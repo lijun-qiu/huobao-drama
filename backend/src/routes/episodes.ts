@@ -3,6 +3,9 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, notFound, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
+import { breakdownNarrationEpisode } from '../services/narration-breakdown.js'
+import { sortStoryboardsByOrder } from '../services/narration-image.js'
+import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 
 const app = new Hono()
 
@@ -26,6 +29,7 @@ app.post('/', async (c) => {
     episodeNumber: nextNum,
     title: body.title || `第${nextNum}集`,
     imageConfigId: body.image_config_id,
+    imageModel: body.image_model || DEFAULT_IMAGE_MODEL,
     videoConfigId: body.video_config_id,
     audioConfigId: body.audio_config_id,
     createdAt: ts,
@@ -39,6 +43,7 @@ app.post('/', async (c) => {
     episode_number: ep.episodeNumber,
     title: ep.title,
     image_config_id: ep.imageConfigId,
+    image_model: ep.imageModel || DEFAULT_IMAGE_MODEL,
     video_config_id: ep.videoConfigId,
     audio_config_id: ep.audioConfigId,
   })
@@ -49,7 +54,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -63,6 +68,7 @@ app.put('/:id', async (c) => {
   if ('title' in updates) drizzleUpdates.title = updates.title
   if ('description' in updates) drizzleUpdates.description = updates.description
   if ('status' in updates) drizzleUpdates.status = updates.status
+  if ('image_model' in updates) drizzleUpdates.imageModel = updates.image_model
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
   return success(c)
@@ -95,10 +101,12 @@ app.get('/:id/scenes', async (c) => {
 // GET /episodes/:episode_id/storyboards
 app.get('/:episode_id/storyboards', async (c) => {
   const episodeId = Number(c.req.param('episode_id'))
-  const rows = db.select().from(schema.storyboards)
-    .where(eq(schema.storyboards.episodeId, episodeId))
-    .orderBy(schema.storyboards.storyboardNumber)
-    .all()
+  const rows = sortStoryboardsByOrder(
+    db.select().from(schema.storyboards)
+      .where(eq(schema.storyboards.episodeId, episodeId))
+      .all()
+      .filter(row => !row.deletedAt),
+  )
   const links = db.select().from(schema.storyboardCharacters).all()
   const charIdsByStoryboard = new Map<number, number[]>()
   for (const link of links) {
@@ -161,6 +169,29 @@ app.get('/:id/pipeline-status', async (c) => {
       merge_episode: { status: latestMerge?.status === 'completed' ? 'done' : (latestMerge ? latestMerge.status : 'pending'), merged_url: latestMerge?.mergedUrl },
     },
   })
+})
+
+// POST /episodes/:id/narration-breakdown — 解说文案按句拆分分镜
+app.post('/:id/narration-breakdown', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  let style = String(body.style || '').trim()
+  if (!style) {
+    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+    style = drama?.style || 'comic'
+  }
+
+  try {
+    const script = String(body.script || '').trim()
+    const mode = 'paragraph' as const
+    const result = await breakdownNarrationEpisode(episodeId, style, script || undefined, mode)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
 })
 
 export default app

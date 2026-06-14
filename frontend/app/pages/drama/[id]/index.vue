@@ -126,6 +126,11 @@
                 <BaseSelect v-model="newEpisodeImageConfigId" :options="imageConfigOptions" placeholder="选择图片服务" searchable />
               </label>
               <label class="config-card">
+                <span class="config-card-kicker">MODEL</span>
+                <span class="field-label">配图模型</span>
+                <BaseSelect v-model="newEpisodeImageModel" :options="imageModelOptions" placeholder="选择配图模型" searchable />
+              </label>
+              <label class="config-card">
                 <span class="config-card-kicker">VIDEO</span>
                 <span class="field-label">视频配置</span>
                 <BaseSelect v-model="newEpisodeVideoConfigId" :options="videoConfigOptions" placeholder="选择视频服务" searchable />
@@ -139,7 +144,7 @@
           </div>
         </div>
         <div class="dialog-foot">
-          <div class="dialog-foot-copy">创建后，工作台中的图片、视频、音频生成入口都会锁定到当前集。</div>
+          <div class="dialog-foot-copy">创建后，API 服务锁定到当前集；配图模型可在工作台随时切换。</div>
           <button class="btn btn-primary" :disabled="creatingEpisode || !canCreateEpisode" @click="addEpisode">
             {{ creatingEpisode ? '创建中...' : '创建并锁定配置' }}
           </button>
@@ -152,6 +157,8 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, dramaAPI, episodeAPI } from '~/composables/useApi'
+import { DEFAULT_IMAGE_MODEL, IMAGE_MODEL_OPTIONS } from '~/composables/useEpisodeWorkflow'
+import BaseSelect from '~/components/BaseSelect.vue'
 
 const route = useRoute()
 const drama = ref(null)
@@ -163,6 +170,7 @@ const imageConfigs = ref([])
 const videoConfigs = ref([])
 const audioConfigs = ref([])
 const newEpisodeImageConfigId = ref(null)
+const newEpisodeImageModel = ref(DEFAULT_IMAGE_MODEL)
 const newEpisodeVideoConfigId = ref(null)
 const newEpisodeAudioConfigId = ref(null)
 
@@ -176,6 +184,7 @@ function configLabel(config) {
 }
 
 const imageConfigOptions = computed(() => imageConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
+const imageModelOptions = computed(() => IMAGE_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
 const videoConfigOptions = computed(() => videoConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const audioConfigOptions = computed(() => audioConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const canCreateEpisode = computed(() => !!(newEpisodeImageConfigId.value && newEpisodeVideoConfigId.value && newEpisodeAudioConfigId.value))
@@ -208,6 +217,7 @@ async function loadConfigs() {
 
 function openAddEpisode() {
   newEpisodeTitle.value = ''
+  newEpisodeImageModel.value = DEFAULT_IMAGE_MODEL
   addDialog.value = true
 }
 
@@ -218,6 +228,7 @@ async function addEpisode() {
       drama_id: dramaId,
       title: newEpisodeTitle.value || undefined,
       image_config_id: newEpisodeImageConfigId.value,
+      image_model: newEpisodeImageModel.value,
       video_config_id: newEpisodeVideoConfigId.value,
       audio_config_id: newEpisodeAudioConfigId.value,
     })

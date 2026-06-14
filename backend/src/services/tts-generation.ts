@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url'
 import { v4 as uuid } from 'uuid'
 import { getAudioConfigById } from './ai.js'
 import { getTTSAdapter } from './adapters/registry.js'
+import { generateEdgeTTS } from './edge-tts-local.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, redactUrl } from '../utils/task-logger.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -20,12 +21,17 @@ interface TTSParams {
   speed?: number
   emotion?: string
   configId?: number | null
+  localTts?: boolean
 }
 
 /**
  * 生成 TTS 音频，返回本地文件路径
  */
 export async function generateTTS(params: TTSParams): Promise<string> {
+  if (params.localTts) {
+    return generateEdgeTTS(params.text, params.voice)
+  }
+
   const config = getAudioConfigById(params.configId)
   const adapter = getTTSAdapter(config.provider)
 
@@ -64,6 +70,7 @@ export async function generateTTS(params: TTSParams): Promise<string> {
     method,
     headers,
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120_000),
   })
 
   if (!resp.ok) {

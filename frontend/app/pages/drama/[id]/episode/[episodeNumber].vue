@@ -11,9 +11,10 @@
         <div class="studio-identity">
           <h1 class="studio-title">{{ drama.title }}</h1>
           <span class="studio-episode-chip">第 {{ episodeNumber }} 集</span>
+          <span v-if="isNarrationMode" class="studio-episode-chip is-mode">解说模式</span>
           <div class="studio-meta-row">
             <span class="studio-meta-pill">{{ currentSubStageLabel }}</span>
-            <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/11</span>
+            <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/{{ pipelineStepTotal }}</span>
             <span class="studio-meta-inline">{{ chars.length }} 角色 · {{ sbs.length }} 镜头</span>
           </div>
         </div>
@@ -66,10 +67,10 @@
         <div class="progress-wrap">
           <div class="progress-head">
             <span class="progress-label">制作进度</span>
-            <span class="progress-val">{{ pipelineProgress }}/11</span>
+            <span class="progress-val">{{ pipelineProgress }}/{{ pipelineStepTotal }}</span>
           </div>
           <div class="progress-track">
-            <div class="progress-fill" :style="{ width: (pipelineProgress / 11 * 100) + '%' }"></div>
+            <div class="progress-fill" :style="{ width: (pipelineProgress / pipelineStepTotal * 100) + '%' }"></div>
           </div>
         </div>
         <div class="sidebar-jumper" v-if="sidebarJumpSteps.length">
@@ -110,7 +111,7 @@
             <div class="toolbar-left">
               <div class="step-indicator">
                 <span class="step-num">01</span>
-                <span class="step-name">原始内容</span>
+                <span class="step-name">{{ isNarrationMode ? '解说文案' : '原始内容' }}</span>
               </div>
             </div>
             <div class="toolbar-right">
@@ -126,10 +127,13 @@
             v-model="localRaw"
             placeholder="粘贴小说原文、故事大纲或分镜描述..."
           />
+          <div v-if="isNarrationMode" class="narration-hint" style="margin-top:12px">
+            <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。
+          </div>
         </div>
 
         <!-- Step 1: Rewrite -->
-        <div v-else-if="scriptStep === 1" class="step-editor">
+        <div v-else-if="!isNarrationMode && scriptStep === 1" class="step-editor">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
@@ -178,7 +182,7 @@
         </div>
 
         <!-- Step 2: Extract -->
-        <div v-else-if="scriptStep === 2" class="step-editor">
+        <div v-else-if="!isNarrationMode && scriptStep === 2" class="step-editor">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
@@ -274,7 +278,7 @@
         </div>
 
         <!-- Step 3: Voice Assignment -->
-        <div v-else-if="scriptStep === 3" class="step-editor">
+        <div v-else-if="!isNarrationMode && scriptStep === 3" class="step-editor">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
@@ -290,7 +294,7 @@
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
                 重新分配
               </button>
-              <button v-if="charsVoiced" class="btn btn-sm" @click="batchGenSamples">
+              <button v-if="charsVoiced" class="btn btn-sm" :disabled="isBatchRunning('voiceSamples')" @click="batchGenSamples">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19 5v14"/></svg>
                 生成试听文件
               </button>
@@ -399,13 +403,13 @@
           </div>
         </div>
 
-        <!-- Step 4: Storyboard -->
-        <div v-else-if="scriptStep === 4" class="step-editor">
+        <!-- Storyboard -->
+        <div v-else-if="scriptStep === storyboardStep" class="step-editor">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
-                <span class="step-num">05</span>
-                <span class="step-name">分镜列表</span>
+                <span class="step-num">{{ isNarrationMode ? '02' : '05' }}</span>
+                <span class="step-name">{{ isNarrationMode ? '旁白分镜' : '分镜列表' }}</span>
               </div>
             </div>
             <div class="toolbar-right">
@@ -414,14 +418,45 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 添加
               </button>
-              <template v-if="!sbs.length">
+              <template v-if="!sbs.length && !isNarrationMode">
                 <span class="locked-config">视频模型 · {{ lockedVideoConfigLabel }}</span>
               </template>
-              <button class="btn btn-sm" :disabled="rn" @click="doBreakdown">
-                <Loader2 v-if="rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
+              <template v-if="isNarrationMode">
+                <span class="tag dim" style="font-size:11px">按段落配图 · AI文案</span>
+              </template>
+              <button class="btn btn-sm" :disabled="rn || narrationBreaking" @click="isNarrationMode ? doNarrationBreakdown() : doBreakdown()">
+                <Loader2 v-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                {{ sbs.length ? '重新拆解' : 'AI 拆解分镜' }}
+                {{ sbs.length ? '重新分镜' : (isNarrationMode ? '旁白分镜' : 'AI 拆解分镜') }}
               </button>
+            </div>
+          </div>
+
+          <div v-if="isNarrationMode && sbs.length && narrationBreakdownPanel" class="narration-breakdown-panel">
+            <div class="narration-breakdown-head">
+              <div>
+                <strong>旁白分镜结果</strong>
+                <span v-if="narrationBreakdownPanel.generatedAt" class="dim" style="font-size:11px;margin-left:8px">{{ formatBreakdownTime(narrationBreakdownPanel.generatedAt) }}</span>
+              </div>
+              <span v-if="narrationBreakdownPanel.detectLabel" class="tag">{{ narrationBreakdownPanel.detectLabel }}</span>
+            </div>
+            <div class="narration-breakdown-stats">
+              <span class="tag mono">{{ narrationBreakdownPanel.sentenceCount }} 句旁白</span>
+              <span class="tag mono">{{ narrationBreakdownPanel.count }} 镜</span>
+              <span class="tag mono">约 {{ narrationBreakdownPanel.totalDur }}s</span>
+              <span class="tag">{{ narrationBreakdownPanel.imageNeeded }} 张配图</span>
+              <span v-if="narrationBreakdownPanel.paragraphCount != null" class="tag mono">{{ narrationBreakdownPanel.paragraphCount }} 段</span>
+              <span v-if="narrationBreakdownPanel.diptychCount" class="tag">含 {{ narrationBreakdownPanel.diptychCount }} 张两宫格</span>
+              <span v-if="narrationBreakdownPanel.imageNeeded" class="tag dim">约 ¥{{ narrationBreakdownPanel.estImageCost }}（{{ narrationBreakdownPanel.priceLabel }}）</span>
+              <span v-if="narrationBreakdownPanel.titleCount" class="tag">
+                片头 {{ narrationBreakdownPanel.titleCount }} 镜 · {{ narrationBreakdownPanel.titleImageCount }} 张标题图
+                <template v-if="narrationBreakdownPanel.titleHook">（{{ narrationBreakdownPanel.titleHook }}）</template>
+              </span>
+            </div>
+            <div class="narration-breakdown-steps">
+              <strong>下一步：</strong>
+              ① 可在此页编辑/拆分任意镜头（片头用剧中红字）
+              → ② 生成配音 → ③ 生成配图 → ④ 镜头合成 → ⑤ 导出
             </div>
           </div>
 
@@ -431,7 +466,7 @@
               <div class="shot-list-head">
                 <div>
                   <div class="shot-list-title">镜头序列</div>
-                  <div class="shot-list-sub">按镜头顺序检查内容与素材状态</div>
+                  <div class="shot-list-sub">点击镜头编辑台词；片头可「按标点拆成多镜」分成四段剧中红字</div>
                 </div>
                 <span class="tag mono">{{ totalDuration }}s</span>
               </div>
@@ -444,6 +479,7 @@
                 >
                   <div class="shot-item-header">
                     <div class="shot-num">#{{ String(i+1).padStart(2,'0') }}</div>
+                    <span v-if="isNarrationMode && isNarrationTitleShot(sb)" class="tag tag-title" style="font-size:10px">片头</span>
                     <span class="tag" style="font-size:10px">{{ sb.shot_type || sb.shotType || '—' }}</span>
                     <span v-if="getStoryboardCharacterIds(sb).length" class="tag" style="font-size:10px">{{ getStoryboardCharacterIds(sb).length }} 角色</span>
                     <div class="shot-status">
@@ -460,6 +496,7 @@
                     <span v-if="sb.location" class="shot-location">{{ sb.location }}</span>
                     <span v-if="getStoryboardCharacterNames(sb).length" class="shot-location">{{ getStoryboardCharacterNames(sb).join(' / ') }}</span>
                     <span v-if="sb.dialogue" class="shot-dialogue">{{ sb.dialogue }}</span>
+                    <button v-if="isNarrationMode" class="btn btn-ghost btn-sm shot-edit-btn" @click.stop="openShotEditor(sb)">编辑</button>
                   </div>
                 </div>
               </div>
@@ -476,8 +513,42 @@
                   <button class="btn btn-ghost btn-icon ml-auto" style="color:var(--error)" @click="deleteShot(selectedSb)">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
                   </button>
+                  <button v-if="isNarrationMode" class="btn btn-sm" @click="openShotEditor(selectedSb)">编辑镜头</button>
               </div>
               <div class="detail-body">
+                <div v-if="isNarrationMode" class="detail-section narration-shot-edit">
+                  <div class="detail-section-head">
+                    <span class="detail-section-title">编辑镜头</span>
+                    <span v-if="isNarrationTitleShot(selectedSb)" class="tag tag-title">片头 · 剧中红字</span>
+                    <span v-else class="tag">旁白镜头</span>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">{{ isNarrationTitleShot(selectedSb) ? '剧中台词（合成红字）' : '旁白台词' }}</span>
+                    <textarea v-model="narrationEditDialogue" class="textarea" rows="4" :placeholder="isNarrationTitleShot(selectedSb) ? '多句用逗号或换行分隔，可点下方拆成多镜' : '旁白：…'" />
+                  </label>
+                  <div class="field-grid field-grid-2">
+                    <label class="field">
+                      <span class="field-label">时长（秒）</span>
+                      <input v-model.number="narrationEditDuration" class="input" type="number" min="1" max="60" />
+                    </label>
+                    <label class="field">
+                      <span class="field-label">类型</span>
+                      <select v-model="narrationEditAsTitle" class="input">
+                        <option :value="true">片头（剧中红字）</option>
+                        <option :value="false">正文旁白</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div class="narration-shot-edit-actions">
+                    <button class="btn btn-sm btn-primary" :disabled="narrationEditBusy" @click="saveNarrationShotDetail(false)">保存</button>
+                    <button class="btn btn-sm" :disabled="narrationEditBusy" @click="splitShotByPunctuation(selectedSb)">按标点拆成多镜</button>
+                    <button class="btn btn-sm" :disabled="narrationEditBusy" @click="insertShotAfter(selectedSb)">后插镜头</button>
+                  </div>
+                  <p class="dim" style="font-size:11px;margin:0">
+                    例：把片头一句拆四镜 — 台词写「今天体验的人生剧本是，18岁职高辍学打工，省吃俭用五年，结果越来越穷」→ 点「按标点拆成多镜」。
+                  </p>
+                </div>
+                <template v-if="!isNarrationMode">
                 <div class="detail-hero">
                   <div class="detail-hero-copy">
                     <div class="detail-hero-label">镜头概览</div>
@@ -675,13 +746,14 @@
                     </label>
                   </div>
                 </div>
+                </template>
               </div>
             </div>
           </div>
 
-          <div v-else-if="rn && rt === 'storyboard_breaker'" class="step-loading">
+          <div v-else-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" class="step-loading">
             <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
-            <div class="loading-text">正在拆解分镜并生成提示词...</div>
+            <div class="loading-text">{{ isNarrationMode ? '正在按规则拆镜，并由 AI 生成配图文案...' : '正在拆解分镜并生成提示词...' }}</div>
           </div>
 
           <div v-else class="step-empty">
@@ -690,13 +762,19 @@
                 <rect x="2" y="2" width="20" height="20" rx="2.5"/><line x1="7" y1="8" x2="7" y2="16"/><line x1="10" y1="8" x2="10" y2="16"/><line x1="13" y1="8" x2="13" y2="16"/>
               </svg>
             </div>
-            <div class="empty-title">将剧本拆解为分镜序列</div>
-            <div class="empty-desc">AI 自动分析剧本，生成镜头列表和视频提示词</div>
-            <div class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
-            <button class="btn btn-primary" @click="doBreakdown">
-              <Loader2 v-if="rt === 'storyboard_breaker'" :size="13" class="animate-spin" />
+            <div class="empty-title">{{ isNarrationMode ? '将解说文案拆解为旁白镜头' : '将剧本拆解为分镜序列' }}</div>
+            <div class="empty-desc">{{ isNarrationMode ? '按标点拆分旁白（。，、；等）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
+            <div v-if="!isNarrationMode" class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
+            <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
+              <strong>配图规则：</strong>拆镜按规则（一句一镜、按段落配图）；配图文案由<strong>文本 AI</strong>生成，失败时自动退回规则模板。内容多时用两宫格。
+            </div>
+            <div v-if="isNarrationMode" style="margin-bottom:10px">
+              <span class="tag">按段落配图 · AI文案</span>
+            </div>
+            <button class="btn btn-primary" :disabled="narrationBreaking" @click="isNarrationMode ? doNarrationBreakdown() : doBreakdown()">
+              <Loader2 v-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" :size="13" class="animate-spin" />
               <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-              AI 拆解分镜
+              {{ isNarrationMode ? (sbs.length ? '重新分镜' : '旁白分镜') : 'AI 拆解分镜' }}
             </button>
           </div>
         </div>
@@ -737,16 +815,51 @@
             </div>
           </div>
 
+          <div v-if="showImageModelPicker" class="prod-image-model-bar">
+            <span class="dim" style="font-size:12px">配图模型</span>
+            <BaseSelect
+              :model-value="episodeImageModel"
+              :options="imageModelOptions"
+              placeholder="选择配图模型"
+              searchable
+              style="width:300px"
+              @update:model-value="onEpisodeImageModelChange"
+            />
+            <span class="tag">{{ lockedImageConfigLabel }}</span>
+          </div>
+
+          <!-- Sub: Narrator Voice (narration mode) -->
+          <div v-if="prodTab === 'voice'" class="prod-content">
+            <div class="narration-hint">
+              <strong>旁白音色：</strong>使用 MiniMax 等 API 时需在此选择旁白音色。若已在「生成配音」勾选<strong>本地配音（Edge TTS）</strong>，可直接跳过本步。
+            </div>
+            <div class="card" style="padding:16px;max-width:520px">
+              <label class="field">
+                <span class="field-label">旁白音色</span>
+                <BaseSelect :model-value="narratorVoiceId" :options="voiceSelectOptions" placeholder="选择旁白音色" searchable style="width:100%" @update:model-value="onNarratorVoiceChange" />
+              </label>
+              <div v-if="getVoiceProfile(narratorVoiceId)" class="voice-profile-card" style="margin-top:12px">
+                <div class="voice-profile-head">
+                  <span class="voice-profile-name">{{ getVoiceProfile(narratorVoiceId)?.label }}</span>
+                  <span class="tag">{{ getVoiceProfile(narratorVoiceId)?.gender }}</span>
+                </div>
+                <div class="voice-profile-traits">{{ getVoiceProfile(narratorVoiceId)?.traits }}</div>
+              </div>
+              <button class="btn btn-primary" style="margin-top:14px" :disabled="!narratorVoiceId" @click="saveNarratorVoice">
+                保存旁白音色
+              </button>
+            </div>
+          </div>
+
           <!-- Sub: Characters -->
-          <div v-if="prodTab === 'chars'" class="prod-content">
+          <div v-else-if="prodTab === 'chars'" class="prod-content">
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ visualChars.length }} 个需生成形象角色</span>
-              <span class="tag">{{ lockedImageConfigLabel }}</span>
               <span v-if="chars.length > visualChars.length" class="tag">旁白仅保留声音</span>
               <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm" @click="batchCharImages">
+                <button class="btn btn-sm" :disabled="isBatchRunning('charImages') || !charImagesPendingCount" @click="batchCharImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-                  批量生成
+                  生成剩余{{ charImagesPendingCount ? ` (${charImagesPendingCount})` : '' }}
                 </button>
               </div>
             </div>
@@ -781,11 +894,10 @@
           <div v-else-if="prodTab === 'scenes'" class="prod-content">
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ scenes.length }} 个场景</span>
-              <span class="tag">{{ lockedImageConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm" @click="batchSceneImages">
+                <button class="btn btn-sm" :disabled="isBatchRunning('sceneImages') || !sceneImagesPendingCount" @click="batchSceneImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-                  批量生成
+                  生成剩余{{ sceneImagesPendingCount ? ` (${sceneImagesPendingCount})` : '' }}
                 </button>
               </div>
             </div>
@@ -818,14 +930,33 @@
 
           <!-- Sub: Dubbing -->
           <div v-else-if="prodTab === 'dubbing'" class="prod-content">
+            <div v-if="isNarrationMode" class="narration-hint">
+              <strong>配音策略：</strong>解说模式<strong>默认本地 Edge TTS</strong>（免 MiniMax 计费）。批量生成时本地模式<strong>最多 6 路并发</strong>，比逐条快很多。
+            </div>
+            <div v-if="isNarrationMode" class="local-tts-bar">
+              <label class="local-tts-toggle">
+                <input v-model="localTtsEnabled" type="checkbox" />
+                <span>本地配音（Edge TTS · 免 API）</span>
+              </label>
+              <BaseSelect
+                v-if="localTtsEnabled"
+                :model-value="localEdgeVoiceId"
+                :options="edgeVoiceSelectOptions"
+                placeholder="选择本地音色"
+                searchable
+                style="min-width:220px"
+                @update:model-value="localEdgeVoiceId = $event"
+              />
+              <span v-else class="tag warn">将使用付费 API：{{ lockedAudioConfigLabel }}</span>
+            </div>
             <div class="prod-section-bar">
-              <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条可生成配音</span>
-              <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已生成</span>
-              <span class="tag">{{ lockedAudioConfigLabel }}</span>
+              <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条旁白</span>
+              <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已就绪</span>
+              <span class="tag">{{ localTtsEnabled ? '本地 Edge TTS' : lockedAudioConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm" @click="batchShotTTS">
+                <button class="btn btn-sm btn-primary" :disabled="isBatchRunning('tts') || !ttsPendingCount" @click="batchShotTTS">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
-                  批量生成
+                  生成剩余{{ ttsPendingCount ? ` (${ttsPendingCount})` : '' }}
                 </button>
               </div>
             </div>
@@ -848,7 +979,7 @@
                     </div>
                     <div class="dub-desc">{{ getDialogueText(sb) || '未填写文本' }}</div>
                     </div>
-                    <span class="tag" :class="hasTTS(sb) ? 'tag-success' : ''">{{ hasTTS(sb) ? '已生成' : '待生成' }}</span>
+                    <span class="tag" :class="hasEffectiveTTS(sb) ? 'tag-success' : ''">{{ narrationTtsStatusLabel(sb) }}</span>
                   </div>
                 <div class="dub-meta">
                   <span class="dim">{{ sb.shot_type || sb.shotType || '未设景别' }}</span>
@@ -856,20 +987,103 @@
                   <span class="dim">{{ sb.location || '未设地点' }}</span>
                 </div>
                 <div class="dub-foot">
-                  <audio v-if="hasTTS(sb)" :src="'/' + getTTSUrl(sb)" controls preload="none" class="dub-audio" />
+                  <audio v-if="getEffectiveTTSUrl(sb)" :src="'/' + getEffectiveTTSUrl(sb)" controls preload="none" class="dub-audio" />
                   <div v-else class="dim" style="font-size:12px">尚未生成语音文件</div>
-                  <button class="btn btn-sm ml-auto" @click="genShotTTS(sb)">生成配音</button>
+                  <div class="ml-auto flex gap-1">
+                    <button class="btn btn-sm" @click="genShotTTS(sb, hasNarrationShotOwnTts(sb))">
+                      {{ hasNarrationShotOwnTts(sb) ? '重新生成' : '生成配音' }}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- Sub: Shots -->
+          <!-- Sub: Shots (Narration) -->
+          <div v-else-if="prodTab === 'shots' && isNarrationMode" class="prod-content">
+            <div class="narration-hint">
+              <strong>配图策略：</strong>每段 1 张图（内容多时为两宫格）；下方可编辑<strong>配图文案</strong>，修改后点生成即按新提示词出图。
+            </div>
+            <div class="prod-section-bar">
+              <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
+              <span class="tag mono">{{ shotImgCount }}/{{ narrationNeedImageCount }} 需配图</span>
+              <div class="ml-auto flex gap-1">
+                <button class="btn btn-primary btn-sm" :disabled="isBatchRunning('narrationImages') || !narrationImagesPendingCount" @click="batchNarrationShotImages">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  生成剩余{{ narrationImagesPendingCount ? ` (${narrationImagesPendingCount})` : '' }}
+                </button>
+              </div>
+            </div>
+            <div class="prod-grid">
+              <div v-for="(sb, i) in sbs" :key="sb.id" class="card prod-card">
+                <div class="prod-cover">
+                  <img
+                    v-if="getNarrationDisplayImage(sb)"
+                    :src="'/' + getNarrationDisplayImage(sb)"
+                    class="previewable-image"
+                    @click.stop="openImageViewer('/' + getNarrationDisplayImage(sb), `镜头 #${String(i + 1).padStart(2, '0')} 配图`)"
+                  />
+                  <div v-else-if="isPendingNarrationShot(sb.id)" class="prod-cover-empty">
+                    <Loader2 :size="20" class="animate-spin" style="color:var(--accent)" />
+                  </div>
+                  <div v-else class="prod-cover-empty">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  </div>
+                  <span class="prod-idx">#{{ String(i+1).padStart(2,'0') }}</span>
+                  <span v-if="isNarrationTitleShot(sb)" class="prod-overlay-badge is-title">片头</span>
+                  <span v-else-if="narrationShotNeedsOwnImage(sb) && parseNarrationImageMeta(sb).paragraph_layout === 'diptych'" class="prod-overlay-badge">两宫格</span>
+                  <span v-else-if="narrationShotInherited(sb)" class="prod-overlay-badge">复用</span>
+                  <span v-else-if="!narrationShotNeedsOwnImage(sb)" class="prod-overlay-badge">沿用</span>
+                </div>
+                <div class="prod-info">
+                  <div class="prod-desc truncate">{{ extractNarrationSentence(sb) || '—' }}</div>
+                  <div class="prod-meta-line dim" style="font-size:11px">{{ narrationShotImageLabel(sb) }}</div>
+                  <label v-if="narrationShotNeedsOwnImage(sb)" class="narration-shot-prompt-field" @click.stop>
+                    <span class="dim">配图文案</span>
+                    <textarea
+                      class="textarea narration-shot-prompt-textarea"
+                      rows="3"
+                      :value="getNarrationImagePromptText(sb)"
+                      placeholder="配图提示词…"
+                      @blur="updateNarrationImagePrompt(sb, $event.target.value)"
+                    />
+                  </label>
+                </div>
+                <div class="prod-actions">
+                  <button
+                    v-if="narrationShotNeedsOwnImage(sb)"
+                    class="btn btn-sm"
+                    :disabled="isPendingNarrationShot(sb.id)"
+                    @click="genNarrationShotImage(sb)"
+                  >
+                    {{ isPendingNarrationShot(sb.id) ? '生成中' : (hasNarrationShotImage(sb) ? '重新生成' : '生成配图') }}
+                  </button>
+                  <button v-else class="btn btn-sm" @click="markNarrationShotNeedImage(sb)">改为需配图</button>
+                  <button
+                    v-if="!hasNarrationShotImage(sb)"
+                    class="btn btn-sm"
+                    :disabled="!findPrevNarrationShotWithImage(sb)"
+                    @click="reuseNarrationShotImage(sb)"
+                  >
+                    复用上一镜
+                  </button>
+                  <button
+                    v-if="hasNarrationShotImage(sb) && !narrationShotNeedsOwnImage(sb)"
+                    class="btn btn-sm"
+                    @click="clearNarrationShotImage(sb)"
+                  >
+                    取消复用
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sub: Shots (Drama) -->
           <div v-else-if="prodTab === 'shots'" class="prod-content">
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ shotImgCount }}/{{ sbs.length }} 已有帧图</span>
-              <span class="tag">{{ lockedImageConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
                 <BaseSelect v-model="frameMode" :options="frameModeOptions" placeholder="帧模式" searchable style="width:100px" />
                 <button v-if="gridImagePath" class="btn btn-sm" @click="reopenGridPreview">
@@ -1189,14 +1403,17 @@
           </div>
 
           <!-- Sub: Videos -->
-          <div v-else-if="prodTab === 'videos'" class="prod-content">
+          <div v-else-if="!isNarrationMode && prodTab === 'videos'" class="prod-content">
+            <div class="narration-hint">
+              <strong>解说模式可跳过本步：</strong>若每镜已有「配图 + 旁白配音」，无需 AI 视频，直接去「镜头合成」即可（配图保持静止画面）。
+            </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ shotVidCount }}/{{ sbs.length }} 已生成</span>
               <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm" @click="batchVideos">
+                <button class="btn btn-sm" :disabled="isBatchRunning('videos') || !videosPendingCount" @click="batchVideos">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
-                  批量视频
+                  生成剩余{{ videosPendingCount ? ` (${videosPendingCount})` : '' }}
                 </button>
               </div>
             </div>
@@ -1244,13 +1461,16 @@
 
           <!-- Sub: Compose -->
           <div v-else-if="prodTab === 'compose'" class="prod-content">
+            <div class="narration-hint">
+              <strong>配图合成已启用：</strong>有镜头图 + 旁白即可合成。改片头红字或旁白：点某镜「编辑镜头」→ 保存并重新制作 → 再去导出重新拼接。
+            </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ composedCount }}/{{ sbs.length }} 已合成</span>
               <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm" @click="batchCompose">
+                <button class="btn btn-sm btn-primary" :disabled="isBatchRunning('compose') || !composePendingCount" @click="batchCompose">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  批量合成
+                  生成剩余{{ composePendingCount ? ` (${composePendingCount})` : '' }}
                 </button>
               </div>
             </div>
@@ -1289,14 +1509,16 @@
                   <div class="prod-desc truncate">{{ sb.description || sb.title || '—' }}</div>
                   <div class="prod-meta-line">{{ sb.shot_type || sb.shotType || '未设景别' }} · {{ sb.duration || 10 }}s</div>
                   <div class="prod-dots">
-                    <span :class="['dot', hasVid(sb) && 'ok']" /><span style="font-size:10px">视频</span>
-                    <span :class="['dot', hasTTS(sb) && 'ok']" /><span style="font-size:10px">配音</span>
+                    <span :class="['dot', hasImg(sb) && 'ok']" /><span style="font-size:10px">配图</span>
+                    <span :class="['dot', hasComposeTts(sb) && 'ok']" /><span style="font-size:10px">配音</span>
+                    <span :class="['dot', hasVid(sb) && 'ok']" /><span style="font-size:10px">AI视频</span>
                     <span :class="['dot', hasComposed(sb) && 'ok', isPendingCompose(sb.id) && 'pending']" /><span style="font-size:10px">{{ isPendingCompose(sb.id) ? '合成中' : '合成' }}</span>
                   </div>
                   <div v-if="composeFailMessage(sb.id)" class="prod-error">{{ composeFailMessage(sb.id) }}</div>
                 </div>
                 <div class="prod-actions">
-                  <button class="btn btn-sm" :disabled="!hasVid(sb) || isPendingCompose(sb.id)" @click="doCompose(sb)">
+                  <button v-if="isNarrationMode" class="btn btn-sm" @click="openShotEditor(sb)">编辑镜头</button>
+                  <button class="btn btn-sm" :disabled="!canCompose(sb) || isPendingCompose(sb.id)" @click="doCompose(sb)">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                     {{ isPendingCompose(sb.id) ? '合成中' : (hasComposed(sb) ? '重新合成' : '开始合成') }}
                   </button>
@@ -1321,13 +1543,38 @@
         </div>
         <div v-else class="export-split">
           <div class="export-main">
-            <template v-if="mergeUrl">
-              <video :src="'/' + mergeUrl" controls class="export-video" />
+            <template v-if="mergeProcessing">
+              <div class="step-empty">
+                <Loader2 :size="32" class="animate-spin" style="color:var(--accent)" />
+                <div class="empty-title" style="margin-top:12px">正在生成全集视频</div>
+                <div class="empty-desc">{{ mergeProgressMessage }}</div>
+                <div class="progress-wrap" style="margin-top:16px;width:min(360px,100%);margin-left:auto;margin-right:auto">
+                  <div class="progress-head">
+                    <span class="progress-label">拼接进度</span>
+                    <span class="progress-val">{{ mergeProgressPercent }}%</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill" :style="{ width: mergeProgressPercent + '%' }"></div>
+                  </div>
+                </div>
+                <div class="empty-desc" style="margin-top:8px">将 {{ composedCount }} 个已合成镜头拼接为完整视频</div>
+                <div style="display:flex;gap:8px;margin-top:16px;justify-content:center">
+                  <button class="btn btn-ghost" @click="cancelMerge">取消</button>
+                  <button class="btn btn-primary" @click="regenerateMerge">重新生成</button>
+                </div>
+              </div>
+            </template>
+            <template v-else-if="mergeUrl">
+              <video :src="mergeVideoSrc" controls class="export-video" />
               <div class="export-bar">
                 <span class="tag tag-success">拼接完成</span>
                 <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
-                <a :href="'/' + mergeUrl" download class="btn btn-primary ml-auto">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <button class="btn" :disabled="composedCount === 0" @click="regenerateMerge">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  重新生成
+                </button>
+                <a :href="mergeVideoSrc" download class="btn btn-primary ml-auto">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="12" x2="12" y2="3"/></svg>
                   下载视频
                 </a>
               </div>
@@ -1337,11 +1584,11 @@
                 <div class="empty-visual">
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
-                <div class="empty-title">拼接全集视频</div>
+                <div class="empty-title">生成全集视频</div>
                 <div class="empty-desc">将 {{ composedCount }} 个已合成镜头拼接为完整视频</div>
                 <button class="btn btn-primary" :disabled="composedCount === 0" @click="doMerge" style="margin-top:12px">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  开始拼接
+                  开始生成
                 </button>
               </div>
             </template>
@@ -1352,6 +1599,7 @@
               <div v-for="(sb, i) in sbs" :key="sb.id" class="exp-row">
                 <span class="mono dim" style="font-size:10px">#{{ String(i+1).padStart(2,'0') }}</span>
                 <span class="truncate" style="flex:1;font-size:11px">{{ sb.description || sb.title || '—' }}</span>
+                <button v-if="isNarrationMode" class="btn btn-ghost btn-sm" style="padding:2px 6px;font-size:10px" @click="openShotEditor(sb)">编辑</button>
                 <span :class="['dot', hasComposed(sb) && 'ok']" />
               </div>
             </div>
@@ -1417,6 +1665,56 @@
         </button>
       </div>
 
+      <div v-if="shotEditor.open && shotEditor.sb" class="overlay shot-editor-overlay" @click.self="closeShotEditor">
+        <div class="card shot-editor-dialog" @click.stop>
+          <div class="shot-editor-head">
+            <div>
+              <div class="shot-editor-title">编辑镜头 #{{ shotEditor.number }}</div>
+              <div class="shot-editor-sub">
+                <span v-if="shotEditor.isTitle" class="tag tag-title">片头 · 剧中红字</span>
+                <span v-else class="tag">旁白镜头</span>
+                <span class="dim" style="font-size:11px;margin-left:6px">{{ shotEditor.shotType || '未设景别' }} · {{ shotEditor.duration }}s</span>
+              </div>
+            </div>
+            <button class="btn btn-ghost btn-icon" @click="closeShotEditor">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div class="shot-editor-body">
+            <label class="field">
+              <span class="field-label">{{ shotEditor.isTitle ? '剧中台词（合成红字）' : '旁白台词' }}</span>
+              <textarea v-model="shotEditor.dialogue" class="textarea" rows="3" :placeholder="shotEditor.isTitle ? '剧中：今天体验的人生剧本是，' : '旁白：职高读到第二年六月，'" />
+              <span class="dim" style="font-size:11px;margin-top:4px;display:block">
+                {{ shotEditor.isTitle ? '片头改字后请点「保存并重新制作」：自动重新配音 + 重新合成该镜。' : '改台词后需重新配音并重新合成该镜。' }}
+              </span>
+            </label>
+            <label class="field">
+              <span class="field-label">画面描述（列表展示用）</span>
+              <textarea v-model="shotEditor.description" class="textarea" rows="2" placeholder="可选，默认与台词一致" />
+            </label>
+            <div class="field-grid field-grid-2">
+              <label class="field">
+                <span class="field-label">时长（秒）</span>
+                <input v-model.number="shotEditor.duration" class="input" type="number" min="1" max="60" />
+              </label>
+              <label class="field">
+                <span class="field-label">镜头标题</span>
+                <input v-model="shotEditor.title" class="input" placeholder="可选" />
+              </label>
+            </div>
+          </div>
+          <div class="shot-editor-foot">
+            <button class="btn" :disabled="shotEditor.busy" @click="closeShotEditor">取消</button>
+            <button class="btn" :disabled="shotEditor.busy" @click="splitShotByPunctuation(shotEditor.sb)">按标点拆成多镜</button>
+            <button class="btn" :disabled="shotEditor.busy" @click="saveShotEditor(false)">仅保存</button>
+            <button class="btn btn-primary" :disabled="shotEditor.busy" @click="saveShotEditor(true)">
+              <Loader2 v-if="shotEditor.busy" :size="12" class="animate-spin" />
+              {{ shotEditor.busy ? '处理中…' : '保存并重新制作' }}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div v-if="imageViewer.open && imageViewer.src" class="overlay image-viewer-overlay" @click.self="closeImageViewer">
         <div class="card image-viewer-dialog">
           <div class="image-viewer-head">
@@ -1442,6 +1740,38 @@ import {
 } from 'lucide-vue-next'
 import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
+import {
+  parseProductionMode,
+  buildSidebarSections,
+  workflowProgress,
+  workflowStepTotal,
+  resolveScriptStep,
+  resolveActiveSubStepKey,
+  inferNarrationScriptStep,
+  buildNarrationImagePrompt,
+  resolveSceneContentForShot,
+  extractNarrationSentence,
+  DEFAULT_IMAGE_MODEL,
+  IMAGE_MODEL_OPTIONS,
+  imageModelUnitPrice,
+  imageModelPriceLabel,
+  resolveEpisodeImageModel,
+  narrationShotNeedsOwnImage,
+  isNarrationTitleShot,
+  getNarrationShotOwnImage,
+  resolveNarrationEffectiveImage,
+  narrationShotsNeedingImage,
+  narrationShotImageReady,
+  narrationImagesReady,
+  narrationTtsReady as narrationTtsAllReady,
+  getNarrationShotOwnTts,
+  parseNarrationImageMeta,
+  sortStoryboards,
+  hasDuplicateStoryboardNumbers,
+  hasEffectiveNarrationTts,
+  dramaStoryboardStep,
+  narrationStoryboardStep,
+} from '~/composables/useEpisodeWorkflow'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 definePageMeta({ layout: 'studio' })
@@ -1451,8 +1781,32 @@ const dramaId = Number(route.params.id)
 const episodeNumber = Number(route.params.episodeNumber)
 
 const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), sbs = ref([]), mergeData = ref(null)
+
+function findNarratorChar(list = chars.value) {
+  const candidates = list.filter(c => c.name === '旁白'
+    || /^(旁白|画外音|narrator)$/i.test(String(c.name || '').trim())
+    || (c.role === '旁白' && /旁白|画外音|narrator/i.test(`${c.name || ''} ${c.role || ''}`)))
+  if (!candidates.length) return undefined
+  return candidates.find(c => c.voice_style || c.voiceStyle) || candidates[0]
+}
+
+const productionMode = computed(() => parseProductionMode(drama.value))
+const isNarrationMode = computed(() => productionMode.value === 'narration')
+const storyboardStep = computed(() => isNarrationMode.value ? narrationStoryboardStep() : dramaStoryboardStep())
+const narratorChar = computed(() => findNarratorChar(chars.value))
+const narratorReady = computed(() => localTtsEnabled.value || !!(narratorChar.value?.voice_style || narratorChar.value?.voiceStyle))
+const narratorVoiceId = ref('')
+const narratorVoiceDirty = ref(false)
+const DEFAULT_LOCAL_EDGE_VOICE = 'zh-CN-YunxiNeural'
+const localTtsEnabled = ref(true)
+const localEdgeVoiceId = ref(DEFAULT_LOCAL_EDGE_VOICE)
+const edgeVoiceProfiles = ref([])
+const pipelineStepTotal = computed(() => workflowStepTotal(productionMode.value))
 const panel = ref('script')
 const { running: rn, runningType: rt, run: runAgent } = useAgent()
+const narrationBreaking = ref(false)
+const narrationBreakdownSummary = ref(null)
+const imageDetectMode = ref('paragraph')
 
 const localRaw = ref(''), localScript = ref('')
 const rawContent = computed(() => episode.value?.content || '')
@@ -1464,6 +1818,20 @@ const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.vo
 const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
 const composedCount = computed(() => sbs.value.filter(s => s.composed_video_url || s.composedVideoUrl).length)
 const mergeUrl = computed(() => mergeData.value?.merged_url || mergeData.value?.mergedUrl || null)
+const mergeProcessing = computed(() => ['processing', 'pending'].includes(mergeData.value?.status))
+const mergeProgressPercent = computed(() => {
+  const p = mergeData.value?.progress_percent ?? mergeData.value?.progressPercent
+  return typeof p === 'number' ? Math.min(100, Math.max(0, Math.round(p))) : 0
+})
+const mergeProgressMessage = computed(() =>
+  mergeData.value?.progress_message || mergeData.value?.progressMessage || '正在拼接镜头…',
+)
+let mergePollTimer = null
+const mergeVideoSrc = computed(() => {
+  if (!mergeUrl.value) return ''
+  const v = mergeData.value?.completed_at || mergeData.value?.completedAt || mergeData.value?.id || ''
+  return `/${mergeUrl.value}${v ? `?v=${v}` : ''}`
+})
 
 const scriptStep = ref(0)
 const prodTab = ref('chars')
@@ -1482,6 +1850,35 @@ const fallbackVoiceProfiles = [
 ]
 const voiceProfiles = ref(fallbackVoiceProfiles)
 const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({ label: `${v.label} · ${v.traits}`, value: v.id })))
+const edgeVoiceSelectOptions = computed(() => edgeVoiceProfiles.value.map(v => ({ label: v.label, value: v.id })))
+
+function ttsGenerateOptions(force = false) {
+  const opts = {}
+  if (force) opts.force = true
+  if (isNarrationMode.value && localTtsEnabled.value !== false) {
+    opts.local_tts = true
+    opts.local_voice = localEdgeVoiceId.value
+  } else if (!isNarrationMode.value) {
+    // drama mode: never send local_tts
+  } else {
+    opts.local_tts = false
+  }
+  return opts
+}
+
+function persistLocalTtsPrefs() {
+  if (typeof window === 'undefined' || !epId.value) return
+  window.localStorage.setItem(`episode-${epId.value}-local-tts`, localTtsEnabled.value ? '1' : '0')
+  window.localStorage.setItem(`episode-${epId.value}-local-voice`, localEdgeVoiceId.value)
+}
+
+function restoreLocalTtsPrefs() {
+  if (typeof window === 'undefined' || !epId.value) return
+  const stored = window.localStorage.getItem(`episode-${epId.value}-local-tts`)
+  localTtsEnabled.value = stored === null ? true : stored === '1'
+  const voice = window.localStorage.getItem(`episode-${epId.value}-local-voice`)
+  if (voice) localEdgeVoiceId.value = voice
+}
 const videoConfigSelectOptions = computed(() => videoConfigs.value.map(c => {
   let modelName = ''
   try { const m = JSON.parse(c.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = c.model || '' }
@@ -1501,11 +1898,393 @@ const audioConfigs = ref([])
 const pendingCharImageIds = ref([])
 const pendingSceneImageIds = ref([])
 const pendingShotFrameKeys = ref([])
+const pendingNarrationShotIds = ref([])
 const pendingVideoIds = ref([])
 const pendingComposeIds = ref([])
+const batchRunning = ref(new Set())
 const failedVideoMessages = ref({})
 const failedComposeMessages = ref({})
 const imageViewer = ref({ open: false, src: '', title: '' })
+const shotEditor = ref({
+  open: false,
+  sb: null,
+  number: 0,
+  isTitle: false,
+  dialogue: '',
+  description: '',
+  title: '',
+  duration: 10,
+  shotType: '',
+  busy: false,
+})
+
+function normalizeNarrationDialogue(sb, text) {
+  const trimmed = String(text || '').trim()
+  if (!trimmed) return ''
+  if (/^[^:：]+[:：]/.test(trimmed)) return trimmed
+  if (isNarrationTitleShot(sb)) return `剧中：${trimmed}`
+  return `旁白：${trimmed}`
+}
+
+const narrationEditDialogue = ref('')
+const narrationEditDuration = ref(10)
+const narrationEditAsTitle = ref(false)
+const narrationEditBusy = ref(false)
+
+const PUNCT_BOUNDARY_RE = /(?<=[。！？；，、,.!?;])\s*/
+
+function splitNarrationLines(text) {
+  const normalized = String(text || '').replace(/\r\n/g, '\n').trim()
+  if (!normalized) return []
+  const lines = []
+  for (const block of normalized.split(/\n+/)) {
+    const flat = block.replace(/\s+/g, ' ').trim()
+    if (!flat) continue
+    const parts = flat.split(PUNCT_BOUNDARY_RE).map(s => s.trim()).filter(Boolean)
+    lines.push(...(parts.length ? parts : [flat]))
+  }
+  return lines
+}
+
+function estimateNarrationDurationLocal(sentence, isTitle = false) {
+  const chars = sentence.replace(/\s/g, '').length
+  if (isTitle) return Math.max(6, Math.min(12, Math.ceil(chars / 3.5)))
+  return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
+}
+
+function buildNarrationMetaForShot(options) {
+  const {
+    isTitle,
+    inheritImage,
+    titleFull,
+    titleHook,
+    baseMeta = {},
+  } = options
+  if (isTitle) {
+    return JSON.stringify({
+      narration_image_mode: inheritImage ? 'inherit' : 'new',
+      narration_shot_type: 'title',
+      narration_tts_mode: 'new',
+      title_full: titleFull || baseMeta.title_full || undefined,
+      title_hook: titleHook || baseMeta.title_hook || undefined,
+    })
+  }
+  const meta = {
+    narration_image_mode: inheritImage ? 'inherit' : 'new',
+    narration_tts_mode: 'new',
+  }
+  if (baseMeta.paragraph_index != null) meta.paragraph_index = baseMeta.paragraph_index
+  if (baseMeta.paragraph_layout) meta.paragraph_layout = baseMeta.paragraph_layout
+  if (baseMeta.scene_content) meta.scene_content = baseMeta.scene_content
+  return JSON.stringify(meta)
+}
+
+function getNarrationEditContext(sb) {
+  if (shotEditor.value?.open && shotEditor.value.sb?.id === sb?.id) {
+    return {
+      dialogue: String(shotEditor.value.dialogue || '').trim(),
+      duration: shotEditor.value.duration || 10,
+      asTitle: !!shotEditor.value.isTitle,
+    }
+  }
+  return {
+    dialogue: String(narrationEditDialogue.value || '').trim(),
+    duration: narrationEditDuration.value,
+    asTitle: narrationEditAsTitle.value,
+  }
+}
+
+function splitShotInheritImage(sb, isTitle, isFirst) {
+  if (!isFirst) return true
+  if (isTitle) return false
+  const meta = parseNarrationImageMeta(sb)
+  return meta.narration_image_mode === 'inherit'
+}
+
+function syncNarrationEditFromShot(sb) {
+  if (!sb) {
+    narrationEditDialogue.value = ''
+    narrationEditDuration.value = 10
+    narrationEditAsTitle.value = false
+    return
+  }
+  narrationEditDialogue.value = stripNarrationDialoguePrefix(sb.dialogue) || extractNarrationSentence(sb)
+  narrationEditDuration.value = sb.duration || 10
+  narrationEditAsTitle.value = isNarrationTitleShot(sb)
+}
+
+async function renumberStoryboards() {
+  await refreshStoryboardsOnly()
+  const ordered = sortStoryboards(sbs.value)
+  for (let i = 0; i < ordered.length; i++) {
+    const num = i + 1
+    if ((ordered[i].storyboard_number || ordered[i].storyboardNumber) !== num) {
+      await storyboardAPI.update(ordered[i].id, { storyboard_number: num })
+    }
+  }
+  await refreshStoryboardsOnly()
+}
+
+async function shiftStoryboardNumbersFrom(fromNumber, delta) {
+  if (!delta) return
+  const victims = sortStoryboards(sbs.value)
+    .filter(sb => (sb.storyboard_number || sb.storyboardNumber || 0) >= fromNumber)
+    .sort((a, b) => (b.storyboard_number || b.storyboardNumber || 0) - (a.storyboard_number || a.storyboardNumber || 0))
+  for (const sb of victims) {
+    const current = sb.storyboard_number || sb.storyboardNumber || 0
+    await storyboardAPI.update(sb.id, { storyboard_number: current + delta })
+  }
+}
+
+async function fixDuplicateStoryboardNumbers() {
+  const ordered = sortStoryboards(sbs.value)
+  let changed = false
+  for (let i = 0; i < ordered.length; i++) {
+    const num = i + 1
+    if ((ordered[i].storyboard_number || ordered[i].storyboardNumber) !== num) {
+      await storyboardAPI.update(ordered[i].id, { storyboard_number: num })
+      changed = true
+    }
+  }
+  if (changed) await refreshStoryboardsOnly()
+}
+
+async function saveNarrationShotDetail(closeEditor = false) {
+  const sb = selectedSb.value
+  if (!sb || narrationEditBusy.value) return
+  const isTitle = narrationEditAsTitle.value
+  const draft = { ...sb, reference_images: sb.reference_images || sb.referenceImages }
+  if (isTitle && !isNarrationTitleShot(sb)) {
+    draft.reference_images = buildNarrationMetaForShot({ isTitle: true, inheritImage: false })
+  } else if (!isTitle && isNarrationTitleShot(sb)) {
+    draft.reference_images = buildNarrationMetaForShot({ isTitle: false, inheritImage: false })
+  }
+  const dialogue = isTitle ? normalizeNarrationDialogue({ ...sb, reference_images: draft.reference_images }, narrationEditDialogue.value) : normalizeNarrationDialogue(draft, narrationEditDialogue.value)
+  if (!dialogue) {
+    toast.warning('请填写台词')
+    return
+  }
+  const pureText = stripNarrationDialoguePrefix(dialogue)
+  const duration = Math.max(1, Math.min(60, Number(narrationEditDuration.value) || 10))
+  narrationEditBusy.value = true
+  try {
+    const payload = {
+      dialogue,
+      description: pureText,
+      title: isTitle ? '片头标题' : pureText.slice(0, 12),
+      duration,
+      shot_type: isTitle ? '标题' : (sb.shot_type || sb.shotType || '中景'),
+    }
+    if (draft.reference_images !== (sb.reference_images || sb.referenceImages)) {
+      payload.reference_images = typeof draft.reference_images === 'string' ? draft.reference_images : JSON.stringify(draft.reference_images)
+    }
+    await storyboardAPI.update(sb.id, payload)
+    toast.success('镜头已保存')
+    await refresh()
+    if (closeEditor) closeShotEditor()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationEditBusy.value = false
+  }
+}
+
+async function splitShotByPunctuation(sb) {
+  if (!sb || narrationEditBusy.value) return
+  const ctx = getNarrationEditContext(sb)
+  const text = ctx.dialogue || stripNarrationDialoguePrefix(sb.dialogue) || extractNarrationSentence(sb)
+  const lines = splitNarrationLines(text)
+  if (lines.length <= 1) {
+    toast.warning('至少要有 2 句才能拆分。用逗号、顿号或换行分隔多句后再试。')
+    return
+  }
+
+  const isTitle = ctx.asTitle || isNarrationTitleShot(sb)
+  const meta = parseNarrationImageMeta(sb)
+  const titleFull = meta.title_full || lines.join('')
+  const idx = sbs.value.findIndex(item => item.id === sb.id)
+  if (idx < 0) return
+
+  narrationEditBusy.value = true
+  try {
+    const firstDialogue = isTitle ? `剧中：${lines[0]}` : `旁白：${lines[0]}`
+    await storyboardAPI.update(sb.id, {
+      dialogue: firstDialogue,
+      description: lines[0],
+      title: isTitle ? '片头标题' : lines[0].slice(0, 12),
+      duration: estimateNarrationDurationLocal(lines[0], isTitle),
+      shot_type: isTitle ? '标题' : (sb.shot_type || sb.shotType || '中景'),
+      reference_images: buildNarrationMetaForShot({
+        isTitle,
+        inheritImage: splitShotInheritImage(sb, isTitle, true),
+        titleFull,
+        titleHook: lines[0].slice(0, 20),
+        baseMeta: meta,
+      }),
+    })
+
+    const insertNumber = (sb.storyboard_number || sb.storyboardNumber || 1) + 1
+    const newCount = lines.length - 1
+    await shiftStoryboardNumbersFrom(insertNumber, newCount)
+    await refreshStoryboardsOnly()
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i]
+      const dialogue = isTitle ? `剧中：${line}` : `旁白：${line}`
+      await storyboardAPI.create({
+        episode_id: epId.value,
+        storyboard_number: insertNumber + i - 1,
+        title: isTitle ? '片头标题' : line.slice(0, 12),
+        description: line,
+        dialogue,
+        duration: estimateNarrationDurationLocal(line, isTitle),
+        shot_type: isTitle ? '标题' : '中景',
+        angle: '平视',
+        movement: '固定',
+        reference_images: buildNarrationMetaForShot({
+          isTitle,
+          inheritImage: splitShotInheritImage(sb, isTitle, false),
+          titleFull,
+          titleHook: line.slice(0, 20),
+          baseMeta: meta,
+        }),
+      })
+    }
+
+    await renumberStoryboards()
+    toast.success(`已拆成 ${lines.length} 镜${isTitle ? '（片头 · 剧中红字）' : ''}`)
+    closeShotEditor()
+    const first = sbs.value.find(item => item.id === sb.id) || sbs.value[0]
+    if (first) selectedSb.value = first
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationEditBusy.value = false
+  }
+}
+
+async function insertShotAfter(sb) {
+  if (!sb || narrationEditBusy.value) return
+  const isTitle = narrationEditAsTitle.value || isNarrationTitleShot(sb)
+  const meta = parseNarrationImageMeta(sb)
+  narrationEditBusy.value = true
+  try {
+    const insertNumber = (sb.storyboard_number || sb.storyboardNumber || 0) + 1
+    await shiftStoryboardNumbersFrom(insertNumber, 1)
+    await refreshStoryboardsOnly()
+    await storyboardAPI.create({
+      episode_id: epId.value,
+      storyboard_number: insertNumber,
+      title: isTitle ? '片头标题' : `镜头${num}`,
+      description: '',
+      dialogue: isTitle ? '剧中：' : '旁白：',
+      duration: 6,
+      shot_type: isTitle ? '标题' : '中景',
+      angle: '平视',
+      movement: '固定',
+      reference_images: buildNarrationMetaForShot({
+        isTitle,
+        inheritImage: isTitle,
+        titleFull: meta.title_full,
+      }),
+    })
+    await renumberStoryboards()
+    toast.success('已插入镜头')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationEditBusy.value = false
+  }
+}
+
+function stripNarrationDialoguePrefix(text) {
+  return String(text || '')
+    .replace(/^旁白[:：]\s*/, '')
+    .replace(/^剧中[:：]\s*/, '')
+    .trim()
+}
+
+function openShotEditor(sb) {
+  if (!sb) return
+  selectedSb.value = sb
+  syncNarrationEditFromShot(sb)
+  const idx = sbs.value.findIndex(item => item.id === sb.id)
+  shotEditor.value = {
+    open: true,
+    sb,
+    number: idx >= 0 ? idx + 1 : (sb.storyboard_number || sb.storyboardNumber || 0),
+    isTitle: isNarrationTitleShot(sb),
+    dialogue: stripNarrationDialoguePrefix(sb.dialogue) || extractNarrationSentence(sb),
+    description: sb.description || '',
+    title: sb.title || '',
+    duration: sb.duration || 10,
+    shotType: sb.shot_type || sb.shotType || '',
+    busy: false,
+  }
+}
+
+function closeShotEditor() {
+  if (shotEditor.value.busy) return
+  shotEditor.value.open = false
+  shotEditor.value.sb = null
+}
+
+async function saveShotEditor(remake = false) {
+  const editor = shotEditor.value
+  const sb = editor.sb
+  if (!sb || editor.busy) return
+
+  const dialogue = normalizeNarrationDialogue(sb, editor.dialogue)
+  if (!dialogue) {
+    toast.warning('请填写台词')
+    return
+  }
+
+  const pureText = stripNarrationDialoguePrefix(dialogue)
+  const description = String(editor.description || '').trim() || pureText
+  const duration = Math.max(1, Math.min(60, Number(editor.duration) || 10))
+  const title = String(editor.title || '').trim() || (editor.isTitle ? '片头标题' : pureText.slice(0, 12))
+
+  editor.busy = true
+  try {
+    await storyboardAPI.update(sb.id, {
+      dialogue,
+      description,
+      title,
+      duration,
+    })
+    sb.dialogue = dialogue
+    sb.description = description
+    sb.title = title
+    sb.duration = duration
+    sb.tts_audio_url = null
+    sb.ttsAudioUrl = null
+    sb.composed_video_url = null
+    sb.composedVideoUrl = null
+
+    if (!remake) {
+      toast.success('镜头已保存')
+      closeShotEditor()
+      return
+    }
+
+    toast.info('正在重新配音…')
+    await storyboardAPI.generateTTS(sb.id, { force: true, local_tts: localTtsEnabled.value })
+    toast.info('正在重新合成该镜…')
+    delete failedComposeMessages.value[sb.id]
+    if (!isPendingCompose(sb.id)) pendingComposeIds.value.push(sb.id)
+    await composeAPI.shot(sb.id)
+    pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
+    toast.success(`镜头 #${editor.number} 已重新制作`)
+    closeShotEditor()
+    await refresh()
+  } catch (e) {
+    pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
+    toast.error(e.message)
+  } finally {
+    editor.busy = false
+  }
+}
 
 function configLabel(config) {
   if (!config) return '未配置'
@@ -1528,6 +2307,7 @@ function closeImageViewer() {
 }
 
 function handleImageViewerKeydown(event) {
+  if (event.key === 'Escape' && shotEditor.value.open) closeShotEditor()
   if (event.key === 'Escape' && imageViewer.value.open) closeImageViewer()
 }
 
@@ -1579,6 +2359,34 @@ const lockedVideoConfigId = computed(() => episode.value?.video_config_id || epi
 const lockedAudioConfigId = computed(() => episode.value?.audio_config_id || episode.value?.audioConfigId || null)
 const lockedAudioProvider = computed(() => audioConfigs.value.find(c => c.id === lockedAudioConfigId.value)?.provider || '')
 const lockedImageConfigLabel = computed(() => configLabel(imageConfigs.value.find(c => c.id === lockedImageConfigId.value)))
+const episodeImageModel = ref(DEFAULT_IMAGE_MODEL)
+const imageModelOptions = computed(() => IMAGE_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
+const showImageModelPicker = computed(() => ['chars', 'scenes', 'shots'].includes(prodTab.value))
+
+function syncEpisodeImageModel(ep) {
+  episodeImageModel.value = resolveEpisodeImageModel(ep)
+}
+
+async function onEpisodeImageModelChange(model) {
+  if (!model || model === episodeImageModel.value) return
+  episodeImageModel.value = model
+  if (!epId.value) return
+  try {
+    await episodeAPI.update(epId.value, { image_model: model })
+    if (episode.value) {
+      episode.value.image_model = model
+      episode.value.imageModel = model
+    }
+    toast.success('配图模型已保存')
+  } catch (e) {
+    syncEpisodeImageModel(episode.value)
+    toast.error(e.message)
+  }
+}
+
+function buildImagePayload(extra = {}) {
+  return { ...extra, model: episodeImageModel.value }
+}
 const lockedVideoConfigLabel = computed(() => configLabel(videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)))
 const lockedAudioConfigLabel = computed(() => configLabel(audioConfigs.value.find(c => c.id === lockedAudioConfigId.value)))
 
@@ -1753,11 +2561,20 @@ const gridBlankStyle = computed(() => {
 
 // Production step helpers
 function prodStepDone(id) {
+  if (id === 'voice') return narratorReady.value
   if (id === 'chars') return !visualCharTotal.value || charImgCount.value === visualCharTotal.value
   if (id === 'scenes') return !!scenes.value.length && sceneImgCount.value === scenes.value.length
-  if (id === 'dubbing') return !!sbs.value.length && (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
-  if (id === 'shots') return !!sbs.value.length && shotImgCount.value === sbs.value.length
-  if (id === 'videos') return !!sbs.value.length && shotVidCount.value === sbs.value.length
+  if (id === 'dubbing') {
+    const ready = isNarrationMode.value ? narrationTtsReady.value : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
+    return !!sbs.value.length && ready
+  }
+  if (id === 'shots') return !!sbs.value.length && (isNarrationMode.value ? narrationImageReady.value : shotImgCount.value === sbs.value.length)
+  if (id === 'videos') {
+    const narrationReady = !!sbs.value.length
+      && (isNarrationMode.value ? narrationImageReady.value : shotImgCount.value === sbs.value.length)
+      && (isNarrationMode.value ? narrationTtsReady.value : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value))
+    return narrationReady || (!!sbs.value.length && shotVidCount.value === sbs.value.length)
+  }
   if (id === 'compose') return !!sbs.value.length && composedCount.value === sbs.value.length
   return false
 }
@@ -1771,25 +2588,38 @@ function goNextProd() {
 }
 
 // Script step navigation
-const stepLabels = ['原始内容', 'AI 改写', '提取', '音色', '分镜']
-const prevStepLabel = computed(() => scriptStep.value > 0 ? stepLabels[scriptStep.value - 1] : '')
+const stepLabels = computed(() => isNarrationMode.value
+  ? ['解说文案', '旁白分镜']
+  : ['原始内容', 'AI 改写', '提取', '音色', '分镜'])
+const prevStepLabel = computed(() => scriptStep.value > 0 ? stepLabels.value[scriptStep.value - 1] : '')
 const nextStepLabel = computed(() => {
-  if (scriptStep.value === 4) return '进入制作'
-  return stepLabels[scriptStep.value + 1] || ''
+  if (scriptStep.value === storyboardStep.value) return '进入制作'
+  return stepLabels.value[scriptStep.value + 1] || ''
 })
 const canGoNext = computed(() => {
   if (scriptStep.value === 0) return !!localRaw.value.trim()
+  if (isNarrationMode.value && scriptStep.value === 1) return sbs.value.length > 0
   if (scriptStep.value === 1) return !!localScript.value.trim() || !!scriptContent.value
   if (scriptStep.value === 2) return chars.value.length > 0
   if (scriptStep.value === 3) return charsVoiced.value > 0
-  if (scriptStep.value === 4) return sbs.value.length > 0
+  if (scriptStep.value === storyboardStep.value) return sbs.value.length > 0
   return false
 })
 function goPrevStep() { if (scriptStep.value > 0) scriptStep.value-- }
 function goNextStep() {
-  if (scriptStep.value === 0 && localRaw.value.trim()) { saveRaw() }
-  if (scriptStep.value === 1 && localScript.value.trim()) { saveScr() }
-  if (scriptStep.value === 4) { panel.value = 'production'; return }
+  if (scriptStep.value === 0 && localRaw.value.trim()) {
+    saveRaw()
+    if (isNarrationMode.value) {
+      localScript.value = localRaw.value
+      saveScr()
+    }
+  }
+  if (!isNarrationMode.value && scriptStep.value === 1 && localScript.value.trim()) { saveScr() }
+  if (scriptStep.value === storyboardStep.value) {
+    panel.value = 'production'
+    prodTab.value = isNarrationMode.value ? 'voice' : 'chars'
+    return
+  }
   if (canGoNext.value) scriptStep.value++
 }
 
@@ -2075,19 +2905,160 @@ async function doGridSplit() {
 const charImgCount = computed(() => visualChars.value.filter(c => c.image_url || c.imageUrl).length)
 const sceneImgCount = computed(() => scenes.value.filter(s => s.image_url || s.imageUrl).length)
 const ttsEligibleCount = computed(() => sbs.value.filter(s => hasDialogue(s)).length)
-const ttsGeneratedCount = computed(() => sbs.value.filter(s => hasDialogue(s) && hasTTS(s)).length)
-const shotImgCount = computed(() => sbs.value.filter(s => s.first_frame_image || s.firstFrameImage || s.last_frame_image || s.lastFrameImage || s.composed_image || s.composedImage).length)
+const ttsGeneratedCount = computed(() => {
+  if (isNarrationMode.value) return sbs.value.filter(s => hasDialogue(s) && hasNarrationShotOwnTts(s)).length
+  return sbs.value.filter(s => hasDialogue(s) && hasTTS(s)).length
+})
+const narrationTtsReady = computed(() => narrationTtsAllReady(sbs.value))
+const shotImgCount = computed(() => {
+  if (isNarrationMode.value) {
+    return sbs.value.filter(s => narrationShotNeedsOwnImage(s) && hasNarrationShotImage(s)).length
+  }
+  return sbs.value.filter(s => s.first_frame_image || s.firstFrameImage || s.last_frame_image || s.lastFrameImage || s.composed_image || s.composedImage).length
+})
+const narrationNeedImageCount = computed(() => narrationShotsNeedingImage(sbs.value).length)
+
+const ttsPendingCount = computed(() => {
+  if (isNarrationMode.value) {
+    return sbs.value.filter(sb => hasDialogue(sb) && !hasNarrationShotOwnTts(sb)).length
+  }
+  return sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb)).length
+})
+const narrationImagesPendingCount = computed(() =>
+  sbs.value.filter(sb => narrationShotNeedsOwnImage(sb) && !hasNarrationShotImage(sb)).length,
+)
+const composePendingCount = computed(() =>
+  sbs.value.filter(sb => canCompose(sb) && !hasComposed(sb)).length,
+)
+const charImagesPendingCount = computed(() =>
+  visualChars.value.filter(c => !(c.image_url || c.imageUrl)).length,
+)
+const sceneImagesPendingCount = computed(() =>
+  scenes.value.filter(s => !(s.image_url || s.imageUrl)).length,
+)
+const videosPendingCount = computed(() => sbs.value.filter(s => !hasVid(s)).length)
+
+function getNarrationImagePromptText(sb, style = drama.value?.style || 'comic') {
+  const stored = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
+  if (stored) return stored
+  return buildNarrationImagePrompt(sb, style)
+}
+
+function updateNarrationImagePrompt(sb, value) {
+  const trimmed = String(value || '').trim()
+  if (!trimmed) return
+  updateField(sb, 'image_prompt', trimmed)
+}
+
+function updateNarrationImagePromptById(id, value) {
+  const sb = sbs.value.find(item => item.id === id)
+  if (sb) updateNarrationImagePrompt(sb, value)
+}
+
+const narrationBreakdownPanel = computed(() => {
+  if (!isNarrationMode.value || !sbs.value.length) return null
+  const s = narrationBreakdownSummary.value
+  const count = s?.count ?? sbs.value.length
+  const sentenceCount = s?.sentence_count ?? s?.sentenceCount ?? sbs.value.filter(sb => !isNarrationTitleShot(sb)).length
+  const titleCount = s?.title_count ?? s?.titleCount ?? sbs.value.filter(sb => isNarrationTitleShot(sb)).length
+  const titleImageCount = s?.title_image_count ?? s?.titleImageCount ?? (titleCount ? 1 : 0)
+  const titleHook = s?.title_hook ?? s?.titleHook ?? null
+  const paragraphCount = s?.paragraph_count ?? s?.paragraphCount ?? null
+  const diptychCount = s?.diptych_count ?? s?.diptychCount ?? 0
+  const imageNeeded = s?.image_needed_count ?? s?.imageNeededCount ?? narrationNeedImageCount.value
+  const unitPrice = imageModelUnitPrice(episodeImageModel.value)
+  const estImageCost = Math.round(imageNeeded * unitPrice * 100) / 100
+  const priceLabel = imageModelPriceLabel(episodeImageModel.value)
+  const totalDur = s?.total_duration ?? s?.totalDuration ?? totalDuration.value
+  const detectSource = s?.image_detect_source ?? s?.imageDetectSource
+  const detectMode = s?.image_detect_mode ?? s?.imageDetectMode ?? imageDetectMode.value
+  const detectLabel = detectSource === 'paragraph+llm'
+    ? '按段落配图 · AI文案'
+    : (detectMode === 'paragraph' || detectSource === 'paragraph'
+      ? '按段落配图 · 规则文案'
+      : (detectMode === 'conservative'
+        ? (detectSource === 'llm' ? '省钱 · AI识别' : '省钱 · 规则识别')
+        : (detectSource === 'llm' ? '标准 · AI识别' : detectSource === 'heuristic' ? '标准 · 规则识别' : '标准')))
+  return {
+    count,
+    sentenceCount,
+    titleCount,
+    titleImageCount,
+    titleHook,
+    paragraphCount,
+    diptychCount,
+    imageNeeded,
+    estImageCost,
+    priceLabel,
+    totalDur,
+    detectLabel,
+    generatedAt: s?.generated_at ?? s?.generatedAt ?? null,
+  }
+})
+
+function persistNarrationBreakdownSummary(res) {
+  if (!epId.value) return
+  const payload = {
+    count: res?.count ?? 0,
+    sentence_count: res?.sentence_count ?? res?.sentenceCount ?? 0,
+    title_count: res?.title_count ?? res?.titleCount ?? 0,
+    title_image_count: res?.title_image_count ?? res?.titleImageCount ?? 0,
+    title_hook: res?.title_hook ?? res?.titleHook ?? null,
+    image_needed_count: res?.image_needed_count ?? res?.imageNeededCount ?? 0,
+    paragraph_count: res?.paragraph_count ?? res?.paragraphCount ?? 0,
+    diptych_count: res?.diptych_count ?? res?.diptychCount ?? 0,
+    image_detect_source: res?.image_detect_source ?? res?.imageDetectSource ?? null,
+    image_prompt_source: res?.image_prompt_source ?? res?.imagePromptSource ?? null,
+    image_detect_mode: res?.image_detect_mode ?? res?.imageDetectMode ?? imageDetectMode.value,
+    total_duration: res?.total_duration ?? res?.totalDuration ?? 0,
+    generated_at: Date.now(),
+  }
+  narrationBreakdownSummary.value = payload
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(`episode-${epId.value}-narration-breakdown`, JSON.stringify(payload))
+  }
+}
+
+function restoreNarrationBreakdownSummary() {
+  if (typeof window === 'undefined' || !epId.value) return
+  try {
+    const raw = window.localStorage.getItem(`episode-${epId.value}-narration-breakdown`)
+    narrationBreakdownSummary.value = raw ? JSON.parse(raw) : null
+  } catch {
+    narrationBreakdownSummary.value = null
+  }
+}
+
+function formatBreakdownTime(ts) {
+  if (!ts) return ''
+  try {
+    return new Date(ts).toLocaleString('zh-CN', { hour12: false })
+  } catch {
+    return ''
+  }
+}
+const narrationImageReady = computed(() => narrationImagesReady(sbs.value))
 const shotVidCount = computed(() => sbs.value.filter(s => s.video_url || s.videoUrl).length)
 const visualCharTotal = computed(() => visualChars.value.length)
 
-const prodTabDefs = computed(() => [
-  { id: 'chars', label: '角色形象', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
-  { id: 'scenes', label: '场景图片', icon: MapPin, badge: sceneImgCount.value ? `${sceneImgCount.value}/${scenes.value.length}` : '' },
-  { id: 'dubbing', label: '配音生成', icon: Mic2, badge: '' },
-  { id: 'shots', label: '镜头图片', icon: ImageIcon, badge: shotImgCount.value ? `${shotImgCount.value}/${sbs.value.length}` : '' },
-  { id: 'videos', label: '视频生成', icon: Video, badge: shotVidCount.value ? `${shotVidCount.value}/${sbs.value.length}` : '' },
-  { id: 'compose', label: '视频合成', icon: Layers, badge: composedCount.value ? `${composedCount.value}/${sbs.value.length}` : '' },
-])
+const prodTabDefs = computed(() => {
+  if (isNarrationMode.value) {
+    return [
+      { id: 'voice', label: '旁白音色', icon: Mic2, badge: narratorReady.value ? '✓' : '' },
+      { id: 'dubbing', label: '生成配音', icon: Mic2, badge: ttsEligibleCount.value ? `${ttsGeneratedCount.value}/${ttsEligibleCount.value}` : '' },
+      { id: 'shots', label: '生成配图', icon: ImageIcon, badge: narrationNeedImageCount.value ? `${shotImgCount.value}/${narrationNeedImageCount.value}` : '' },
+      { id: 'compose', label: '镜头合成', icon: Layers, badge: sbs.value.length ? `${composedCount.value}/${sbs.value.length}` : '' },
+    ]
+  }
+  return [
+    { id: 'chars', label: '角色形象', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
+    { id: 'scenes', label: '场景图片', icon: MapPin, badge: sceneImgCount.value ? `${sceneImgCount.value}/${scenes.value.length}` : '' },
+    { id: 'dubbing', label: '配音生成', icon: Mic2, badge: '' },
+    { id: 'shots', label: '镜头图片', icon: ImageIcon, badge: shotImgCount.value ? `${shotImgCount.value}/${sbs.value.length}` : '' },
+    { id: 'videos', label: '视频生成（可选）', icon: Video, badge: shotVidCount.value ? `${shotVidCount.value}/${sbs.value.length}` : '' },
+    { id: 'compose', label: '视频合成', icon: Layers, badge: composedCount.value ? `${composedCount.value}/${sbs.value.length}` : '' },
+  ]
+})
 
 const mainStageDefs = [
   { id: 'script', label: '剧本', desc: '内容改写与整理', icon: FileText },
@@ -2096,41 +3067,85 @@ const mainStageDefs = [
   { id: 'export', label: '导出', desc: '拼接与成片输出', icon: Download },
 ]
 
-const sidebarSections = computed(() => ([
-  {
-    id: 'script',
-    label: '剧本',
-    items: [
-      { key: 'script:raw', label: '原始内容', desc: '', icon: FileText, done: !!rawContent.value },
-      { key: 'script:rewrite', label: 'AI 改写', desc: '', icon: FileText, done: !!scriptContent.value },
-      { key: 'script:extract', label: '提取', desc: '', icon: Users, done: !!chars.value.length },
-      { key: 'script:voice', label: '音色', desc: '', icon: Mic2, done: !!chars.value.length && charsVoiced.value === chars.value.length },
-      { key: 'script:storyboard', label: '分镜', desc: '', icon: Clapperboard, done: !!sbs.value.length },
-    ],
-  },
-  {
-    id: 'production',
-    label: '制作',
-    items: [
-      { key: 'prod:chars', label: '角色形象', desc: '', icon: Users, done: prodStepDone('chars') },
-      { key: 'prod:scenes', label: '场景图片', desc: '', icon: MapPin, done: prodStepDone('scenes') },
-      { key: 'prod:dubbing', label: '配音生成', desc: '', icon: Mic2, done: prodStepDone('dubbing') },
-      { key: 'prod:shots', label: '镜头图片', desc: '', icon: ImageIcon, done: prodStepDone('shots') },
-      { key: 'prod:videos', label: '视频生成', desc: '', icon: Video, done: prodStepDone('videos') },
-      { key: 'prod:compose', label: '视频合成', desc: '', icon: Layers, done: prodStepDone('compose') },
-    ],
-  },
-  {
-    id: 'export',
-    label: '导出',
-    items: [
-      { key: 'export:merge', label: '拼接导出', desc: '', icon: Download, done: !!mergeUrl.value },
-    ],
-  },
-]))
+const workflowState = computed(() => ({
+  rawContent: !!rawContent.value,
+  scriptContent: !!scriptContent.value,
+  charsCount: chars.value.length,
+  charsVoiced: charsVoiced.value,
+  sbsCount: sbs.value.length,
+  narratorReady: narratorReady.value,
+  ttsEligibleCount: ttsEligibleCount.value,
+  ttsGeneratedCount: ttsGeneratedCount.value,
+  shotImgCount: shotImgCount.value,
+  shotImgNeededCount: narrationNeedImageCount.value,
+  narrationImagesReady: narrationImageReady.value,
+  narrationTtsReady: narrationTtsReady.value,
+  shotVidCount: shotVidCount.value,
+  composedCount: composedCount.value,
+  mergeUrl: !!mergeUrl.value,
+}))
+
+const narrationIconMap = {
+  'script:raw': FileText,
+  'script:storyboard': Clapperboard,
+  'prod:voice': Mic2,
+  'prod:dubbing': Mic2,
+  'prod:shots': ImageIcon,
+  'prod:compose': Layers,
+  'export:merge': Download,
+}
+
+const sidebarSections = computed(() => {
+  if (isNarrationMode.value) {
+    const sections = buildSidebarSections('narration', workflowState.value) || []
+    return sections.map(section => ({
+      ...section,
+      items: section.items.map(item => ({
+        ...item,
+        icon: narrationIconMap[item.key] || FileText,
+      })),
+    }))
+  }
+  return [
+    {
+      id: 'script',
+      label: '剧本',
+      items: [
+        { key: 'script:raw', label: '原始内容', desc: '', icon: FileText, done: !!rawContent.value },
+        { key: 'script:rewrite', label: 'AI 改写', desc: '', icon: FileText, done: !!scriptContent.value },
+        { key: 'script:extract', label: '提取', desc: '', icon: Users, done: !!chars.value.length },
+        { key: 'script:voice', label: '音色', desc: '', icon: Mic2, done: !!chars.value.length && charsVoiced.value === chars.value.length },
+        { key: 'script:storyboard', label: '分镜', desc: '', icon: Clapperboard, done: !!sbs.value.length },
+      ],
+    },
+    {
+      id: 'production',
+      label: '制作',
+      items: [
+        { key: 'prod:chars', label: '角色形象', desc: '', icon: Users, done: prodStepDone('chars') },
+        { key: 'prod:scenes', label: '场景图片', desc: '', icon: MapPin, done: prodStepDone('scenes') },
+        { key: 'prod:dubbing', label: '配音生成', desc: '', icon: Mic2, done: prodStepDone('dubbing') },
+        { key: 'prod:shots', label: '镜头图片', desc: '', icon: ImageIcon, done: prodStepDone('shots') },
+        { key: 'prod:videos', label: '视频生成', desc: '', icon: Video, done: prodStepDone('videos') },
+        { key: 'prod:compose', label: '视频合成', desc: '', icon: Layers, done: prodStepDone('compose') },
+      ],
+    },
+    {
+      id: 'export',
+      label: '导出',
+      items: [
+        { key: 'export:merge', label: '拼接导出', desc: '', icon: Download, done: !!mergeUrl.value },
+      ],
+    },
+  ]
+})
 
 const activeMainStage = computed(() => {
   if (panel.value === 'export') return 'export'
+  if (isNarrationMode.value) {
+    if (panel.value === 'production') return 'production'
+    return 'script'
+  }
   if (panel.value === 'production') {
     return ['chars', 'scenes'].includes(prodTab.value) ? 'assets' : 'storyboard'
   }
@@ -2149,10 +3164,12 @@ function mainStageDone(stageId) {
   }
   if (stageId === 'storyboard') {
     if (!sbs.value.length) return false
-    const ttsReady = !ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value
+    const ttsReady = isNarrationMode.value
+      ? narrationTtsReady.value
+      : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
     return ttsReady
-      && shotImgCount.value === sbs.value.length
-      && shotVidCount.value === sbs.value.length
+      && (isNarrationMode.value ? narrationImageReady.value : shotImgCount.value === sbs.value.length)
+      && (isNarrationMode.value || shotVidCount.value === sbs.value.length)
       && composedCount.value === sbs.value.length
   }
   if (stageId === 'export') return !!mergeUrl.value
@@ -2191,6 +3208,23 @@ function goMainStage(stageId) {
 }
 
 const activeSubSteps = computed(() => {
+  if (isNarrationMode.value) {
+    if (panel.value === 'script') {
+      return [
+        { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
+        { key: 'script:storyboard', label: '旁白分镜', done: !!sbs.value.length },
+      ]
+    }
+    if (panel.value === 'production') {
+      return [
+        { key: 'prod:voice', label: '旁白音色', done: narratorReady.value },
+        { key: 'prod:dubbing', label: '生成配音', done: isNarrationMode.value ? narrationTtsReady.value : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value) },
+        { key: 'prod:shots', label: '生成配图', done: !!sbs.value.length && narrationImageReady.value },
+        { key: 'prod:compose', label: '镜头合成', done: !!sbs.value.length && composedCount.value === sbs.value.length },
+      ]
+    }
+    return [{ key: 'export:merge', label: '拼接导出', done: !!mergeUrl.value }]
+  }
   if (activeMainStage.value === 'script') {
     return [
       { key: 'script:raw', label: '原始内容', done: !!rawContent.value },
@@ -2219,17 +3253,7 @@ const activeSubSteps = computed(() => {
   ]
 })
 
-const activeSubStepKey = computed(() => {
-  if (panel.value === 'script') {
-    if (scriptStep.value === 0) return 'script:raw'
-    if (scriptStep.value === 1) return 'script:rewrite'
-    if (scriptStep.value === 2) return 'script:extract'
-    if (scriptStep.value === 3) return 'script:voice'
-    return 'script:storyboard'
-  }
-  if (panel.value === 'production') return `prod:${prodTab.value}`
-  return 'export:merge'
-})
+const activeSubStepKey = computed(() => resolveActiveSubStepKey(productionMode.value, panel.value, scriptStep.value, prodTab.value))
 
 const sidebarJumpSteps = computed(() => {
   const section = sidebarSections.value.find((item) => item.items.some(step => step.key === activeSubStepKey.value))
@@ -2267,14 +3291,7 @@ const showBottomBubble = computed(() => panel.value === 'script' || panel.value 
 function goSubStep(key) {
   if (key.startsWith('script:')) {
     panel.value = 'script'
-    const stepMap = {
-      'script:raw': 0,
-      'script:rewrite': 1,
-      'script:extract': 2,
-      'script:voice': 3,
-      'script:storyboard': 4,
-    }
-    scriptStep.value = stepMap[key] ?? 0
+    scriptStep.value = resolveScriptStep(productionMode.value, key)
     return
   }
   if (key.startsWith('prod:')) {
@@ -2285,23 +3302,10 @@ function goSubStep(key) {
   panel.value = 'export'
 }
 
-const pipelineProgress = computed(() => {
-  let p = 0
-  if (rawContent.value) p++
-  if (scriptContent.value) p++
-  if (chars.value.length) p++
-  if (charsVoiced.value) p++
-  if (sbs.value.length) p++
-  if (sbs.value.length && (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)) p++
-  if (sbs.value.some(s => s.composed_image || s.composedImage)) p++
-  if (sbs.value.some(s => s.video_url || s.videoUrl)) p++
-  if (sbs.value.length && composedCount.value === sbs.value.length) p++
-  if (mergeUrl.value) p++
-  return p
-})
+const pipelineProgress = computed(() => workflowProgress(productionMode.value, workflowState.value))
 
 const currentStageLabel = computed(() => {
-  if (panel.value === 'script') return `剧本阶段 · ${stepLabels[scriptStep.value]}`
+  if (panel.value === 'script') return `${isNarrationMode.value ? '解说' : '剧本'}阶段 · ${stepLabels.value[scriptStep.value] || ''}`
   if (panel.value === 'production') return `制作阶段 · ${prodTabDefs.value[prodTabIdx.value]?.label || '制作'}`
   return mergeUrl.value ? '导出阶段 · 成片已生成' : '导出阶段 · 等待拼接'
 })
@@ -2334,6 +3338,8 @@ function getVoiceProfile(voiceId) {
 const totalDuration = computed(() => sbs.value.reduce((s, sb) => s + (sb.duration || 10), 0))
 
 const selectedSb = ref(null)
+watch(selectedSb, sb => syncNarrationEditFromShot(sb), { immediate: true })
+
 const shotTypes = [
   '大远景', '远景', '全景', '中景', '中近景', '近景', '特写', '大特写',
   '双人镜头', '三人镜头', '群像', '背影', '侧面', '正面', '俯视', '仰视',
@@ -2409,36 +3415,72 @@ const scriptSteps = computed(() => {
 watch(rawContent, v => { localRaw.value = v }, { immediate: true })
 watch(scriptContent, v => { localScript.value = v }, { immediate: true })
 
+async function refreshStoryboardsOnly() {
+  if (!epId.value) return
+  sbs.value = sortStoryboards(await episodeAPI.storyboards(epId.value))
+}
+
 async function refresh() {
   try {
     drama.value = await dramaAPI.get(dramaId)
     const ep = drama.value.episodes?.find(e => (e.episode_number || e.episodeNumber) === episodeNumber)
     if (ep) {
       episode.value = ep
+      syncEpisodeImageModel(ep)
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
       try { scenes.value = await episodeAPI.scenes(ep.id) } catch { scenes.value = [] }
-      sbs.value = await episodeAPI.storyboards(ep.id)
-      if (sbs.value.length && !selectedSb.value) selectedSb.value = sbs.value[0]
+      sbs.value = sortStoryboards(await episodeAPI.storyboards(ep.id))
+      if (hasDuplicateStoryboardNumbers(sbs.value)) {
+        await fixDuplicateStoryboardNumbers()
+      }
+      if (sbs.value.length) {
+        const prevId = selectedSb.value?.id
+        const stillExists = prevId && sbs.value.some(sb => sb.id === prevId)
+        if (!stillExists) selectedSb.value = sbs.value[0]
+      } else {
+        selectedSb.value = null
+      }
 
       const epHasContent = !!(episode.value?.content)
       const epHasScript = !!(episode.value?.script_content || episode.value?.scriptContent)
       const epHasSbs = sbs.value.length > 0
 
-      if (epHasSbs) scriptStep.value = 4
+      if (isNarrationMode.value) {
+        scriptStep.value = inferNarrationScriptStep(episode.value, sbs.value.length, narratorReady.value)
+        try { await ensureNarratorCharacter() } catch {}
+      } else if (epHasSbs) scriptStep.value = 4
       else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
       else if (epHasScript && chars.value.length) scriptStep.value = 2
       else if (epHasScript || epHasContent) scriptStep.value = 1
       else scriptStep.value = 0
       await loadLatestGridImage()
+      if (isNarrationMode.value && panel.value === 'production' && !['voice', 'dubbing', 'shots', 'compose'].includes(prodTab.value)) {
+        prodTab.value = 'voice'
+      }
     }
   } catch (e) {
     toast.error(e.message)
   }
-  try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
+  try {
+    mergeData.value = await mergeAPI.status(epId.value)
+    if (['processing', 'pending'].includes(mergeData.value?.status)) startMergePoll()
+  } catch {}
 }
 
 function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
 function saveScr() { episodeAPI.update(epId.value, { script_content: localScript.value }); episode.value.script_content = localScript.value }
+async function saveNarrationScript() {
+  const script = (localRaw.value || localScript.value || '').trim()
+  if (!script) throw new Error('请先填写解说文案')
+  localScript.value = script
+  localRaw.value = script
+  await Promise.all([
+    episodeAPI.update(epId.value, { content: script, script_content: script }),
+  ])
+  episode.value.content = script
+  episode.value.script_content = script
+  return script
+}
 function doRewrite() { saveRaw(); runAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', dramaId, epId.value, refresh) }
 function skipRewrite() {
   const raw = (localRaw.value || rawContent.value || '').trim()
@@ -2459,27 +3501,186 @@ async function batchGenSamples() {
     toast.info(charsVoiced.value ? '所有角色的试听文件已生成' : '请先分配音色')
     return
   }
-  const results = await Promise.allSettled(pending.map(c => characterAPI.voiceSample(c.id, epId.value)))
-  const okCount = results.filter(r => r.status === 'fulfilled').length
-  const failCount = results.length - okCount
-  if (okCount) toast.success(`已生成 ${okCount} 份试听文件`)
-  if (failCount) toast.error(`${failCount} 份试听文件生成失败`)
-  await refresh()
+  if (!tryBeginBatch('voiceSamples', '正在批量生成试听文件…')) return
+  try {
+    const results = await Promise.allSettled(pending.map(c => characterAPI.voiceSample(c.id, epId.value)))
+    const okCount = results.filter(r => r.status === 'fulfilled').length
+    const failCount = results.length - okCount
+    if (okCount) toast.success(`已生成 ${okCount} 份试听文件`)
+    if (failCount) toast.error(`${failCount} 份试听文件生成失败`)
+    await refresh()
+  } finally {
+    endBatch('voiceSamples')
+  }
 }
 function doBreakdown() {
   const cfg = videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)
   const label = cfg ? `${cfg.name} (${cfg.provider})` : '默认'
   runAgent('storyboard_breaker', `请拆解分镜并生成视频提示词。视频模型：${label}，请根据该模型的特性和时长限制生成合适的视频提示词。`, dramaId, epId.value, refresh)
 }
+function restoreImageDetectModePrefs() {
+  if (typeof window === 'undefined' || !epId.value) return
+  const mode = window.localStorage.getItem(`episode-${epId.value}-image-detect-mode`)
+  if (mode === 'paragraph' || mode === 'balanced' || mode === 'conservative') imageDetectMode.value = 'paragraph'
+}
+
+function doNarrationBreakdown() {
+  narrationBreaking.value = true
+  const style = drama.value?.style || 'comic'
+  void (async () => {
+    try {
+      const script = await saveNarrationScript()
+      const res = await episodeAPI.narrationBreakdown(epId.value, {
+        style,
+        script,
+        image_detect_mode: imageDetectMode.value,
+      })
+      const titleCount = res?.title_count ?? res?.titleCount ?? 0
+      const titleImageCount = res?.title_image_count ?? res?.titleImageCount ?? (titleCount ? 1 : 0)
+      const titleHook = res?.title_hook ?? res?.titleHook
+      const sentenceCount = res?.sentence_count ?? res?.sentenceCount ?? 0
+      const titleHint = titleCount
+        ? `，片头 ${titleCount} 镜共用 ${titleImageCount} 张标题图${titleHook ? `（${titleHook}）` : ''}`
+        : '，未识别片头标题（首行请写「标题：」或「今天体验的人生剧本是…」）'
+      const paragraphCount = res?.paragraph_count ?? res?.paragraphCount ?? 0
+      const diptychCount = res?.diptych_count ?? res?.diptychCount ?? 0
+      const imageCount = res?.image_needed_count ?? res?.imageNeededCount ?? 0
+      const diptychHint = diptychCount ? `（含 ${diptychCount} 张两宫格）` : ''
+      const promptSource = res?.image_prompt_source ?? res?.imagePromptSource
+      const promptHint = promptSource === 'llm' ? ' · AI配图文案' : ' · 规则配图文案'
+      toast.success(`已拆分 ${sentenceCount} 句 → ${res?.count || 0} 镜${titleHint}，${paragraphCount} 段 · ${imageCount} 张配图${diptychHint}${promptHint}`)
+      persistNarrationBreakdownSummary(res)
+      await refresh()
+      await ensureNarratorCharacter()
+    } catch (e) {
+      toast.error(e.message)
+    } finally {
+      narrationBreaking.value = false
+    }
+  })()
+}
+function onNarratorVoiceChange(voiceId) {
+  narratorVoiceId.value = voiceId
+  narratorVoiceDirty.value = true
+}
+
+function syncNarratorVoiceFromChar(narrator) {
+  if (narratorVoiceDirty.value) return
+  const voice = narrator?.voice_style || narrator?.voiceStyle
+  if (voice) narratorVoiceId.value = voice
+}
+
+async function ensureNarratorCharacter() {
+  if (!epId.value) {
+    throw new Error('集信息加载中，请稍后重试')
+  }
+  let narrator = findNarratorChar(chars.value)
+  if (narrator) {
+    syncNarratorVoiceFromChar(narrator)
+    return narrator
+  }
+
+  const dramaNarrator = findNarratorChar(drama.value?.characters || [])
+  await characterAPI.create({
+    drama_id: dramaId,
+    episode_id: epId.value,
+    name: '旁白',
+    role: '旁白',
+    voice_style: narratorVoiceId.value || dramaNarrator?.voice_style || dramaNarrator?.voiceStyle || undefined,
+    voice_provider: lockedAudioProvider.value || undefined,
+  })
+  await refresh()
+  narrator = findNarratorChar(chars.value)
+  if (narrator) syncNarratorVoiceFromChar(narrator)
+  return narrator || null
+}
+async function saveNarratorVoice() {
+  if (!narratorVoiceId.value) {
+    toast.warning('请先选择旁白音色')
+    return
+  }
+  const selectedVoice = narratorVoiceId.value
+  try {
+    const narrator = await ensureNarratorCharacter()
+    if (!narrator?.id) {
+      toast.error('旁白角色创建失败，请刷新页面后重试')
+      return
+    }
+    narratorVoiceId.value = selectedVoice
+    const updated = await characterAPI.update(narrator.id, {
+      voice_style: selectedVoice,
+      voice_provider: lockedAudioProvider.value || undefined,
+    })
+    const patch = {
+      voice_style: selectedVoice,
+      voiceStyle: selectedVoice,
+      voice_provider: lockedAudioProvider.value || undefined,
+      voiceProvider: lockedAudioProvider.value || undefined,
+    }
+    const local = chars.value.find(c => c.id === narrator.id)
+    if (local) Object.assign(local, patch)
+    const dramaChar = drama.value?.characters?.find(c => c.id === narrator.id)
+    if (dramaChar) Object.assign(dramaChar, patch)
+    narratorVoiceId.value = updated?.voice_style || updated?.voiceStyle || selectedVoice
+    narratorVoiceDirty.value = false
+    toast.success('旁白音色已保存')
+  } catch (e) {
+    toast.error(e.message || '旁白音色保存失败')
+  }
+}
 async function genSample(id) { try { await characterAPI.voiceSample(id, epId.value); toast.success('试听已生成'); refresh() } catch (e) { toast.error(e.message) } }
 async function addShot() { await storyboardAPI.create({ episode_id: epId.value, storyboard_number: sbs.value.length + 1, title: `镜头${sbs.value.length + 1}`, duration: 10 }); refresh() }
+
+function isBatchRunning(key) {
+  return batchRunning.value.has(key)
+}
+
+function tryBeginBatch(key, message) {
+  if (batchRunning.value.has(key)) {
+    toast.warning('批量任务进行中，请稍候')
+    return false
+  }
+  batchRunning.value = new Set([...batchRunning.value, key])
+  toast.info(message)
+  return true
+}
+
+function endBatch(key) {
+  const next = new Set(batchRunning.value)
+  next.delete(key)
+  batchRunning.value = next
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  if (!items.length) return []
+  const results = new Array(items.length)
+  let cursor = 0
+  async function runWorker() {
+    while (cursor < items.length) {
+      const index = cursor++
+      try {
+        results[index] = { status: 'fulfilled', value: await worker(items[index], index) }
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason }
+      }
+    }
+  }
+  const workers = Math.min(Math.max(1, limit), items.length)
+  await Promise.all(Array.from({ length: workers }, () => runWorker()))
+  return results
+}
+
+function resolveTtsBatchConcurrency() {
+  if (isNarrationMode.value && localTtsEnabled.value !== false) return 6
+  return 2
+}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function watchAsyncResult(check, attempts = 24, delay = 2500) {
-  void (async () => {
+  return (async () => {
     for (let i = 0; i < attempts; i++) {
       await sleep(delay)
       await refresh()
@@ -2505,23 +3706,30 @@ async function genCharImg(id) {
     toast.error(e.message)
   }
 }
-function batchCharImages() {
+async function batchCharImages() {
   const ids = visualChars.value.filter(c => !(c.image_url || c.imageUrl)).map(c => c.id)
-  if (!ids.length) { toast.info('所有角色图片已生成'); return }
+  if (!ids.length) {
+    toast.info('所有角色图片已生成')
+    return
+  }
+  if (!tryBeginBatch('charImages', '角色图片批量生成中…')) return
   pendingCharImageIds.value = [...new Set([...pendingCharImageIds.value, ...ids])]
-  characterAPI.batchImages(ids, epId.value).then(async () => {
-    toast.success('角色图片批量生成中')
+  try {
+    await characterAPI.batchImages(ids, epId.value)
     await refresh()
-    watchAsyncResult(() => ids.every(id => {
+    await watchAsyncResult(() => ids.every(id => {
       const char = chars.value.find(c => c.id === id)
       const done = !!(char?.image_url || char?.imageUrl)
       if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
       return done
     }), 36)
-  }).catch(e => {
+    toast.success('角色图片批量生成完成')
+  } catch (e) {
     pendingCharImageIds.value = pendingCharImageIds.value.filter(item => !ids.includes(item))
     toast.error(e.message)
-  })
+  } finally {
+    endBatch('charImages')
+  }
 }
 async function genSceneImg(id) {
   try {
@@ -2540,18 +3748,32 @@ async function genSceneImg(id) {
     toast.error(e.message)
   }
 }
-function batchSceneImages() {
+async function batchSceneImages() {
   const ids = scenes.value.filter(s => !(s.image_url || s.imageUrl)).map(s => s.id)
-  if (!ids.length) { toast.info('所有场景图片已生成'); return }
+  if (!ids.length) {
+    toast.info('所有场景图片已生成')
+    return
+  }
+  if (!tryBeginBatch('sceneImages', '场景图片批量生成中…')) return
   pendingSceneImageIds.value = [...new Set([...pendingSceneImageIds.value, ...ids])]
-  ids.forEach(id => { sceneAPI.generateImage(id, epId.value).then(() => refresh()).catch(e => toast.error(e.message)) })
-  toast.success('场景图片批量生成中')
-  watchAsyncResult(() => ids.every(id => {
-    const scene = scenes.value.find(s => s.id === id)
-    const done = !!(scene?.image_url || scene?.imageUrl)
-    if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
-    return done
-  }), 36)
+  try {
+    const results = await Promise.allSettled(ids.map(id => sceneAPI.generateImage(id, epId.value)))
+    const failCount = results.filter(r => r.status === 'rejected').length
+    if (failCount) toast.error(`${failCount} 个场景图片提交失败`)
+    await refresh()
+    await watchAsyncResult(() => ids.every(id => {
+      const scene = scenes.value.find(s => s.id === id)
+      const done = !!(scene?.image_url || scene?.imageUrl)
+      if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+      return done
+    }), 36)
+    if (!failCount) toast.success('场景图片批量生成完成')
+  } catch (e) {
+    pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => !ids.includes(item))
+    toast.error(e.message)
+  } finally {
+    endBatch('sceneImages')
+  }
 }
 
 const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
@@ -2580,40 +3802,230 @@ function isTTSIgnorable(sb) {
 
 function hasDialogue(sb) { return !isTTSIgnorable(sb) }
 function hasTTS(sb) { return !!(sb?.tts_audio_url || sb?.ttsAudioUrl) }
+function hasComposeTts(sb) {
+  if (isNarrationMode.value) return hasEffectiveNarrationTts(sbs.value, sb)
+  return hasTTS(sb)
+}
 function getTTSUrl(sb) { return sb?.tts_audio_url || sb?.ttsAudioUrl || '' }
+function hasNarrationShotOwnTts(sb) { return !!getNarrationShotOwnTts(sb) }
+function hasEffectiveTTS(sb) {
+  if (!isNarrationMode.value) return hasTTS(sb)
+  return hasNarrationShotOwnTts(sb)
+}
+function getEffectiveTTSUrl(sb) {
+  if (!isNarrationMode.value) return getTTSUrl(sb)
+  return getNarrationShotOwnTts(sb) || ''
+}
+function narrationTtsStatusLabel(sb) {
+  if (!isNarrationMode.value) return hasTTS(sb) ? '已生成' : '待生成'
+  return hasNarrationShotOwnTts(sb) ? '已生成' : '待生成'
+}
 function getDialogueSpeaker(sb) {
   const speaker = getDialogueSpeakerRaw(sb)
   if (!speaker) return '旁白'
   return speaker
 }
-async function genShotTTS(sb) {
+async function genShotTTS(sb, force = false) {
   try {
-    await storyboardAPI.generateTTS(sb.id)
-    toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成`)
+    const res = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force))
+    const provider = res?.provider || (localTtsEnabled.value ? 'edge' : 'api')
+    const mode = provider === 'edge' ? '（本地 Edge）' : '（付费 API）'
+    toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成${mode}`)
     await refresh()
   } catch (e) { toast.error(e.message) }
 }
 async function batchShotTTS() {
-  const pending = sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb))
+  const pending = (isNarrationMode.value
+    ? sbs.value.filter(sb => hasDialogue(sb) && !hasNarrationShotOwnTts(sb))
+    : sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb)))
+    .sort((a, b) => (a.storyboard_number || a.storyboardNumber || 0) - (b.storyboard_number || b.storyboardNumber || 0))
   if (!pending.length) {
-    toast.info(ttsEligibleCount.value ? '所有镜头配音已生成' : '当前没有可生成的对白或旁白')
+    toast.info(ttsEligibleCount.value ? '所有镜头配音已就绪' : '当前没有可生成的对白或旁白')
     return
   }
-  const results = await Promise.allSettled(pending.map(sb => storyboardAPI.generateTTS(sb.id)))
-  const okCount = results.filter(r => r.status === 'fulfilled').length
-  const failCount = results.length - okCount
-  if (okCount) toast.success(`已生成 ${okCount} 条镜头配音`)
-  if (failCount) toast.error(`${failCount} 条镜头配音生成失败`)
-  await refresh()
+  if (!tryBeginBatch('tts', `配音生成中（剩余 ${pending.length} 条${localTtsEnabled.value ? ' · 并发' : ''}）…`)) return
+  try {
+    const concurrency = resolveTtsBatchConcurrency()
+    const results = await mapWithConcurrency(
+      pending,
+      concurrency,
+      sb => storyboardAPI.generateTTS(sb.id, ttsGenerateOptions()),
+    )
+    const apiCount = results.filter(r => r.status === 'fulfilled').length
+    const failCount = results.length - apiCount
+    if (apiCount) {
+      toast.success(`已生成剩余 ${apiCount} 条配音${localTtsEnabled.value ? `（本地 Edge · ${concurrency} 并发）` : ''}`)
+    }
+    if (failCount) toast.error(`${failCount} 条镜头配音生成失败`)
+    await refresh()
+  } finally {
+    endBatch('tts')
+  }
 }
 
 function getFirstFrame(s) { return s?.first_frame_image || s?.firstFrameImage || null }
 function getLastFrame(s) { return s?.last_frame_image || s?.lastFrameImage || null }
-function getStoryboardCover(s) { return s?.composed_image || s?.composedImage || getFirstFrame(s) || getLastFrame(s) || null }
+function getNarrationShotImage(s) { return getNarrationShotOwnImage(s) }
+function hasNarrationShotImage(s) { return !!getNarrationShotImage(s) }
+function getNarrationDisplayImage(s) { return resolveNarrationEffectiveImage(sbs.value, s).path }
+function narrationShotInherited(s) {
+  return hasNarrationShotImage(s) && parseNarrationImageMeta(s).narration_image_mode === 'copy'
+    || (!hasNarrationShotImage(s) && !!resolveNarrationEffectiveImage(sbs.value, s).inherited)
+}
+function narrationShotImageLabel(s) {
+  const meta = parseNarrationImageMeta(s)
+  if (meta.narration_shot_type === 'title') {
+    const segment = extractNarrationSentence(s)
+    if (meta.narration_image_mode === 'new') {
+      return hasNarrationShotImage(s)
+        ? `片头 · 已生成背景图（剧中红字：${segment}）`
+        : `片头 · 待生成背景图（剧中红字：${segment}）`
+    }
+    const inherited = resolveNarrationEffectiveImage(sbs.value, s)
+    return inherited.path
+      ? `片头 · 沿用背景图（剧中红字：${segment}）`
+      : '片头 · 待首镜生成背景图'
+  }
+  if (meta.narration_image_mode === 'new') {
+    const paraHint = meta.paragraph_index != null ? `段 ${meta.paragraph_index + 1}` : '段落'
+    const layoutHint = meta.paragraph_layout === 'diptych' ? ' · 两宫格' : ''
+    const sceneHint = meta.scene_content ? ` · ${meta.scene_content.slice(0, 20)}${meta.scene_content.length > 20 ? '…' : ''}` : ''
+    return hasNarrationShotImage(s)
+      ? `${paraHint}${layoutHint} · 已生成配图${sceneHint}`
+      : `${paraHint}${layoutHint} · 待生成配图${sceneHint}`
+  }
+  if (hasNarrationShotImage(s) && meta.narration_image_mode === 'copy') return '已复用上一镜配图'
+  if (!narrationShotNeedsOwnImage(s)) return '同段 · 沿用上一张'
+  if (resolveNarrationEffectiveImage(sbs.value, s).inherited) return '同段 · 合成沿用前图'
+  return '同段 · 沿用上一张'
+}
+function findPrevNarrationShotWithImage(sb) {
+  const idx = sbs.value.findIndex(item => item.id === sb.id)
+  if (idx <= 0) return null
+  for (let i = idx - 1; i >= 0; i--) {
+    if (hasNarrationShotImage(sbs.value[i])) return sbs.value[i]
+  }
+  return null
+}
+function narrationImageMetaJson(mode) {
+  return JSON.stringify({ narration_image_mode: mode })
+}
+async function reuseNarrationShotImage(sb) {
+  const prev = findPrevNarrationShotWithImage(sb)
+  if (!prev) {
+    toast.warning('前面没有可复用的配图')
+    return
+  }
+  await storyboardAPI.update(sb.id, {
+    composed_image: getNarrationShotImage(prev),
+    reference_images: narrationImageMetaJson('copy'),
+  })
+  toast.success('已复用上一镜配图')
+  await refresh()
+}
+async function clearNarrationShotImage(sb) {
+  await storyboardAPI.update(sb.id, {
+    composed_image: null,
+    reference_images: narrationImageMetaJson('inherit'),
+  })
+  toast.success('已取消复用，合成时将自动沿用前图')
+  await refresh()
+}
+async function markNarrationShotNeedImage(sb) {
+  const sceneContent = resolveSceneContentForShot(sbs.value, sb)
+  const style = drama.value?.style || 'comic'
+  const draft = {
+    ...sb,
+    reference_images: JSON.stringify({ narration_image_mode: 'new', scene_content: sceneContent }),
+    image_prompt: null,
+    imagePrompt: null,
+  }
+  await storyboardAPI.update(sb.id, {
+    reference_images: JSON.stringify({ narration_image_mode: 'new', scene_content: sceneContent }),
+    image_prompt: buildNarrationImagePrompt(draft, style),
+  })
+  toast.success('已标记为需配图')
+  await refresh()
+}
+function isPendingNarrationShot(id) { return pendingNarrationShotIds.value.includes(id) }
+
+async function genNarrationShotImage(sb) {
+  const style = drama.value?.style || 'comic'
+  const prompt = getNarrationImagePromptText(sb, style)
+  if (!prompt) {
+    toast.warning('该镜头没有旁白文案，无法生成配图')
+    return
+  }
+  if (!String(sb?.image_prompt || sb?.imagePrompt || '').trim()) {
+    updateField(sb, 'image_prompt', prompt)
+  }
+  try {
+    if (!isPendingNarrationShot(sb.id)) pendingNarrationShotIds.value.push(sb.id)
+    await imageAPI.generate(buildImagePayload({
+      storyboard_id: sb.id,
+      drama_id: dramaId,
+      prompt,
+      frame_type: 'illustration',
+    }))
+    toast.success('配图生成中')
+    await refresh()
+    watchAsyncResult(() => {
+      const target = sbs.value.find(s => s.id === sb.id)
+      const done = hasNarrationShotImage(target)
+      if (done) pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(item => item !== sb.id)
+      return done
+    })
+  } catch (e) {
+    pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(item => item !== sb.id)
+    toast.error(e.message)
+  }
+}
+
+async function batchNarrationShotImages() {
+  const pending = sbs.value.filter(sb => narrationShotNeedsOwnImage(sb) && !hasNarrationShotImage(sb))
+  if (!pending.length) {
+    toast.info('所有需配图镜头已生成')
+    return
+  }
+  if (!tryBeginBatch('narrationImages', `配图生成中（剩余 ${pending.length} 张）…`)) return
+  try {
+    const style = drama.value?.style || 'comic'
+    pendingNarrationShotIds.value = [...new Set([...pendingNarrationShotIds.value, ...pending.map(sb => sb.id)])]
+    const results = await Promise.allSettled(pending.map(sb => imageAPI.generate(buildImagePayload({
+      storyboard_id: sb.id,
+      drama_id: dramaId,
+      prompt: getNarrationImagePromptText(sb, style),
+      frame_type: 'illustration',
+    }))))
+    const failCount = results.filter(r => r.status === 'rejected').length
+    if (failCount) toast.error(`${failCount} 个镜头配图提交失败`)
+    else toast.success(`已提交剩余 ${pending.length} 张配图生成`)
+    await refresh()
+    await watchAsyncResult(() => pending.every(sb => {
+      const target = sbs.value.find(s => s.id === sb.id)
+      const done = hasNarrationShotImage(target)
+      if (done) pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(item => item !== sb.id)
+      return done
+    }), 60, 4000)
+  } finally {
+    endBatch('narrationImages')
+  }
+}
+
+function getStoryboardCover(s) {
+  if (isNarrationMode.value) return getNarrationDisplayImage(s) || getNarrationShotImage(s)
+  return s?.composed_image || s?.composedImage || getFirstFrame(s) || getLastFrame(s) || null
+}
 function getVideoUrl(s) { return s?.video_url || s?.videoUrl || null }
 function getComposedVideoUrl(s) { return s?.composed_video_url || s?.composedVideoUrl || null }
 function hasImg(s) { return !!getStoryboardCover(s) }
 function hasVid(s) { return !!getVideoUrl(s) }
+function hasDialogueForCompose(s) { return hasDialogue(s) }
+function canCompose(s) {
+  if (hasVid(s)) return true
+  if (isNarrationMode.value) return hasDialogueForCompose(s)
+  return hasImg(s)
+}
 function hasComposed(s) { return !!getComposedVideoUrl(s) }
 
 function getShotReferenceImages(sb) {
@@ -2675,13 +4087,13 @@ async function genShotFrame(sb, frameType) {
   const key = framePendingKey(sb.id, frameType)
   try {
     if (!pendingShotFrameKeys.value.includes(key)) pendingShotFrameKeys.value.push(key)
-    const body = {
+    const body = buildImagePayload({
       storyboard_id: sb.id,
       drama_id: dramaId,
       prompt,
       frame_type: frameType,
       reference_images: referenceImages.length ? referenceImages : undefined,
-    }
+    })
     await imageAPI.generate(body)
     toast.success(frameType === 'first_frame' ? '首帧生成中' : '尾帧生成中')
     await refresh()
@@ -2778,37 +4190,98 @@ async function doCompose(sb) {
     toast.error(e.message)
   }
 }
-function batchVideos() {
+async function batchVideos() {
   const pendingIds = sbs.value.filter(s => !hasVid(s)).map(s => s.id)
-  pendingIds.forEach(id => {
-    const sb = sbs.value.find(item => item.id === id)
-    if (sb) genVid(sb)
-  })
-  if (pendingIds.length) {
+  if (!pendingIds.length) return
+  if (!tryBeginBatch('videos', '批量视频生成中…')) return
+  try {
+    pendingIds.forEach(id => {
+      const sb = sbs.value.find(item => item.id === id)
+      if (sb) genVid(sb)
+    })
     pendingVideoIds.value = [...new Set([...pendingVideoIds.value, ...pendingIds])]
-    watchAsyncResult(() => pendingIds.every(id => {
+    await watchAsyncResult(() => pendingIds.every(id => {
       const target = sbs.value.find(s => s.id === id)
       const done = !!(target?.video_url || target?.videoUrl)
       if (done) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== id)
       return done
     }), 80, 4000)
+  } finally {
+    endBatch('videos')
   }
 }
 async function batchCompose() {
-  await composeAPI.all(epId.value)
-  pendingComposeIds.value = [...new Set(sbs.value.filter(sb => !!sb.video_url || !!sb.videoUrl).map(sb => sb.id))]
-  toast.success('批量合成已开始')
-  pollComposeStatus()
+  const pending = sbs.value.filter(sb => canCompose(sb) && !hasComposed(sb))
+  if (!pending.length) {
+    toast.info('所有可合成镜头已完成')
+    return
+  }
+  if (!tryBeginBatch('compose', `镜头合成中（剩余 ${pending.length} 个 · 并发）…`)) return
+  try {
+    const res = await composeAPI.all(epId.value, { only_remaining: true })
+    const concurrency = res?.concurrency || 3
+    pendingComposeIds.value = [...new Set([...pendingComposeIds.value, ...pending.map(sb => sb.id)])]
+    toast.info(`已开始合成剩余 ${pending.length} 个镜头（${concurrency} 路并发）`)
+    await pollComposeStatus()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    endBatch('compose')
+  }
 }
-async function doMerge() {
-  await mergeAPI.merge(epId.value); toast.success('拼接中...')
-  const poll = setInterval(async () => {
+function stopMergePoll() {
+  if (mergePollTimer) {
+    clearInterval(mergePollTimer)
+    mergePollTimer = null
+  }
+}
+
+function startMergePoll() {
+  stopMergePoll()
+  mergePollTimer = setInterval(async () => {
     try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
-    if (mergeData.value?.status === 'completed' || mergeData.value?.status === 'failed') {
-      clearInterval(poll)
-      mergeData.value.status === 'completed' ? toast.success('拼接完成') : toast.error('拼接失败')
+    if (mergeData.value?.status === 'completed' || mergeData.value?.status === 'failed' || mergeData.value?.status === 'cancelled') {
+      stopMergePoll()
+      if (mergeData.value.status === 'completed') {
+        toast.success('视频生成完成')
+        await refresh()
+      } else if (mergeData.value.status === 'failed') {
+        toast.error(mergeData.value?.error_msg || mergeData.value?.errorMsg || '生成失败')
+      }
     }
-  }, 3000)
+  }, 1500)
+}
+
+async function cancelMerge() {
+  try {
+    await mergeAPI.cancel(epId.value)
+    stopMergePoll()
+    mergeData.value = { ...(mergeData.value || {}), status: 'cancelled' }
+    toast.info('已取消生成')
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function regenerateMerge() {
+  stopMergePoll()
+  await doMerge()
+}
+
+async function doMerge() {
+  try {
+    await mergeAPI.merge(epId.value, { cancel_running: true })
+    mergeData.value = {
+      ...(mergeData.value || {}),
+      status: 'processing',
+      progress_percent: 0,
+      progress_message: '正在启动拼接…',
+    }
+    toast.success('生成中…')
+    startMergePoll()
+  } catch (e) {
+    toast.error(e.message)
+  }
 }
 
 async function pollComposeStatus() {
@@ -2832,7 +4305,7 @@ async function pollComposeStatus() {
 
       if (!processingIds.length) {
         if (failedItems.length) toast.error(`有 ${failedItems.length} 个镜头合成失败`)
-        else toast.success('批量合成完成')
+        else toast.success('剩余镜头合成完成')
         return
       }
     } catch {}
@@ -2875,6 +4348,18 @@ function mapVoiceProfile(v) {
   }
 }
 
+async function loadEdgeVoices() {
+  try {
+    const rows = await voicesAPI.list('edge')
+    edgeVoiceProfiles.value = rows?.length
+      ? rows.map(mapVoiceProfile)
+      : [{ id: DEFAULT_LOCAL_EDGE_VOICE, label: '云希（男·解说）', gender: '男声', traits: '本地 Edge', suitable: '解说旁白' }]
+  } catch (e) {
+    console.error('Failed to load edge voices', e)
+    edgeVoiceProfiles.value = [{ id: DEFAULT_LOCAL_EDGE_VOICE, label: '云希（男·解说）', gender: '男声', traits: '本地 Edge', suitable: '解说旁白' }]
+  }
+}
+
 async function loadVoices() {
   try {
     const provider = lockedAudioProvider.value || 'minimax'
@@ -2887,7 +4372,9 @@ async function loadVoices() {
 }
 
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
-onMounted(() => { refresh(); loadConfigs(); loadVoices() })
+watch([localTtsEnabled, localEdgeVoiceId], persistLocalTtsPrefs)
+watch(epId, () => { restoreLocalTtsPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs() }, { immediate: true })
+onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
 </script>
 
 <style scoped>
@@ -2990,6 +4477,10 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   color: var(--accent-text);
   font-size: 9px;
   font-weight: 700;
+}
+.studio-episode-chip.is-mode {
+  background: rgba(59, 130, 246, 0.12);
+  color: #2563eb;
 }
 
 .studio-meta-row {
@@ -3610,6 +5101,159 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 /* Production content */
 .prod-content { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
 .prod-section-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.prod-image-model-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+}
+.narration-hint {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.18);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.narration-hint strong { color: var(--accent); font-weight: 600; }
+
+.local-tts-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(34, 197, 94, 0.06);
+  border: 1px solid rgba(34, 197, 94, 0.16);
+}
+.local-tts-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-1);
+  cursor: pointer;
+  user-select: none;
+}
+.local-tts-toggle input { accent-color: var(--accent); }
+.tag.warn { color: #b45309; border-color: rgba(180, 83, 9, 0.25); background: rgba(251, 191, 36, 0.12); }
+
+.narration-breakdown-panel {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.narration-breakdown-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.narration-breakdown-head strong { color: var(--accent); }
+.narration-breakdown-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.narration-breakdown-steps {
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+.narration-breakdown-steps strong { color: var(--text-1); font-weight: 600; }
+.narration-shot-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.shot-edit-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.narration-breakdown-prompts {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.narration-breakdown-prompts-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.narration-breakdown-prompts-head strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+.narration-prompt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.narration-prompt-item {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+}
+.narration-prompt-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.narration-prompt-content {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-1);
+  word-break: break-word;
+}
+.narration-prompt-content + .narration-prompt-content { margin-top: 4px; }
+.narration-prompt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.narration-prompt-textarea {
+  font-size: 11px;
+  line-height: 1.55;
+  min-height: 72px;
+  resize: vertical;
+}
+.narration-shot-prompt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 10px;
+}
+.narration-shot-prompt-textarea {
+  font-size: 11px;
+  line-height: 1.5;
+  min-height: 60px;
+  resize: vertical;
+}
+.prod-card .prod-info { align-items: stretch; }
 
 .dub-grid { display: flex; flex-direction: column; gap: 10px; }
 .dub-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; border-radius: 20px; background: linear-gradient(180deg, rgba(255,255,255,0.74), rgba(248,251,255,0.58)); }
@@ -3739,6 +5383,16 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   position: absolute; bottom: 5px; right: 5px; font-size: 10px; font-weight: 600;
   background: var(--success); color: #fff; padding: 1px 5px; border-radius: 3px;
 }
+.prod-overlay-badge.is-title {
+  background: #e53935;
+  left: 5px;
+  right: auto;
+}
+.tag-title {
+  background: rgba(229, 57, 53, 0.15);
+  color: #e53935;
+  border: 1px solid rgba(229, 57, 53, 0.35);
+}
 .prod-info { padding: 10px 12px 8px; }
 .prod-desc { font-size: 12px; line-height: 1.4; }
 .prod-meta-line { margin-top: 5px; font-size: 10px; color: var(--text-3); }
@@ -3796,6 +5450,50 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   border-radius: 18px;
   box-shadow: 0 18px 48px rgba(8, 14, 24, 0.22);
   background: rgba(255,255,255,0.9);
+}
+
+.shot-editor-overlay { z-index: 120; }
+.shot-editor-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 20px;
+}
+.shot-editor-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(27, 41, 64, 0.08);
+}
+.shot-editor-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-1);
+  font-family: var(--font-display);
+}
+.shot-editor-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.shot-editor-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.shot-editor-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 18px;
+  border-top: 1px solid rgba(27, 41, 64, 0.08);
 }
 
 /* Grid tool dialog */

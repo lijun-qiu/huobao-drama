@@ -12,7 +12,8 @@ import { VolcEngineVideoAdapter } from './volcengine-video'
 import { ViduVideoAdapter } from './vidu-video'
 import { AliImageAdapter } from './ali-image'
 import { AliVideoAdapter } from './ali-video'
-import type { ImageProviderAdapter, VideoProviderAdapter, TTSProviderAdapter } from './types'
+import { KlingImageAdapter } from './kling-image'
+import type { ImageProviderAdapter, VideoProviderAdapter, TTSProviderAdapter, AIConfig } from './types'
 
 // 图片 Adapter 注册表
 export const imageAdapters: Record<string, ImageProviderAdapter> = {
@@ -21,7 +22,8 @@ export const imageAdapters: Record<string, ImageProviderAdapter> = {
   gemini: new GeminiImageAdapter(),
   volcengine: new VolcEngineImageAdapter(),
   ali: new AliImageAdapter(),
-  // Chatfire - 待确认 API 格式，暂用 OpenAI
+  kling: new KlingImageAdapter(),
+  // Chatfire 豆包绘画仍走 OpenAI 兼容格式
   chatfire: new OpenAIImageAdapter(),
 }
 
@@ -50,6 +52,29 @@ export function getTTSAdapter(provider: string): TTSProviderAdapter {
  */
 export function getImageAdapter(provider: string): ImageProviderAdapter {
   return imageAdapters[provider.toLowerCase()] || imageAdapters['minimax']
+}
+
+/** 按模型名自动选择适配器（剧集可单独选模型，与全局 provider 可不一致） */
+export function resolveImageAdapter(config: AIConfig, model?: string | null): ImageProviderAdapter {
+  const m = String(model || config.model || '').toLowerCase()
+  if (m.startsWith('kling-')) {
+    return imageAdapters.kling
+  }
+  if (m.startsWith('doubao-seedream') || m.startsWith('seedream')) {
+    return imageAdapters.chatfire
+  }
+  if (config.provider.toLowerCase() === 'kling') {
+    return imageAdapters.kling
+  }
+  return getImageAdapter(config.provider)
+}
+
+export function resolveImageProvider(config: AIConfig, model?: string | null): string {
+  const m = String(model || config.model || '').toLowerCase()
+  if (m.startsWith('kling-')) return 'kling'
+  if (m.startsWith('doubao-seedream') || m.startsWith('seedream')) return 'chatfire'
+  if (config.provider.toLowerCase() === 'kling') return 'kling'
+  return config.provider
 }
 
 /**

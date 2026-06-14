@@ -2,16 +2,81 @@ import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
+import { toSnakeCase } from '../utils/transform.js'
 import { generateVoiceSample } from '../services/tts-generation.js'
 import { generateImage } from '../services/image-generation.js'
+import { resolveEpisodeImageModel } from '../constants/image-models.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
+
+function linkCharacterToEpisode(episodeId: number, characterId: number) {
+  const existing = db.select().from(schema.episodeCharacters)
+    .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
+    .find(row => row.characterId === characterId)
+  if (!existing) {
+    db.insert(schema.episodeCharacters).values({ episodeId, characterId, createdAt: now() }).run()
+  }
+}
+
+function findDramaNarrator(dramaId: number) {
+  return db.select().from(schema.characters).all()
+    .find(c => c.dramaId === dramaId && !c.deletedAt && (c.name === '旁白' || c.role === '旁白'))
+}
+
+// POST /characters
+app.post('/', async (c) => {
+  const body = await c.req.json()
+  const dramaId = Number(body.drama_id || body.dramaId)
+  const name = String(body.name || '').trim()
+  if (!dramaId || !name) return badRequest(c, 'drama_id and name are required')
+
+  const ts = now()
+  const episodeId = Number(body.episode_id || body.episodeId || 0)
+
+  if (name === '旁白') {
+    const existing = findDramaNarrator(dramaId)
+    if (existing) {
+      const updates: Record<string, any> = { updatedAt: ts }
+      const voiceStyle = body.voice_style || body.voiceStyle
+      const voiceProvider = body.voice_provider || body.voiceProvider
+      if (voiceStyle) updates.voiceStyle = voiceStyle
+      if (voiceProvider) updates.voiceProvider = voiceProvider
+      if (Object.keys(updates).length > 1) {
+        db.update(schema.characters).set(updates).where(eq(schema.characters.id, existing.id)).run()
+      }
+      if (episodeId) linkCharacterToEpisode(episodeId, existing.id)
+      const [row] = db.select().from(schema.characters).where(eq(schema.characters.id, existing.id)).all()
+      return success(c, toSnakeCase(row))
+    }
+  }
+
+  const res = db.insert(schema.characters).values({
+    dramaId,
+    name,
+    role: body.role || '旁白',
+    description: body.description || '',
+    appearance: body.appearance || '',
+    personality: body.personality || '',
+    voiceStyle: body.voice_style || body.voiceStyle || null,
+    voiceProvider: body.voice_provider || body.voiceProvider || null,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run()
+
+  const characterId = Number(res.lastInsertRowid)
+  if (episodeId) linkCharacterToEpisode(episodeId, characterId)
+
+  const [row] = db.select().from(schema.characters).where(eq(schema.characters.id, characterId)).all()
+  return success(c, toSnakeCase(row))
+})
 
 // PUT /characters/:id
 app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
+  const [existing] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  if (!existing || existing.deletedAt) return badRequest(c, '角色不存在')
   const updates: Record<string, any> = { updatedAt: now() }
   for (const key of ['name', 'role', 'description', 'appearance', 'personality', 'voiceStyle', 'voiceProvider', 'imageUrl', 'localPath']) {
     const snakeKey = key.replace(/[A-Z]/g, m => '_' + m.toLowerCase())
@@ -22,7 +87,8 @@ app.put('/:id', async (c) => {
     updates.voiceSampleUrl = null
   }
   db.update(schema.characters).set(updates).where(eq(schema.characters.id, id)).run()
-  return success(c)
+  const [row] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  return success(c, toSnakeCase(row))
 })
 
 // DELETE /characters/:id
@@ -72,7 +138,13 @@ app.post('/:id/generate-image', async (c) => {
   const prompt = `${char.name}, ${char.appearance || char.description || '人物立绘'}, 高质量, 正面, 白色背景`
   try {
     logTaskStart('CharacterImage', 'generate', { characterId: id, episodeId: ep.id, dramaId: char.dramaId })
-    const genId = await generateImage({ characterId: id, dramaId: char.dramaId, prompt, configId: ep.imageConfigId ?? undefined })
+    const genId = await generateImage({
+      characterId: id,
+      dramaId: char.dramaId,
+      prompt,
+      model: resolveEpisodeImageModel(ep),
+      configId: ep.imageConfigId ?? undefined,
+    })
     logTaskSuccess('CharacterImage', 'generate', { characterId: id, generationId: genId })
     return success(c, { image_generation_id: genId })
   } catch (err: any) {
@@ -94,7 +166,13 @@ app.post('/batch-generate-images', async (c) => {
     if (!char) continue
     const prompt = `${char.name}, ${char.appearance || char.description || '人物立绘'}, 高质量, 正面, 白色背景`
     try {
-      const genId = await generateImage({ characterId: cid, dramaId: char.dramaId, prompt, configId: ep.imageConfigId ?? undefined })
+      const genId = await generateImage({
+        characterId: cid,
+        dramaId: char.dramaId,
+        prompt,
+        model: resolveEpisodeImageModel(ep),
+        configId: ep.imageConfigId ?? undefined,
+      })
       results.push(genId)
     } catch {}
   }

@@ -52,6 +52,7 @@
 
           <div class="project-meta">
             <span v-if="d.style" class="style-tag">{{ d.style }}</span>
+            <span v-if="getModeLabel(d)" class="style-tag is-mode">{{ getModeLabel(d) }}</span>
             <span class="meta-item">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               {{ d.characters?.length || 0 }}
@@ -111,6 +112,12 @@
               <input v-model.number="form.total_episodes" class="input" type="number" min="1" max="100" />
             </label>
             <label class="field">
+              <span class="field-label">制作模式</span>
+              <BaseSelect v-model="form.production_mode" :options="modeSelectOptions" placeholder="选择模式" />
+            </label>
+          </div>
+          <div class="field-row">
+            <label class="field">
               <span class="field-label">视觉风格</span>
               <BaseSelect v-model="form.style" :options="styleSelectOptions" placeholder="选择风格" searchable />
             </label>
@@ -138,9 +145,13 @@ import BaseSelect from '~/components/BaseSelect.vue'
 const dramas = ref([])
 const loading = ref(false)
 const showCreate = ref(false)
-const form = ref({ title: '', total_episodes: 1, style: '' })
+const form = ref({ title: '', total_episodes: 1, style: 'comic', production_mode: 'narration' })
 const styles = ['realistic', 'anime', 'ghibli', 'cinematic', 'comic', 'watercolor']
 const styleSelectOptions = computed(() => styles.map(s => ({ label: s, value: s })))
+const modeSelectOptions = [
+  { label: '解说视频（配图+旁白）', value: 'narration' },
+  { label: '漫剧短剧（完整流程）', value: 'drama' },
+]
 
 async function load() {
   loading.value = true
@@ -157,7 +168,11 @@ async function load() {
 async function create() {
   if (!form.value.title?.trim()) return
   try {
-    const d = await dramaAPI.create(form.value)
+    const { production_mode, ...rest } = form.value
+    const d = await dramaAPI.create({
+      ...rest,
+      metadata: JSON.stringify({ production_mode: production_mode || 'drama' }),
+    })
     showCreate.value = false
     navigateTo(`/drama/${d.id}`)
   } catch (e) {
@@ -186,6 +201,14 @@ function fmtDate(s) {
   if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`
   if (diff < 604800000) return `${Math.floor(diff / 86400000)} 天前`
   return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+}
+
+function getModeLabel(d) {
+  let meta = d.metadata
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta) } catch { meta = null }
+  }
+  return meta?.production_mode === 'narration' ? '解说' : ''
 }
 
 function getProgress(d) {
@@ -301,6 +324,7 @@ onMounted(load)
   border-radius: 99px;
   border: 1px solid rgba(184,120,20,0.12);
 }
+.style-tag.is-mode { background: rgba(59, 130, 246, 0.12); color: #2563eb; border-color: rgba(59, 130, 246, 0.18); }
 .meta-item {
   display: flex; align-items: center; gap: 4px;
   font-size: 12px; color: var(--text-3);

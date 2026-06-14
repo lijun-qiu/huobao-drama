@@ -421,7 +421,7 @@ const cfgTestResult = ref(null)
 const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0 })
 const huobaoForm = reactive({ apiKey: '' })
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
-const providers = ['ali', 'chatfire', 'gemini', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine']
+const providers = ['ali', 'chatfire', 'gemini', 'kling', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine']
 const providerSelectOptions = computed(() => providers.map(p => ({ label: p, value: p })))
 const serviceMeta = {
   text: { label: '文本', desc: '剧本改写、角色场景提取、分镜拆解等 Agent 文本能力' },
@@ -436,9 +436,30 @@ const providerPresets = {
     openai: { label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'] },
   },
   image: {
-    chatfire: { label: 'ChatFire 推荐', baseUrl: 'https://api.chatfire.site', models: ['doubao-seedream-4-5-251128'] },
-    gemini: { label: 'Gemini 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3-pro-image-preview'] },
-    volcengine: { label: '火山推荐', baseUrl: 'https://ark.cn-beijing.volces.com', models: ['doubao-seedream-4-0-250828'] },
+    chatfire: {
+      label: '豆包绘画推荐',
+      baseUrl: 'https://api.4022543.xyz',
+      models: [
+        'doubao-seedream-3-0-t2i-250415',
+        'doubao-seedream-4-0-250828',
+        'doubao-seedream-5-0-260128',
+        'doubao-seedream-4-5-251128',
+        'qwen-image-2.0-2026-03-03',
+        'qwen-image-max',
+      ],
+    },
+    kling: {
+      label: '可灵 Kling',
+      baseUrl: 'https://api.chatfire.site',
+      models: ['kling-v2-1', 'kling-v2', 'kling-v2-new', 'kling-v1-5', 'kling-v1'],
+    },
+    ali: { label: '阿里百炼直连', baseUrl: 'https://dashscope.aliyuncs.com', models: ['qwen-image-2.0-2026-03-03', 'qwen-image-max'] },
+    gemini: { label: 'Gemini 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3.1-flash-image'] },
+    volcengine: {
+      label: '火山直连',
+      baseUrl: 'https://ark.cn-beijing.volces.com',
+      models: ['doubao-seedream-5-0-260128', 'doubao-seedream-4-0-250828', 'doubao-seedream-4-5-251128'],
+    },
   },
   video: {
     volcengine: { label: '火宝视频', baseUrl: 'https://api.chatfire.site/volcengine', models: ['doubao-seedance-1-5-pro-251215'] },
@@ -446,14 +467,18 @@ const providerPresets = {
     ali: { label: '阿里推荐', baseUrl: 'https://dashscope.aliyuncs.com', models: ['wan2.6-i2v-flash'] },
   },
   audio: {
-    minimax: { label: '火宝音频', baseUrl: 'https://api.chatfire.site/minimax', models: ['speech-2.8-hd'] },
+    minimax: {
+      label: 'MiniMax TTS',
+      baseUrl: 'https://api.4022543.xyz/minimax',
+      models: ['speech-2.8-hd', 'speech-2.8-turbo', 'speech-02-turbo'],
+    },
   },
 }
 const huobaoPresetCards = [
   { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-preview', priority: 100 },
-  { serviceType: 'image', label: '图片', provider: 'gemini', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-image-preview', priority: 99 },
+  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'doubao-seedream-3-0-t2i-250415', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: 'https://api.chatfire.site/volcengine', model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
-  { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'speech-2.8-hd', priority: 97 },
+  { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.4022543.xyz/minimax', model: 'speech-2.8-hd', priority: 97 },
 ]
 const endpointPrefixes = {
   chatfire: '/v1',
@@ -463,6 +488,7 @@ const endpointPrefixes = {
   gemini: '/v1beta',
   volcengine: '/api/v3',
   ali: '/api/v1',
+  kling: '/kling/v1',
   vidu: '/ent/v2',
 }
 

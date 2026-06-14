@@ -1,9 +1,14 @@
 /**
- * 阿里云百炼（万相）图片生成 Adapter
- * API 文档: https://help.aliyun.com/zh/model-studio/text-to-image-v2-api-reference
+ * 阿里云百炼（万相 / Qwen-Image）图片生成 Adapter
+ * - wan 系列: /services/aigc/image-generation/generation (异步)
+ * - qwen-image 系列: /services/aigc/multimodal-generation/generation (同步)
  */
 import type { ImageProviderAdapter, ImageGenerationRecord } from './types'
 import { joinProviderUrl } from './url'
+
+function isQwenImageModel(model?: string | null) {
+  return String(model || '').toLowerCase().startsWith('qwen-image')
+}
 
 export class AliImageAdapter implements ImageProviderAdapter {
   readonly provider = 'ali'
@@ -15,40 +20,62 @@ export class AliImageAdapter implements ImageProviderAdapter {
     body: any
   } {
     const baseUrl = config.baseUrl || 'https://dashscope.aliyuncs.com'
+    const model = record.model || config.model || 'wan2.6-t2i'
+    const qwen = isQwenImageModel(model)
 
-    // wan2.6 使用新版异步接口
-    const url = joinProviderUrl(baseUrl, '/api/v1', '/services/aigc/image-generation/generation')
+    const path = qwen
+      ? '/services/aigc/multimodal-generation/generation'
+      : '/services/aigc/image-generation/generation'
+    const url = joinProviderUrl(baseUrl, '/api/v1', path)
 
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${config.apiKey}`,
       'Content-Type': 'application/json',
-      'X-DashScope-Async': 'enable',
     }
+    if (!qwen) headers['X-DashScope-Async'] = 'enable'
 
-    // 解析 size 参数（如 "1920x1080" -> "1696*960"）
-    const size = this.normalizeSize(record.size || '1280*1280')
+    const size = this.normalizeSize(record.size || '1920x1080', model)
+    const content = this.buildContent(record, qwen)
 
     const body: any = {
-      model: record.model || 'wan2.6-t2i',
+      model,
       input: {
-        messages: [
-          {
-            role: 'user',
-            content: [{ text: record.prompt }],
-          },
-        ],
+        messages: [{ role: 'user', content }],
       },
       parameters: {
         size,
         n: 1,
-        negative_prompt: '',
+        negative_prompt: qwen ? 'low quality, blurry, watermark' : '',
         prompt_extend: true,
         watermark: false,
-        seed: record.referenceImages ? undefined : Math.floor(Math.random() * 2147483647),
       },
     }
 
+    if (!qwen && !record.referenceImages) {
+      body.parameters.seed = Math.floor(Math.random() * 2147483647)
+    }
+
     return { url, method: 'POST', headers, body }
+  }
+
+  private buildContent(record: ImageGenerationRecord, qwen: boolean) {
+    const content: Array<Record<string, string>> = []
+
+    if (qwen && record.referenceImages) {
+      try {
+        const refs = JSON.parse(record.referenceImages)
+        for (const ref of refs) {
+          const value = String(ref || '').trim()
+          if (!value) continue
+          if (value.startsWith('http://') || value.startsWith('https://')) {
+            content.push({ image: value })
+          }
+        }
+      } catch {}
+    }
+
+    content.push({ text: record.prompt || 'Generate an image' })
+    return content
   }
 
   parseGenerateResponse(result: any): {
@@ -56,20 +83,13 @@ export class AliImageAdapter implements ImageProviderAdapter {
     taskId?: string
     imageUrl?: string
   } {
-    // PENDING 表示异步任务已创建
+    const imageUrl = this.extractImageUrl(result)
+    if (imageUrl) return { isAsync: false, imageUrl }
+
     if (result.output?.task_status === 'PENDING' && result.output?.task_id) {
       return { isAsync: true, taskId: result.output.task_id }
     }
 
-    // 同步模式：直接返回图片 URL
-    if (result.output?.choices?.[0]?.message?.content?.[0]?.image) {
-      return {
-        isAsync: false,
-        imageUrl: result.output.choices[0].message.content[0].image,
-      }
-    }
-
-    // 未知响应格式
     throw new Error(`Unexpected Ali image response: ${JSON.stringify(result).slice(0, 200)}`)
   }
 
@@ -99,8 +119,8 @@ export class AliImageAdapter implements ImageProviderAdapter {
     const status = result.output?.task_status
 
     if (status === 'SUCCEEDED') {
-      const imageUrl = result.output?.choices?.[0]?.message?.content?.[0]?.image
-      return { status: 'completed', imageUrl }
+      const imageUrl = this.extractImageUrl(result)
+      return { status: 'completed', imageUrl: imageUrl || undefined }
     }
 
     if (status === 'FAILED') {
@@ -114,28 +134,27 @@ export class AliImageAdapter implements ImageProviderAdapter {
     return { status: 'pending' }
   }
 
-  extractImageBase64(result: any): { data: string; mimeType: string } | null {
-    // Ali 目前不支持直接返回 base64
+  extractImageBase64(_result: any): { data: string; mimeType: string } | null {
     return null
   }
 
   extractImageUrl(result: any): string | null {
-    return result.output?.choices?.[0]?.message?.content?.[0]?.image || null
+    const parts = result.output?.choices?.[0]?.message?.content || []
+    for (const part of parts) {
+      if (part?.image) return part.image
+    }
+    return null
   }
 
-  /**
-   * 将 "1920x1080" 转换为阿里需要的 "1696*960" 格式
-   */
-  private normalizeSize(size: string): string {
-    // 默认比例 16:9
-    const [w, h] = size.split('x').map(Number)
+  private normalizeSize(size: string, model?: string | null): string {
+    const qwen = isQwenImageModel(model)
+    const [w, h] = size.split(/[x*]/).map(Number)
     if (w && h) {
-      // 映射到 Ali 支持的比例
       const aspect = w / h
-      if (aspect > 1.7) return '1696*960' // 16:9
-      if (aspect < 0.8) return '960*1696' // 9:16
-      return '1280*1280' // 1:1
+      if (aspect > 1.7) return qwen ? '1664*928' : '1696*960'
+      if (aspect < 0.8) return qwen ? '928*1664' : '960*1696'
+      return qwen ? '1328*1328' : '1280*1280'
     }
-    return '1280*1280'
+    return qwen ? '1664*928' : '1280*1280'
   }
 }

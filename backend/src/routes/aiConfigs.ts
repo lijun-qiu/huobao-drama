@@ -3,14 +3,14 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, notFound, created, badRequest, now } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
-import { joinProviderUrl } from '../services/adapters/url.js'
+import { parseModelField } from '../services/ai.js'
 import { redactUrl, logTaskError, logTaskProgress, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
 
 const HUOBAO_PRESET_SERVICES = [
   { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-preview', priority: 100 },
-  { serviceType: 'image', label: '图片', provider: 'gemini', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-image-preview', priority: 99 },
+  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'doubao-seedream-3-0-t2i-250415', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: 'https://api.chatfire.site/volcengine', model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'speech-2.8-hd', priority: 97 },
 ] as const
@@ -69,11 +69,15 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
   }
 
   if (p === 'ali') {
+    const isQwenImage = String(m || '').toLowerCase().startsWith('qwen-image')
+    const imagePath = isQwenImage
+      ? '/services/aigc/multimodal-generation/generation'
+      : '/services/aigc/image-generation/generation'
     return {
       method: 'POST',
       url: joinProviderUrl(baseUrl, '/api/v1', serviceType === 'video'
         ? '/services/aigc/video-generation/video-synthesis'
-        : '/services/aigc/image-generation/generation'),
+        : imagePath),
       headers: bearerHeaders(apiKey, true),
       body: {},
     }
@@ -114,6 +118,20 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
     }
   }
 
+  if (p === 'kling') {
+    return {
+      method: 'POST',
+      url: joinProviderUrl(baseUrl, '/kling/v1', '/images/generations'),
+      headers: bearerHeaders(apiKey, true),
+      body: {
+        model_name: m || 'kling-v2-1',
+        prompt: 'probe',
+        n: 1,
+        aspect_ratio: '16:9',
+      },
+    }
+  }
+
   return {
     method: 'GET',
     url: joinProviderUrl(baseUrl, '', m ? `/${m}` : '/'),
@@ -130,7 +148,7 @@ app.get('/', async (c) => {
 
   const parsed = rows.map(r => ({
     ...toSnakeCase(r),
-    model: r.model ? JSON.parse(r.model) : [],
+    model: parseModelField(r.model),
   }))
   return success(c, parsed)
 })
@@ -163,7 +181,7 @@ app.post('/', async (c) => {
 
   return created(c, {
     ...toSnakeCase(row),
-    model: row.model ? JSON.parse(row.model) : [],
+    model: parseModelField(row.model),
   })
 })
 
@@ -176,8 +194,12 @@ app.post('/huobao-preset', async (c) => {
   const ts = now()
 
   for (const preset of HUOBAO_PRESET_SERVICES) {
-    const [existing] = db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.serviceType, preset.serviceType)).all()
-      .filter(row => row.provider === preset.provider)
+    const existing = preset.serviceType === 'image'
+      ? db.select().from(schema.aiServiceConfigs).all()
+        .filter(row => row.serviceType === 'image')
+        .sort((a, b) => (b.priority || 0) - (a.priority || 0))[0]
+      : db.select().from(schema.aiServiceConfigs).all()
+        .find(row => row.serviceType === preset.serviceType && row.provider === preset.provider)
 
     const values = {
       serviceType: preset.serviceType,
@@ -231,7 +253,7 @@ app.post('/huobao-preset', async (c) => {
 
   const configs = db.select().from(schema.aiServiceConfigs).all().map(row => ({
     ...toSnakeCase(row),
-    model: row.model ? JSON.parse(row.model) : [],
+    model: parseModelField(row.model),
   }))
   const agents = db.select().from(schema.agentConfigs).all().map(row => toSnakeCase(row))
 
@@ -323,7 +345,7 @@ app.get('/:id', async (c) => {
   if (!row) return notFound(c)
   return success(c, {
     ...toSnakeCase(row),
-    model: row.model ? JSON.parse(row.model) : [],
+    model: parseModelField(row.model),
   })
 })
 

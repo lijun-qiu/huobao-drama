@@ -50,16 +50,20 @@ export const episodeAPI = {
   scenes: (id: number) => api.get(`/episodes/${id}/scenes`),
   storyboards: (id: number) => api.get(`/episodes/${id}/storyboards`),
   pipelineStatus: (id: number) => api.get(`/episodes/${id}/pipeline-status`),
+  narrationBreakdown: (id: number, options?: { style?: string; script?: string; image_detect_mode?: 'paragraph' | 'conservative' | 'balanced' }) =>
+    api.post(`/episodes/${id}/narration-breakdown`, options || {}),
 }
 
 export const storyboardAPI = {
   create: (data: any) => api.post('/storyboards', data),
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
-  generateTTS: (id: number) => api.post(`/storyboards/${id}/generate-tts`),
+  generateTTS: (id: number, options?: { force?: boolean; local_tts?: boolean; local_voice?: string }) =>
+    api.post(`/storyboards/${id}/generate-tts`, options || {}),
   del: (id: number) => api.del(`/storyboards/${id}`),
 }
 
 export const characterAPI = {
+  create: (data: any) => api.post('/characters', data),
   update: (id: number, data: any) => api.put(`/characters/${id}`, data),
   voiceSample: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId }),
   generateImage: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-image`, { episode_id: episodeId }),
@@ -91,11 +95,14 @@ export const videoAPI = {
 }
 export const composeAPI = {
   shot: (id: number) => api.post(`/compose/storyboards/${id}/compose`),
-  all: (epId: number) => api.post(`/compose/episodes/${epId}/compose-all`),
+  all: (epId: number, options?: { only_remaining?: boolean }) =>
+    api.post(`/compose/episodes/${epId}/compose-all`, { only_remaining: options?.only_remaining !== false }),
   status: (epId: number) => api.get(`/compose/episodes/${epId}/compose-status`),
 }
 export const mergeAPI = {
-  merge: (epId: number) => api.post(`/merge/episodes/${epId}/merge`),
+  merge: (epId: number, options?: { cancel_running?: boolean }) =>
+    api.post(`/merge/episodes/${epId}/merge`, { cancel_running: options?.cancel_running !== false }),
+  cancel: (epId: number) => api.post(`/merge/episodes/${epId}/merge/cancel`),
   status: (epId: number) => api.get(`/merge/episodes/${epId}/merge`),
 }
 export const aiConfigAPI = {

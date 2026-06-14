@@ -3,6 +3,7 @@ import { eq, isNull, like, desc } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, notFound, created, now } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
+import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 
 const app = new Hono()
 
@@ -74,6 +75,7 @@ app.post('/', async (c) => {
       dramaId: result.id,
       episodeNumber: i,
       title: `第${i}集`,
+      imageModel: DEFAULT_IMAGE_MODEL,
       status: 'draft',
       createdAt: ts,
       updatedAt: ts,

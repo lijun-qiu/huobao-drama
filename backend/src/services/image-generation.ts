@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm'
 import { getActiveConfig, getConfigById } from './ai.js'
 import { now } from '../utils/response.js'
 import { downloadFile, readImageAsCompressedDataUrl, saveBase64Image } from '../utils/storage.js'
-import { getImageAdapter } from './adapters/registry'
+import { getImageAdapter, resolveImageAdapter, resolveImageProvider } from './adapters/registry'
 import type { AIConfig } from './adapters/types'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 
@@ -27,14 +27,17 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     : getActiveConfig('image')
   if (!config) throw new Error('No active image AI config')
 
+  const model = params.model || config.model
+  const provider = resolveImageProvider(config, model)
+
   const res = db.insert(schema.imageGenerations).values({
     storyboardId: params.storyboardId,
     dramaId: params.dramaId,
     sceneId: params.sceneId,
     characterId: params.characterId,
     prompt: params.prompt,
-    model: params.model || config.model,
-    provider: config.provider,
+    model,
+    provider,
     size: params.size || '1920x1080',
     frameType: params.frameType,
     referenceImages: params.referenceImages ? JSON.stringify(params.referenceImages) : null,
@@ -46,12 +49,12 @@ export async function generateImage(params: GenerateImageParams): Promise<number
   const lastId = Number(res.lastInsertRowid)
   logTaskStart('ImageTask', 'enqueue', {
     id: lastId,
-    provider: config.provider,
+    provider,
     storyboardId: params.storyboardId,
     sceneId: params.sceneId,
     characterId: params.characterId,
     frameType: params.frameType,
-    model: params.model || config.model,
+    model,
   })
   logTaskPayload('ImageTask', 'enqueue params', {
     id: lastId,
@@ -70,15 +73,15 @@ export async function generateImage(params: GenerateImageParams): Promise<number
 }
 
 async function processImageGeneration(id: number, config: AIConfig) {
-  const adapter = getImageAdapter(config.provider)
+  const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
+  const record = rows[0]
+  if (!record) return
+  const adapter = resolveImageAdapter(config, record.model)
 
   try {
-    const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
-    const record = rows[0]
-    if (!record) return
     logTaskProgress('ImageTask', 'build-request', {
       id,
-      provider: config.provider,
+      provider: adapter.provider,
       storyboardId: record.storyboardId,
       sceneId: record.sceneId,
       characterId: record.characterId,
@@ -97,7 +100,7 @@ async function processImageGeneration(id: number, config: AIConfig) {
     })
     logTaskProgress('ImageTask', 'request', {
       id,
-      provider: config.provider,
+      provider: adapter.provider,
       method,
       url: redactUrl(url),
       model: record.model,
@@ -200,7 +203,8 @@ async function normalizeReferenceImages(raw: string | null | undefined): Promise
 }
 
 async function pollImageTask(id: number, config: AIConfig, taskId: string) {
-  const adapter = getImageAdapter(config.provider)
+  const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
+  const adapter = resolveImageAdapter(config, rows[0]?.model)
   const startedAt = Date.now()
   const maxDurationMs = 600_000
 

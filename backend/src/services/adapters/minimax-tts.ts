@@ -40,7 +40,7 @@ export class MiniMaxTTSAdapter implements TTSProviderAdapter {
     }
 
     const body: any = {
-      model: params.model || 'speech-2.8-hd',
+      model: params.model || config.model || 'speech-2.8-hd',
       text: params.text,
       stream: false,
       voice_setting: {

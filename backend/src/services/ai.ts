@@ -15,6 +15,20 @@ export interface AIConfig {
   model: string
 }
 
+export function parseModelField(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) return parsed.map((item) => String(item || '').trim()).filter(Boolean)
+    const single = String(parsed || '').trim()
+    return single ? [single] : []
+  } catch {
+    logTaskWarn('AIConfig', 'model-json-invalid', { raw: String(raw).slice(0, 80) })
+    const fallback = String(raw).replace(/[\[\]"\\]/g, ' ').trim().split(/\s+/).filter(Boolean)[0]
+    return fallback ? [fallback] : []
+  }
+}
+
 export function getTextProviderBaseUrl(config: AIConfig) {
   const provider = config.provider.toLowerCase()
 
@@ -46,7 +60,7 @@ export function getActiveConfig(serviceType: ServiceType): AIConfig | null {
     return null
   }
 
-  const models = active.model ? JSON.parse(active.model) : []
+  const models = parseModelField(active.model)
   logTaskProgress('AIConfig', 'active-config-selected', {
     serviceType,
     configId: active.id,
@@ -89,7 +103,7 @@ export function getConfigById(id: number): AIConfig | null {
     logTaskWarn('AIConfig', 'config-by-id-missing', { configId: id })
     return null
   }
-  const models = row.model ? JSON.parse(row.model) : []
+  const models = parseModelField(row.model)
   logTaskProgress('AIConfig', 'config-by-id-selected', {
     configId: id,
     provider: row.provider,

@@ -4,22 +4,12 @@ import { db, schema } from '../db/index.js'
 import { success, created, now, badRequest } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { generateTTS } from '../services/tts-generation.js'
+import { findReusableTtsByText, narrationShotNeedsOwnTts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from '../services/narration-tts.js'
+import { isNarrationStoryboard, parseNarrationImageMeta } from '../services/narration-image.js'
+import { resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
-
-const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
-const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需对白|none|null|n\/a|na|环境音|环境声|音效|效果音|纯音效|纯环境音|只有环境音|仅环境音|背景音|背景音乐|bgm|sfx|ambient)$/i
-
-function parseDialogueForTTS(dialogue?: string | null) {
-  const raw = dialogue?.trim() || ''
-  if (!raw) return { speaker: '', pureText: '', ignorable: true }
-  const speakerMatch = raw.match(/^(.+?)[:：]/)
-  const speaker = speakerMatch ? speakerMatch[1].replace(/[（(].+?[)）]/g, '').trim() : ''
-  const pureText = raw.replace(/^.+?[:：]\s*/, '').replace(/[（(].+?[)）]/g, '').trim()
-  const ignorable = (!!speaker && IGNORE_TTS_SPEAKERS.test(speaker)) || !pureText || IGNORE_TTS_TEXT.test(pureText)
-  return { speaker, pureText, ignorable }
-}
 
 function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
   db.delete(schema.storyboardCharacters)
@@ -85,6 +75,11 @@ app.post('/', async (c) => {
     action: body.action,
     dialogue: body.dialogue,
     sceneId: body.scene_id,
+    shotType: body.shot_type,
+    angle: body.angle,
+    movement: body.movement,
+    imagePrompt: body.image_prompt,
+    referenceImages: body.reference_images,
     duration: body.duration || 10,
     createdAt: ts,
     updatedAt: ts,
@@ -123,6 +118,8 @@ app.put('/:id', async (c) => {
     image_prompt: 'imagePrompt', scene_id: 'sceneId', location: 'location',
     time: 'time', atmosphere: 'atmosphere', result: 'result',
     bgm_prompt: 'bgmPrompt', sound_effect: 'soundEffect',
+    composed_image: 'composedImage', reference_images: 'referenceImages',
+    tts_audio_url: 'ttsAudioUrl',
   }
 
   const updates: Record<string, any> = { updatedAt: now() }
@@ -133,6 +130,8 @@ app.put('/:id', async (c) => {
   if ('dialogue' in body) {
     updates.ttsAudioUrl = null
     updates.subtitleUrl = null
+    updates.composedVideoUrl = null
+    updates.status = 'pending'
   }
 
   validateStoryboardBindings(
@@ -154,41 +153,101 @@ app.put('/:id', async (c) => {
 // POST /storyboards/:id/generate-tts
 app.post('/:id/generate-tts', async (c) => {
   const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const force = body?.force === true
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
   if (!sb) return badRequest(c, '镜头不存在')
+  // 解说镜默认本地 Edge TTS；仅显式传 local_tts: false 时才走付费 API
+  const localTts = body?.local_tts === false ? false : (body?.local_tts === true || isNarrationStoryboard(sb))
   const parsedDialogue = parseDialogueForTTS(sb.dialogue)
   if (parsedDialogue.ignorable) return badRequest(c, '该镜头没有可生成的对白或旁白')
   logTaskStart('StoryboardAPI', 'generate-tts', {
     storyboardId: id,
     episodeId: sb.episodeId,
     dialoguePreview: (sb.dialogue || '').slice(0, 40),
+    force,
+    localTts,
   })
   logTaskPayload('StoryboardAPI', 'generate-tts input', {
     storyboardId: id,
     episodeId: sb.episodeId,
     dialogue: sb.dialogue,
+    force,
   })
+
+  if (!force && sb.ttsAudioUrl) {
+    logTaskSuccess('StoryboardAPI', 'generate-tts', {
+      storyboardId: id,
+      reused: true,
+      path: sb.ttsAudioUrl,
+    })
+    return success(c, { tts_audio_url: sb.ttsAudioUrl, reused: true })
+  }
 
   let voiceId = 'alloy'
   const speaker = parsedDialogue.speaker
+  const titleMeta = isNarrationStoryboard(sb) ? parseNarrationImageMeta(sb.referenceImages) : null
+  const isTitleShot = titleMeta?.narration_shot_type === 'title'
 
-  if (speaker) {
-    if (!/^(旁白|画外音|narrator)$/i.test(speaker)) {
-      const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
-      if (ep) {
-        const chars = db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId)).all()
-        const found = chars.find((char) => char.name === speaker)
-        if (found?.voiceStyle) voiceId = found.voiceStyle
-      }
-    }
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  if (ep) {
+    const chars = db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId)).all()
+    voiceId = resolveNarrationVoiceId(speaker, chars, { isTitleShot: !!isTitleShot })
   }
 
   const pureDialogue = parsedDialogue.pureText
   if (!pureDialogue) return badRequest(c, '未提取到可合成的文本')
 
-  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  const episodeStoryboards = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, sb.episodeId))
+    .all()
+    .filter(row => !row.deletedAt)
+
+  if (!force && !isNarrationStoryboard(sb) && !narrationShotNeedsOwnTts(sb)) {
+    const inherited = resolveStoryboardTtsSource(episodeStoryboards, id)
+    if (inherited?.path) {
+      logTaskSuccess('StoryboardAPI', 'generate-tts', {
+        storyboardId: id,
+        reused: true,
+        inherited: true,
+        sourceId: inherited.sourceId,
+        path: inherited.path,
+      })
+      return success(c, {
+        tts_audio_url: inherited.path,
+        reused: true,
+        inherited: true,
+        inherited_from: inherited.sourceId,
+      })
+    }
+    return badRequest(c, '该镜头沿用前镜配音，请先生成前序需配音的镜头')
+  }
+
+  const reusablePath = !force && !isNarrationStoryboard(sb) ? findReusableTtsByText(episodeStoryboards, pureDialogue, id) : null
+  if (reusablePath) {
+    db.update(schema.storyboards)
+      .set({ ttsAudioUrl: reusablePath, updatedAt: now() })
+      .where(eq(schema.storyboards.id, id))
+      .run()
+    logTaskSuccess('StoryboardAPI', 'generate-tts', {
+      storyboardId: id,
+      reused: true,
+      reusedFromText: true,
+      path: reusablePath,
+    })
+    return success(c, { tts_audio_url: reusablePath, reused: true, reused_from_text: true, text: pureDialogue })
+  }
+
   try {
-    const audioPath = await generateTTS({ text: pureDialogue, voice: voiceId, configId: ep?.audioConfigId || null })
+    const ttsVoice = localTts
+      ? resolveEdgeVoice(body?.local_voice ? String(body.local_voice) : voiceId)
+      : voiceId
+    const audioPath = await generateTTS({
+      text: pureDialogue,
+      voice: ttsVoice,
+      configId: localTts ? null : (ep?.audioConfigId || null),
+      localTts,
+    })
   db.update(schema.storyboards)
     .set({ ttsAudioUrl: audioPath, updatedAt: now() })
     .where(eq(schema.storyboards.id, id))
@@ -196,11 +255,18 @@ app.post('/:id/generate-tts', async (c) => {
 
     logTaskSuccess('StoryboardAPI', 'generate-tts', {
       storyboardId: id,
-      voiceId,
+      voiceId: ttsVoice,
       path: audioPath,
       textLength: pureDialogue.length,
+      localTts,
     })
-    return success(c, { tts_audio_url: audioPath, voice_id: voiceId, text: pureDialogue })
+    return success(c, {
+      tts_audio_url: audioPath,
+      voice_id: ttsVoice,
+      text: pureDialogue,
+      local_tts: localTts,
+      provider: localTts ? 'edge' : undefined,
+    })
   } catch (err: any) {
     logTaskError('StoryboardAPI', 'generate-tts', { storyboardId: id, voiceId, error: err.message })
     return badRequest(c, err.message)

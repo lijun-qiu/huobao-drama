@@ -8,12 +8,22 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { joinProviderUrl } from '../services/adapters/url.js'
+import { EDGE_VOICE_OPTIONS } from '../services/edge-tts-local.js'
 
 const app = new Hono()
 
-// GET /ai-voices?provider=minimax
+// GET /ai-voices?provider=minimax|edge
 app.get('/', async (c) => {
   const provider = c.req.query('provider') || 'minimax'
+  if (provider === 'edge') {
+    return success(c, EDGE_VOICE_OPTIONS.map(v => ({
+      voice_id: v.voice_id,
+      voice_name: v.voice_name,
+      description: [],
+      language: v.language,
+      provider: 'edge',
+    })))
+  }
   const rows = db.select().from(schema.aiVoices)
     .where(eq(schema.aiVoices.provider, provider))
     .all()
