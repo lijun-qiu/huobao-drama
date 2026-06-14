@@ -60,12 +60,16 @@ function buildMergeStatusPayload(episodeId: number, latest: typeof schema.videoM
     payload.progress_phase = progress.phase
   }
 
-  if (!payload.merged_url && ['failed', 'cancelled'].includes(String(reconciled.status))) {
+  // 失败/取消时不回填旧成片 URL，避免误以为「重新生成成功但仍是旧视频」
+  if (['failed', 'cancelled'].includes(String(reconciled.status))) {
+    payload.merged_url = null
+    payload.duration = null
+    payload.completed_at = null
     const lastCompleted = getLastCompletedMerge(episodeId)
     if (lastCompleted?.mergedUrl) {
-      payload.merged_url = lastCompleted.mergedUrl
-      payload.duration = lastCompleted.duration
-      payload.completed_at = lastCompleted.completedAt
+      payload.previous_merged_url = lastCompleted.mergedUrl
+      payload.previous_duration = lastCompleted.duration
+      payload.previous_completed_at = lastCompleted.completedAt
     }
   }
 

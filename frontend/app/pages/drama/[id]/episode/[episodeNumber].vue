@@ -958,6 +958,10 @@
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
                   生成剩余{{ ttsPendingCount ? ` (${ttsPendingCount})` : '' }}
                 </button>
+                <button class="btn btn-sm" :disabled="isBatchRunning('tts') || !ttsEligibleCount" @click="batchShotTTSAll">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  全部生成
+                </button>
               </div>
             </div>
 
@@ -1468,9 +1472,13 @@
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ composedCount }}/{{ sbs.length }} 已合成</span>
               <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm btn-primary" :disabled="isBatchRunning('compose') || !composePendingCount" @click="batchCompose">
+                <button class="btn btn-sm btn-primary" :disabled="isBatchRunning('compose') || mergeProcessing || !composePendingCount" @click="batchCompose">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   生成剩余{{ composePendingCount ? ` (${composePendingCount})` : '' }}
+                </button>
+                <button class="btn btn-sm" :disabled="isBatchRunning('compose') || mergeProcessing || !composableCount" @click="regenerateAllComposeAndMerge">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  重新生成全部并导出
                 </button>
               </div>
             </div>
@@ -1565,18 +1573,34 @@
               </div>
             </template>
             <template v-else-if="mergeUrl">
-              <video :src="mergeVideoSrc" controls class="export-video" />
+              <video :key="mergeVideoSrc" :src="mergeVideoSrc" controls class="export-video" />
               <div class="export-bar">
                 <span class="tag tag-success">拼接完成</span>
                 <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
-                <button class="btn" :disabled="composedCount === 0" @click="regenerateMerge">
+                <button class="btn" :disabled="composedCount === 0 || isBatchRunning('compose') || mergeProcessing" @click="regenerateAllComposeAndMerge">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                  重新生成
+                  全部重合成并导出
+                </button>
+                <button class="btn" :disabled="composedCount === 0 || mergeProcessing" @click="regenerateMerge">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  重新拼接
                 </button>
                 <a :href="mergeVideoSrc" download class="btn btn-primary ml-auto">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="12" x2="12" y2="3"/></svg>
                   下载视频
                 </a>
+              </div>
+            </template>
+            <template v-else-if="mergeFailed">
+              <div class="step-empty">
+                <div class="empty-title" style="color:var(--danger)">拼接失败</div>
+                <div class="empty-desc">{{ mergeFailedMessage }}</div>
+                <video v-if="previousMergeUrl" :src="'/' + previousMergeUrl" controls class="export-video" style="margin-top:16px;opacity:0.72" />
+                <div v-if="previousMergeUrl" class="dim" style="font-size:12px;margin-top:8px">上方为上次成功成片（仅供参考）</div>
+                <div style="display:flex;gap:8px;margin-top:16px;justify-content:center;flex-wrap:wrap">
+                  <button class="btn btn-primary" :disabled="composedCount === 0 || isBatchRunning('compose') || mergeProcessing" @click="regenerateAllComposeAndMerge">全部重合成并导出</button>
+                  <button class="btn" :disabled="composedCount === 0 || mergeProcessing" @click="regenerateMerge">仅重新拼接</button>
+                </div>
               </div>
             </template>
             <template v-else>
@@ -1817,7 +1841,17 @@ const scriptLen = computed(() => localScript.value.replace(/\s/g, '').length || 
 const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.voiceStyle).length)
 const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
 const composedCount = computed(() => sbs.value.filter(s => s.composed_video_url || s.composedVideoUrl).length)
-const mergeUrl = computed(() => mergeData.value?.merged_url || mergeData.value?.mergedUrl || null)
+const mergeUrl = computed(() => {
+  if (mergeData.value?.status !== 'completed') return null
+  return mergeData.value?.merged_url || mergeData.value?.mergedUrl || null
+})
+const mergeFailed = computed(() => mergeData.value?.status === 'failed')
+const mergeFailedMessage = computed(() =>
+  mergeData.value?.error_msg || mergeData.value?.errorMsg || '拼接失败，请重试',
+)
+const previousMergeUrl = computed(() =>
+  mergeData.value?.previous_merged_url || mergeData.value?.previousMergedUrl || null,
+)
 const mergeProcessing = computed(() => ['processing', 'pending'].includes(mergeData.value?.status))
 const mergeProgressPercent = computed(() => {
   const p = mergeData.value?.progress_percent ?? mergeData.value?.progressPercent
@@ -1829,8 +1863,8 @@ const mergeProgressMessage = computed(() =>
 let mergePollTimer = null
 const mergeVideoSrc = computed(() => {
   if (!mergeUrl.value) return ''
-  const v = mergeData.value?.completed_at || mergeData.value?.completedAt || mergeData.value?.id || ''
-  return `/${mergeUrl.value}${v ? `?v=${v}` : ''}`
+  const v = mergeData.value?.id || mergeData.value?.completed_at || mergeData.value?.completedAt || Date.now()
+  return `/${mergeUrl.value}?v=${encodeURIComponent(String(v))}`
 })
 
 const scriptStep = ref(0)
@@ -2930,6 +2964,7 @@ const narrationImagesPendingCount = computed(() =>
 const composePendingCount = computed(() =>
   sbs.value.filter(sb => canCompose(sb) && !hasComposed(sb)).length,
 )
+const composableCount = computed(() => sbs.value.filter(sb => canCompose(sb)).length)
 const charImagesPendingCount = computed(() =>
   visualChars.value.filter(c => !(c.image_url || c.imageUrl)).length,
 )
@@ -3843,18 +3878,38 @@ async function batchShotTTS() {
     toast.info(ttsEligibleCount.value ? '所有镜头配音已就绪' : '当前没有可生成的对白或旁白')
     return
   }
-  if (!tryBeginBatch('tts', `配音生成中（剩余 ${pending.length} 条${localTtsEnabled.value ? ' · 并发' : ''}）…`)) return
+  await runBatchShotTTS(pending, `配音生成中（剩余 ${pending.length} 条${localTtsEnabled.value ? ' · 并发' : ''}）…`, false)
+}
+
+async function batchShotTTSAll() {
+  const targets = sbs.value
+    .filter(sb => hasDialogue(sb))
+    .sort((a, b) => (a.storyboard_number || a.storyboardNumber || 0) - (b.storyboard_number || b.storyboardNumber || 0))
+  if (!targets.length) {
+    toast.info('当前没有可生成的对白或旁白')
+    return
+  }
+  await runBatchShotTTS(
+    targets,
+    `正在重新生成全部 ${targets.length} 条配音${localTtsEnabled.value ? ' · 并发' : ''}…`,
+    true,
+  )
+}
+
+async function runBatchShotTTS(targets, batchMessage, force) {
+  if (!tryBeginBatch('tts', batchMessage)) return
   try {
     const concurrency = resolveTtsBatchConcurrency()
     const results = await mapWithConcurrency(
-      pending,
+      targets,
       concurrency,
-      sb => storyboardAPI.generateTTS(sb.id, ttsGenerateOptions()),
+      sb => storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force)),
     )
     const apiCount = results.filter(r => r.status === 'fulfilled').length
     const failCount = results.length - apiCount
     if (apiCount) {
-      toast.success(`已生成剩余 ${apiCount} 条配音${localTtsEnabled.value ? `（本地 Edge · ${concurrency} 并发）` : ''}`)
+      const label = force ? '已重新生成' : '已生成'
+      toast.success(`${label} ${apiCount} 条配音${localTtsEnabled.value ? `（本地 Edge · ${concurrency} 并发）` : ''}`)
     }
     if (failCount) toast.error(`${failCount} 条镜头配音生成失败`)
     await refresh()
@@ -4229,6 +4284,34 @@ async function batchCompose() {
     endBatch('compose')
   }
 }
+
+async function regenerateAllComposeAndMerge() {
+  const targets = sbs.value.filter(sb => canCompose(sb))
+  if (!targets.length) {
+    toast.info('没有可合成的镜头')
+    return
+  }
+  if (!tryBeginBatch('compose', `正在重新合成全部 ${targets.length} 个镜头…`)) return
+  try {
+    const res = await composeAPI.all(epId.value, { only_remaining: false })
+    const concurrency = res?.concurrency || 3
+    pendingComposeIds.value = [...new Set([...pendingComposeIds.value, ...targets.map(sb => sb.id)])]
+    toast.info(`已开始重新合成全部 ${targets.length} 个镜头（${concurrency} 路并发）`)
+    const ok = await pollComposeStatus({
+      successMessage: '全部镜头合成完成，正在拼接导出…',
+      maxAttempts: Math.max(600, targets.length * 4),
+      expectTotal: targets.length,
+    })
+    await refresh()
+    if (!ok) return
+    panel.value = 'export'
+    await doMerge({ wait: true })
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    endBatch('compose')
+  }
+}
 function stopMergePoll() {
   if (mergePollTimer) {
     clearInterval(mergePollTimer)
@@ -4236,20 +4319,31 @@ function stopMergePoll() {
   }
 }
 
-function startMergePoll() {
+function startMergePoll(onDone) {
   stopMergePoll()
   mergePollTimer = setInterval(async () => {
     try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
-    if (mergeData.value?.status === 'completed' || mergeData.value?.status === 'failed' || mergeData.value?.status === 'cancelled') {
+    const status = mergeData.value?.status
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
       stopMergePoll()
-      if (mergeData.value.status === 'completed') {
+      if (status === 'completed') {
         toast.success('视频生成完成')
         await refresh()
-      } else if (mergeData.value.status === 'failed') {
-        toast.error(mergeData.value?.error_msg || mergeData.value?.errorMsg || '生成失败')
+        onDone?.(true)
+      } else if (status === 'failed') {
+        toast.error(mergeFailedMessage.value)
+        onDone?.(false)
+      } else {
+        onDone?.(false)
       }
     }
   }, 1500)
+}
+
+function waitForMergeComplete() {
+  return new Promise((resolve) => {
+    startMergePoll(resolve)
+  })
 }
 
 async function cancelMerge() {
@@ -4268,29 +4362,37 @@ async function regenerateMerge() {
   await doMerge()
 }
 
-async function doMerge() {
+async function doMerge(options = {}) {
   try {
     await mergeAPI.merge(epId.value, { cancel_running: true })
     mergeData.value = {
-      ...(mergeData.value || {}),
       status: 'processing',
+      merged_url: null,
+      mergedUrl: null,
       progress_percent: 0,
       progress_message: '正在启动拼接…',
     }
     toast.success('生成中…')
+    if (options.wait) return waitForMergeComplete()
     startMergePoll()
   } catch (e) {
     toast.error(e.message)
+    return false
   }
 }
 
-async function pollComposeStatus() {
-  for (let i = 0; i < 120; i++) {
+async function pollComposeStatus(options = {}) {
+  const maxAttempts = options.maxAttempts ?? 120
+  const expectTotal = options.expectTotal ?? 0
+  for (let i = 0; i < maxAttempts; i++) {
     await sleep(3000)
     try {
       const res = await composeAPI.status(epId.value)
       await refresh()
       const items = Array.isArray(res?.items) ? res.items : []
+      const processingCount = res?.processing ?? items.filter(item => item.status === 'compose_processing').length
+      const completedCount = res?.completed ?? items.filter(item => item.status === 'compose_completed').length
+      const totalCount = res?.total ?? items.length
       const processingIds = items.filter(item => item.status === 'compose_processing').map(item => item.id)
       pendingComposeIds.value = processingIds
 
@@ -4303,13 +4405,18 @@ async function pollComposeStatus() {
         failedComposeMessages.value = next
       }
 
-      if (!processingIds.length) {
-        if (failedItems.length) toast.error(`有 ${failedItems.length} 个镜头合成失败`)
-        else toast.success('剩余镜头合成完成')
-        return
-      }
+      if (processingCount > 0) continue
+
+      const doneTotal = expectTotal > 0 ? expectTotal : totalCount
+      if (completedCount < doneTotal) continue
+
+      if (failedItems.length) toast.error(`有 ${failedItems.length} 个镜头合成失败`)
+      else toast.success(options.successMessage || '剩余镜头合成完成')
+      return failedItems.length === 0
     } catch {}
   }
+  toast.error('合成等待超时，请稍后在导出页手动拼接')
+  return false
 }
 function getRefs(sb) {
   const raw = sb.reference_images || sb.referenceImages

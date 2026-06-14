@@ -15,13 +15,14 @@ import { now } from '../utils/response.js'
 import { generateTTS } from './tts-generation.js'
 import { resolveEdgeVoice } from './edge-tts-local.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { isNarrationStoryboard, parseNarrationImageMeta, resolveStoryboardVisualSource } from './narration-image.js'
+import { isNarrationStoryboard, parseNarrationImageMeta, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 let subtitleFilterSupport: boolean | null = null
+const imageBaseCacheInflight = new Map<string, Promise<string>>()
 
 function toAbsPath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) return relativePath
@@ -69,6 +70,14 @@ export function getStoryboardVisualSource(sb: {
   const image = sb.composedImage || sb.firstFrameImage
   if (image) return { type: 'image' as const, path: toAbsPath(image) }
   return null
+}
+
+/** 烧录字幕用：去掉中英文标点，保留正文与空格 */
+function stripSubtitlePunctuation(text: string): string {
+  return text
+    .replace(/[，。！？；：、,.!?;:'"''""（）()\[\]《》【】「」『』…—·\-~～]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 function formatSrtTimestamp(seconds: number) {
@@ -121,19 +130,29 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Title, Microsoft YaHei, ${TITLE_FONT_SIZE}, &H0014F0&, &HFF000000&, &H00FFFFFF&, &H00000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 3, 0, 5, 0, 0, 0, 1
+Style: TitleWhite, Microsoft YaHei, ${TITLE_FONT_SIZE}, &HFFFFFF&, &HFF000000&, &H00000000&, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 5, 0, 0, 0, 1
+Style: Title, Microsoft YaHei, ${TITLE_FONT_SIZE}, &H0014F0&, &HFF000000&, &H00FFFFFF&, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 5, 0, 0, 0, 1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `
 }
 
-function buildTitleAssContent(text: string, durationSec: number) {
-  const cleaned = text.replace(/\r/g, '').replace(/\n/g, ' ').trim()
-  const endAt = formatAssTimestamp(Math.max(durationSec - 0.2, 0.8))
-  const line = escapeAssText(cleaned)
-  return `${buildTitleAssHeader()}Dialogue: 0,0:00:00.50,${endAt},Title,,0,0,0,,{\\an5\\pos(640,360)}${line}
-`
+const TITLE_TEXT_SLIDE_MS = 420
+/** 片头字幕相对该句音频起点的显示延迟（原 0.5s，提前 0.5s 后为 0） */
+const TITLE_SUBTITLE_START_DELAY_SEC = 0
+
+/** 片头字幕：自下往上滑入 + 首句白字/后续红字（参照解说类成片） */
+function buildTitleAssDialogueLine(text: string, startSec: number, endSec: number, lineIndex = 0) {
+  const line = escapeAssText(text.replace(/\r/g, '').replace(/\n/g, ' ').trim())
+  const style = lineIndex === 0 ? 'TitleWhite' : 'Title'
+  const tags = `{\\an5\\move(640,780,640,360,0,${TITLE_TEXT_SLIDE_MS})\\fad(180,140)}`
+  return `Dialogue: 0,${formatAssTimestamp(startSec)},${formatAssTimestamp(endSec)},${style},,0,0,0,,${tags}${line}`
+}
+
+function buildTitleAssContent(text: string, durationSec: number, lineIndex = 0) {
+  const endAt = Math.max(durationSec - 0.2, 0.8)
+  return `${buildTitleAssHeader()}${buildTitleAssDialogueLine(text, TITLE_SUBTITLE_START_DELAY_SEC, endAt, lineIndex)}\n`
 }
 
 function buildSubtitleForceStyle(isTitleShot: boolean) {
@@ -158,42 +177,90 @@ function buildSubtitleFilter(subtitlePath: string, isTitleShot: boolean) {
 
 function buildImageMotionFilter() {
   const fps = 25
-  // 静态居中裁剪，不用 zoompan
   return `scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fps=${fps},format=yuv420p`
 }
 
-/** 同一张配图生成共享静态底片，避免每镜独立 -loop 编码导致切换时画面跳变 */
-async function getSharedImageBaseVideo(imageAbsPath: string): Promise<string> {
+/** 片头动态底：慢推镜 + RGB 色散 + 暗角（参照解说成片风格） */
+function buildTitleDynamicMotionFilter(baseFrames = 750) {
+  const fps = 25
+  return [
+    'scale=8000:-1',
+    `zoompan=z='min(1+0.00022*on,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${baseFrames}:s=1280x720:fps=${fps}`,
+    'rgbashift=rh=-5:gh=0:bv=5',
+    'vignette=angle=PI/5',
+    'format=yuv420p',
+  ].join(',')
+}
+
+async function isValidVideoFile(filePath: string): Promise<boolean> {
+  try {
+    const stat = fs.statSync(filePath)
+    if (stat.size < 1024) return false
+    await probeMediaDuration(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 同一张配图生成共享底片；片头启用 dynamic 动态底 */
+async function getSharedImageBaseVideo(imageAbsPath: string, options?: { dynamic?: boolean }): Promise<string> {
   const cacheDir = path.join(STORAGE_ROOT, 'temp', 'image-bases')
   fs.mkdirSync(cacheDir, { recursive: true })
-  const key = createHash('md5').update(imageAbsPath).digest('hex')
+  const key = createHash('md5').update(`${imageAbsPath}|${options?.dynamic ? 'dynamic' : 'static'}`).digest('hex')
   const cached = path.join(cacheDir, `${key}-base.mp4`)
-  if (fs.existsSync(cached)) return cached
 
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg()
-      .input(imageAbsPath)
-      .inputOptions(['-loop', '1'])
-      .videoFilter(buildImageMotionFilter())
-      .outputOptions([
-        '-t', '30',
-        '-an',
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '18',
-        '-g', '1',
-        '-keyint_min', '1',
-        '-tune', 'stillimage',
-        '-pix_fmt', 'yuv420p',
-        '-r', '25',
-      ])
-      .output(cached)
-      .on('end', () => resolve())
-      .on('error', (err) => reject(err))
-      .run()
-  })
+  if (fs.existsSync(cached)) {
+    if (await isValidVideoFile(cached)) return cached
+    try { fs.unlinkSync(cached) } catch {}
+  }
 
-  return cached
+  const inflight = imageBaseCacheInflight.get(key)
+  if (inflight) return inflight
+
+  const videoFilter = options?.dynamic ? buildTitleDynamicMotionFilter() : buildImageMotionFilter()
+  const buildPromise = (async () => {
+    const tmpPath = path.join(cacheDir, `${key}-base.${uuid()}.tmp.mp4`)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ffmpeg()
+          .input(imageAbsPath)
+          .inputOptions(['-loop', '1'])
+          .videoFilter(videoFilter)
+          .outputOptions([
+            '-t', '30',
+            '-an',
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-crf', '18',
+            '-g', '1',
+            '-keyint_min', '1',
+            '-tune', 'stillimage',
+            '-pix_fmt', 'yuv420p',
+            '-r', '25',
+          ])
+          .output(tmpPath)
+          .on('end', () => resolve())
+          .on('error', (err) => reject(err))
+          .run()
+      })
+
+      if (!(await isValidVideoFile(tmpPath))) {
+        throw new Error(`Generated image base video is invalid: ${tmpPath}`)
+      }
+
+      fs.renameSync(tmpPath, cached)
+      return cached
+    } finally {
+      if (fs.existsSync(tmpPath)) {
+        try { fs.unlinkSync(tmpPath) } catch {}
+      }
+      imageBaseCacheInflight.delete(key)
+    }
+  })()
+
+  imageBaseCacheInflight.set(key, buildPromise)
+  return buildPromise
 }
 
 function escapeConcatMediaPath(absPath: string): string {
@@ -244,7 +311,7 @@ export async function renderSameImageGroupSegment(
   imageAbsPath: string,
   outputPath: string,
 ): Promise<number> {
-  const baseVideo = await getSharedImageBaseVideo(imageAbsPath)
+  const baseVideo = await getSharedImageBaseVideo(imageAbsPath, { dynamic: true })
   const tempDir = path.join(STORAGE_ROOT, 'temp')
   fs.mkdirSync(tempDir, { recursive: true })
 
@@ -266,15 +333,15 @@ export async function renderSameImageGroupSegment(
     if (!fs.existsSync(audioPath)) throw new Error(`Storyboard ${sb.id} audio file missing`)
 
     const durationSec = await probeMediaDuration(audioPath)
-    const text = parsed.pureText.trim()
-    const startSec = offsetSec + 0.5
+    const text = stripSubtitlePunctuation(parsed.pureText)
+    const startSec = isTitleShot
+      ? offsetSec + TITLE_SUBTITLE_START_DELAY_SEC
+      : offsetSec + 0.5
     const endSec = offsetSec + Math.max(durationSec - 0.2, 0.8)
 
     if (text) {
       if (isTitleShot) {
-        assDialogues.push(
-          `Dialogue: 0,${formatAssTimestamp(startSec)},${formatAssTimestamp(endSec)},Title,,0,0,0,,{\\an5\\pos(640,360)}${escapeAssText(text)}`,
-        )
+        assDialogues.push(buildTitleAssDialogueLine(text, startSec, endSec, i))
       } else {
         srtBlocks.push(
           `${i + 1}\n${formatSrtTimestamp(startSec)} --> ${formatSrtTimestamp(endSec)}\n${text}\n`,
@@ -435,16 +502,24 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
     // 2. 生成字幕：正文 SRT 底栏；片头 ASS 剧中红字整句居中
     const subtitleText = parsedDialogue.pureText
-    if (subtitleText && (!parsedDialogue.ignorable || isTitleShot)) {
+    const pureText = stripSubtitlePunctuation(subtitleText)
+    if (pureText && (!parsedDialogue.ignorable || isTitleShot)) {
       const srtDir = path.join(STORAGE_ROOT, 'subtitles')
       fs.mkdirSync(srtDir, { recursive: true })
       const subtitleFilename = `${uuid()}${isTitleShot ? '.ass' : '.srt'}`
       subtitlePath = path.join(srtDir, subtitleFilename)
 
-      const pureText = subtitleText
       const endAt = formatSrtTimestamp(Math.max(clipDuration - 0.2, 0.8))
+      let titleLineIndex = 0
+      if (isTitleShot) {
+        const titleShots = sortStoryboardsByOrder(episodeStoryboards).filter(row => {
+          const meta = parseNarrationImageMeta(row.referenceImages)
+          return meta.narration_shot_type === 'title'
+        })
+        titleLineIndex = Math.max(0, titleShots.findIndex(row => row.id === storyboardId))
+      }
       const subtitleContent = isTitleShot
-        ? buildTitleAssContent(pureText, clipDuration)
+        ? buildTitleAssContent(pureText, clipDuration, titleLineIndex)
         : `1\n00:00:00,500 --> ${endAt}\n${pureText}\n`
       fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
 
@@ -478,13 +553,15 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         filters.unshift('fps=25,format=yuv420p')
         logTaskProgress('ComposeTask', 'black-frame-compose', { storyboardId, duration: clipDuration })
       } else if (visual!.type === 'image') {
-        const baseVideo = await getSharedImageBaseVideo(visual!.path)
+        const useTitleDynamic = !!isTitleShot
+        const baseVideo = await getSharedImageBaseVideo(visual!.path, { dynamic: useTitleDynamic })
         cmd = cmd.input(baseVideo)
         logTaskProgress('ComposeTask', 'image-slideshow-compose', {
           storyboardId,
           duration: clipDuration,
           inherited: visual!.inherited || false,
           sharedBase: true,
+          titleDynamic: useTitleDynamic,
         })
       } else {
         cmd = cmd.input(visual!.path)

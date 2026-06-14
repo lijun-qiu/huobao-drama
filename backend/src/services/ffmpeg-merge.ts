@@ -18,8 +18,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 
-/** 换配图时用淡入淡出过渡 */
-const IMAGE_CHANGE_TRANSITION = 'fade'
+/** 换配图时用自下而上滑入过渡（ffmpeg xfade: slideup） */
+const IMAGE_CHANGE_TRANSITION = 'slideup'
 const IMAGE_CHANGE_TRANSITION_SEC = 0.45
 const MAX_XFADE_INPUTS = 48
 
@@ -367,8 +367,8 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Pr
   }).run()
   const mergeId = Number(res.lastInsertRowid)
 
-  // 异步执行
-  doMerge(mergeId, episodeId, composedStoryboards).catch(err => {
+  // 异步执行（doMerge 内会重新读取 DB，避免用到启动瞬间的旧镜头快照）
+  doMerge(mergeId, episodeId).catch(err => {
     if (String(err?.message || '').includes('SIGKILL') || String(err?.message || '').includes('code 255')) return
     logTaskError('MergeTask', 'episode-merge', { mergeId, episodeId, error: err.message })
     console.error(`[Merge] Failed:`, err)
@@ -401,7 +401,21 @@ export function cancelEpisodeMerge(episodeId: number): boolean {
   return true
 }
 
-async function doMerge(mergeId: number, episodeId: number, storyboards: ComposedStoryboard[]) {
+function loadComposedStoryboards(episodeId: number): ComposedStoryboard[] {
+  const storyboards = sortStoryboardsByOrder(
+    db.select().from(schema.storyboards)
+      .where(eq(schema.storyboards.episodeId, episodeId))
+      .all()
+      .filter(sb => !sb.deletedAt),
+  )
+  const composed = storyboards.filter(sb => !!sb.composedVideoUrl)
+  if (composed.length !== storyboards.length) {
+    throw new Error(`Only composed storyboards can be merged (${composed.length}/${storyboards.length} ready)`)
+  }
+  return composed
+}
+
+async function doMerge(mergeId: number, episodeId: number) {
   const run: ActiveMergeRun = { mergeId, cancelled: false, command: null }
   activeMerges.set(episodeId, run)
   setMergeProgress(episodeId, {
@@ -412,7 +426,12 @@ async function doMerge(mergeId: number, episodeId: number, storyboards: Composed
     updatedAt: Date.now(),
   })
 
+  const storyboards = loadComposedStoryboards(episodeId)
   const absPaths = storyboards.map(sb => toAbsPath(sb.composedVideoUrl!))
+  const missing = absPaths.filter(p => !fs.existsSync(p))
+  if (missing.length > 0) {
+    throw new Error(`部分镜头视频文件缺失（${missing.length}/${absPaths.length}），请重新合成后再导出`)
+  }
   const groups = buildVisualGroups(storyboards)
   const usePageFlip = groups.length > 1
   let tempFiles: string[] = []
@@ -449,7 +468,7 @@ async function doMerge(mergeId: number, episodeId: number, storyboards: Composed
       phase: 'merging',
       percent,
       message: usePageFlip
-        ? `正在淡入过渡拼接 (${percent}%)…`
+        ? `正在滑入过渡拼接 (${percent}%)…`
         : `正在编码拼接 (${percent}%)…`,
       updatedAt: Date.now(),
     })
@@ -461,7 +480,7 @@ async function doMerge(mergeId: number, episodeId: number, storyboards: Composed
         mergeId,
         phase: 'merging',
         percent: 10,
-        message: `正在分组 ${groups.length} 段画面并添加淡入过渡…`,
+        message: `正在分组 ${groups.length} 段画面并添加自下而上过渡…`,
         updatedAt: Date.now(),
       })
 

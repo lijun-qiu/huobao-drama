@@ -69,7 +69,11 @@ app.post('/episodes/:id/compose-all', async (c) => {
 
   for (const sb of targets) {
     db.update(schema.storyboards)
-      .set({ status: 'compose_processing', updatedAt: now() })
+      .set({
+        status: 'compose_processing',
+        composedVideoUrl: onlyRemaining ? sb.composedVideoUrl : null,
+        updatedAt: now(),
+      })
       .where(eq(schema.storyboards.id, sb.id))
       .run()
   }
