@@ -116,6 +116,8 @@ sqlite.exec(`
     reference_images TEXT,
     video_url TEXT,
     tts_audio_url TEXT,
+    bgm_audio_url TEXT,
+    bgm_generation_id INTEGER,
     subtitle_url TEXT,
     composed_video_url TEXT,
     status TEXT DEFAULT 'pending',
@@ -282,6 +284,29 @@ sqlite.exec(`
     deleted_at TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS music_generations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drama_id INTEGER,
+    episode_id INTEGER,
+    storyboard_id INTEGER,
+    provider TEXT,
+    model TEXT,
+    prompt TEXT NOT NULL,
+    description TEXT,
+    title TEXT,
+    cover_url TEXT,
+    audio_url TEXT,
+    local_path TEXT,
+    duration REAL,
+    status TEXT DEFAULT 'pending',
+    task_id TEXT,
+    error_msg TEXT,
+    batch_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS video_merges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     episode_id INTEGER,
@@ -359,6 +384,51 @@ ensureColumn('episodes', 'image_config_id', 'INTEGER')
 ensureColumn('episodes', 'image_model', 'TEXT')
 ensureColumn('episodes', 'video_config_id', 'INTEGER')
 ensureColumn('episodes', 'audio_config_id', 'INTEGER')
+ensureColumn('storyboards', 'bgm_audio_url', 'TEXT')
+ensureColumn('storyboards', 'bgm_generation_id', 'INTEGER')
+ensureColumn('characters', 'variant_label', 'TEXT')
+
+// 历史默认迁移为 GPT Image（4022 OpenAI 兼容，文生图 + edits 参考图定妆）
+try {
+  sqlite.exec(`
+    UPDATE episodes
+    SET image_model = 'gpt-image-2-all'
+    WHERE image_model IS NULL
+       OR TRIM(image_model) = ''
+       OR image_model LIKE 'doubao-seedream%'
+       OR image_model LIKE 'qwen-image%'
+       OR image_model LIKE 'gemini-%flash-image%'
+       OR image_model LIKE 'kling-%'
+  `)
+  sqlite.exec(`
+    UPDATE ai_service_configs
+    SET provider = 'chatfire',
+        model = '["gpt-image-2-all","qwen-image-edit-2509","qwen-image-2.0-2026-03-03","kling-v1-5","kling-v1","gemini-3.1-flash-image-preview"]',
+        updated_at = datetime('now')
+    WHERE service_type = 'image'
+      AND (
+        provider IN ('kling', 'gemini')
+        OR model LIKE '%kling%'
+        OR model LIKE '%seedream%'
+        OR model LIKE '%gemini%flash-image%'
+        OR model LIKE '%qwen-image%'
+        OR model NOT LIKE '%gpt-image%'
+      )
+  `)
+} catch {
+  // ignore migration errors on fresh DB
+}
+
+// 旧项目默认 webtoon(Q版) → 短剧动漫(正常比例)
+try {
+  sqlite.exec(`
+    UPDATE dramas
+    SET style = 'short-drama', updated_at = datetime('now')
+    WHERE style IS NULL OR TRIM(style) = '' OR style = 'webtoon'
+  `)
+} catch {
+  // ignore
+}
 
 export const db = drizzle(sqlite, { schema })
 export { schema }

@@ -17,33 +17,68 @@ import type {
 import { joinProviderUrl } from './url'
 import { parseDataUrl } from '../../utils/storage.js'
 
+function is4022Gateway(baseUrl: string) {
+  const base = String(baseUrl || '').toLowerCase()
+  return base.includes('4022543') || base.includes('4022')
+}
+
+function normalizeGeminiModelId(model: string): string {
+  const raw = String(model || '').trim()
+  return raw.startsWith('models/') ? raw.slice('models/'.length) : raw
+}
+
+function buildGeminiGenerateUrl(config: AIConfig, model: string): string {
+  const modelPath = `/models/${normalizeGeminiModelId(model)}:generateContent`
+  // 4022 与文本 Gemini 相同：/v1beta/models/{model}:generateContent（非 /gemini/v1beta）
+  return joinProviderUrl(config.baseUrl, '/v1beta', modelPath)
+}
+
+function buildGeminiParts(record: ImageGenerationRecord): any[] {
+  const parts: any[] = []
+  if (record.referenceImages) {
+    try {
+      const refs = JSON.parse(record.referenceImages)
+      for (const ref of refs) {
+        const parsed = parseDataUrl(String(ref || ''))
+        if (parsed) {
+          parts.push({
+            inline_data: {
+              mime_type: parsed.mimeType,
+              data: parsed.data,
+            },
+          })
+        }
+      }
+    } catch {}
+  }
+  parts.push({ text: record.prompt || 'Generate an image' })
+  return parts
+}
+
+function buildOpenAIChatContent(record: ImageGenerationRecord): any[] | string {
+  const items: any[] = [{ type: 'text', text: record.prompt || 'Generate an image' }]
+  if (record.referenceImages) {
+    try {
+      const refs = JSON.parse(record.referenceImages)
+      for (const ref of refs) {
+        const value = String(ref || '').trim()
+        if (!value) continue
+        if (value.startsWith('data:image/')) {
+          items.push({ type: 'image_url', image_url: { url: value } })
+        }
+      }
+    } catch {}
+  }
+  return items.length === 1 ? items[0].text : items
+}
+
 export class GeminiImageAdapter implements ImageProviderAdapter {
   provider = 'gemini'
 
   buildGenerateRequest(config: AIConfig, record: ImageGenerationRecord): ProviderRequest {
-    // Gemini 模型名格式: "models/gemini-2.5-flash-image" 或直接 "gemini-2.5-flash-image"
-    const modelName = record.model || config.model || 'gemini-2.5-flash-image'
+    const modelName = record.model || config.model || 'gemini-3.1-flash-image-preview'
     const model = modelName.startsWith('models/') ? modelName : `models/${modelName}`
-
-    // Google REST 风格请求体
-    const parts: any[] = []
-    if (record.referenceImages) {
-      try {
-        const refs = JSON.parse(record.referenceImages)
-        for (const ref of refs) {
-          const parsed = parseDataUrl(String(ref || ''))
-          if (parsed) {
-            parts.push({
-              inline_data: {
-                mime_type: parsed.mimeType,
-                data: parsed.data,
-              },
-            })
-          }
-        }
-      } catch {}
-    }
-    parts.push({ text: record.prompt || 'Generate an image' })
+    const parts = buildGeminiParts(record)
 
     const body = {
       contents: [{
@@ -52,15 +87,16 @@ export class GeminiImageAdapter implements ImageProviderAdapter {
       generationConfig: {
         responseModalities: ['IMAGE', 'TEXT'],
         imageConfig: {
-          // 解析 size 如 "1920x1080" -> aspectRatio
           aspectRatio: this.parseAspectRatio(record.size),
           imageSize: this.parseImageSize(record.size),
         },
       },
     }
 
-    const url = new URL(joinProviderUrl(config.baseUrl, '/v1beta', `/${model}:generateContent`))
-    url.searchParams.set('key', config.apiKey)
+    const url = new URL(buildGeminiGenerateUrl(config, model))
+    if (!is4022Gateway(config.baseUrl)) {
+      url.searchParams.set('key', config.apiKey)
+    }
 
     return {
       url: url.toString(),
@@ -68,10 +104,31 @@ export class GeminiImageAdapter implements ImageProviderAdapter {
       headers: {
         'Content-Type': 'application/json',
         'x-goog-api-key': config.apiKey,
-        'Authorization': `Bearer ${config.apiKey}`,
+        Authorization: `Bearer ${config.apiKey}`,
       },
       body,
     }
+  }
+
+  /** 4022 网关：native 失败时尝试 OpenAI chat/completions */
+  buildGenerateRequestVariants(config: AIConfig, record: ImageGenerationRecord): ProviderRequest[] {
+    const native = this.buildGenerateRequest(config, record)
+    if (!is4022Gateway(config.baseUrl)) return [native]
+
+    const modelName = normalizeGeminiModelId(record.model || config.model || 'gemini-3.1-flash-image-preview')
+    const chat: ProviderRequest = {
+      url: joinProviderUrl(config.baseUrl, '/v1', '/chat/completions'),
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: {
+        model: modelName,
+        messages: [{ role: 'user', content: buildOpenAIChatContent(record) }],
+      },
+    }
+    return [native, chat]
   }
 
   parseGenerateResponse(result: any): ImageGenResponse {
@@ -141,6 +198,24 @@ export class GeminiImageAdapter implements ImageProviderAdapter {
         return {
           data: inline.data,
           mimeType: inline.mimeType || inline.mime_type || 'image/png',
+        }
+      }
+    }
+
+    const message = result?.choices?.[0]?.message
+    const content = message?.content
+    if (Array.isArray(content)) {
+      for (const part of content) {
+        if (part?.type === 'image_url' && part.image_url?.url?.startsWith('data:image/')) {
+          const parsed = parseDataUrl(part.image_url.url)
+          if (parsed) return { data: parsed.data, mimeType: parsed.mimeType }
+        }
+        if (part?.inline_data?.data || part?.inlineData?.data) {
+          const inline = part.inline_data || part.inlineData
+          return {
+            data: inline.data,
+            mimeType: inline.mime_type || inline.mimeType || 'image/png',
+          }
         }
       }
     }

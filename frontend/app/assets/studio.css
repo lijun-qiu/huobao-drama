@@ -1,6 +1,5 @@
 /* === HuoBao Studio — Cinematic Editorial === */
-/* Google Fonts: Noto Serif SC (headings) + DM Sans (body) */
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Noto+Serif+SC:wght@400;500;600;700&display=swap');
+/* 使用系统字体，避免 Google Fonts 在国内超时 */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -62,9 +61,9 @@
   --radius-lg:  14px;
   --radius-xl:  20px;
 
-  /* Typography */
-  --font-display: 'Noto Serif SC', 'Georgia', serif;
-  --font-body:    'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  /* Typography — 系统字体，中英文均可用 */
+  --font-display: "Songti SC", "STSong", "SimSun", "Noto Serif SC", Georgia, serif;
+  --font-body:    system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   --font-mono:    'SF Mono', 'Fira Code', 'Consolas', monospace;
 
   /* Spacing base */

@@ -49,6 +49,7 @@ export const characters = sqliteTable('characters', {
   role: text('role'),
   description: text('description'),
   appearance: text('appearance'),
+  variantLabel: text('variant_label'),
   personality: text('personality'),
   voiceStyle: text('voice_style'),
   imageUrl: text('image_url'),
@@ -122,6 +123,8 @@ export const storyboards = sqliteTable('storyboards', {
   referenceImages: text('reference_images'),
   videoUrl: text('video_url'),
   ttsAudioUrl: text('tts_audio_url'),
+  bgmAudioUrl: text('bgm_audio_url'),
+  bgmGenerationId: integer('bgm_generation_id'),
   subtitleUrl: text('subtitle_url'),
   composedVideoUrl: text('composed_video_url'),
   status: text('status').default('pending'),
@@ -262,6 +265,29 @@ export const videoGenerations = sqliteTable('video_generations', {
   updatedAt: text('updated_at').notNull(),
   completedAt: text('completed_at'),
   deletedAt: text('deleted_at'),
+})
+
+export const musicGenerations = sqliteTable('music_generations', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  dramaId: integer('drama_id'),
+  episodeId: integer('episode_id'),
+  storyboardId: integer('storyboard_id'),
+  provider: text('provider'),
+  model: text('model'),
+  prompt: text('prompt').notNull(),
+  description: text('description'),
+  title: text('title'),
+  coverUrl: text('cover_url'),
+  audioUrl: text('audio_url'),
+  localPath: text('local_path'),
+  duration: real('duration'),
+  status: text('status').default('pending'),
+  taskId: text('task_id'),
+  errorMsg: text('error_msg'),
+  batchId: text('batch_id'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  completedAt: text('completed_at'),
 })
 
 export const videoMerges = sqliteTable('video_merges', {

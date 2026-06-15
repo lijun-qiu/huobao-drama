@@ -13,11 +13,17 @@ import type {
   ImagePollResponse,
 } from './types'
 import { joinProviderUrl } from './url'
+import { parseDataUrl } from '../../utils/storage.js'
+import { getKlingModelMeta, klingModelRequiresReference, klingModelSupportsSingleReference } from '../../constants/kling-image-models.js'
 
 const KLING_PREFIX = '/kling/v1'
-const DEFAULT_MODEL = 'kling-v2-1'
+const DEFAULT_MODEL = 'kling-v1-5'
 /** 1k 约 ¥0.04/张；2k 约 ¥0.17/张（平台按清晰度计费） */
 const DEFAULT_RESOLUTION = '1k'
+
+function unwrapData(result: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  return (result?.data ?? result ?? {}) as Record<string, unknown>
+}
 
 function sizeToAspectRatio(size?: string | null): string {
   if (!size) return '16:9'
@@ -36,10 +42,24 @@ function parseReferenceImages(raw?: string | null): string[] {
   try {
     const refs = JSON.parse(raw)
     if (!Array.isArray(refs)) return []
-    return refs.map((item) => String(item || '').trim()).filter(Boolean)
+    return refs.map((item) => normalizeKlingImageRef(String(item || '').trim())).filter(Boolean)
   } catch {
     return []
   }
+}
+
+/** 4022/Kling 图生图 image 字段需要纯 base64 或公网 URL，不能传 data: 前缀 */
+function normalizeKlingImageRef(value: string): string {
+  if (!value) return ''
+  if (value.startsWith('data:')) {
+    const parsed = parseDataUrl(value)
+    return parsed?.data || ''
+  }
+  if (value.startsWith('http://') || value.startsWith('https://')) return value
+  if (value.startsWith('static/') || value.startsWith('/static/')) {
+    throw new Error(`Kling 参考图路径未转换：${value}，请使用可访问 URL 或 base64`)
+  }
+  return value
 }
 
 function resolveModelName(record: ImageGenerationRecord, config: AIConfig): string {
@@ -48,8 +68,13 @@ function resolveModelName(record: ImageGenerationRecord, config: AIConfig): stri
   return DEFAULT_MODEL
 }
 
-function unwrapData(result: any) {
-  return result?.data ?? result
+function klingModelUsesImageReferenceParam(model?: string | null): boolean {
+  const m = String(model || '').trim().toLowerCase()
+  if (m === 'kling-v1') return false
+  if (m === 'kling-v1-5') return true
+  if (m.startsWith('kling-v2')) return true
+  if (m === 'kling-v3') return true
+  return false
 }
 
 export class KlingImageAdapter implements ImageProviderAdapter {
@@ -64,11 +89,19 @@ export class KlingImageAdapter implements ImageProviderAdapter {
       Authorization: `Bearer ${config.apiKey}`,
     }
 
+    if (klingModelRequiresReference(modelName) && refs.length === 0) {
+      throw new Error(`${modelName} 在 4022 仅支持图生图，请提供参考图或改用 kling-v1`)
+    }
+
     if (refs.length >= 2) {
+      const meta = getKlingModelMeta(modelName)
+      if (meta && !meta.supportsMulti) {
+        throw new Error(`${modelName} 不支持多图参考，请改用 kling-v2 / kling-v2-1，或单图时用 kling-v1`)
+      }
       const body: Record<string, unknown> = {
         model_name: modelName,
         prompt: record.prompt || '',
-        subject_image_list: refs.slice(0, 4).map((subject_image) => ({ subject_image })),
+        subject_image_list: refs.slice(0, 4).map((ref) => ({ subject_image: ref })),
         n: 1,
         aspect_ratio: aspectRatio,
         resolution: DEFAULT_RESOLUTION,
@@ -90,10 +123,14 @@ export class KlingImageAdapter implements ImageProviderAdapter {
     }
 
     if (refs.length === 1) {
+      if (!klingModelSupportsSingleReference(modelName)) {
+        throw new Error(`${modelName} 在 4022 不支持单图参考生图，请改用 kling-v1 / kling-v2，或去掉参考图`)
+      }
       body.image = refs[0]
-      if (modelName === 'kling-v1-5') {
+      if (klingModelUsesImageReferenceParam(modelName)) {
         body.image_reference = 'subject'
-        body.image_fidelity = 0.7
+        const aging = /naturally aged|aged to elderly|aged to middle/i.test(record.prompt || '')
+        body.image_fidelity = aging ? 0.45 : 0.72
       }
     }
 
@@ -108,7 +145,11 @@ export class KlingImageAdapter implements ImageProviderAdapter {
   parseGenerateResponse(result: any): ImageGenResponse {
     const code = result?.code
     if (code !== undefined && code !== 0 && code !== 'success') {
-      throw new Error(result?.message || `Kling API error: ${code}`)
+      const msg = result?.message || result?.error?.message || `Kling API error: ${code}`
+      if (/无可用渠道|distributor/i.test(msg)) {
+        throw new Error(`4022 当前分组未开通该 Kling 模型渠道，请改用 kling-v1 或联系平台开通「特价kling」分组：${msg}`)
+      }
+      throw new Error(msg)
     }
 
     const data = unwrapData(result)

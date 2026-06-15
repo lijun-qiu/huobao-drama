@@ -10,9 +10,10 @@ const app = new Hono()
 
 const HUOBAO_PRESET_SERVICES = [
   { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-preview', priority: 100 },
-  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'doubao-seedream-3-0-t2i-250415', priority: 99 },
+  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2-all', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: 'https://api.chatfire.site/volcengine', model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'speech-2.8-hd', priority: 97 },
+  { serviceType: 'music', label: '音乐', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'suno_music_open', priority: 96 },
 ] as const
 
 const HUOBAO_AGENT_DEFAULTS = [
@@ -124,7 +125,7 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
       url: joinProviderUrl(baseUrl, '/kling/v1', '/images/generations'),
       headers: bearerHeaders(apiKey, true),
       body: {
-        model_name: m || 'kling-v2-1',
+        model_name: m || 'gpt-image-2-all',
         prompt: 'probe',
         n: 1,
         aspect_ratio: '16:9',

@@ -6,6 +6,7 @@ import { toSnakeCase } from '../utils/transform.js'
 import { generateTTS } from '../services/tts-generation.js'
 import { findReusableTtsByText, narrationShotNeedsOwnTts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from '../services/narration-tts.js'
 import { isNarrationStoryboard, parseNarrationImageMeta } from '../services/narration-image.js'
+import { formatCharacterDisplayName, resolveStoryboardCharacterIdsForShot } from '../services/narration-characters.js'
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
@@ -120,6 +121,7 @@ app.put('/:id', async (c) => {
     bgm_prompt: 'bgmPrompt', sound_effect: 'soundEffect',
     composed_image: 'composedImage', reference_images: 'referenceImages',
     tts_audio_url: 'ttsAudioUrl',
+    bgm_audio_url: 'bgmAudioUrl', bgm_generation_id: 'bgmGenerationId',
   }
 
   const updates: Record<string, any> = { updatedAt: now() }
@@ -128,10 +130,13 @@ app.put('/:id', async (c) => {
   }
 
   if ('dialogue' in body) {
-    updates.ttsAudioUrl = null
-    updates.subtitleUrl = null
-    updates.composedVideoUrl = null
-    updates.status = 'pending'
+    const nextDialogue = typeof body.dialogue === 'string' ? body.dialogue : String(body.dialogue ?? '')
+    if (nextDialogue !== (storyboard.dialogue || '')) {
+      updates.ttsAudioUrl = null
+      updates.subtitleUrl = null
+      updates.composedVideoUrl = null
+      updates.status = 'pending'
+    }
   }
 
   validateStoryboardBindings(
@@ -148,6 +153,27 @@ app.put('/:id', async (c) => {
     characterIds: body.character_ids,
   })
   return success(c)
+})
+
+// POST /storyboards/:id/resolve-characters — 按镜头内容解析应使用的定妆形态
+app.post('/:id/resolve-characters', async (c) => {
+  const id = Number(c.req.param('id'))
+  try {
+    const resolved = resolveStoryboardCharacterIdsForShot(id, { sync: true })
+    return success(c, {
+      storyboard_id: resolved.storyboardId,
+      character_ids: resolved.characterIds,
+      characters: resolved.characters.map(ch => ({
+        id: ch.id,
+        name: ch.name,
+        variant_label: ch.variantLabel || '',
+        display_name: formatCharacterDisplayName(ch),
+        image_url: ch.imageUrl,
+      })),
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
 })
 
 // POST /storyboards/:id/generate-tts
@@ -206,6 +232,10 @@ app.post('/:id/generate-tts', async (c) => {
   if (!force && !isNarrationStoryboard(sb) && !narrationShotNeedsOwnTts(sb)) {
     const inherited = resolveStoryboardTtsSource(episodeStoryboards, id)
     if (inherited?.path) {
+      db.update(schema.storyboards)
+        .set({ ttsAudioUrl: inherited.path, updatedAt: now() })
+        .where(eq(schema.storyboards.id, id))
+        .run()
       logTaskSuccess('StoryboardAPI', 'generate-tts', {
         storyboardId: id,
         reused: true,

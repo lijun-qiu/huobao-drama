@@ -11,10 +11,6 @@ dist/
 *.swo
 *~
 
-# Environment
-.env
-.env.local
-
 # Logs
 *.log
 

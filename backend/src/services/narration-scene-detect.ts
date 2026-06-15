@@ -1,5 +1,6 @@
 import { getTextConfig, getTextProviderBaseUrl } from './ai.js'
 import { joinProviderUrl } from './adapters/url.js'
+import { artStylePrompt } from '../constants/art-styles.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 
 export type NarrationSentenceItem = {
@@ -336,14 +337,25 @@ export type ParagraphPromptInput = {
   layout: 'single' | 'diptych'
 }
 
+type CharacterPromptHint = {
+  name: string
+  appearance?: string | null
+}
+
 /** 按段落规则拆镜后，用文本模型批量生成配图提示词（英文，可直接用于文生图） */
 export async function generateParagraphImagePromptsWithLLM(
   paragraphs: ParagraphPromptInput[],
-  options?: { titleHook?: string | null; titleFull?: string | null; style?: string },
+  options?: {
+    titleHook?: string | null
+    titleFull?: string | null
+    style?: string
+    characters?: CharacterPromptHint[]
+  },
 ): Promise<{ titlePrompt: string | null; promptsByStartIndex: Map<number, string> } | null> {
   const style = options?.style || 'comic'
   const titleHook = options?.titleHook?.trim() || null
   const titleFull = options?.titleFull?.trim() || null
+  const characters = options?.characters || []
 
   if (!paragraphs.length && !titleHook) return { titlePrompt: null, promptsByStartIndex: new Map() }
 
@@ -361,16 +373,23 @@ export async function generateParagraphImagePromptsWithLLM(
       '你是影视解说分镜美术指导。拆镜结构已由规则确定（一句旁白一镜、按内容段落配图），你的任务是写 AI 文生图用的英文 image_prompt。',
       '硬性规则：',
       '1) 每个段落综合该段全部旁白句，提炼地点、人物、动作、氛围，不要只写首句',
-      `2) 画风：${style} style, comic illustration, cinematic composition, 16:9 landscape, high quality, no text, no watermark`,
+      `2) 画风：${artStylePrompt(style, 'scene')}, 16:9 landscape, high quality, no text, no watermark`,
       '3) layout=single：单张完整场景插画。prompt 以 "single full illustration, one complete scene only" 开头，并写明 no grid, no collage, no multi-panel, no split screen',
       '4) layout=diptych：横向两宫格（仍算一张图）。prompt 以 "single 16:9 illustration with exactly 2 horizontal panels side by side, diptych layout, one image file" 开头，分别描述 left panel 与 right panel 的场景',
       '5) 片头标题图：氛围背景，预留中央叠字区域，绝对无文字 no text no letters no words',
       '6) 除 diptych 两宫格式外，禁止 grid/panel/collage/strip/storyboard 等词',
+      characters.length
+        ? '7) 若段落涉及已知角色，prompt 中必须写出其外貌特征并保持与角色设定一致（same face, same outfit）'
+        : '',
       '只输出 JSON，不要解释。',
-    ].join('\n')
+    ].filter(Boolean).join('\n')
 
     const user = JSON.stringify({
       title: titleHook ? { hook: titleHook, full: titleFull || titleHook } : null,
+      characters: characters.map(ch => ({
+        name: ch.name,
+        appearance: ch.appearance || '',
+      })),
       paragraphs: paragraphs.map(p => ({
         paragraph_index: p.index,
         start_index: p.startIndex,

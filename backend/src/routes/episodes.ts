@@ -5,6 +5,7 @@ import { success, notFound, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
 import { breakdownNarrationEpisode } from '../services/narration-breakdown.js'
 import { sortStoryboardsByOrder } from '../services/narration-image.js'
+import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 
 const app = new Hono()
@@ -168,6 +169,50 @@ app.get('/:id/pipeline-status', async (c) => {
       compose_shots: { status: stepStatus(sbsComposed.length === sbs.length && sbs.length > 0, sbsComposed.length > 0), completed: sbsComposed.length, total: sbs.length },
       merge_episode: { status: latestMerge?.status === 'completed' ? 'done' : (latestMerge ? latestMerge.status : 'pending'), merged_url: latestMerge?.mergedUrl },
     },
+  })
+})
+
+// POST /episodes/:id/extract-narration-characters — 从解说文案提取角色并关联分镜
+app.post('/:id/extract-narration-characters', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  let style = String(body.style || '').trim()
+  if (!style) {
+    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+    style = drama?.style || 'comic'
+  }
+
+  const script = String(body.script || ep.scriptContent || ep.content || '').trim()
+  if (!script) return badRequest(c, '请先填写解说文案')
+
+  try {
+    const result = await extractNarrationCharacters(episodeId, ep.dramaId, script, style)
+    return success(c, {
+      created: result.created,
+      updated: result.updated,
+      characters: toSnakeCaseArray(result.characters),
+      linked_storyboard_count: result.linked.linkedStoryboardCount,
+      storyboard_count: result.linked.storyboardCount,
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/link-narration-characters — 按文案重新关联分镜角色
+app.post('/:id/link-narration-characters', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const linked = linkAllNarrationStoryboardCharacters(episodeId, ep.dramaId)
+  return success(c, {
+    linked_storyboard_count: linked.linkedStoryboardCount,
+    storyboard_count: linked.storyboardCount,
+    character_count: linked.characterCount,
   })
 })
 

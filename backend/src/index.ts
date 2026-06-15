@@ -18,11 +18,13 @@ import agentConfigs from './routes/agentConfigs.js'
 import agent from './routes/agent.js'
 import compose from './routes/compose.js'
 import merge from './routes/merge.js'
+import music from './routes/music.js'
 import grid from './routes/grid.js'
 import skills from './routes/skills.js'
 import webhooks from './routes/webhooks.js'
 import aiVoices from './routes/aiVoices.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
+import { resumePendingBgmTasks } from './services/bgm-generation.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -56,6 +58,7 @@ api.route('/agent-configs', agentConfigs)
 api.route('/agent', agent)
 api.route('/compose', compose)
 api.route('/merge', merge)
+api.route('/music', music)
 api.route('/grid', grid)
 api.route('/skills', skills)
 api.route('/ai-voices', aiVoices)
@@ -75,4 +78,5 @@ app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
 
 const port = Number(process.env.PORT || 5679)
 console.log(`🚀 Huobao Drama TS server on http://localhost:${port}`)
+resumePendingBgmTasks()
 serve({ fetch: app.fetch, port })

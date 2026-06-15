@@ -65,16 +65,19 @@ function resolveEdgeTtsBin() {
   return (process.env.EDGE_TTS_BIN || 'edge-tts').trim() || 'edge-tts'
 }
 
+/** 通过临时文件调用 edge-tts CLI，避免 Windows shell 把含空格的 --text 拆成多参数 */
 function runEdgeTtsCli(text: string, voice: string, outputPath: string): Promise<void> {
   const bin = resolveEdgeTtsBin()
-  return new Promise((resolve, reject) => {
-    const args = ['--voice', voice, '--text', text, '--write-media', outputPath]
-    logTaskProgress('AudioTask', 'edge-tts-cli', { bin, voice, textLength: text.length })
+  const tmpDir = path.join(STORAGE_ROOT, 'audio', '.tts-tmp')
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const tmpFile = path.join(tmpDir, `${uuid()}.txt`)
+  fs.writeFileSync(tmpFile, text, 'utf8')
 
-    const proc = spawn(bin, args, {
-      shell: process.platform === 'win32',
-      windowsHide: true,
-    })
+  return new Promise((resolve, reject) => {
+    const args = ['--voice', voice, '--file', tmpFile, '--write-media', outputPath]
+    logTaskProgress('AudioTask', 'edge-tts-cli', { bin, voice, textLength: text.length, via: 'file' })
+
+    const proc = spawn(bin, args, { shell: false, windowsHide: true })
 
     let stderr = ''
     const timer = setTimeout(() => {
@@ -89,6 +92,7 @@ function runEdgeTtsCli(text: string, voice: string, outputPath: string): Promise
     })
     proc.on('close', code => {
       clearTimeout(timer)
+      try { fs.unlinkSync(tmpFile) } catch {}
       if (code === 0 && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
         resolve()
         return
@@ -99,11 +103,14 @@ function runEdgeTtsCli(text: string, voice: string, outputPath: string): Promise
 }
 
 export async function generateEdgeTTS(text: string, voiceId?: string | null): Promise<string> {
+  const trimmed = String(text || '').trim()
+  if (!trimmed) throw new Error('配音文本为空')
+
   const voice = resolveEdgeVoice(voiceId)
   logTaskStart('AudioTask', 'edge-tts-generate', {
     voice,
-    textPreview: text.slice(0, 50),
-    textLength: text.length,
+    textPreview: trimmed.slice(0, 50),
+    textLength: trimmed.length,
     engine: 'edge-tts-cli',
   })
 
@@ -114,7 +121,7 @@ export async function generateEdgeTTS(text: string, voiceId?: string | null): Pr
 
   await acquireEdgeTtsSlot()
   try {
-    await runEdgeTtsCli(text, voice, filePath)
+    await runEdgeTtsCli(trimmed, voice, filePath)
     const relativePath = `static/audio/${filename}`
     logTaskSuccess('AudioTask', 'edge-tts-saved', {
       voice,

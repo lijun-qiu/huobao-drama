@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm'
 import { logTaskProgress, logTaskWarn } from '../utils/task-logger.js'
 import { joinProviderUrl } from './adapters/url.js'
 
-export type ServiceType = 'text' | 'image' | 'video' | 'audio'
+export type ServiceType = 'text' | 'image' | 'video' | 'audio' | 'music'
 
 export interface AIConfig {
   provider: string
@@ -94,6 +94,18 @@ export function getAudioConfigById(id?: number | null): AIConfig {
     if (config) return config
   }
   return getAudioConfig()
+}
+
+export function getMusicConfigById(id?: number | null): AIConfig {
+  if (id) {
+    const config = getConfigById(id)
+    if (config) return config
+  }
+  const music = getActiveConfig('music')
+  if (music) return music
+  const image = getActiveConfig('image')
+  if (image) return image
+  throw new Error('No active music AI config')
 }
 
 export function getConfigById(id: number): AIConfig | null {

@@ -51,7 +51,7 @@
           <h3 class="project-title">{{ d.title }}</h3>
 
           <div class="project-meta">
-            <span v-if="d.style" class="style-tag">{{ d.style }}</span>
+            <span v-if="d.style" class="style-tag">{{ artStyleLabel(d.style) }}</span>
             <span v-if="getModeLabel(d)" class="style-tag is-mode">{{ getModeLabel(d) }}</span>
             <span class="meta-item">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
@@ -140,14 +140,14 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import { dramaAPI } from '~/composables/useApi'
+import { DEFAULT_ART_STYLE, artStyleLabel, artStyleSelectOptions } from '~/composables/useArtStyles'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 const dramas = ref([])
 const loading = ref(false)
 const showCreate = ref(false)
-const form = ref({ title: '', total_episodes: 1, style: 'comic', production_mode: 'narration' })
-const styles = ['realistic', 'anime', 'ghibli', 'cinematic', 'comic', 'watercolor']
-const styleSelectOptions = computed(() => styles.map(s => ({ label: s, value: s })))
+const form = ref({ title: '', total_episodes: 1, style: DEFAULT_ART_STYLE, production_mode: 'narration' })
+const styleSelectOptions = artStyleSelectOptions
 const modeSelectOptions = [
   { label: '解说视频（配图+旁白）', value: 'narration' },
   { label: '漫剧短剧（完整流程）', value: 'drama' },

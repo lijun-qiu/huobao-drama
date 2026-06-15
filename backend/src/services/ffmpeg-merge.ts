@@ -53,6 +53,11 @@ export type MergeProgress = {
   updatedAt: number
 }
 
+export type MergeOptions = {
+  bgmMusicId?: number
+  bgmVolume?: number
+}
+
 const activeMerges = new Map<number, ActiveMergeRun>()
 const mergeProgressMap = new Map<number, MergeProgress>()
 
@@ -322,10 +327,56 @@ function cleanupTempFiles(paths: string[]) {
   }
 }
 
+function resolveMergeBgmPath(musicId: number): string | null {
+  const [music] = db.select().from(schema.musicGenerations)
+    .where(eq(schema.musicGenerations.id, musicId))
+    .all()
+  if (!music || music.status !== 'completed' || !music.localPath) return null
+  const abs = toAbsPath(music.localPath)
+  return fs.existsSync(abs) ? abs : null
+}
+
+async function mixBgmIntoMergedVideo(
+  videoPath: string,
+  bgmAbsPath: string,
+  volume: number,
+  run: ActiveMergeRun,
+): Promise<void> {
+  const tempOut = `${videoPath}.bgm.mp4`
+  const vol = Math.max(0.05, Math.min(1, volume))
+
+  await new Promise<void>((resolve, reject) => {
+    const command = ffmpeg()
+      .input(videoPath)
+      .input(bgmAbsPath)
+      .inputOptions(['-stream_loop', '-1'])
+      .outputOptions([
+        '-filter_complex',
+        `[0:a]volume=1[voice];[1:a]volume=${vol}[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`,
+        '-map', '0:v',
+        '-map', '[aout]',
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-ar', '48000',
+        '-b:a', '192k',
+        '-shortest',
+        '-movflags', '+faststart',
+      ])
+      .output(tempOut)
+    run.command = command
+    command
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+
+  fs.renameSync(tempOut, videoPath)
+}
+
 /**
  * 拼接一集的所有合成镜头视频
  */
-export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Promise<number> {
+export async function mergeEpisodeVideos(episodeId: number, dramaId: number, options: MergeOptions = {}): Promise<number> {
   const storyboards = sortStoryboardsByOrder(
     db.select().from(schema.storyboards)
       .where(eq(schema.storyboards.episodeId, episodeId))
@@ -335,7 +386,7 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Pr
 
   const composedStoryboards = storyboards.filter(sb => !!sb.composedVideoUrl)
   if (composedStoryboards.length !== storyboards.length) {
-    throw new Error(`Only composed storyboards can be merged (${composedStoryboards.length}/${storyboards.length} ready)`)
+    throw new Error(`尚有 ${storyboards.length - composedStoryboards.length} 个镜头未合成（${composedStoryboards.length}/${storyboards.length}），请先在「镜头合成」完成全部镜头后再导出`)
   }
   const videos = composedStoryboards
     .map(sb => sb.composedVideoUrl)
@@ -349,7 +400,7 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Pr
     throw new Error(`部分镜头视频文件缺失（${missing.length}/${videos.length}），请重新合成后再导出`)
   }
 
-  logTaskStart('MergeTask', 'episode-merge', { episodeId, dramaId, clips: videos.length })
+  logTaskStart('MergeTask', 'episode-merge', { episodeId, dramaId, clips: videos.length, bgmMusicId: options.bgmMusicId })
 
   supersedeStaleMerges(episodeId)
 
@@ -368,7 +419,7 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Pr
   const mergeId = Number(res.lastInsertRowid)
 
   // 异步执行（doMerge 内会重新读取 DB，避免用到启动瞬间的旧镜头快照）
-  doMerge(mergeId, episodeId).catch(err => {
+  doMerge(mergeId, episodeId, options).catch(err => {
     if (String(err?.message || '').includes('SIGKILL') || String(err?.message || '').includes('code 255')) return
     logTaskError('MergeTask', 'episode-merge', { mergeId, episodeId, error: err.message })
     console.error(`[Merge] Failed:`, err)
@@ -410,12 +461,12 @@ function loadComposedStoryboards(episodeId: number): ComposedStoryboard[] {
   )
   const composed = storyboards.filter(sb => !!sb.composedVideoUrl)
   if (composed.length !== storyboards.length) {
-    throw new Error(`Only composed storyboards can be merged (${composed.length}/${storyboards.length} ready)`)
+    throw new Error(`尚有 ${storyboards.length - composed.length} 个镜头未合成（${composed.length}/${storyboards.length}），请先在「镜头合成」完成全部镜头后再导出`)
   }
   return composed
 }
 
-async function doMerge(mergeId: number, episodeId: number) {
+async function doMerge(mergeId: number, episodeId: number, options: MergeOptions = {}) {
   const run: ActiveMergeRun = { mergeId, cancelled: false, command: null }
   activeMerges.set(episodeId, run)
   setMergeProgress(episodeId, {
@@ -567,6 +618,28 @@ async function doMerge(mergeId: number, episodeId: number) {
 
   cleanupTempFiles(tempFiles)
 
+  if (options.bgmMusicId && !run.cancelled) {
+    const bgmAbs = resolveMergeBgmPath(options.bgmMusicId)
+    if (bgmAbs) {
+      setMergeProgress(episodeId, {
+        mergeId,
+        phase: 'finalizing',
+        percent: 92,
+        message: '正在混入 BGM…',
+        updatedAt: Date.now(),
+      })
+      try {
+        await mixBgmIntoMergedVideo(outputPath, bgmAbs, options.bgmVolume ?? 0.22, run)
+      } catch (err: any) {
+        throw new Error(`BGM 混音失败: ${err.message}`)
+      }
+    } else {
+      logTaskError('MergeTask', 'bgm-missing', { mergeId, episodeId, bgmMusicId: options.bgmMusicId })
+    }
+  }
+
+  if (run.cancelled) return
+
   setMergeProgress(episodeId, {
     mergeId,
     phase: 'finalizing',
@@ -606,5 +679,6 @@ async function doMerge(mergeId: number, episodeId: number) {
     duration,
     clips: storyboards.length,
     pageFlipTransitions: usePageFlip ? groups.length - 1 : 0,
+    bgmMusicId: options.bgmMusicId,
   })
 }

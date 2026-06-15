@@ -180,6 +180,89 @@ function buildImageMotionFilter() {
   return `scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fps=${fps},format=yuv420p`
 }
 
+/** 同配图多镜：每镜线性推近 0.02，换图后从 1.0 重新起算 */
+const SAME_IMAGE_ZOOM_STEP = 0.02
+const COMPOSE_FPS = 25
+
+type VisualStoryboard = {
+  id: number
+  storyboardNumber: number
+  referenceImages?: string | null
+  videoUrl?: string | null
+  composedImage?: string | null
+  firstFrameImage?: string | null
+}
+
+function getStoryboardVisualKey(sb: VisualStoryboard, storyboards: VisualStoryboard[]) {
+  const visual = resolveStoryboardVisualSource(storyboards, sb.id)
+  if (!visual) return `none:${sb.id}`
+  return `${visual.type}:${visual.path}`
+}
+
+/** 当前镜头在同一张配图连续分组内的序号（0 起） */
+function getSameImageShotIndex(storyboardId: number, episodeStoryboards: VisualStoryboard[]) {
+  const ordered = sortStoryboardsByOrder(episodeStoryboards)
+  const idx = ordered.findIndex(sb => sb.id === storyboardId)
+  if (idx < 0) return 0
+
+  const currentKey = getStoryboardVisualKey(ordered[idx], ordered)
+  let groupStart = idx
+  for (let i = idx - 1; i >= 0; i--) {
+    if (getStoryboardVisualKey(ordered[i], ordered) === currentKey) {
+      groupStart = i
+    } else {
+      break
+    }
+  }
+  return idx - groupStart
+}
+
+function durationToFrameCount(durationSec: number, fps = COMPOSE_FPS) {
+  return Math.max(2, Math.round(durationSec * fps))
+}
+
+function buildShotZoomRange(shotIndex: number) {
+  const startZ = 1 + shotIndex * SAME_IMAGE_ZOOM_STEP
+  return { startZ, endZ: startZ + SAME_IMAGE_ZOOM_STEP }
+}
+
+/** 单镜配图：从 startZ 线性推至 endZ（中心缩放） */
+function buildShotZoomMotionFilter(shotIndex: number, durationSec: number, fps = COMPOSE_FPS) {
+  const frames = durationToFrameCount(durationSec, fps)
+  const { startZ, endZ } = buildShotZoomRange(shotIndex)
+  const delta = endZ - startZ
+  return [
+    'scale=8000:-1',
+    `zoompan=z='${startZ}+${delta}*on/${frames - 1}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=1280x720:fps=${fps}`,
+    'format=yuv420p',
+  ].join(',')
+}
+
+/** 同配图多句：按各句时长分段连续推镜（第 1 句 1→1.02，第 2 句 1.02→1.04…） */
+function buildGroupProgressiveZoomFilter(shotDurationsSec: number[], fps = COMPOSE_FPS) {
+  const frameCounts = shotDurationsSec.map(d => durationToFrameCount(d, fps))
+  const totalFrames = frameCounts.reduce((sum, count) => sum + count, 0)
+
+  const zForShot = (shotIndex: number, startFrame: number, frames: number) => {
+    const { startZ, endZ } = buildShotZoomRange(shotIndex)
+    const delta = endZ - startZ
+    return `${startZ}+${delta}*(on-${startFrame})/${frames - 1}`
+  }
+
+  let startFrame = 0
+  let zExpr = zForShot(0, 0, frameCounts[0])
+  for (let i = 1; i < frameCounts.length; i++) {
+    startFrame += frameCounts[i - 1]
+    zExpr = `if(gte(on,${startFrame}),${zForShot(i, startFrame, frameCounts[i])},${zExpr})`
+  }
+
+  return [
+    'scale=8000:-1',
+    `zoompan=z='${zExpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${totalFrames}:s=1280x720:fps=${fps}`,
+    'format=yuv420p',
+  ].join(',')
+}
+
 /** 片头动态底：慢推镜 + RGB 色散 + 暗角（参照解说成片风格） */
 function buildTitleDynamicMotionFilter(baseFrames = 750) {
   const fps = 25
@@ -311,7 +394,6 @@ export async function renderSameImageGroupSegment(
   imageAbsPath: string,
   outputPath: string,
 ): Promise<number> {
-  const baseVideo = await getSharedImageBaseVideo(imageAbsPath, { dynamic: true })
   const tempDir = path.join(STORAGE_ROOT, 'temp')
   fs.mkdirSync(tempDir, { recursive: true })
 
@@ -320,6 +402,7 @@ export async function renderSameImageGroupSegment(
   const assDialogues: string[] = []
   const srtBlocks: string[] = []
   const audioPaths: string[] = []
+  const shotDurationsSec: number[] = []
 
   for (let i = 0; i < orderedStoryboards.length; i++) {
     const sb = orderedStoryboards[i]
@@ -333,6 +416,7 @@ export async function renderSameImageGroupSegment(
     if (!fs.existsSync(audioPath)) throw new Error(`Storyboard ${sb.id} audio file missing`)
 
     const durationSec = await probeMediaDuration(audioPath)
+    shotDurationsSec.push(durationSec)
     const text = stripSubtitlePunctuation(parsed.pureText)
     const startSec = isTitleShot
       ? offsetSec + TITLE_SUBTITLE_START_DELAY_SEC
@@ -364,12 +448,15 @@ export async function renderSameImageGroupSegment(
   await concatAudioFiles(audioPaths, mergedAudioPath)
 
   await new Promise<void>((resolve, reject) => {
-    const filters: string[] = []
+    const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec)]
     if (supportsSubtitleFilter()) {
       filters.push(buildSubtitleFilter(subtitlePath, titleMode))
     }
 
-    let cmd = ffmpeg().input(baseVideo).input(mergedAudioPath)
+    let cmd = ffmpeg()
+      .input(imageAbsPath)
+      .inputOptions(['-loop', '1'])
+      .input(mergedAudioPath)
     if (filters.length > 0) cmd = cmd.videoFilter(filters)
     cmd
       .outputOptions([
@@ -426,6 +513,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
   })
 
   let audioPath: string | null = null
+  let bgmPath: string | null = null
   let subtitlePath: string | null = null
   const parsedDialogue = parseDialogueForTTS(sb.dialogue)
   const titleMeta = isNarrationStoryboard(sb) ? parseNarrationImageMeta(sb.referenceImages) : null
@@ -489,8 +577,16 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       ? await probeMediaDuration(audioPath)
       : (sb.duration || 10)
 
-    if (!visual && !audioPath) {
-      throw new Error(`Storyboard ${storyboardId} has no video, image, or narration audio`)
+    if (sb.bgmAudioUrl) {
+      const candidate = toAbsPath(sb.bgmAudioUrl)
+      if (fs.existsSync(candidate)) {
+        bgmPath = candidate
+        logTaskProgress('ComposeTask', 'bgm-attached', { storyboardId, bgmPath: sb.bgmAudioUrl })
+      }
+    }
+
+    if (!visual && !audioPath && !bgmPath) {
+      throw new Error(`Storyboard ${storyboardId} has no video, image, narration audio, or BGM`)
     }
 
     if (visual?.inherited) {
@@ -554,14 +650,21 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         logTaskProgress('ComposeTask', 'black-frame-compose', { storyboardId, duration: clipDuration })
       } else if (visual!.type === 'image') {
         const useTitleDynamic = !!isTitleShot
-        const baseVideo = await getSharedImageBaseVideo(visual!.path, { dynamic: useTitleDynamic })
-        cmd = cmd.input(baseVideo)
+        const sameImageShotIndex = useTitleDynamic ? undefined : getSameImageShotIndex(storyboardId, episodeStoryboards)
+        if (useTitleDynamic) {
+          const baseVideo = await getSharedImageBaseVideo(visual!.path, { dynamic: true })
+          cmd = cmd.input(baseVideo)
+        } else {
+          filters.unshift(buildShotZoomMotionFilter(sameImageShotIndex!, clipDuration))
+          cmd = cmd.input(visual!.path).inputOptions(['-loop', '1'])
+        }
         logTaskProgress('ComposeTask', 'image-slideshow-compose', {
           storyboardId,
           duration: clipDuration,
           inherited: visual!.inherited || false,
-          sharedBase: true,
+          sharedBase: useTitleDynamic,
           titleDynamic: useTitleDynamic,
+          sameImageShotIndex,
         })
       } else {
         cmd = cmd.input(visual!.path)
@@ -570,12 +673,17 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       if (audioPath) {
         cmd = cmd.input(audioPath)
       }
+      if (bgmPath) {
+        cmd = cmd.input(bgmPath).inputOptions(['-stream_loop', '-1'])
+      }
 
       if (filters.length > 0) {
         cmd = cmd.videoFilter(filters)
       }
 
       const outputOptions = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p']
+      const hasVoice = !!audioPath
+      const hasBgm = !!bgmPath
 
       if (useBlackFrame || visual?.type === 'image') {
         outputOptions.push('-t', String(clipDuration), '-vsync', 'cfr', '-r', '25')
@@ -584,10 +692,35 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         }
       }
 
-      if (audioPath) {
-        const videoInput = 0
+      if (hasVoice && hasBgm) {
+        const voiceInput = 1
+        const bgmInput = 2
+        outputOptions.push(
+          '-filter_complex',
+          `[${voiceInput}:a]volume=1[voice];[${bgmInput}:a]volume=0.22[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`,
+          '-map', '0:v',
+          '-map', '[aout]',
+          '-c:a', 'aac',
+          '-shortest',
+        )
+        if (useBlackFrame || visual?.type === 'image') {
+          outputOptions.push('-tune', 'stillimage')
+        }
+      } else if (hasVoice) {
         const audioInput = 1
-        outputOptions.push('-map', `${videoInput}:v`, '-map', `${audioInput}:a`, '-c:a', 'aac', '-shortest')
+        outputOptions.push('-map', '0:v', '-map', `${audioInput}:a`, '-c:a', 'aac', '-shortest')
+        if (useBlackFrame || visual?.type === 'image') {
+          outputOptions.push('-tune', 'stillimage')
+        }
+      } else if (hasBgm) {
+        const bgmInput = 1
+        outputOptions.push(
+          '-filter_complex',
+          `[${bgmInput}:a]volume=0.35,atrim=0:${clipDuration}[aout]`,
+          '-map', '0:v',
+          '-map', '[aout]',
+          '-c:a', 'aac',
+        )
         if (useBlackFrame || visual?.type === 'image') {
           outputOptions.push('-tune', 'stillimage')
         }

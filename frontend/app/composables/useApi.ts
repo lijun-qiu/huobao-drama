@@ -52,6 +52,9 @@ export const episodeAPI = {
   pipelineStatus: (id: number) => api.get(`/episodes/${id}/pipeline-status`),
   narrationBreakdown: (id: number, options?: { style?: string; script?: string; image_detect_mode?: 'paragraph' | 'conservative' | 'balanced' }) =>
     api.post(`/episodes/${id}/narration-breakdown`, options || {}),
+  extractNarrationCharacters: (id: number, options?: { script?: string; style?: string }) =>
+    api.post(`/episodes/${id}/extract-narration-characters`, options || {}),
+  linkNarrationCharacters: (id: number) => api.post(`/episodes/${id}/link-narration-characters`),
 }
 
 export const storyboardAPI = {
@@ -59,6 +62,7 @@ export const storyboardAPI = {
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
   generateTTS: (id: number, options?: { force?: boolean; local_tts?: boolean; local_voice?: string }) =>
     api.post(`/storyboards/${id}/generate-tts`, options || {}),
+  resolveCharacters: (id: number) => api.post(`/storyboards/${id}/resolve-characters`, {}),
   del: (id: number) => api.del(`/storyboards/${id}`),
 }
 
@@ -66,8 +70,20 @@ export const characterAPI = {
   create: (data: any) => api.post('/characters', data),
   update: (id: number, data: any) => api.put(`/characters/${id}`, data),
   voiceSample: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId }),
-  generateImage: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-image`, { episode_id: episodeId }),
-  batchImages: (ids: number[], episodeId: number) => api.post('/characters/batch-generate-images', { character_ids: ids, episode_id: episodeId }),
+  generateImage: (id: number, episodeId: number, options?: { useReference?: boolean }) =>
+    api.post(`/characters/${id}/generate-image`, {
+      episode_id: episodeId,
+      use_reference: options?.useReference !== false,
+    }),
+  recognizePortrait: (id: number, episodeId: number) => api.post(`/characters/${id}/recognize-portrait`, { episode_id: episodeId }),
+  generateAppearance: (id: number, data: { episode_id?: number; script?: string; content?: string }) =>
+    api.post(`/characters/${id}/generate-appearance`, data),
+  batchImages: (ids: number[], episodeId: number, options?: { useReference?: boolean }) =>
+    api.post('/characters/batch-generate-images', {
+      character_ids: ids,
+      episode_id: episodeId,
+      use_reference: options?.useReference !== false,
+    }),
 }
 
 export const sceneAPI = {
@@ -76,6 +92,7 @@ export const sceneAPI = {
 
 export const imageAPI = {
   generate: (d: any) => api.post('/images', d),
+  get: (id: number) => api.get(`/images/${id}`),
   list: (params?: { drama_id?: number; storyboard_id?: number }) => {
     const query = new URLSearchParams()
     if (params?.drama_id) query.set('drama_id', String(params.drama_id))
@@ -100,8 +117,12 @@ export const composeAPI = {
   status: (epId: number) => api.get(`/compose/episodes/${epId}/compose-status`),
 }
 export const mergeAPI = {
-  merge: (epId: number, options?: { cancel_running?: boolean }) =>
-    api.post(`/merge/episodes/${epId}/merge`, { cancel_running: options?.cancel_running !== false }),
+  merge: (epId: number, options?: { cancel_running?: boolean; bgm_music_id?: number; bgm_volume?: number }) =>
+    api.post(`/merge/episodes/${epId}/merge`, {
+      cancel_running: options?.cancel_running !== false,
+      bgm_music_id: options?.bgm_music_id,
+      bgm_volume: options?.bgm_volume,
+    }),
   cancel: (epId: number) => api.post(`/merge/episodes/${epId}/merge/cancel`),
   status: (epId: number) => api.get(`/merge/episodes/${epId}/merge`),
 }
@@ -133,4 +154,38 @@ export const skillsAPI = {
 export const voicesAPI = {
   list: (provider?: string) => api.get(`/ai-voices${provider ? `?provider=${provider}` : ''}`),
   sync: () => api.post('/ai-voices/sync', {}),
+}
+
+export const musicAPI = {
+  list: (params?: { episode_id?: number; drama_id?: number; storyboard_id?: number }) => {
+    const query = new URLSearchParams()
+    if (params?.episode_id) query.set('episode_id', String(params.episode_id))
+    if (params?.drama_id) query.set('drama_id', String(params.drama_id))
+    if (params?.storyboard_id) query.set('storyboard_id', String(params.storyboard_id))
+    return api.get(`/music${query.size ? `?${query.toString()}` : ''}`)
+  },
+  get: (id: number) => api.get(`/music/${id}`),
+  suggestDescription: (data: {
+    episode_id?: number
+    storyboard_id?: number
+    model?: string
+    description?: string
+    content?: string
+  }) => api.post('/music/suggest-description', data),
+  generate: (data: {
+    episode_id?: number
+    drama_id?: number
+    storyboard_id?: number
+    description?: string
+    prompt?: string
+    content?: string
+    model?: string
+    config_id?: number
+    auto_apply?: boolean
+  }) => api.post('/music/generate', data),
+  apply: (id: number, storyboardId: number) => api.post(`/music/${id}/apply`, { storyboard_id: storyboardId }),
+  applyAll: (id: number, episodeId: number) => api.post(`/music/${id}/apply-all`, { episode_id: episodeId }),
+  sync: (id: number) => api.post(`/music/${id}/sync`, {}),
+  resumePending: (data?: { episode_id?: number; drama_id?: number }) => api.post('/music/resume-pending', data || {}),
+  del: (id: number) => api.del(`/music/${id}`),
 }

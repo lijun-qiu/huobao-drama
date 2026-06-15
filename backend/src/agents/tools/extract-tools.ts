@@ -12,6 +12,7 @@ import { z } from 'zod'
 import { db, schema } from '../../db/index.js'
 import { eq, and } from 'drizzle-orm'
 import { now } from '../../utils/response.js'
+import { sanitizeCharacterAppearance } from '../../constants/art-styles.js'
 import { logTaskProgress, logTaskSuccess } from '../../utils/task-logger.js'
 
 // ─── 关联辅助 ────────────────────────────────────────────────
@@ -144,7 +145,7 @@ export function createExtractTools(episodeId: number, dramaId: number) {
           db.update(schema.characters).set({
             role: char.role || existing.role,
             description: char.description || existing.description,
-            appearance: char.appearance || existing.appearance,
+            appearance: sanitizeCharacterAppearance(char.appearance || existing.appearance),
             personality: char.personality || existing.personality,
             updatedAt: ts,
           }).where(eq(schema.characters.id, existing.id)).run()
@@ -156,7 +157,7 @@ export function createExtractTools(episodeId: number, dramaId: number) {
             name: char.name,
             role: char.role || '',
             description: char.description || '',
-            appearance: char.appearance || '',
+            appearance: sanitizeCharacterAppearance(char.appearance || ''),
             personality: char.personality || '',
             dramaId,
             createdAt: ts,

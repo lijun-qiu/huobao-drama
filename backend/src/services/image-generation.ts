@@ -4,7 +4,7 @@ import { getActiveConfig, getConfigById } from './ai.js'
 import { now } from '../utils/response.js'
 import { downloadFile, readImageAsCompressedDataUrl, saveBase64Image } from '../utils/storage.js'
 import { getImageAdapter, resolveImageAdapter, resolveImageProvider } from './adapters/registry'
-import type { AIConfig } from './adapters/types'
+import type { AIConfig, ProviderRequest } from './adapters/types'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 
 interface GenerateImageParams {
@@ -90,71 +90,109 @@ async function processImageGeneration(id: number, config: AIConfig) {
 
     // 使用 Adapter 构建请求
     const resolvedReferenceImages = await normalizeReferenceImages(record.referenceImages)
-    const { url, method, headers, body } = adapter.buildGenerateRequest(config, {
+    const recordInput = {
       id: record.id,
       model: record.model,
       prompt: record.prompt,
       size: record.size,
       frameType: record.frameType,
       referenceImages: resolvedReferenceImages ? JSON.stringify(resolvedReferenceImages) : null,
-    })
-    logTaskProgress('ImageTask', 'request', {
-      id,
-      provider: adapter.provider,
-      method,
-      url: redactUrl(url),
-      model: record.model,
-    })
-    logTaskPayload('ImageTask', 'request payload', {
-      id,
-      method,
-      url,
-      headers,
-      body,
-    })
-
-    const resp = await fetch(url, {
-      method,
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(600_000),
-    })
-
-    if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`)
-    const result = await resp.json() as any
-    logTaskPayload('ImageTask', 'response payload', {
-      id,
-      provider: config.provider,
-      result,
-    })
-
-    const { isAsync, taskId, imageUrl } = adapter.parseGenerateResponse(result)
-
-    if (!isAsync && imageUrl) {
-      logTaskProgress('ImageTask', 'sync-complete', { id, imageUrl })
-      // 同步模式：直接下载图片
-      await handleImageComplete(id, config.provider, imageUrl)
-      return
     }
 
-    if (!isAsync && !imageUrl) {
-      // 同步模式但无 URL（Gemini 等返回 base64）
-      const b64 = adapter.extractImageBase64(result)
-      if (b64) {
-        logTaskProgress('ImageTask', 'sync-base64-complete', { id, mimeType: b64.mimeType })
-        await handleImageCompleteBase64(id, config.provider, b64.data, b64.mimeType)
-        return
+    const requests = (adapter as { buildGenerateRequestVariants?: (c: AIConfig, r: typeof recordInput) => ProviderRequest[] })
+      .buildGenerateRequestVariants?.(config, recordInput)
+      ?? [adapter.buildGenerateRequest(config, recordInput)]
+
+    let lastError = 'Image generation failed'
+    for (let attempt = 0; attempt < requests.length; attempt++) {
+      const request = requests[attempt]
+      const { url, method, body } = request
+      const isFormData = request.bodyFormat === 'form-data'
+      const headers = { ...request.headers }
+      if (isFormData) delete headers['Content-Type']
+
+      logTaskProgress('ImageTask', 'request', {
+        id,
+        provider: adapter.provider,
+        method,
+        url: redactUrl(url),
+        model: record.model,
+        attempt: attempt + 1,
+        attempts: requests.length,
+        bodyFormat: request.bodyFormat || 'json',
+      })
+      logTaskPayload('ImageTask', 'request payload', {
+        id,
+        method,
+        url,
+        headers,
+        body: isFormData ? '[form-data]' : body,
+      })
+
+      const resp = await fetch(url, {
+        method,
+        headers,
+        body: isFormData ? body : JSON.stringify(body),
+        signal: AbortSignal.timeout(600_000),
+      })
+
+      const responseText = await resp.text()
+      if (!resp.ok) {
+        lastError = `API error ${resp.status}: ${responseText.slice(0, 240)}`
+        logTaskWarn('ImageTask', 'request-failed', { id, attempt: attempt + 1, error: lastError })
+        continue
       }
-      throw new Error('No image URL or base64 data in response')
+
+      let result: any
+      try {
+        result = JSON.parse(responseText) as any
+      } catch {
+        lastError = `Invalid JSON response: ${responseText.slice(0, 240)}`
+        logTaskWarn('ImageTask', 'invalid-json', { id, attempt: attempt + 1, error: lastError })
+        continue
+      }
+
+      logTaskPayload('ImageTask', 'response payload', {
+        id,
+        provider: config.provider,
+        attempt: attempt + 1,
+        result,
+      })
+
+      try {
+        const { isAsync, taskId, imageUrl } = adapter.parseGenerateResponse(result)
+
+        if (!isAsync && imageUrl) {
+          logTaskProgress('ImageTask', 'sync-complete', { id, imageUrl, attempt: attempt + 1 })
+          await handleImageComplete(id, config.provider, imageUrl)
+          return
+        }
+
+        if (!isAsync && !imageUrl) {
+          const b64 = adapter.extractImageBase64(result)
+          if (b64) {
+            logTaskProgress('ImageTask', 'sync-base64-complete', { id, mimeType: b64.mimeType, attempt: attempt + 1 })
+            await handleImageCompleteBase64(id, config.provider, b64.data, b64.mimeType)
+            return
+          }
+          lastError = 'No image URL or base64 data in response'
+          continue
+        }
+
+        db.update(schema.imageGenerations)
+          .set({ taskId, status: 'processing', updatedAt: now() })
+          .where(eq(schema.imageGenerations.id, id))
+          .run()
+        logTaskProgress('ImageTask', 'poll-start', { id, taskId, provider: config.provider, attempt: attempt + 1 })
+        pollImageTask(id, config, taskId!)
+        return
+      } catch (err: any) {
+        lastError = err.message || lastError
+        logTaskWarn('ImageTask', 'parse-failed', { id, attempt: attempt + 1, error: lastError })
+      }
     }
 
-    // 异步模式：更新 taskId，开始轮询
-    db.update(schema.imageGenerations)
-      .set({ taskId, status: 'processing', updatedAt: now() })
-      .where(eq(schema.imageGenerations.id, id))
-      .run()
-    logTaskProgress('ImageTask', 'poll-start', { id, taskId, provider: config.provider })
-    pollImageTask(id, config, taskId!)
+    throw new Error(lastError)
   } catch (err: any) {
     logTaskError('ImageTask', 'process', { id, provider: config.provider, error: err.message })
     db.update(schema.imageGenerations)
@@ -193,6 +231,18 @@ async function normalizeReferenceImages(raw: string | null | undefined): Promise
         })
       } catch (err) {
         logTaskWarn('ImageTask', 'reference-read-failed', { path: localPath, error: (err as Error).message })
+        return null
+      }
+    }
+    if (value.startsWith('http://') || value.startsWith('https://')) {
+      try {
+        const resp = await fetch(value, { signal: AbortSignal.timeout(30_000) })
+        if (!resp.ok) return null
+        const mime = resp.headers.get('content-type')?.split(';')[0]?.trim() || 'image/jpeg'
+        const buf = Buffer.from(await resp.arrayBuffer())
+        return `data:${mime};base64,${buf.toString('base64')}`
+      } catch (err) {
+        logTaskWarn('ImageTask', 'reference-fetch-failed', { url: value, error: (err as Error).message })
         return null
       }
     }

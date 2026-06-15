@@ -1,11 +1,16 @@
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
+import { artStylePrompt } from '../constants/art-styles.js'
 import {
   buildNarrationImageMeta,
   buildParagraphImagePrompt,
   summarizeSceneMainContent,
 } from './narration-image.js'
+import {
+  getEpisodeVisualCharacters,
+  linkStoryboardCharactersFromText,
+} from './narration-characters.js'
 import { buildNarrationParagraphs, type NarrationParagraph } from './narration-paragraph.js'
 import {
   generateParagraphImagePromptsWithLLM,
@@ -76,7 +81,7 @@ export function buildTitleImagePrompt(moodHint: string, style = 'comic') {
   return [
     'cinematic opening background scene, single full illustration',
     'absolutely no text, no letters, no words, no watermark, no captions on image',
-    `${style} style, anime illustration, dramatic lighting, shallow depth of field`,
+    artStylePrompt(style, 'title'),
     `atmospheric background mood for story theme: ${moodHint}`,
     'clean center area reserved for dynamic title overlay, 16:9 landscape, high quality',
   ].join(', ')
@@ -121,6 +126,7 @@ export async function breakdownNarrationEpisode(
   const titleHook = titleItems.length ? extractTitleHook(titleItems[0].sentence) : null
   let imagePromptSource: 'paragraph+llm' | 'paragraph' = 'paragraph'
   let titleImagePrompt = titleHook ? buildTitleImagePrompt(titleHook, style) : null
+  const episodeCharacters = getEpisodeVisualCharacters(episodeId, ep.dramaId)
 
   const llmPrompts = await generateParagraphImagePromptsWithLLM(
     paragraphs.map((para: NarrationParagraph) => ({
@@ -129,7 +135,7 @@ export async function breakdownNarrationEpisode(
       sentences: para.sentences,
       layout: para.layout,
     })),
-    { titleHook, titleFull: title || null, style },
+    { titleHook, titleFull: title || null, style, characters: episodeCharacters },
   )
   if (llmPrompts) {
     imagePromptSource = 'paragraph+llm'
@@ -171,7 +177,7 @@ export async function breakdownNarrationEpisode(
       storyboardNumber++
       if (needsTitleImage) imageNeededCount++
       totalDuration += duration
-      db.insert(schema.storyboards).values({
+      const res = db.insert(schema.storyboards).values({
         episodeId,
         storyboardNumber,
         title: '片头标题',
@@ -191,6 +197,7 @@ export async function breakdownNarrationEpisode(
         createdAt: ts,
         updatedAt: ts,
       }).run()
+      linkStoryboardCharactersFromText(Number(res.lastInsertRowid), sentence, episodeCharacters)
     })
   }
 
@@ -206,7 +213,7 @@ export async function breakdownNarrationEpisode(
     const isParagraphAnchor = !!paraInfo
     const para = paragraphs.find(p => p.startIndex === index)
 
-    db.insert(schema.storyboards).values({
+    const res = db.insert(schema.storyboards).values({
       episodeId,
       storyboardNumber,
       title: sentence.slice(0, 12) || `镜头${storyboardNumber}`,
@@ -226,6 +233,7 @@ export async function breakdownNarrationEpisode(
       createdAt: ts,
       updatedAt: ts,
     }).run()
+    linkStoryboardCharactersFromText(Number(res.lastInsertRowid), sentence, episodeCharacters)
   })
 
   db.update(schema.episodes)

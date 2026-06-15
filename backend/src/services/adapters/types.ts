@@ -66,6 +66,8 @@ export interface ProviderRequest {
   method: string
   headers: Record<string, string>
   body: any
+  /** multipart/form-data 时不要手动设置 Content-Type */
+  bodyFormat?: 'json' | 'form-data'
 }
 
 export interface AIConfig {

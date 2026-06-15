@@ -5,10 +5,95 @@ import { success, badRequest, now } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { generateVoiceSample } from '../services/tts-generation.js'
 import { generateImage } from '../services/image-generation.js'
-import { resolveEpisodeImageModel } from '../constants/image-models.js'
-import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { generateCharacterAppearance, resolveCharacterPortraitGeneration, resolvePortraitImageModel, variantNeedsYouthPortraitReference, variantPortraitSortOrder, getVariantAgeGroup, finalizeCharacterAppearance } from '../services/narration-characters.js'
+import { buildCharacterAppearanceContext } from '../services/ai-description-context.js'
+import { recognizePortraitImage } from '../services/kling-image-recognize.js'
+import { resolveEpisodeImageModel, imageModelSupportsReferenceImages } from '../constants/image-models.js'
+import { normalizeArtStyle, sanitizeCharacterAppearance } from '../constants/art-styles.js'
+import { logTaskError, logTaskStart, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 
 const app = new Hono()
+
+function parseUseReference(body: Record<string, unknown>): boolean {
+  if (body.use_reference === false || body.useReference === false) return false
+  return true
+}
+
+function resolvePortraitReferenceImages(
+  resolved: ReturnType<typeof resolveCharacterPortraitGeneration>,
+  model: string,
+  useReference: boolean,
+) {
+  if (!useReference) return undefined
+  if (!imageModelSupportsReferenceImages(model)) return undefined
+  return resolved.referenceImages
+}
+
+async function waitForCharacterImage(characterId: number, timeoutMs = 180_000, intervalMs = 2500): Promise<boolean> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, characterId)).all()
+    if (char?.imageUrl?.trim()) return true
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+  }
+  return false
+}
+
+async function submitCharacterPortrait(
+  char: typeof schema.characters.$inferSelect,
+  ep: typeof schema.episodes.$inferSelect,
+  style: string,
+  useReference = true,
+) {
+  const model = resolvePortraitImageModel(resolveEpisodeImageModel(ep), char.variantLabel)
+  let appearance = char.appearance || ''
+  const cleanedAppearance = await finalizeCharacterAppearance(appearance || char.description || '', {
+    name: char.name,
+    role: char.role,
+  })
+  if (cleanedAppearance && cleanedAppearance !== appearance) {
+    appearance = cleanedAppearance
+    db.update(schema.characters).set({ appearance, updatedAt: now() }).where(eq(schema.characters.id, char.id)).run()
+  } else if (cleanedAppearance) {
+    appearance = cleanedAppearance
+  }
+  const resolved = resolveCharacterPortraitGeneration({
+    id: char.id,
+    name: char.name,
+    dramaId: char.dramaId,
+    appearance,
+    description: char.description,
+    personality: char.personality,
+    role: char.role,
+    variantLabel: char.variantLabel,
+    imageUrl: char.imageUrl,
+  }, style, { useReference })
+
+  if (useReference && resolved.referenceCharacterId) {
+    logTaskStart('CharacterImage', 'portrait-reference', {
+      characterId: char.id,
+      referenceCharacterId: resolved.referenceCharacterId,
+      referenceVariant: resolved.referenceCharacterVariant,
+    })
+  } else if (useReference && imageModelSupportsReferenceImages(model)) {
+    logTaskWarn('CharacterImage', 'no-portrait-reference', {
+      characterId: char.id,
+      name: char.name,
+      variantLabel: char.variantLabel,
+    })
+  }
+
+  const referenceImages = resolvePortraitReferenceImages(resolved, model, useReference)
+
+  return generateImage({
+    characterId: char.id,
+    dramaId: char.dramaId,
+    prompt: resolved.prompt,
+    model,
+    configId: ep.imageConfigId ?? undefined,
+    referenceImages,
+  })
+}
 
 function linkCharacterToEpisode(episodeId: number, characterId: number) {
   const existing = db.select().from(schema.episodeCharacters)
@@ -78,13 +163,16 @@ app.put('/:id', async (c) => {
   const [existing] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
   if (!existing || existing.deletedAt) return badRequest(c, '角色不存在')
   const updates: Record<string, any> = { updatedAt: now() }
-  for (const key of ['name', 'role', 'description', 'appearance', 'personality', 'voiceStyle', 'voiceProvider', 'imageUrl', 'localPath']) {
+  for (const key of ['name', 'role', 'description', 'appearance', 'variantLabel', 'personality', 'voiceStyle', 'voiceProvider', 'imageUrl', 'localPath']) {
     const snakeKey = key.replace(/[A-Z]/g, m => '_' + m.toLowerCase())
     if (snakeKey in body) updates[key] = body[snakeKey]
     else if (key in body) updates[key] = body[key]
   }
   if ('voice_style' in body || 'voiceStyle' in body) {
     updates.voiceSampleUrl = null
+  }
+  if (updates.appearance != null) {
+    updates.appearance = sanitizeCharacterAppearance(String(updates.appearance))
   }
   db.update(schema.characters).set(updates).where(eq(schema.characters.id, id)).run()
   const [row] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
@@ -124,6 +212,99 @@ app.post('/:id/generate-voice-sample', async (c) => {
   }
 })
 
+// POST /characters/:id/generate-appearance — AI 生成外貌描述
+app.post('/:id/generate-appearance', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  if (!char) return badRequest(c, 'Character not found')
+
+  let script = String(body.script || body.content || '').trim()
+  let style = 'comic'
+  const episodeId = body.episode_id ? Number(body.episode_id) : undefined
+  if (episodeId) {
+    const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+    if (ep) {
+      script = script || String(ep.scriptContent || ep.content || '').trim()
+      const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+      style = drama?.style || style
+    }
+  }
+  if (!script) {
+    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, char.dramaId)).all()
+    style = drama?.style || style
+  }
+
+  const contentCtx = buildCharacterAppearanceContext({
+    characterId: id,
+    characterName: char.name,
+    episodeId,
+    dramaId: char.dramaId,
+    script,
+  })
+  if (!contentCtx.hasScript && !contentCtx.storyboardSnippets.length) {
+    return badRequest(c, '缺少解说稿或分镜内容，请先填写文案或完成分镜拆解')
+  }
+
+  try {
+    logTaskStart('CharacterAppearance', 'generate', { characterId: id, name: char.name })
+    const appearance = await generateCharacterAppearance({
+      character: char,
+      script,
+      style: contentCtx.dramaStyle || style,
+      contentContext: contentCtx,
+    })
+    db.update(schema.characters)
+      .set({ appearance, updatedAt: now() })
+      .where(eq(schema.characters.id, id))
+      .run()
+    const [row] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+    logTaskSuccess('CharacterAppearance', 'generate', { characterId: id, length: appearance.length })
+    return success(c, { appearance, character: toSnakeCase(row) })
+  } catch (err: any) {
+    logTaskError('CharacterAppearance', 'generate', { characterId: id, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /characters/:id/recognize-portrait — 可灵识图，从定妆图补全外貌描述
+app.post('/:id/recognize-portrait', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  if (!char) return badRequest(c, 'Character not found')
+
+  const imagePath = String(body.image_url || body.imageUrl || char.imageUrl || '').trim()
+  if (!imagePath) return badRequest(c, '请先生成或上传定妆图')
+
+  let episodeConfigId: number | undefined
+  if (body.episode_id) {
+    const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
+    episodeConfigId = ep?.imageConfigId ?? undefined
+  }
+
+  try {
+    logTaskStart('CharacterRecognize', 'portrait', { characterId: id, imagePath })
+    const description = await recognizePortraitImage(imagePath, episodeConfigId)
+    if (!description) return badRequest(c, '识图未返回有效描述')
+
+    const merged = await finalizeCharacterAppearance(
+      [char.appearance?.trim(), description.trim()].filter(Boolean).join('; '),
+      { name: char.name, role: char.role },
+    )
+    db.update(schema.characters)
+      .set({ appearance: merged, updatedAt: now() })
+      .where(eq(schema.characters.id, id))
+      .run()
+    const [row] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+    logTaskSuccess('CharacterRecognize', 'portrait', { characterId: id, length: description.length })
+    return success(c, { appearance: merged, recognition: description, character: toSnakeCase(row) })
+  } catch (err: any) {
+    logTaskError('CharacterRecognize', 'portrait', { characterId: id, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
 // POST /characters/:id/generate-image
 app.post('/:id/generate-image', async (c) => {
   const id = Number(c.req.param('id'))
@@ -135,18 +316,64 @@ app.post('/:id/generate-image', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
   if (!ep) return badRequest(c, 'Episode not found')
 
-  const prompt = `${char.name}, ${char.appearance || char.description || '人物立绘'}, 高质量, 正面, 白色背景`
+  const useReference = parseUseReference(body)
+
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, char.dramaId)).all()
+  const style = normalizeArtStyle(drama?.style)
+  const model = resolvePortraitImageModel(resolveEpisodeImageModel(ep), char.variantLabel)
+
+  let appearance = char.appearance || ''
+  let appearanceAutoEnriched = false
+  const cleanedAppearance = await finalizeCharacterAppearance(appearance || char.description || '', {
+    name: char.name,
+    role: char.role,
+  })
+  if (cleanedAppearance && cleanedAppearance !== appearance) {
+    appearance = cleanedAppearance
+    db.update(schema.characters).set({ appearance, updatedAt: now() }).where(eq(schema.characters.id, id)).run()
+    appearanceAutoEnriched = true
+  } else if (cleanedAppearance) {
+    appearance = cleanedAppearance
+  }
+
+  const resolved = resolveCharacterPortraitGeneration({
+    id: char.id,
+    name: char.name,
+    dramaId: char.dramaId,
+    appearance,
+    description: char.description,
+    personality: char.personality,
+    role: char.role,
+    variantLabel: char.variantLabel,
+    imageUrl: char.imageUrl,
+  }, style, { useReference })
+
+  const referenceImages = resolvePortraitReferenceImages(resolved, model, useReference)
+
   try {
-    logTaskStart('CharacterImage', 'generate', { characterId: id, episodeId: ep.id, dramaId: char.dramaId })
+    logTaskStart('CharacterImage', 'generate', { characterId: id, episodeId: ep.id, dramaId: char.dramaId, model, useReference })
     const genId = await generateImage({
       characterId: id,
       dramaId: char.dramaId,
-      prompt,
-      model: resolveEpisodeImageModel(ep),
+      prompt: resolved.prompt,
+      model,
       configId: ep.imageConfigId ?? undefined,
+      referenceImages,
     })
     logTaskSuccess('CharacterImage', 'generate', { characterId: id, generationId: genId })
-    return success(c, { image_generation_id: genId })
+    return success(c, {
+      image_generation_id: genId,
+      model,
+      use_reference: useReference,
+      reference_images: referenceImages || [],
+      used_portrait_reference: !!(useReference && resolved.referenceCharacterId && referenceImages?.length),
+      reference_character_id: resolved.referenceCharacterId || null,
+      reference_character_variant: resolved.referenceCharacterVariant || null,
+      used_youth_reference: !!(useReference && getVariantAgeGroup(resolved.referenceCharacterVariant) === 'youth' && referenceImages?.length),
+      youth_character_id: getVariantAgeGroup(resolved.referenceCharacterVariant) === 'youth' ? resolved.referenceCharacterId : null,
+      appearance_auto_enriched: appearanceAutoEnriched,
+      appearance: appearanceAutoEnriched ? appearance : undefined,
+    })
   } catch (err: any) {
     logTaskError('CharacterImage', 'generate', { characterId: id, error: err.message })
     return badRequest(c, err.message)
@@ -160,20 +387,51 @@ app.post('/batch-generate-images', async (c) => {
   if (!body.episode_id) return badRequest(c, 'episode_id is required')
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
   if (!ep) return badRequest(c, 'Episode not found')
-  const results: number[] = []
-  for (const cid of ids) {
-    const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, cid)).all()
-    if (!char) continue
-    const prompt = `${char.name}, ${char.appearance || char.description || '人物立绘'}, 高质量, 正面, 白色背景`
-    try {
-      const genId = await generateImage({
-        characterId: cid,
-        dramaId: char.dramaId,
-        prompt,
-        model: resolveEpisodeImageModel(ep),
-        configId: ep.imageConfigId ?? undefined,
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  const style = normalizeArtStyle(drama?.style)
+
+  const chars = ids
+    .map(cid => db.select().from(schema.characters).where(eq(schema.characters.id, cid)).all()[0])
+    .filter(Boolean)
+    .sort((a, b) => {
+      const byStage = variantPortraitSortOrder(a.variantLabel) - variantPortraitSortOrder(b.variantLabel)
+      if (byStage !== 0) return byStage
+      return a.name.localeCompare(b.name, 'zh-CN')
+    })
+
+  const useReference = parseUseReference(body)
+
+  const laterNames = new Set(
+    chars
+      .filter(ch => {
+        const others = chars.filter(other => other.name.trim() === ch.name.trim() && other.id !== ch.id)
+        return others.some(other => {
+          const resolved = resolveCharacterPortraitGeneration({
+            id: other.id,
+            name: other.name,
+            dramaId: other.dramaId,
+            appearance: other.appearance,
+            description: other.description,
+            personality: other.personality,
+            role: other.role,
+            variantLabel: other.variantLabel,
+            imageUrl: other.imageUrl,
+          }, style, { useReference })
+          return resolved.referenceCharacterId === ch.id
+        })
       })
+      .map(ch => ch.name.trim()),
+  )
+
+  const results: number[] = []
+  for (const char of chars) {
+    try {
+      const genId = await submitCharacterPortrait(char, ep, style, useReference)
       results.push(genId)
+
+      if (useReference && laterNames.has(char.name.trim())) {
+        await waitForCharacterImage(char.id)
+      }
     } catch {}
   }
   logTaskSuccess('CharacterImage', 'batch-generate', { episodeId: ep.id, requested: ids.length, started: results.length })

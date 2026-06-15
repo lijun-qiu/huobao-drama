@@ -10,6 +10,21 @@ function isQwenImageModel(model?: string | null) {
   return String(model || '').toLowerCase().startsWith('qwen-image')
 }
 
+function isQwenImageEditModel(model?: string | null) {
+  const m = String(model || '').toLowerCase()
+  return m.startsWith('qwen-image-edit')
+}
+
+function qwenImageMaxRefs(model?: string | null) {
+  return isQwenImageModel(model) ? 3 : 6
+}
+
+function isImageReferenceValue(value: string) {
+  return value.startsWith('http://')
+    || value.startsWith('https://')
+    || value.startsWith('data:image/')
+}
+
 export class AliImageAdapter implements ImageProviderAdapter {
   readonly provider = 'ali'
 
@@ -35,7 +50,7 @@ export class AliImageAdapter implements ImageProviderAdapter {
     if (!qwen) headers['X-DashScope-Async'] = 'enable'
 
     const size = this.normalizeSize(record.size || '1920x1080', model)
-    const content = this.buildContent(record, qwen)
+    const content = this.buildContent(record, qwen, model)
 
     const body: any = {
       model,
@@ -58,23 +73,25 @@ export class AliImageAdapter implements ImageProviderAdapter {
     return { url, method: 'POST', headers, body }
   }
 
-  private buildContent(record: ImageGenerationRecord, qwen: boolean) {
+  private buildContent(record: ImageGenerationRecord, qwen: boolean, model?: string | null) {
     const content: Array<Record<string, string>> = []
+    const qwenEdit = isQwenImageEditModel(model)
 
     if (qwen && record.referenceImages) {
       try {
         const refs = JSON.parse(record.referenceImages)
-        for (const ref of refs) {
+        const maxRefs = qwenImageMaxRefs(model)
+        for (const ref of refs.slice(0, maxRefs)) {
           const value = String(ref || '').trim()
           if (!value) continue
-          if (value.startsWith('http://') || value.startsWith('https://')) {
+          if (isImageReferenceValue(value)) {
             content.push({ image: value })
           }
         }
       } catch {}
     }
 
-    content.push({ text: record.prompt || 'Generate an image' })
+    content.push({ text: record.prompt || (qwenEdit ? 'Generate an image based on reference' : 'Generate an image') })
     return content
   }
 

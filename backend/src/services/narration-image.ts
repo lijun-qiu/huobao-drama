@@ -1,3 +1,5 @@
+import { artStylePrompt } from '../constants/art-styles.js'
+
 export type NarrationImageMode = 'new' | 'inherit' | 'copy'
 export type NarrationShotType = 'title' | 'normal'
 export type ParagraphLayout = 'single' | 'diptych'
@@ -99,7 +101,7 @@ export function buildNarrationSceneImagePrompt(sentences: string[], style = 'com
   return [
     'single full illustration, one complete scene only',
     'no grid, no collage, no multi-panel, no comic strip, no split screen, no storyboard layout',
-    `${style} style, comic illustration, bold lines, cinematic composition`,
+    artStylePrompt(style, 'scene'),
     `illustrate the main visual of this scene based on narration: ${main}`,
     '16:9 landscape, high quality, no text, no watermark',
   ].join(', ')
@@ -114,7 +116,7 @@ export function buildNarrationDiptychImagePrompt(sentences: string[], style = 'c
   return [
     'single 16:9 illustration with exactly 2 horizontal panels side by side, diptych layout, one image file',
     'only left panel and right panel, no third panel, no vertical stack',
-    `${style} style, comic illustration, cinematic composition`,
+    artStylePrompt(style, 'diptych'),
     `left panel scene: ${left || right}`,
     `right panel scene: ${right || left}`,
     'high quality, no text, no watermark',

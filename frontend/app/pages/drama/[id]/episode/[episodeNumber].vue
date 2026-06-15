@@ -132,6 +132,133 @@
           </div>
         </div>
 
+        <!-- Narration Step 1: Character Reference -->
+        <div v-else-if="isNarrationMode && scriptStep === 1" class="step-editor">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">02</span>
+                <span class="step-name">角色定妆</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <span v-if="visualChars.length" class="char-count">{{ visualCharNameCount }} 人物 · {{ charImgCount }}/{{ visualChars.length }} 定妆</span>
+              <button v-if="visualChars.length" class="btn btn-sm" :disabled="narrationExtracting" @click="doExtractNarrationCharacters">
+                <Loader2 v-if="narrationExtracting" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                重新提取
+              </button>
+            </div>
+          </div>
+
+          <div class="narration-hint" style="margin-bottom:12px">
+            <strong>角色定妆参考：</strong>从解说文案提取会在画面出现的角色；若文案含不同年龄/时期（回忆、多年后等），会<strong>自动拆成多条定妆</strong>（如 张三·青年、张三·老年）。<strong>中年/老年形态会以青年定妆图为参考</strong>生成，请先完成青年定妆；后续配图按镜头关联对应形态参考图。
+          </div>
+
+          <div class="prod-image-model-bar" style="margin-bottom:12px">
+            <span class="dim" style="font-size:12px">项目画风</span>
+            <span class="tag tag-success">{{ artStyleLabel(drama?.style) }}</span>
+            <span class="dim" style="font-size:11px">项目页可切换 · 改画风后需重生成定妆</span>
+          </div>
+
+          <div class="prod-image-model-bar" style="margin-bottom:12px">
+            <span class="dim" style="font-size:12px">定妆生图模型</span>
+            <BaseSelect
+              :model-value="episodeImageModel"
+              :options="imageModelOptions"
+              placeholder="选择定妆模型"
+              searchable
+              style="width:300px"
+              @update:model-value="onEpisodeImageModelChange"
+            />
+            <span class="tag">{{ lockedImageConfigLabel }}</span>
+            <span v-if="imageModelSupportsReferenceImages(episodeImageModel)" class="tag tag-success">支持参考图</span>
+          </div>
+
+          <div v-if="!visualChars.length && !narrationExtracting" class="step-empty">
+            <div class="empty-visual">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            </div>
+            <div class="empty-title">从解说文案提取角色</div>
+            <div class="empty-desc">AI 分析文案中会出现的人物，生成外貌设定，供后续配图保持一致</div>
+            <div class="step-empty-actions">
+              <button class="btn btn-primary" :disabled="!localRaw.trim()" @click="doExtractNarrationCharacters">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                提取角色
+              </button>
+              <button class="btn" @click="addNarrationCharacter">手动添加</button>
+            </div>
+          </div>
+          <div v-else-if="narrationExtracting" class="step-loading">
+            <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
+            <div class="loading-text">正在从文案提取角色设定...</div>
+          </div>
+          <div v-else class="prod-content">
+            <div class="prod-section-bar">
+              <span class="dim" style="font-size:12px">{{ visualChars.length }} 个画面角色</span>
+              <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" @click="addNarrationCharacter">添加角色</button>
+                <button class="btn btn-sm" :disabled="isBatchRunning('charImages') || !charImagesPendingCount" @click="batchCharImages">
+                  生成定妆图{{ charImagesPendingCount ? ` (${charImagesPendingCount})` : '' }}
+                </button>
+              </div>
+            </div>
+            <div class="asset-grid">
+              <div v-for="c in visualChars" :key="c.id" class="card asset-card">
+                <div class="asset-cover">
+                  <img
+                    v-if="c.image_url || c.imageUrl"
+                    :src="'/' + (c.image_url || c.imageUrl)"
+                    class="previewable-image"
+                    @click.stop="openImageViewer('/' + (c.image_url || c.imageUrl), `${c.name} 定妆参考`)"
+                  />
+                  <div v-else class="asset-cover-empty">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                  </div>
+                  <span class="asset-cover-badge" :class="(c.image_url || c.imageUrl) ? 'is-ready' : (isPendingCharImage(c.id) ? 'is-pending' : '')">{{ (c.image_url || c.imageUrl) ? '定妆完成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
+                </div>
+                <div class="asset-body">
+                  <div class="asset-name">{{ formatCharacterDisplayName(c) }}</div>
+                  <div class="asset-meta dim">{{ c.role || '角色' }}</div>
+                  <textarea
+                    class="textarea"
+                    rows="3"
+                    style="margin-top:8px;font-size:11px"
+                    :value="c.appearance || ''"
+                    placeholder="外貌描述：年龄、发型、服装、体型…"
+                    @change="updateCharacterAppearance(c.id, $event.target.value)"
+                  />
+                  <button
+                    class="btn btn-sm"
+                    style="margin-top:6px"
+                    :disabled="isPendingCharAppearance(c.id)"
+                    @click="generateCharAppearance(c.id)"
+                  >{{ isPendingCharAppearance(c.id) ? 'AI 生成中…' : 'AI 生成描述' }}</button>
+                  <button
+                    v-if="imageModelSupportsReferenceImages(episodeImageModel)"
+                    class="btn btn-sm"
+                    style="margin-top:6px"
+                    :class="{ 'btn-primary': isCharPortraitUseReference(c.id) }"
+                    :title="isCharPortraitUseReference(c.id) ? '使用同角色已有定妆作参考（自动选最合适形态）' : '纯文生图，不使用参考图'"
+                    @click="toggleCharPortraitUseReference(c.id)"
+                  >{{ isCharPortraitUseReference(c.id) ? '✓ 参考图' : '参考图' }}</button>
+                </div>
+                <div class="asset-foot">
+                  <span :class="['dot', (c.image_url || c.imageUrl) && 'ok', isPendingCharImage(c.id) && 'pending']" />
+                  <span class="dim" style="font-size:10px">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
+                  <button class="btn btn-sm ml-auto" :disabled="isPendingCharImage(c.id)" @click="genCharImg(c.id)">{{ isPendingCharImage(c.id) ? '生成中' : '生成定妆' }}</button>
+                  <button
+                    v-if="c.image_url || c.imageUrl"
+                    class="btn btn-sm"
+                    :disabled="isPendingCharRecognize(c.id)"
+                    @click="recognizeCharPortrait(c.id)"
+                  >{{ isPendingCharRecognize(c.id) ? '识图中' : '识图补全外貌' }}</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Step 1: Rewrite -->
         <div v-else-if="!isNarrationMode && scriptStep === 1" class="step-editor">
           <div class="step-toolbar">
@@ -408,7 +535,7 @@
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
-                <span class="step-num">{{ isNarrationMode ? '02' : '05' }}</span>
+                <span class="step-num">{{ isNarrationMode ? '03' : '05' }}</span>
                 <span class="step-name">{{ isNarrationMode ? '旁白分镜' : '分镜列表' }}</span>
               </div>
             </div>
@@ -455,8 +582,8 @@
             </div>
             <div class="narration-breakdown-steps">
               <strong>下一步：</strong>
-              ① 可在此页编辑/拆分任意镜头（片头用剧中红字）
-              → ② 生成配音 → ③ 生成配图 → ④ 镜头合成 → ⑤ 导出
+              ① 确认角色定妆图已生成
+              → ② 生成配音 → ③ 生成配图（自动带角色参考） → ④ 镜头合成 → ⑤ 导出
             </div>
           </div>
 
@@ -816,7 +943,7 @@
           </div>
 
           <div v-if="showImageModelPicker" class="prod-image-model-bar">
-            <span class="dim" style="font-size:12px">配图模型</span>
+            <span class="dim" style="font-size:12px">{{ prodTab === 'chars' ? '定妆/配图模型' : '配图模型' }}</span>
             <BaseSelect
               :model-value="episodeImageModel"
               :options="imageModelOptions"
@@ -826,6 +953,20 @@
               @update:model-value="onEpisodeImageModelChange"
             />
             <span class="tag">{{ lockedImageConfigLabel }}</span>
+            <span v-if="imageModelSupportsReferenceImages(episodeImageModel)" class="tag tag-success">支持定妆参考图</span>
+          </div>
+
+          <div v-if="showBgmModelPicker" class="prod-image-model-bar">
+            <span class="dim" style="font-size:12px">BGM 模型</span>
+            <BaseSelect
+              :model-value="bgmModel"
+              :options="bgmModelOptions"
+              placeholder="选择 BGM 模型"
+              style="width:320px"
+              @update:model-value="bgmModel = $event"
+            />
+            <span class="tag">{{ bgmModelLabel(bgmModel) }}</span>
+            <span v-if="bgmModel === 'pixverse-sound-effect'" class="tag tag-accent">需关联已合成镜头</span>
           </div>
 
           <!-- Sub: Narrator Voice (narration mode) -->
@@ -853,6 +994,9 @@
 
           <!-- Sub: Characters -->
           <div v-else-if="prodTab === 'chars'" class="prod-content">
+            <div v-if="isNarrationMode" class="narration-hint">
+              <strong>定妆参考图：</strong>每个角色可单独开关；开启后会自动选用同角色<strong>已有定妆</strong>作参考（不限青年，无可用参考则纯文生图）。
+            </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ visualChars.length }} 个需生成形象角色</span>
               <span v-if="chars.length > visualChars.length" class="tag">旁白仅保留声音</span>
@@ -878,13 +1022,41 @@
                   <span class="asset-cover-badge" :class="(c.image_url || c.imageUrl) ? 'is-ready' : (isPendingCharImage(c.id) ? 'is-pending' : '')">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
                 </div>
                 <div class="asset-body">
-                  <div class="asset-name">{{ c.name }}</div>
+                  <div class="asset-name">{{ formatCharacterDisplayName(c) }}</div>
                   <div class="asset-meta dim">{{ c.role || '角色' }}</div>
+                  <textarea
+                    class="textarea"
+                    rows="3"
+                    style="margin-top:8px;font-size:11px"
+                    :value="c.appearance || ''"
+                    placeholder="外貌描述：年龄、发型、服装、体型…"
+                    @change="updateCharacterAppearance(c.id, $event.target.value)"
+                  />
+                  <button
+                    class="btn btn-sm"
+                    style="margin-top:6px"
+                    :disabled="isPendingCharAppearance(c.id)"
+                    @click="generateCharAppearance(c.id)"
+                  >{{ isPendingCharAppearance(c.id) ? 'AI 生成中…' : 'AI 生成描述' }}</button>
+                  <button
+                    v-if="imageModelSupportsReferenceImages(episodeImageModel)"
+                    class="btn btn-sm"
+                    style="margin-top:6px"
+                    :class="{ 'btn-primary': isCharPortraitUseReference(c.id) }"
+                    :title="isCharPortraitUseReference(c.id) ? '使用同角色已有定妆作参考（自动选最合适形态）' : '纯文生图，不使用参考图'"
+                    @click="toggleCharPortraitUseReference(c.id)"
+                  >{{ isCharPortraitUseReference(c.id) ? '✓ 参考图' : '参考图' }}</button>
                 </div>
                 <div class="asset-foot">
                   <span :class="['dot', (c.image_url || c.imageUrl) && 'ok', isPendingCharImage(c.id) && 'pending']" />
                   <span class="dim" style="font-size:10px">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
                   <button class="btn btn-sm ml-auto" :disabled="isPendingCharImage(c.id)" @click="genCharImg(c.id)">{{ isPendingCharImage(c.id) ? '生成中' : '生成' }}</button>
+                  <button
+                    v-if="c.image_url || c.imageUrl"
+                    class="btn btn-sm"
+                    :disabled="isPendingCharRecognize(c.id)"
+                    @click="recognizeCharPortrait(c.id)"
+                  >{{ isPendingCharRecognize(c.id) ? '识图中' : '识图' }}</button>
                 </div>
               </div>
             </div>
@@ -998,6 +1170,111 @@
                       {{ hasNarrationShotOwnTts(sb) ? '重新生成' : '生成配音' }}
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sub: BGM -->
+          <div v-else-if="prodTab === 'bgm'" class="prod-content">
+            <div class="narration-hint">
+              <strong>BGM 策略：</strong>默认 <code>suno_music_open</code>（纯器乐）；可选 <code>pixverse-sound-effect</code>（按画面生成环境音，需关联已合成镜头）。上方工具栏可切换模型；合成时自动与旁白混音（BGM 音量约 22%）。
+            </div>
+            <div class="prod-section-bar">
+              <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ bgmAppliedCount }} 已配 BGM</span>
+              <span class="tag mono">{{ bgmCompletedCount }} 首可用</span>
+              <span v-if="bgmPendingCount" class="tag">{{ bgmPendingCount }} 生成中</span>
+              <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" :disabled="bgmGenerating" @click="refreshBgmLibrary">刷新库</button>
+              </div>
+            </div>
+
+            <div class="card" style="padding:14px;margin-bottom:14px">
+              <div class="field-label" style="margin-bottom:8px">生成新 BGM</div>
+              <div class="flex gap-2" style="flex-wrap:wrap;margin-bottom:10px">
+                <BaseSelect
+                  :model-value="bgmTargetSbId"
+                  :options="[{ label: '整集通用（不绑定镜头）', value: null }, ...sbs.map((sb, i) => ({ label: `#${String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2,'0')} ${getDialogueText(sb).slice(0,24) || sb.title || '镜头'}`, value: sb.id }))]"
+                  placeholder="关联镜头（可选）"
+                  style="min-width:240px"
+                  @update:model-value="bgmTargetSbId = $event"
+                />
+              </div>
+              <textarea v-model="bgmDesc" class="textarea" rows="3" :placeholder="bgmModel === 'pixverse-sound-effect' ? '音效描述，如：雨夜街道环境音，远处车流，低频悬疑氛围' : 'BGM 描述，如：轻柔钢琴与弦乐，悬疑氛围，无人声，适合解说旁白'" />
+              <div class="flex gap-1" style="margin-top:8px">
+                <button class="btn btn-sm" :disabled="bgmDescGenerating" @click="generateBgmDescription">
+                  {{ bgmDescGenerating ? 'AI 生成中…' : 'AI 生成描述' }}
+                </button>
+              </div>
+              <div v-if="bgmModel === 'pixverse-sound-effect'" class="dim" style="font-size:12px;margin-top:8px">
+                PixVerse 需关联已合成/有视频的镜头，将按画面生成环境音与音效（4022 网关要求上传 video_media_id）。
+              </div>
+              <div class="flex gap-1" style="margin-top:10px">
+                <button class="btn btn-sm btn-primary" :disabled="bgmGenerating || !bgmDesc.trim()" @click="generateEpisodeBgm">
+                  {{ bgmGenerating ? '提交中…' : '生成 BGM' }}
+                </button>
+                <span v-if="bgmTargetSbId" class="dim" style="font-size:12px;align-self:center">生成后可一键应用到所选镜头</span>
+              </div>
+            </div>
+
+            <div v-if="!visibleBgmLibrary.length && !bgmPendingCount" class="step-empty" style="min-height:220px">
+              <div class="empty-title">暂无 BGM 记录</div>
+              <div class="empty-desc">填写描述并点击「生成 BGM」，通常需 1–3 分钟。也可在分镜详情里填写 BGM 描述后在此生成。</div>
+            </div>
+
+            <div v-else-if="!visibleBgmLibrary.length && bgmPendingCount" class="step-empty" style="min-height:180px">
+              <div class="empty-title">BGM 生成中…</div>
+              <div class="empty-desc">Suno 通常需 1–3 分钟，完成后会自动出现在下方。也可点「刷新库」手动同步。</div>
+            </div>
+
+            <div v-else class="dub-grid">
+              <div v-for="item in visibleBgmLibrary" :key="item.id" class="card dub-card">
+                <div class="dub-head">
+                  <div class="dub-copy">
+                    <div class="dub-title">
+                      <span class="frame-num">#{{ item.id }}</span>
+                      <span class="frame-badge">{{ item.title || 'BGM' }}</span>
+                    </div>
+                    <div class="dub-desc">{{ item.description || item.prompt }}</div>
+                    <div v-if="item.model" class="dim" style="font-size:11px;margin-top:4px">{{ item.model }}</div>
+                  </div>
+                  <span class="tag" :class="item.status === 'completed' ? 'tag-success' : item.status === 'failed' ? 'tag-danger' : ''">
+                    {{ item.status === 'completed' ? '就绪' : item.status === 'failed' ? '失败' : '生成中' }}
+                  </span>
+                </div>
+                <div class="dub-foot">
+                  <audio v-if="item.local_path || item.localPath" :src="'/' + (item.local_path || item.localPath)" controls preload="none" class="dub-audio" />
+                  <div v-else class="dim" style="font-size:12px">{{ item.error_msg || item.errorMsg || '等待生成…' }}</div>
+                  <div v-if="item.status === 'completed'" class="ml-auto flex gap-1" style="flex-wrap:wrap;justify-content:flex-end">
+                    <button
+                      class="btn btn-sm btn-primary"
+                      :disabled="!!bgmApplyingAllId"
+                      @click="applyBgmToAllShots(item.id)"
+                    >
+                      {{ bgmApplyingAllId === item.id ? '应用中…' : `应用到全部 (${sbs.length})` }}
+                    </button>
+                    <BaseSelect
+                      :model-value="null"
+                      :options="sbs.map((sb, i) => ({ label: `#${String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2,'0')}`, value: sb.id }))"
+                      placeholder="单镜应用"
+                      style="min-width:100px"
+                      @update:model-value="val => val && applyBgmToShot(item.id, val)"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="sbs.length" class="card" style="padding:14px;margin-top:14px">
+              <div class="field-label" style="margin-bottom:10px">镜头 BGM 状态</div>
+              <div class="dub-grid">
+                <div v-for="(sb, i) in sbs" :key="sb.id" class="card dub-card" style="padding:10px">
+                  <div class="dub-title" style="margin-bottom:6px">
+                    <span class="frame-num">#{{ String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2, '0') }}</span>
+                    <span class="dim" style="font-size:12px;margin-left:8px">{{ getDialogueText(sb).slice(0, 40) || '—' }}</span>
+                  </div>
+                  <audio v-if="sb.bgm_audio_url || sb.bgmAudioUrl" :src="'/' + (sb.bgm_audio_url || sb.bgmAudioUrl)" controls preload="none" class="dub-audio" />
+                  <div v-else class="dim" style="font-size:12px">未设置 BGM</div>
                 </div>
               </div>
             </div>
@@ -1609,8 +1886,8 @@
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
                 <div class="empty-title">生成全集视频</div>
-                <div class="empty-desc">将 {{ composedCount }} 个已合成镜头拼接为完整视频</div>
-                <button class="btn btn-primary" :disabled="composedCount === 0" @click="doMerge" style="margin-top:12px">
+                <div class="empty-desc">将 {{ composedCount }}/{{ sbs.length }} 个已合成镜头拼接为完整视频{{ composedCount < sbs.length ? '（需全部镜头合成完成）' : '' }}{{ exportMixBgm && exportBgmMusicId ? '，并混入所选 BGM' : '' }}</div>
+                <button class="btn btn-primary" :disabled="composedCount === 0 || composedCount < sbs.length || mergeProcessing" @click="doMerge" style="margin-top:12px">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   开始生成
                 </button>
@@ -1618,6 +1895,50 @@
             </template>
           </div>
           <div class="export-list">
+            <div class="export-list-head">成片 BGM</div>
+            <div class="export-bgm-panel">
+              <label class="export-bgm-toggle">
+                <input v-model="exportMixBgm" type="checkbox" />
+                <span>拼接时混入 BGM</span>
+              </label>
+              <div v-if="exportMixBgm" class="export-bgm-fields">
+                <BaseSelect
+                  :model-value="exportBgmMusicId"
+                  :options="exportBgmOptions"
+                  placeholder="选择 BGM 曲目"
+                  searchable
+                  style="width:100%"
+                  @update:model-value="exportBgmMusicId = $event"
+                />
+                <div v-if="!exportBgmOptions.length" class="dim" style="font-size:11px;line-height:1.5">
+                  暂无可用 BGM，请先在「BGM 配乐」步骤生成，或
+                  <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px" @click="panel = 'production'; prodTab = 'bgm'">前往生成</button>
+                </div>
+                <div v-else class="export-bgm-volume">
+                  <span class="dim" style="font-size:11px">BGM 音量 {{ exportBgmVolume }}%</span>
+                  <input v-model.number="exportBgmVolume" type="range" min="5" max="50" step="1" class="export-bgm-slider" />
+                </div>
+                <audio
+                  v-if="exportBgmPreviewUrl"
+                  :src="exportBgmPreviewUrl"
+                  controls
+                  preload="none"
+                  class="dub-audio"
+                  style="width:100%;margin-top:4px"
+                />
+                <div v-if="bgmAppliedCount > 0" class="dim" style="font-size:11px;line-height:1.5">
+                  已有 {{ bgmAppliedCount }} 镜在「镜头合成」时混入了 BGM；此处为<strong>整集成片</strong>再铺一层配乐，二者可叠加。
+                </div>
+                <button
+                  class="btn btn-sm"
+                  style="width:100%;margin-top:4px"
+                  :disabled="!exportBgmMusicId || exportBgmApplying"
+                  @click="applyExportBgmToAllShots"
+                >
+                  {{ exportBgmApplying ? '应用中…' : '应用到全部镜头（需重合成）' }}
+                </button>
+              </div>
+            </div>
             <div class="export-list-head">镜头概览</div>
             <div class="export-list-body">
               <div v-for="(sb, i) in sbs" :key="sb.id" class="exp-row">
@@ -1758,11 +2079,12 @@
 </template>
 
 <script setup>
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { toast } from 'vue-sonner'
 import {
-  Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download,
+  Users, MapPin, Video, ImageIcon, Layers, Mic2, Music, FileText, FolderKanban, Clapperboard, Download,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, musicAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import {
   parseProductionMode,
@@ -1773,10 +2095,15 @@ import {
   resolveActiveSubStepKey,
   inferNarrationScriptStep,
   buildNarrationImagePrompt,
+  buildNarrationImageGeneratePayload,
+  imageModelSupportsReferenceImages,
   resolveSceneContentForShot,
   extractNarrationSentence,
   DEFAULT_IMAGE_MODEL,
   IMAGE_MODEL_OPTIONS,
+  BGM_MODEL_OPTIONS,
+  DEFAULT_BGM_MODEL,
+  bgmModelLabel,
   imageModelUnitPrice,
   imageModelPriceLabel,
   resolveEpisodeImageModel,
@@ -1789,13 +2116,22 @@ import {
   narrationImagesReady,
   narrationTtsReady as narrationTtsAllReady,
   getNarrationShotOwnTts,
+  resolveNarrationEffectiveTts,
   parseNarrationImageMeta,
   sortStoryboards,
   hasDuplicateStoryboardNumbers,
   hasEffectiveNarrationTts,
+  formatCharacterDisplayName,
+  normalizeVariantLabel,
+  variantNeedsYouthPortraitReference,
+  getVariantAgeGroup,
+  findYouthBaseCharacter,
+  findPortraitReferenceCharacter,
+  sortCharactersForPortraitGeneration,
   dramaStoryboardStep,
   narrationStoryboardStep,
 } from '~/composables/useEpisodeWorkflow'
+import { artStyleLabel } from '~/composables/useArtStyles'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 definePageMeta({ layout: 'studio' })
@@ -1829,6 +2165,7 @@ const pipelineStepTotal = computed(() => workflowStepTotal(productionMode.value)
 const panel = ref('script')
 const { running: rn, runningType: rt, run: runAgent } = useAgent()
 const narrationBreaking = ref(false)
+const narrationExtracting = ref(false)
 const narrationBreakdownSummary = ref(null)
 const imageDetectMode = ref('paragraph')
 
@@ -1869,6 +2206,59 @@ const mergeVideoSrc = computed(() => {
 
 const scriptStep = ref(0)
 const prodTab = ref('chars')
+const bgmLibrary = ref([])
+const bgmGenerating = ref(false)
+const bgmDescGenerating = ref(false)
+const bgmDesc = ref('')
+const bgmTargetSbId = ref(null)
+const bgmModel = ref(DEFAULT_BGM_MODEL)
+const musicConfigs = ref([])
+let bgmPollTimer = null
+let bgmPollTick = 0
+const bgmAppliedCount = computed(() => sbs.value.filter(s => s.bgm_audio_url || s.bgmAudioUrl).length)
+const bgmCompletedCount = computed(() => bgmLibrary.value.filter(m => m.status === 'completed').length)
+const bgmPendingCount = computed(() => bgmLibrary.value.filter(m => ['pending', 'processing'].includes(m.status)).length)
+const exportMixBgm = ref(true)
+const exportBgmMusicId = ref(null)
+const exportBgmVolume = ref(22)
+const exportBgmApplying = ref(false)
+const bgmApplyingAllId = ref(null)
+const visibleBgmLibrary = computed(() => {
+  const items = bgmLibrary.value.filter(m => m.status !== 'deleted')
+  const completedTaskIds = new Set(
+    items.filter(m => m.status === 'completed' && (m.task_id || m.taskId)).map(m => String(m.task_id || m.taskId)),
+  )
+  return items
+    .filter(m => !(m.status === 'processing' && (m.task_id || m.taskId) && completedTaskIds.has(String(m.task_id || m.taskId))))
+    .sort((a, b) => {
+      const rank = s => s.status === 'completed' ? 0 : s.status === 'processing' ? 1 : 2
+      const diff = rank(a.status) - rank(b.status)
+      return diff !== 0 ? diff : Number(b.id || 0) - Number(a.id || 0)
+    })
+})
+const exportBgmOptions = computed(() =>
+  visibleBgmLibrary.value
+    .filter(m => m.status === 'completed' && (m.local_path || m.localPath))
+    .map(m => ({
+      value: m.id,
+      label: `${m.title || 'BGM'} #${m.id}`,
+    })),
+)
+const exportBgmPreviewUrl = computed(() => {
+  if (!exportBgmMusicId.value) return ''
+  const item = bgmLibrary.value.find(m => m.id === exportBgmMusicId.value)
+  const path = item?.local_path || item?.localPath
+  return path ? `/${path}` : ''
+})
+const bgmModelOptions = computed(() => {
+  const models = new Map(BGM_MODEL_OPTIONS.map(o => [o.value, o.label]))
+  for (const cfg of musicConfigs.value) {
+    const m = cfg.model
+    if (Array.isArray(m)) m.forEach(x => { if (!models.has(x)) models.set(x, x) })
+    else if (m && !models.has(m)) models.set(m, m)
+  }
+  return [...models.entries()].map(([value, label]) => ({ value, label }))
+})
 const prodTabIdx = computed({
   get: () => prodTabDefs.value.findIndex(t => t.id === prodTab.value),
   set: (v) => { prodTab.value = prodTabDefs.value[v]?.id || 'chars' },
@@ -1913,6 +2303,61 @@ function restoreLocalTtsPrefs() {
   const voice = window.localStorage.getItem(`episode-${epId.value}-local-voice`)
   if (voice) localEdgeVoiceId.value = voice
 }
+
+function persistExportBgmPrefs() {
+  if (typeof window === 'undefined' || !epId.value) return
+  window.localStorage.setItem(`episode-${epId.value}-export-mix-bgm`, exportMixBgm.value ? '1' : '0')
+  window.localStorage.setItem(`episode-${epId.value}-export-bgm-id`, exportBgmMusicId.value ? String(exportBgmMusicId.value) : '')
+  window.localStorage.setItem(`episode-${epId.value}-export-bgm-vol`, String(exportBgmVolume.value))
+}
+
+function restoreExportBgmPrefs() {
+  if (typeof window === 'undefined' || !epId.value) return
+  const mix = window.localStorage.getItem(`episode-${epId.value}-export-mix-bgm`)
+  exportMixBgm.value = mix === null ? true : mix === '1'
+  const id = window.localStorage.getItem(`episode-${epId.value}-export-bgm-id`)
+  exportBgmMusicId.value = id ? Number(id) : null
+  const vol = window.localStorage.getItem(`episode-${epId.value}-export-bgm-vol`)
+  if (vol) exportBgmVolume.value = Number(vol) || 22
+}
+
+function buildMergePayload() {
+  const payload = { cancel_running: true }
+  if (exportMixBgm.value && exportBgmMusicId.value) {
+    payload.bgm_music_id = exportBgmMusicId.value
+    payload.bgm_volume = Math.max(0.05, Math.min(0.5, exportBgmVolume.value / 100))
+  }
+  return payload
+}
+
+async function applyBgmToAllShots(musicId) {
+  if (!musicId || !epId.value) return
+  if (!sbs.value.length) {
+    toast.error('暂无镜头')
+    return
+  }
+  bgmApplyingAllId.value = musicId
+  exportBgmApplying.value = true
+  try {
+    const res = await musicAPI.applyAll(musicId, epId.value)
+    const count = res?.applied ?? sbs.value.length
+    toast.success(`已应用到全部 ${count} 个镜头，请重新「镜头合成」后 BGM 才会进入各镜`)
+    await refreshStoryboardsOnly()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    bgmApplyingAllId.value = null
+    exportBgmApplying.value = false
+  }
+}
+
+async function applyExportBgmToAllShots() {
+  if (!exportBgmMusicId.value) {
+    toast.error('请先选择 BGM')
+    return
+  }
+  await applyBgmToAllShots(exportBgmMusicId.value)
+}
 const videoConfigSelectOptions = computed(() => videoConfigs.value.map(c => {
   let modelName = ''
   try { const m = JSON.parse(c.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = c.model || '' }
@@ -1930,6 +2375,9 @@ const imageConfigs = ref([])
 const videoConfigs = ref([])
 const audioConfigs = ref([])
 const pendingCharImageIds = ref([])
+const charPortraitUseReferenceById = ref({})
+const pendingCharRecognizeIds = ref([])
+const pendingCharAppearanceIds = ref([])
 const pendingSceneImageIds = ref([])
 const pendingShotFrameKeys = ref([])
 const pendingNarrationShotIds = ref([])
@@ -2279,6 +2727,9 @@ async function saveShotEditor(remake = false) {
   const duration = Math.max(1, Math.min(60, Number(editor.duration) || 10))
   const title = String(editor.title || '').trim() || (editor.isTitle ? '片头标题' : pureText.slice(0, 12))
 
+  const prevDialogue = String(sb.dialogue || '').trim()
+  const dialogueChanged = dialogue !== prevDialogue
+
   editor.busy = true
   try {
     await storyboardAPI.update(sb.id, {
@@ -2291,10 +2742,12 @@ async function saveShotEditor(remake = false) {
     sb.description = description
     sb.title = title
     sb.duration = duration
-    sb.tts_audio_url = null
-    sb.ttsAudioUrl = null
-    sb.composed_video_url = null
-    sb.composedVideoUrl = null
+    if (dialogueChanged) {
+      sb.tts_audio_url = null
+      sb.ttsAudioUrl = null
+      sb.composed_video_url = null
+      sb.composedVideoUrl = null
+    }
 
     if (!remake) {
       toast.success('镜头已保存')
@@ -2330,6 +2783,23 @@ function configLabel(config) {
 function isPendingCharImage(id) {
   return pendingCharImageIds.value.includes(id)
 }
+function isPendingCharRecognize(id) {
+  return pendingCharRecognizeIds.value.includes(id)
+}
+function isPendingCharAppearance(id) {
+  return pendingCharAppearanceIds.value.includes(id)
+}
+
+function isCharPortraitUseReference(id) {
+  return charPortraitUseReferenceById.value[id] !== false
+}
+
+function toggleCharPortraitUseReference(id) {
+  charPortraitUseReferenceById.value = {
+    ...charPortraitUseReferenceById.value,
+    [id]: !isCharPortraitUseReference(id),
+  }
+}
 
 function openImageViewer(src, title = '') {
   if (!src) return
@@ -2351,6 +2821,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleImageViewerKeydown)
+  stopBgmPoll()
 })
 
 function isPendingSceneImage(id) {
@@ -2386,7 +2857,16 @@ function isNarratorCharacter(char) {
   return text.includes('旁白') || text.includes('narrator') || text.includes('画外音')
 }
 
-const visualChars = computed(() => chars.value.filter(c => !isNarratorCharacter(c)))
+const visualChars = computed(() => {
+  const list = chars.value.filter(c => !isNarratorCharacter(c))
+  return [...list].sort((a, b) => {
+    const byName = String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN')
+    if (byName !== 0) return byName
+    return normalizeVariantLabel(a.variant_label || a.variantLabel)
+      .localeCompare(normalizeVariantLabel(b.variant_label || b.variantLabel), 'zh-CN')
+  })
+})
+const visualCharNameCount = computed(() => new Set(visualChars.value.map(c => c.name)).size)
 
 const lockedImageConfigId = computed(() => episode.value?.image_config_id || episode.value?.imageConfigId || null)
 const lockedVideoConfigId = computed(() => episode.value?.video_config_id || episode.value?.videoConfigId || null)
@@ -2396,6 +2876,7 @@ const lockedImageConfigLabel = computed(() => configLabel(imageConfigs.value.fin
 const episodeImageModel = ref(DEFAULT_IMAGE_MODEL)
 const imageModelOptions = computed(() => IMAGE_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
 const showImageModelPicker = computed(() => ['chars', 'scenes', 'shots'].includes(prodTab.value))
+const showBgmModelPicker = computed(() => prodTab.value === 'bgm')
 
 function syncEpisodeImageModel(ep) {
   episodeImageModel.value = resolveEpisodeImageModel(ep)
@@ -2602,6 +3083,7 @@ function prodStepDone(id) {
     const ready = isNarrationMode.value ? narrationTtsReady.value : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
     return !!sbs.value.length && ready
   }
+  if (id === 'bgm') return !!sbs.value.length && bgmAppliedCount.value > 0
   if (id === 'shots') return !!sbs.value.length && (isNarrationMode.value ? narrationImageReady.value : shotImgCount.value === sbs.value.length)
   if (id === 'videos') {
     const narrationReady = !!sbs.value.length
@@ -2623,7 +3105,7 @@ function goNextProd() {
 
 // Script step navigation
 const stepLabels = computed(() => isNarrationMode.value
-  ? ['解说文案', '旁白分镜']
+  ? ['解说文案', '角色定妆', '旁白分镜']
   : ['原始内容', 'AI 改写', '提取', '音色', '分镜'])
 const prevStepLabel = computed(() => scriptStep.value > 0 ? stepLabels.value[scriptStep.value - 1] : '')
 const nextStepLabel = computed(() => {
@@ -2632,7 +3114,8 @@ const nextStepLabel = computed(() => {
 })
 const canGoNext = computed(() => {
   if (scriptStep.value === 0) return !!localRaw.value.trim()
-  if (isNarrationMode.value && scriptStep.value === 1) return sbs.value.length > 0
+  if (isNarrationMode.value && scriptStep.value === 1) return true
+  if (isNarrationMode.value && scriptStep.value === 2) return sbs.value.length > 0
   if (scriptStep.value === 1) return !!localScript.value.trim() || !!scriptContent.value
   if (scriptStep.value === 2) return chars.value.length > 0
   if (scriptStep.value === 3) return charsVoiced.value > 0
@@ -2651,7 +3134,9 @@ function goNextStep() {
   if (!isNarrationMode.value && scriptStep.value === 1 && localScript.value.trim()) { saveScr() }
   if (scriptStep.value === storyboardStep.value) {
     panel.value = 'production'
-    prodTab.value = isNarrationMode.value ? 'voice' : 'chars'
+    prodTab.value = isNarrationMode.value
+      ? (visualCharTotal.value && charImgCount.value < visualCharTotal.value ? 'chars' : 'voice')
+      : 'chars'
     return
   }
   if (canGoNext.value) scriptStep.value++
@@ -3080,7 +3565,9 @@ const prodTabDefs = computed(() => {
   if (isNarrationMode.value) {
     return [
       { id: 'voice', label: '旁白音色', icon: Mic2, badge: narratorReady.value ? '✓' : '' },
+      { id: 'chars', label: '定妆参考', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
       { id: 'dubbing', label: '生成配音', icon: Mic2, badge: ttsEligibleCount.value ? `${ttsGeneratedCount.value}/${ttsEligibleCount.value}` : '' },
+      { id: 'bgm', label: 'BGM 配乐', icon: Music, badge: sbs.value.length ? `${bgmAppliedCount.value}/${sbs.value.length}` : '' },
       { id: 'shots', label: '生成配图', icon: ImageIcon, badge: narrationNeedImageCount.value ? `${shotImgCount.value}/${narrationNeedImageCount.value}` : '' },
       { id: 'compose', label: '镜头合成', icon: Layers, badge: sbs.value.length ? `${composedCount.value}/${sbs.value.length}` : '' },
     ]
@@ -3089,6 +3576,7 @@ const prodTabDefs = computed(() => {
     { id: 'chars', label: '角色形象', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
     { id: 'scenes', label: '场景图片', icon: MapPin, badge: sceneImgCount.value ? `${sceneImgCount.value}/${scenes.value.length}` : '' },
     { id: 'dubbing', label: '配音生成', icon: Mic2, badge: '' },
+    { id: 'bgm', label: 'BGM 配乐', icon: Music, badge: sbs.value.length ? `${bgmAppliedCount.value}/${sbs.value.length}` : '' },
     { id: 'shots', label: '镜头图片', icon: ImageIcon, badge: shotImgCount.value ? `${shotImgCount.value}/${sbs.value.length}` : '' },
     { id: 'videos', label: '视频生成（可选）', icon: Video, badge: shotVidCount.value ? `${shotVidCount.value}/${sbs.value.length}` : '' },
     { id: 'compose', label: '视频合成', icon: Layers, badge: composedCount.value ? `${composedCount.value}/${sbs.value.length}` : '' },
@@ -3105,7 +3593,7 @@ const mainStageDefs = [
 const workflowState = computed(() => ({
   rawContent: !!rawContent.value,
   scriptContent: !!scriptContent.value,
-  charsCount: chars.value.length,
+  charsCount: visualChars.value.length,
   charsVoiced: charsVoiced.value,
   sbsCount: sbs.value.length,
   narratorReady: narratorReady.value,
@@ -3118,13 +3606,17 @@ const workflowState = computed(() => ({
   shotVidCount: shotVidCount.value,
   composedCount: composedCount.value,
   mergeUrl: !!mergeUrl.value,
+  bgmAppliedCount: bgmAppliedCount.value,
 }))
 
 const narrationIconMap = {
   'script:raw': FileText,
+  'script:characters': Users,
   'script:storyboard': Clapperboard,
   'prod:voice': Mic2,
+  'prod:chars': Users,
   'prod:dubbing': Mic2,
+  'prod:bgm': Music,
   'prod:shots': ImageIcon,
   'prod:compose': Layers,
   'export:merge': Download,
@@ -3160,6 +3652,7 @@ const sidebarSections = computed(() => {
         { key: 'prod:chars', label: '角色形象', desc: '', icon: Users, done: prodStepDone('chars') },
         { key: 'prod:scenes', label: '场景图片', desc: '', icon: MapPin, done: prodStepDone('scenes') },
         { key: 'prod:dubbing', label: '配音生成', desc: '', icon: Mic2, done: prodStepDone('dubbing') },
+        { key: 'prod:bgm', label: 'BGM 配乐', desc: '', icon: Music, done: prodStepDone('bgm') },
         { key: 'prod:shots', label: '镜头图片', desc: '', icon: ImageIcon, done: prodStepDone('shots') },
         { key: 'prod:videos', label: '视频生成', desc: '', icon: Video, done: prodStepDone('videos') },
         { key: 'prod:compose', label: '视频合成', desc: '', icon: Layers, done: prodStepDone('compose') },
@@ -3214,7 +3707,7 @@ function mainStageDone(stageId) {
 function goMainStage(stageId) {
   if (stageId === 'script') {
     panel.value = 'script'
-    scriptStep.value = Math.min(scriptStep.value, 1)
+    scriptStep.value = Math.min(scriptStep.value, isNarrationMode.value ? 2 : 1)
     return
   }
   if (stageId === 'assets') {
@@ -3232,7 +3725,7 @@ function goMainStage(stageId) {
   }
   if (stageId === 'storyboard') {
     if (panel.value === 'production') {
-      prodTab.value = ['dubbing', 'shots', 'videos', 'compose'].includes(prodTab.value) ? prodTab.value : 'dubbing'
+      prodTab.value = ['dubbing', 'bgm', 'shots', 'videos', 'compose'].includes(prodTab.value) ? prodTab.value : 'dubbing'
       return
     }
     panel.value = 'script'
@@ -3247,13 +3740,16 @@ const activeSubSteps = computed(() => {
     if (panel.value === 'script') {
       return [
         { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
+        { key: 'script:characters', label: '角色定妆', done: visualCharTotal.value > 0 },
         { key: 'script:storyboard', label: '旁白分镜', done: !!sbs.value.length },
       ]
     }
     if (panel.value === 'production') {
       return [
         { key: 'prod:voice', label: '旁白音色', done: narratorReady.value },
+        { key: 'prod:chars', label: '定妆参考', done: !visualCharTotal.value || charImgCount.value === visualCharTotal.value },
         { key: 'prod:dubbing', label: '生成配音', done: isNarrationMode.value ? narrationTtsReady.value : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value) },
+        { key: 'prod:bgm', label: 'BGM 配乐', done: bgmAppliedCount.value > 0 },
         { key: 'prod:shots', label: '生成配图', done: !!sbs.value.length && narrationImageReady.value },
         { key: 'prod:compose', label: '镜头合成', done: !!sbs.value.length && composedCount.value === sbs.value.length },
       ]
@@ -3278,6 +3774,7 @@ const activeSubSteps = computed(() => {
     return [
       { key: 'script:storyboard', label: '分镜拆解', done: !!sbs.value.length },
       { key: 'prod:dubbing', label: '配音生成', done: !ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value },
+      { key: 'prod:bgm', label: 'BGM 配乐', done: bgmAppliedCount.value > 0 },
       { key: 'prod:shots', label: '镜头图片', done: !!sbs.value.length && shotImgCount.value === sbs.value.length },
       { key: 'prod:videos', label: '视频生成', done: !!sbs.value.length && shotVidCount.value === sbs.value.length },
       { key: 'prod:compose', label: '视频合成', done: !!sbs.value.length && composedCount.value === sbs.value.length },
@@ -3402,7 +3899,21 @@ function getStoryboardCharacterIds(sb) {
 
 function getStoryboardCharacterNames(sb) {
   const ids = getStoryboardCharacterIds(sb)
-  return chars.value.filter(char => ids.includes(char.id)).map(char => char.name)
+  return chars.value.filter(char => ids.includes(char.id)).map(char => formatCharacterDisplayName(char))
+}
+
+async function resolveShotCharacterIds(sb) {
+  try {
+    const resolved = await storyboardAPI.resolveCharacters(sb.id)
+    const ids = resolved?.character_ids || []
+    if (ids.length) {
+      sb.character_ids = ids
+      sb.characterIds = ids
+    }
+    return ids.length ? ids : getStoryboardCharacterIds(sb)
+  } catch {
+    return getStoryboardCharacterIds(sb)
+  }
 }
 
 function isStoryboardCharacterSelected(sb, charId) {
@@ -3455,6 +3966,161 @@ async function refreshStoryboardsOnly() {
   sbs.value = sortStoryboards(await episodeAPI.storyboards(epId.value))
 }
 
+function normalizeBgmLibraryRows(rows) {
+  if (Array.isArray(rows)) return rows
+  if (Array.isArray(rows?.items)) return rows.items
+  return []
+}
+
+function mergeBgmLibraryRows(existing, incoming) {
+  const map = new Map()
+  for (const item of existing || []) map.set(item.id, item)
+  for (const item of incoming || []) map.set(item.id, { ...map.get(item.id), ...item })
+  return Array.from(map.values()).sort((a, b) => Number(b.id || 0) - Number(a.id || 0))
+}
+
+function stopBgmPoll() {
+  if (bgmPollTimer) {
+    clearInterval(bgmPollTimer)
+    bgmPollTimer = null
+  }
+}
+
+async function tickBgmPoll(options = { resume: false }) {
+  if (!epId.value) return
+  try {
+    const prevCompleted = bgmCompletedCount.value
+    if (options.resume) {
+      try { await musicAPI.resumePending({ episode_id: epId.value }) } catch {}
+    }
+    await loadBgmLibrary({ resumePoll: false })
+    const pending = bgmPendingCount.value
+    const nowCompleted = bgmCompletedCount.value
+    if (nowCompleted > prevCompleted) {
+      toast.success(`BGM 生成完成，新增 ${nowCompleted - prevCompleted} 首，共 ${nowCompleted} 首可用`)
+      await refreshStoryboardsOnly()
+    }
+    if (!pending) stopBgmPoll()
+  } catch (e) {
+    console.warn('[BGM poll]', e?.message || e)
+  }
+}
+
+function startBgmPoll() {
+  stopBgmPoll()
+  bgmPollTick = 0
+  void tickBgmPoll({ resume: true })
+  bgmPollTimer = setInterval(() => {
+    bgmPollTick += 1
+    void tickBgmPoll({ resume: bgmPollTick % 6 === 0 })
+  }, 5000)
+}
+
+async function loadBgmLibrary(options = { resumePoll: true }) {
+  if (!epId.value) return
+  const rows = await musicAPI.list({ episode_id: epId.value })
+  bgmLibrary.value = normalizeBgmLibraryRows(rows)
+  if (options.resumePoll) {
+    const pending = bgmLibrary.value.some(m => ['pending', 'processing'].includes(m.status))
+    if (pending && !bgmPollTimer) startBgmPoll()
+  }
+}
+
+async function refreshBgmLibrary() {
+  if (!epId.value) return
+  const pendingLead = bgmLibrary.value
+    .filter(m => m.status === 'processing')
+    .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))[0]
+  if (pendingLead?.id) {
+    try {
+      await musicAPI.sync(pendingLead.id)
+      toast.success('BGM 已同步完成')
+      await loadBgmLibrary()
+      return
+    } catch (e) {
+      console.warn('[BGM sync]', e?.message || e)
+    }
+  }
+  try { await musicAPI.resumePending({ episode_id: epId.value }) } catch {}
+  await loadBgmLibrary()
+}
+
+async function generateBgmDescription() {
+  bgmDescGenerating.value = true
+  try {
+    const sb = bgmTargetSbId.value ? sbs.value.find(s => s.id === bgmTargetSbId.value) : null
+    const result = await musicAPI.suggestDescription({
+      episode_id: epId.value,
+      storyboard_id: sb?.id,
+      model: bgmModel.value,
+      description: bgmDesc.value.trim() || undefined,
+      content: sb ? getDialogueText(sb) : (localScript.value || scriptContent.value || localRaw.value || ''),
+    })
+    if (result?.description) {
+      bgmDesc.value = result.description
+      toast.success('BGM 描述已生成')
+    } else {
+      toast.error('AI 未返回描述')
+    }
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    bgmDescGenerating.value = false
+  }
+}
+
+async function generateEpisodeBgm() {
+  if (!bgmDesc.value.trim()) {
+    toast.error('请填写 BGM 描述')
+    return
+  }
+  if (bgmModel.value === 'pixverse-sound-effect' && !bgmTargetSbId.value) {
+    toast.error('PixVerse 需关联已有合成/视频的镜头')
+    return
+  }
+  if (bgmModel.value === 'pixverse-sound-effect' && bgmTargetSbId.value) {
+    const sb = sbs.value.find(s => s.id === bgmTargetSbId.value)
+    const hasVideo = sb && (sb.composed_video_url || sb.composedVideoUrl || sb.video_url || sb.videoUrl)
+    if (!hasVideo) {
+      toast.error('所选镜头尚无合成/视频，请先在「合成」步骤生成，或改用 Suno')
+      return
+    }
+  }
+  bgmGenerating.value = true
+  try {
+    const sb = bgmTargetSbId.value ? sbs.value.find(s => s.id === bgmTargetSbId.value) : null
+    const result = await musicAPI.generate({
+      episode_id: epId.value,
+      storyboard_id: sb?.id,
+      description: bgmDesc.value.trim(),
+      content: sb ? getDialogueText(sb) : (localScript.value || scriptContent.value || ''),
+      model: bgmModel.value,
+      auto_apply: !!sb,
+    })
+    const createdItems = normalizeBgmLibraryRows(result?.items)
+    await loadBgmLibrary({ resumePoll: false })
+    if (createdItems.length) {
+      bgmLibrary.value = mergeBgmLibraryRows(bgmLibrary.value, createdItems)
+    }
+    toast.success(createdItems.length ? 'BGM 已提交，正在生成…' : 'BGM 生成已提交，请稍候')
+    startBgmPoll()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    bgmGenerating.value = false
+  }
+}
+
+async function applyBgmToShot(musicId, storyboardId) {
+  try {
+    await musicAPI.apply(musicId, storyboardId)
+    toast.success('已应用到镜头')
+    await refreshStoryboardsOnly()
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
 async function refresh() {
   try {
     drama.value = await dramaAPI.get(dramaId)
@@ -3481,7 +4147,7 @@ async function refresh() {
       const epHasSbs = sbs.value.length > 0
 
       if (isNarrationMode.value) {
-        scriptStep.value = inferNarrationScriptStep(episode.value, sbs.value.length, narratorReady.value)
+        scriptStep.value = inferNarrationScriptStep(episode.value, sbs.value.length, visualChars.value.length)
         try { await ensureNarratorCharacter() } catch {}
       } else if (epHasSbs) scriptStep.value = 4
       else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
@@ -3489,9 +4155,10 @@ async function refresh() {
       else if (epHasScript || epHasContent) scriptStep.value = 1
       else scriptStep.value = 0
       await loadLatestGridImage()
-      if (isNarrationMode.value && panel.value === 'production' && !['voice', 'dubbing', 'shots', 'compose'].includes(prodTab.value)) {
+      if (isNarrationMode.value && panel.value === 'production' && !['voice', 'chars', 'dubbing', 'bgm', 'shots', 'compose'].includes(prodTab.value)) {
         prodTab.value = 'voice'
       }
+      try { await loadBgmLibrary() } catch {}
     }
   } catch (e) {
     toast.error(e.message)
@@ -3594,6 +4261,59 @@ function doNarrationBreakdown() {
     }
   })()
 }
+
+async function doExtractNarrationCharacters() {
+  narrationExtracting.value = true
+  try {
+    const script = await saveNarrationScript()
+    const style = drama.value?.style || 'comic'
+    const res = await episodeAPI.extractNarrationCharacters(epId.value, { script, style })
+    const created = res?.created ?? 0
+    const updated = res?.updated ?? 0
+    if (created || updated) {
+      const total = (res?.characters || []).length
+      toast.success(`已提取 ${total} 条定妆：新增 ${created}，更新 ${updated}`)
+    } else if ((res?.characters || []).length) {
+      toast.info('角色列表已是最新')
+    } else {
+      toast.warning('未从文案中识别到画面角色，可手动添加或跳过后续分镜')
+    }
+    await refresh()
+    if (sbs.value.length) {
+      await episodeAPI.linkNarrationCharacters(epId.value)
+      await refresh()
+    }
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationExtracting.value = false
+  }
+}
+
+async function addNarrationCharacter() {
+  const name = window.prompt('角色姓名')
+  if (!name?.trim()) return
+  try {
+    await characterAPI.create({
+      drama_id: dramaId,
+      episode_id: epId.value,
+      name: name.trim(),
+      role: '角色',
+    })
+    await refresh()
+    toast.success('角色已添加')
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+function updateCharacterAppearance(charId, value) {
+  const trimmed = String(value || '').trim()
+  characterAPI.update(charId, { appearance: trimmed })
+  const c = chars.value.find(ch => ch.id === charId)
+  if (c) c.appearance = trimmed
+}
+
 function onNarratorVoiceChange(voiceId) {
   narratorVoiceId.value = voiceId
   narratorVoiceDirty.value = true
@@ -3719,30 +4439,135 @@ function watchAsyncResult(check, attempts = 24, delay = 2500) {
     for (let i = 0; i < attempts; i++) {
       await sleep(delay)
       await refresh()
-      if (check()) return
+      if (check()) return true
     }
+    return false
   })()
 }
 
+async function watchCharImageResult(charId, generationId, attempts = 36, delay = 2500, baseline = null) {
+  const startChar = chars.value.find(c => c.id === charId)
+  const startUrl = baseline?.startUrl ?? (startChar?.image_url || startChar?.imageUrl || '')
+  const startUpdatedAt = baseline?.startUpdatedAt ?? (startChar?.updated_at || startChar?.updatedAt || '')
+
+  for (let i = 0; i < attempts; i++) {
+    await sleep(i === 0 ? 1500 : delay)
+
+    if (generationId) {
+      try {
+        const gen = await imageAPI.get(generationId)
+        if (gen?.status === 'failed') {
+          pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
+          toast.error(gen?.error_msg || gen?.errorMsg || '定妆生成失败')
+          return false
+        }
+        if (gen?.status === 'completed') {
+          await refresh()
+          pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
+          return true
+        }
+      } catch {}
+    }
+
+    await refresh()
+    const char = chars.value.find(c => c.id === charId)
+    const url = char?.image_url || char?.imageUrl || ''
+    const updatedAt = char?.updated_at || char?.updatedAt || ''
+    if (url && (url !== startUrl || updatedAt !== startUpdatedAt)) {
+      pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
+      return true
+    }
+  }
+  pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
+  toast.warning('定妆生成超时或失败，请重试')
+  return false
+}
+
 async function genCharImg(id) {
+  const useReference = isCharPortraitUseReference(id)
+  const beforeChar = chars.value.find(c => c.id === id)
+  const baseline = {
+    startUrl: beforeChar?.image_url || beforeChar?.imageUrl || '',
+    startUpdatedAt: beforeChar?.updated_at || beforeChar?.updatedAt || '',
+  }
   try {
     if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
-    await characterAPI.generateImage(id, epId.value)
-    toast.success('角色图片生成中')
+    const result = await characterAPI.generateImage(id, epId.value, { useReference })
+    if (result?.appearance_auto_enriched && result?.appearance) {
+      const c = chars.value.find(ch => ch.id === id)
+      if (c) c.appearance = result.appearance
+      toast.info('已自动补全 English tags 外貌描述')
+    }
+    const refHint = !useReference
+      ? '（纯文生图）'
+      : result?.used_portrait_reference
+      ? `（参考：${result?.reference_character_variant || '同角色定妆'}）`
+      : '（无可用参考，纯文生图）'
+    toast.success(`定妆生成中 · ${result?.model || episodeImageModel.value}${refHint}`)
     await refresh()
-    watchAsyncResult(() => {
-      const char = chars.value.find(c => c.id === id)
-      const done = !!(char?.image_url || char?.imageUrl)
-      if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-      return done
-    })
+    const genId = result?.image_generation_id
+    const done = await watchCharImageResult(id, genId, 36, 2500, baseline)
+    if (done) toast.success('定妆图已更新')
+    else if (genId) {
+      try {
+        const gen = await imageAPI.get(genId)
+        const err = gen?.error_msg || gen?.errorMsg
+        if (err) toast.error(err)
+      } catch {}
+    }
   } catch (e) {
     pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
     toast.error(e.message)
   }
 }
+
+async function recognizeCharPortrait(id) {
+  try {
+    if (!isPendingCharRecognize(id)) pendingCharRecognizeIds.value.push(id)
+    const result = await characterAPI.recognizePortrait(id, epId.value)
+    toast.success('外貌描述已更新')
+    if (result?.character) {
+      const idx = chars.value.findIndex(c => c.id === id)
+      if (idx >= 0) chars.value[idx] = result.character
+    }
+    await refresh()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    pendingCharRecognizeIds.value = pendingCharRecognizeIds.value.filter(item => item !== id)
+  }
+}
+
+async function generateCharAppearance(id) {
+  try {
+    if (!isPendingCharAppearance(id)) pendingCharAppearanceIds.value.push(id)
+    const script = localRaw.value || rawContent.value || scriptContent.value || ''
+    const result = await characterAPI.generateAppearance(id, {
+      episode_id: epId.value,
+      script,
+    })
+    const appearance = result?.appearance || ''
+    if (appearance) {
+      const c = chars.value.find(ch => ch.id === id)
+      if (c) c.appearance = appearance
+      if (result?.character) {
+        const idx = chars.value.findIndex(ch => ch.id === id)
+        if (idx >= 0) chars.value[idx] = result.character
+      }
+    }
+    toast.success('AI 外貌描述已生成（含 English tags）')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    pendingCharAppearanceIds.value = pendingCharAppearanceIds.value.filter(item => item !== id)
+  }
+}
+
 async function batchCharImages() {
-  const ids = visualChars.value.filter(c => !(c.image_url || c.imageUrl)).map(c => c.id)
+  const pending = sortCharactersForPortraitGeneration(
+    visualChars.value.filter(c => !(c.image_url || c.imageUrl)),
+  )
+  const ids = pending.map(c => c.id)
   if (!ids.length) {
     toast.info('所有角色图片已生成')
     return
@@ -3750,7 +4575,20 @@ async function batchCharImages() {
   if (!tryBeginBatch('charImages', '角色图片批量生成中…')) return
   pendingCharImageIds.value = [...new Set([...pendingCharImageIds.value, ...ids])]
   try {
-    await characterAPI.batchImages(ids, epId.value)
+    for (const char of pending) {
+      const useReference = isCharPortraitUseReference(char.id)
+      if (useReference) {
+        const ref = findPortraitReferenceCharacter(chars.value, char)
+        if (ref && pending.some(c => c.id === ref.id && !(c.image_url || c.imageUrl))) {
+          await watchAsyncResult(() => {
+            const row = chars.value.find(c => c.id === ref.id)
+            return !!(row?.image_url || row?.imageUrl)
+          }, 36)
+          await refresh()
+        }
+      }
+      await characterAPI.generateImage(char.id, epId.value, { useReference })
+    }
     await refresh()
     await watchAsyncResult(() => ids.every(id => {
       const char = chars.value.find(c => c.id === id)
@@ -3842,18 +4680,28 @@ function hasComposeTts(sb) {
   return hasTTS(sb)
 }
 function getTTSUrl(sb) { return sb?.tts_audio_url || sb?.ttsAudioUrl || '' }
+function applyTtsResultToStoryboard(storyboardId, result) {
+  const path = result?.tts_audio_url || result?.ttsAudioUrl
+  if (!path) return
+  const sb = sbs.value.find(item => item.id === storyboardId)
+  if (!sb) return
+  sb.tts_audio_url = path
+  sb.ttsAudioUrl = path
+}
 function hasNarrationShotOwnTts(sb) { return !!getNarrationShotOwnTts(sb) }
 function hasEffectiveTTS(sb) {
   if (!isNarrationMode.value) return hasTTS(sb)
-  return hasNarrationShotOwnTts(sb)
+  return !!resolveNarrationEffectiveTts(sbs.value, sb).path
 }
 function getEffectiveTTSUrl(sb) {
   if (!isNarrationMode.value) return getTTSUrl(sb)
-  return getNarrationShotOwnTts(sb) || ''
+  return resolveNarrationEffectiveTts(sbs.value, sb).path || ''
 }
 function narrationTtsStatusLabel(sb) {
   if (!isNarrationMode.value) return hasTTS(sb) ? '已生成' : '待生成'
-  return hasNarrationShotOwnTts(sb) ? '已生成' : '待生成'
+  const resolved = resolveNarrationEffectiveTts(sbs.value, sb)
+  if (resolved.path && resolved.inherited) return '沿用前镜'
+  return resolved.path ? '已生成' : '待生成'
 }
 function getDialogueSpeaker(sb) {
   const speaker = getDialogueSpeakerRaw(sb)
@@ -3863,10 +4711,11 @@ function getDialogueSpeaker(sb) {
 async function genShotTTS(sb, force = false) {
   try {
     const res = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force))
+    applyTtsResultToStoryboard(sb.id, res)
     const provider = res?.provider || (localTtsEnabled.value ? 'edge' : 'api')
     const mode = provider === 'edge' ? '（本地 Edge）' : '（付费 API）'
     toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成${mode}`)
-    await refresh()
+    await refreshStoryboardsOnly()
   } catch (e) { toast.error(e.message) }
 }
 async function batchShotTTS() {
@@ -3905,6 +4754,11 @@ async function runBatchShotTTS(targets, batchMessage, force) {
       concurrency,
       sb => storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force)),
     )
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        applyTtsResultToStoryboard(targets[index].id, result.value)
+      }
+    })
     const apiCount = results.filter(r => r.status === 'fulfilled').length
     const failCount = results.length - apiCount
     if (apiCount) {
@@ -3912,7 +4766,7 @@ async function runBatchShotTTS(targets, batchMessage, force) {
       toast.success(`${label} ${apiCount} 条配音${localTtsEnabled.value ? `（本地 Edge · ${concurrency} 并发）` : ''}`)
     }
     if (failCount) toast.error(`${failCount} 条镜头配音生成失败`)
-    await refresh()
+    await refreshStoryboardsOnly()
   } finally {
     endBatch('tts')
   }
@@ -4006,22 +4860,23 @@ function isPendingNarrationShot(id) { return pendingNarrationShotIds.value.inclu
 
 async function genNarrationShotImage(sb) {
   const style = drama.value?.style || 'comic'
-  const prompt = getNarrationImagePromptText(sb, style)
-  if (!prompt) {
+  const basePrompt = getNarrationImagePromptText(sb, style)
+  if (!basePrompt) {
     toast.warning('该镜头没有旁白文案，无法生成配图')
     return
   }
   if (!String(sb?.image_prompt || sb?.imagePrompt || '').trim()) {
-    updateField(sb, 'image_prompt', prompt)
+    updateField(sb, 'image_prompt', basePrompt)
   }
   try {
     if (!isPendingNarrationShot(sb.id)) pendingNarrationShotIds.value.push(sb.id)
-    await imageAPI.generate(buildImagePayload({
+    const characterIds = await resolveShotCharacterIds(sb)
+    const payload = buildNarrationImageGeneratePayload(sb, visualChars.value, style, {
       storyboard_id: sb.id,
       drama_id: dramaId,
-      prompt,
       frame_type: 'illustration',
-    }))
+    }, episodeImageModel.value, characterIds)
+    await imageAPI.generate(buildImagePayload(payload))
     toast.success('配图生成中')
     await refresh()
     watchAsyncResult(() => {
@@ -4046,12 +4901,15 @@ async function batchNarrationShotImages() {
   try {
     const style = drama.value?.style || 'comic'
     pendingNarrationShotIds.value = [...new Set([...pendingNarrationShotIds.value, ...pending.map(sb => sb.id)])]
-    const results = await Promise.allSettled(pending.map(sb => imageAPI.generate(buildImagePayload({
-      storyboard_id: sb.id,
-      drama_id: dramaId,
-      prompt: getNarrationImagePromptText(sb, style),
-      frame_type: 'illustration',
-    }))))
+    const results = await Promise.allSettled(pending.map(async sb => {
+      const characterIds = await resolveShotCharacterIds(sb)
+      const payload = buildNarrationImageGeneratePayload(sb, visualChars.value, style, {
+        storyboard_id: sb.id,
+        drama_id: dramaId,
+        frame_type: 'illustration',
+      }, episodeImageModel.value, characterIds)
+      return imageAPI.generate(buildImagePayload(payload))
+    }))
     const failCount = results.filter(r => r.status === 'rejected').length
     if (failCount) toast.error(`${failCount} 个镜头配图提交失败`)
     else toast.success(`已提交剩余 ${pending.length} 张配图生成`)
@@ -4363,8 +5221,18 @@ async function regenerateMerge() {
 }
 
 async function doMerge(options = {}) {
+  if (composedCount.value < sbs.value.length) {
+    toast.error(`尚有 ${sbs.value.length - composedCount.value} 个镜头未合成（${composedCount.value}/${sbs.value.length}），请先在「镜头合成」完成后再导出`)
+    return false
+  }
+  if (exportMixBgm.value && !exportBgmMusicId.value && exportBgmOptions.value.length) {
+    exportBgmMusicId.value = exportBgmOptions.value[0].value
+  }
+  if (exportMixBgm.value && !exportBgmMusicId.value) {
+    toast.warning('未选择 BGM，将仅拼接旁白；可在右侧选择曲目或前往「BGM 配乐」生成')
+  }
   try {
-    await mergeAPI.merge(epId.value, { cancel_running: true })
+    await mergeAPI.merge(epId.value, buildMergePayload())
     mergeData.value = {
       status: 'processing',
       merged_url: null,
@@ -4426,14 +5294,22 @@ function getRefs(sb) {
 
 async function loadConfigs() {
   try {
-    const [imgCfgs, vidCfgs, audCfgs] = await Promise.all([
+    const [imgCfgs, vidCfgs, audCfgs, musCfgs] = await Promise.all([
       aiConfigAPI.list('image'),
       aiConfigAPI.list('video'),
       aiConfigAPI.list('audio'),
+      aiConfigAPI.list('music'),
     ])
     imageConfigs.value = imgCfgs || []
     videoConfigs.value = vidCfgs || []
     audioConfigs.value = audCfgs || []
+    musicConfigs.value = musCfgs || []
+    const activeMusic = (musCfgs || []).find(c => c.is_active)
+    if (activeMusic?.model) {
+      bgmModel.value = Array.isArray(activeMusic.model) ? activeMusic.model[0] : activeMusic.model
+    } else {
+      bgmModel.value = DEFAULT_BGM_MODEL
+    }
   } catch (e) { console.error('Failed to load AI configs', e) }
 }
 
@@ -4480,7 +5356,17 @@ async function loadVoices() {
 
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
 watch([localTtsEnabled, localEdgeVoiceId], persistLocalTtsPrefs)
-watch(epId, () => { restoreLocalTtsPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs() }, { immediate: true })
+watch([exportMixBgm, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
+watch(exportBgmOptions, (opts) => {
+  if (!exportBgmMusicId.value && opts.length) exportBgmMusicId.value = opts[0].value
+})
+watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs() }, { immediate: true })
+watch([prodTab, epId], ([tab, id]) => {
+  if (tab === 'bgm' && id) loadBgmLibrary()
+})
+watch([panel, epId], ([p, id]) => {
+  if (p === 'export' && id) loadBgmLibrary({ resumePoll: false })
+})
 onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
 </script>
 
@@ -5946,7 +6832,13 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
 .export-main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; }
 .export-video { max-width: 720px; width: 100%; border-radius: var(--radius-lg); background: #000; }
 .export-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; width: 100%; max-width: 720px; }
-.export-list { width: 240px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.export-list { width: 280px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.export-bgm-panel { padding: 10px 12px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.export-bgm-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); cursor: pointer; }
+.export-bgm-toggle input { accent-color: var(--accent); }
+.export-bgm-fields { display: flex; flex-direction: column; gap: 8px; }
+.export-bgm-volume { display: flex; flex-direction: column; gap: 4px; }
+.export-bgm-slider { width: 100%; accent-color: var(--accent); }
 .export-list-head { padding: 11px 14px; font-size: 11px; font-weight: 700; color: var(--text-3); border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.06em; }
 .export-list-body { flex: 1; overflow-y: auto; padding: 6px; }
 .exp-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--radius); }

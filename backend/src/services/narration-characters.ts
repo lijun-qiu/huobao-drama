@@ -1,0 +1,776 @@
+import { eq } from 'drizzle-orm'
+import { db, schema } from '../db/index.js'
+import { now } from '../utils/response.js'
+import { artStylePrompt, normalizeArtStyle, sanitizeCharacterAppearance, sanitizeAppearanceForPortrait } from '../constants/art-styles.js'
+import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
+import { getTextConfig, getTextProviderBaseUrl } from './ai.js'
+import { joinProviderUrl } from './adapters/url.js'
+import { parseNarrationImageMeta } from './narration-image.js'
+import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
+
+export type NarrationCharacterRow = {
+  id: number
+  name: string
+  role?: string | null
+  appearance?: string | null
+  variantLabel?: string | null
+  personality?: string | null
+  imageUrl?: string | null
+}
+
+export function normalizeVariantLabel(label?: string | null): string {
+  const raw = String(label || '').trim()
+  if (!raw || raw === '常态' || raw === '默认') return ''
+  return raw
+}
+
+export type VariantAgeGroup = 'youth' | 'child' | 'middle' | 'elder' | 'default' | 'other'
+
+export function getVariantAgeGroup(label?: string | null): VariantAgeGroup {
+  const l = normalizeVariantLabel(label)
+  if (!l) return 'default'
+  if (/童年|幼年|儿时|孩童|幼童/.test(l)) return 'child'
+  if (/青年|少年|年轻/.test(l)) return 'youth'
+  if (/中年/.test(l)) return 'middle'
+  if (/老年|晚年|垂暮|苍老|年迈/.test(l)) return 'elder'
+  return 'other'
+}
+
+export function variantNeedsYouthPortraitReference(label?: string | null): boolean {
+  const group = getVariantAgeGroup(label)
+  return group === 'middle' || group === 'elder'
+}
+
+export function variantPortraitSortOrder(label?: string | null): number {
+  const order: Record<VariantAgeGroup, number> = {
+    default: 0,
+    youth: 1,
+    child: 2,
+    other: 3,
+    middle: 4,
+    elder: 5,
+  }
+  return order[getVariantAgeGroup(label)]
+}
+
+export function findYouthBaseCharacter(
+  dramaId: number,
+  name: string,
+  excludeId?: number,
+): NarrationCharacterRow | null {
+  const siblings = listCharacterSiblings(dramaId, name, excludeId)
+  const withImage = (list: NarrationCharacterRow[]) => list.find(ch => ch.imageUrl?.trim()) || null
+  const youthHit = withImage(siblings.filter(ch => getVariantAgeGroup(ch.variantLabel) === 'youth'))
+  if (youthHit) return youthHit
+  return withImage(siblings.filter(ch => getVariantAgeGroup(ch.variantLabel) === 'default'))
+}
+
+function listCharacterSiblings(dramaId: number, name: string, excludeId?: number): NarrationCharacterRow[] {
+  return db.select().from(schema.characters).all()
+    .filter(ch => ch.dramaId === dramaId && !ch.deletedAt && ch.name.trim() === name.trim() && ch.id !== excludeId)
+    .map(ch => ({
+      id: ch.id,
+      name: ch.name,
+      role: ch.role,
+      appearance: ch.appearance,
+      variantLabel: ch.variantLabel,
+      personality: ch.personality,
+      imageUrl: ch.imageUrl,
+    }))
+}
+
+function portraitReferencePriority(targetGroup: VariantAgeGroup): VariantAgeGroup[] {
+  switch (targetGroup) {
+    case 'elder':
+      return ['middle', 'youth', 'default', 'child', 'other']
+    case 'middle':
+      return ['youth', 'default', 'elder', 'child', 'other']
+    case 'youth':
+      return ['default', 'child', 'middle', 'elder', 'other']
+    case 'child':
+      return ['default', 'youth', 'middle', 'other', 'elder']
+    default:
+      return ['youth', 'default', 'middle', 'child', 'elder', 'other']
+  }
+}
+
+/** 按目标形态智能选取同角色已有定妆参考（不限于青年） */
+export function findPortraitReferenceCharacter(
+  dramaId: number,
+  name: string,
+  excludeId?: number,
+  targetLabel?: string | null,
+): NarrationCharacterRow | null {
+  const siblings = listCharacterSiblings(dramaId, name, excludeId)
+  const withImage = (list: NarrationCharacterRow[]) => list.find(ch => ch.imageUrl?.trim()) || null
+  const targetGroup = getVariantAgeGroup(targetLabel)
+
+  for (const group of portraitReferencePriority(targetGroup)) {
+    const hit = withImage(siblings.filter(ch => getVariantAgeGroup(ch.variantLabel) === group))
+    if (hit) return hit
+  }
+  return withImage(siblings)
+}
+
+function variantAgeOrder(group: VariantAgeGroup): number {
+  const order: Record<VariantAgeGroup, number> = {
+    child: 0,
+    youth: 1,
+    default: 1,
+    other: 2,
+    middle: 3,
+    elder: 4,
+  }
+  return order[group]
+}
+
+function buildPortraitReferenceHint(targetGroup: VariantAgeGroup, refGroup: VariantAgeGroup): string {
+  if (refGroup === targetGroup) {
+    return 'same person as reference image, keep facial structure and identity recognizable, match reference art style and line weight, follow appearance description'
+  }
+  const delta = variantAgeOrder(targetGroup) - variantAgeOrder(refGroup)
+  if (delta > 0) {
+    if (targetGroup === 'elder') {
+      return 'same person as reference image, naturally aged to elderly, gray or white hair, visible wrinkles and aged skin, clearly older than reference, do NOT copy youth hairstyle or outfit from reference, follow appearance description for elderly look, match reference art style and line weight only'
+    }
+    if (targetGroup === 'middle') {
+      return 'same person as reference image, naturally aged to middle age, subtle gray at temples, keep facial structure recognizable, match reference art style and line weight, follow appearance description over reference age'
+    }
+    return 'same person as reference image, older than reference, follow target life stage in appearance description, match reference art style'
+  }
+  if (delta < 0) {
+    return 'same person as reference image, younger than reference, follow target life stage in appearance description, match reference art style and line weight'
+  }
+  return 'same person as reference image, keep identity recognizable, match reference art style, follow appearance description'
+}
+
+export function formatCharacterDisplayName(char: { name?: string | null; variantLabel?: string | null; variant_label?: string | null }) {
+  const name = String(char.name || '').trim()
+  const label = normalizeVariantLabel(char.variantLabel ?? (char as { variant_label?: string }).variant_label)
+  return label ? `${name} · ${label}` : name
+}
+
+function scoreVariantForText(text: string, char: NarrationCharacterRow): number {
+  const label = normalizeVariantLabel(char.variantLabel)
+  const app = String(char.appearance || '').trim()
+  let score = 0
+
+  if (label && text.includes(label)) score += 15
+
+  const ageRules: Array<{ keys: string[]; pattern: RegExp }> = [
+    { keys: ['童年', '幼年', '孩童'], pattern: /童年|幼年|儿时|小时候|孩童|幼童|几岁/ },
+    { keys: ['少年', '青年'], pattern: /少年|青年|年轻|二十岁|18岁|19岁|20岁|二十出头|大学|小伙/ },
+    { keys: ['中年'], pattern: /中年|四十|五十|人到中年|40岁|50岁/ },
+    { keys: ['老年', '晚年'], pattern: /老年|晚年|白发|鬓白|六十|七十|80岁|垂暮|苍老|老人|年迈/ },
+  ]
+
+  for (const rule of ageRules) {
+    const labelHit = label ? rule.keys.some(k => label.includes(k)) : false
+    const textHit = rule.pattern.test(text)
+    const appHit = rule.keys.some(k => app.includes(k))
+    if (labelHit && textHit) score += 12
+    if (textHit && appHit) score += 8
+  }
+
+  const textAge = text.match(/(\d{1,2})\s*岁/)?.[1]
+  const appAge = app.match(/(\d{1,2})\s*岁/)?.[1]
+  if (textAge && appAge && textAge === appAge) score += 20
+
+  if (!label) score += 1
+  return score
+}
+
+function pickBestVariantForText(text: string, variants: NarrationCharacterRow[]): NarrationCharacterRow {
+  let best = variants[0]
+  let bestScore = -1
+  for (const variant of variants) {
+    const score = scoreVariantForText(text, variant)
+    if (score > bestScore) {
+      bestScore = score
+      best = variant
+    }
+  }
+  if (bestScore <= 0) {
+    return variants.find(v => !normalizeVariantLabel(v.variantLabel)) || variants[0]
+  }
+  return best
+}
+
+export function isNarratorCharacter(char: { name?: string | null; role?: string | null }) {
+  const text = `${char.name || ''} ${char.role || ''}`.toLowerCase()
+  return text.includes('旁白') || text.includes('narrator') || text.includes('画外音')
+}
+
+export function isVisualCharacter(char: { name?: string | null; role?: string | null }) {
+  return !isNarratorCharacter(char)
+}
+
+function linkCharacterToEpisode(episodeId: number, characterId: number) {
+  const existing = db.select().from(schema.episodeCharacters)
+    .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
+    .find(row => row.characterId === characterId)
+  if (!existing) {
+    db.insert(schema.episodeCharacters).values({ episodeId, characterId, createdAt: now() }).run()
+  }
+}
+
+export function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
+  db.delete(schema.storyboardCharacters)
+    .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
+    .run()
+
+  const uniqueIds = [...new Set((characterIds || []).filter(Boolean))]
+  for (const characterId of uniqueIds) {
+    db.insert(schema.storyboardCharacters).values({ storyboardId, characterId }).run()
+  }
+}
+
+export function getEpisodeVisualCharacters(episodeId: number, dramaId: number): NarrationCharacterRow[] {
+  const links = db.select().from(schema.episodeCharacters)
+    .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
+  const linkedIds = new Set(links.map(link => link.characterId))
+  return db.select().from(schema.characters).all()
+    .filter(ch => ch.dramaId === dramaId && !ch.deletedAt && linkedIds.has(ch.id) && isVisualCharacter(ch))
+    .map(ch => ({
+      id: ch.id,
+      name: ch.name,
+      role: ch.role,
+      appearance: ch.appearance,
+      variantLabel: ch.variantLabel,
+      personality: ch.personality,
+      imageUrl: ch.imageUrl,
+    }))
+}
+
+export function detectCharacterIdsInText(text: string, characters: NarrationCharacterRow[]): number[] {
+  const normalized = String(text || '').trim()
+  if (!normalized || !characters.length) return []
+
+  const mentionedNames: string[] = []
+  const sorted = [...characters].sort((a, b) => b.name.length - a.name.length)
+  for (const char of sorted) {
+    const name = char.name.trim()
+    if (!name || name.length < 2) continue
+    if (normalized.includes(name) && !mentionedNames.includes(name)) mentionedNames.push(name)
+  }
+
+  const found: number[] = []
+  for (const name of mentionedNames) {
+    const variants = characters.filter(ch => ch.name.trim() === name)
+    if (!variants.length) continue
+    if (variants.length === 1) {
+      found.push(variants[0].id)
+      continue
+    }
+    found.push(pickBestVariantForText(normalized, variants).id)
+  }
+  return found
+}
+
+export function buildStoryboardCharacterContextText(sb: {
+  dialogue?: string | null
+  description?: string | null
+  title?: string | null
+  imagePrompt?: string | null
+  action?: string | null
+  atmosphere?: string | null
+  location?: string | null
+  referenceImages?: string | null
+}) {
+  const meta = parseNarrationImageMeta(sb.referenceImages)
+  const parts = [
+    meta.scene_content,
+    meta.title_hook,
+    meta.title_full,
+    sb.dialogue,
+    sb.description,
+    sb.title,
+    sb.imagePrompt,
+    sb.action,
+    sb.atmosphere,
+    sb.location,
+  ]
+  return parts.map(v => String(v || '').trim()).filter(Boolean).join('\n')
+}
+
+export function resolveStoryboardCharacterIdsForShot(
+  storyboardId: number,
+  options?: { sync?: boolean },
+) {
+  const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboardId)).all()
+  if (!sb) throw new Error('镜头不存在')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  if (!ep) throw new Error('剧集不存在')
+
+  const characters = getEpisodeVisualCharacters(sb.episodeId, ep.dramaId)
+  const text = buildStoryboardCharacterContextText(sb)
+  const ids = detectCharacterIdsInText(text, characters)
+  if (options?.sync !== false) syncStoryboardCharacters(storyboardId, ids)
+
+  return {
+    storyboardId,
+    episodeId: sb.episodeId,
+    dramaId: ep.dramaId,
+    characterIds: ids,
+    characters: characters.filter(ch => ids.includes(ch.id)),
+    contextText: text,
+  }
+}
+
+export function linkStoryboardCharactersFromText(
+  storyboardId: number,
+  text: string,
+  characters: NarrationCharacterRow[],
+) {
+  const ids = detectCharacterIdsInText(text, characters)
+  syncStoryboardCharacters(storyboardId, ids)
+  return ids
+}
+
+export function linkAllNarrationStoryboardCharacters(episodeId: number, dramaId: number) {
+  const characters = getEpisodeVisualCharacters(episodeId, dramaId)
+  const storyboards = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, episodeId)).all()
+    .filter(sb => !sb.deletedAt)
+
+  let linked = 0
+  for (const sb of storyboards) {
+    const text = buildStoryboardCharacterContextText(sb)
+    const ids = linkStoryboardCharactersFromText(sb.id, text, characters)
+    if (ids.length) linked++
+  }
+  return { storyboardCount: storyboards.length, linkedStoryboardCount: linked, characterCount: characters.length }
+}
+
+function extractJsonObject(text: string) {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const candidate = (fenced?.[1] || text).trim()
+  const start = candidate.indexOf('{')
+  const end = candidate.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  try {
+    return JSON.parse(candidate.slice(start, end + 1))
+  } catch {
+    return null
+  }
+}
+
+export async function callTextChat(system: string, user: string): Promise<string> {
+  const config = getTextConfig()
+  const url = joinProviderUrl(getTextProviderBaseUrl(config), '/chat/completions', '')
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      temperature: 0.2,
+    }),
+  })
+
+  if (!resp.ok) {
+    throw new Error(`Text API error ${resp.status}: ${await resp.text()}`)
+  }
+
+  const json = await resp.json() as any
+  return json.choices?.[0]?.message?.content || ''
+}
+
+function resolvePortraitFraming(_appearance: string): string {
+  return [
+    'character design reference sheet for animation production',
+    'isolated single character on plain light gray studio background',
+    'half-body to full-body turnaround view, outfit and small props visible',
+    'NOT movie poster, NOT scenic background, NOT environmental illustration',
+    'NOT pixel art, NOT retro photo filter, NOT dithered shading',
+  ].join(', ')
+}
+
+const PORTRAIT_STYLE_GUARD = [
+  'CRITICAL ART STYLE: modern Chinese short-drama 2D anime, thin clean line art, flat soft cel shading, solid light gray background',
+  'FORBIDDEN: pixel art, dithering, 8-bit, retro game, vintage photo filter, nostalgic poster, film grain, CRT noise, cross-hatching',
+].join(', ')
+
+function extractEnglishAppearanceTags(appearance: string): { body: string; tags: string } {
+  const match = appearance.match(/(?:^|\n)\s*English tags:\s*(.+)$/im)
+  if (!match) return { body: appearance.trim(), tags: '' }
+  return {
+    body: appearance.replace(/(?:^|\n)\s*English tags:\s*.+$/im, '').trim(),
+    tags: match[1].trim(),
+  }
+}
+
+export function hasEnglishAppearanceTags(appearance?: string | null): boolean {
+  return /(?:^|\n)\s*English tags:\s*\S/im.test(String(appearance || ''))
+}
+
+async function generateEnglishAppearanceTags(
+  appearanceBody: string,
+  context?: { name?: string | null; role?: string | null },
+): Promise<string> {
+  const system = [
+    '你是定妆视觉标注助手。根据外貌描述，只输出一行 English tags: 开头的英文标签。',
+    '仅写肉眼可见项：发型、上衣、下装、鞋、眼镜、首饰、道具、手持/身旁物品（如 bicycle）。',
+    '禁止 retro style, vintage look, pixel, webtoon, chibi, anime style 等画风词。',
+    '禁止 abstract 气质词，只要可视名词短语；逗号分隔，6-12 项。',
+    '示例：English tags: side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, bicycle',
+  ].join('\n')
+  const user = [
+    context?.name ? `角色：${context.name}` : '',
+    context?.role ? `定位：${context.role}` : '',
+    `外貌描述：\n${appearanceBody}`,
+  ].filter(Boolean).join('\n\n')
+  const raw = (await callTextChat(system, user)).trim()
+  const matched = raw.match(/English tags:\s*(.+)/i)?.[1] || raw.split('\n')[0]?.trim() || ''
+  const tags = sanitizeCharacterAppearance(matched.replace(/^English tags:\s*/i, ''))
+  return tags
+}
+
+/** 清洗 + 补全 English tags（缺失时自动调用 LLM） */
+export async function finalizeCharacterAppearance(
+  appearance: string,
+  context?: { name?: string | null; role?: string | null },
+): Promise<string> {
+  let text = sanitizeCharacterAppearance(appearance)
+  if (!text) return text
+  if (hasEnglishAppearanceTags(text)) {
+    const { body, tags } = extractEnglishAppearanceTags(text)
+    const cleanedBody = sanitizeCharacterAppearance(body)
+    const cleanedTags = tags ? sanitizeCharacterAppearance(tags) : ''
+    return [cleanedBody, cleanedTags ? `English tags: ${cleanedTags}` : ''].filter(Boolean).join('\n').slice(0, 600)
+  }
+
+  const { body } = extractEnglishAppearanceTags(text)
+  const tags = await generateEnglishAppearanceTags(body || text, context)
+  if (!tags) return text.slice(0, 600)
+  const merged = `${(body || text).trim()}\nEnglish tags: ${tags}`
+  return sanitizeCharacterAppearance(merged).slice(0, 600)
+}
+
+export function buildCharacterPortraitPrompt(
+  char: { name: string; appearance?: string | null; description?: string | null; personality?: string | null; role?: string | null; variantLabel?: string | null },
+  style = 'webtoon',
+  options?: { portraitReference?: boolean; referenceVariantLabel?: string | null },
+) {
+  const normalizedStyle = normalizeArtStyle(style)
+  const rawAppearance = sanitizeCharacterAppearance(char.appearance?.trim() || char.description?.trim() || '')
+  const { body: appearance, tags: englishTags } = extractEnglishAppearanceTags(rawAppearance)
+  const cleanTags = englishTags ? sanitizeCharacterAppearance(englishTags) : ''
+  const role = char.role?.trim() || ''
+  const stage = normalizeVariantLabel(char.variantLabel)
+  const ageGroup = getVariantAgeGroup(char.variantLabel)
+  const stylePrompt = artStylePrompt(normalizedStyle, 'portrait')
+  const refHint = options?.portraitReference
+    ? buildPortraitReferenceHint(ageGroup, getVariantAgeGroup(options.referenceVariantLabel))
+    : ''
+  const framing = resolvePortraitFraming(`${rawAppearance} ${cleanTags}`)
+  return [
+    PORTRAIT_STYLE_GUARD,
+    stylePrompt,
+    'unified character design sheet, single consistent project art style, no mixed media',
+    `${char.name}${stage ? ` (${stage})` : ''}, character reference portrait for animation production`,
+    stage ? `life stage: ${stage}` : '',
+    refHint,
+    appearance ? `appearance: ${appearance}` : '',
+    cleanTags ? `costume and props: ${cleanTags}` : '',
+    role ? `role: ${role}` : '',
+    framing,
+    'no text, no watermark',
+    'repeat: 2D anime cel-shading character sheet, NOT pixel art, NOT retro filter',
+  ].filter(Boolean).join(', ')
+}
+
+export function resolveCharacterPortraitGeneration(
+  char: {
+    id: number
+    name: string
+    dramaId: number
+    appearance?: string | null
+    description?: string | null
+    personality?: string | null
+    role?: string | null
+    variantLabel?: string | null
+    imageUrl?: string | null
+  },
+  style = 'comic',
+  options?: { useReference?: boolean },
+) {
+  const useReference = options?.useReference !== false
+  const refChar = useReference
+    ? findPortraitReferenceCharacter(char.dramaId, char.name, char.id, char.variantLabel)
+    : null
+  const refUrl = refChar?.imageUrl?.trim() || null
+
+  const referenceImages: string[] = []
+  if (useReference && refUrl) referenceImages.push(refUrl)
+
+  const prompt = buildCharacterPortraitPrompt(char, style, {
+    portraitReference: !!(useReference && refUrl),
+    referenceVariantLabel: refChar?.variantLabel,
+  })
+
+  return {
+    prompt,
+    referenceImages: referenceImages.length ? referenceImages : undefined,
+    referenceCharacterId: refChar?.id,
+    referenceCharacterVariant: refChar?.variantLabel || null,
+    /** @deprecated use referenceCharacterId */
+    youthCharacterId: getVariantAgeGroup(refChar?.variantLabel) === 'youth' ? refChar?.id : undefined,
+  }
+}
+
+/** 中年/老年定妆需 subject 参考能力；kling-v1 仅普通图生图，自动升到 v1.5 */
+export function resolvePortraitImageModel(episodeModel?: string | null, variantLabel?: string | null): string {
+  const model = String(episodeModel || '').trim() || DEFAULT_IMAGE_MODEL
+  if (!variantNeedsYouthPortraitReference(variantLabel)) return model
+  if (model === 'kling-v1') return 'kling-v1-5'
+  return model
+}
+
+export function enrichImagePromptWithCharacters(
+  prompt: string,
+  characters: NarrationCharacterRow[],
+  characterIds?: number[],
+) {
+  const base = String(prompt || '').trim()
+  if (!base) return base
+
+  const relevant = characterIds?.length
+    ? characters.filter(ch => characterIds.includes(ch.id))
+    : characters
+  if (!relevant.length) return base
+
+  const hints = relevant.map(ch => {
+    const app = ch.appearance?.trim()
+    const label = formatCharacterDisplayName(ch)
+    return app ? `${label} (${app})` : label
+  }).join('; ')
+
+  return `${base}, characters in scene: ${hints}, keep each character appearance consistent with reference images for the same life stage, same face and outfit within the same variant`
+}
+
+export async function generateCharacterAppearance(params: {
+  character: {
+    name: string
+    role?: string | null
+    personality?: string | null
+    appearance?: string | null
+    description?: string | null
+    variantLabel?: string | null
+  }
+  script?: string
+  style?: string
+  contentContext?: {
+    dramaTitle?: string
+    dramaGenre?: string
+    dramaStyle?: string
+    episodeTitle?: string
+    mentionExcerpt?: string
+    storyboardSnippets?: string[]
+    otherCharacters?: string[]
+  }
+}): Promise<string> {
+  const { character, script, style = 'comic', contentContext } = params
+  logTaskProgress('CharacterAppearance', 'llm-generate-start', { name: character.name, model: getTextConfig().model })
+  const system = [
+    '你是影视角色定妆造型设计助手。',
+    '必须根据解说稿/剧本中该角色的出场情节、对白、行为来推断外貌，与故事时代、题材、氛围一致。',
+    '不要写与内容无关的通用模板；若剧本暗示年龄/职业/身份，外貌要体现。',
+    '与其他角色要有明显区分。',
+    '若提供了 variant_label / 时期标签，外貌必须严格对应该人生阶段，不得写成其他年龄。',
+    '中文为主，可夹英文关键词；含年龄、性别、发型、五官、服装、体型、标志特征；80-180 字。',
+    '【重要】只描述人物本身：发型、五官、服装、配饰、体型、动作道具。画风由项目统一设置，禁止出现：',
+    '- 渲染/画风词：retro style, vintage look, pixel, webtoon, chibi, anime style, 复古风, Q版, 条漫, 像素',
+    '- 把年代写成画风：禁止 "1980s retro style"，应写 "1980s side-part hairstyle, floral shirt, bell-bottom pants"',
+    '- 禁止 vintage bicycle，应写 bicycle 或 pushing a bicycle',
+    '示例（好）：28-year-old male, 1980s side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, pushing a bicycle',
+    '示例（差）：28-year-old male, 1980s retro style, vintage look, retro hairstyle',
+    '输出格式：一段中文外貌描述 + 换行 + English tags: 英文逗号分隔的具体发型/服装/配饰/道具（生图必用），如 English tags: 1980s side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, bicycle',
+    '只输出描述正文，不要标题、markdown、JSON。',
+  ].join('\n')
+
+  const user = [
+    `角色名：${character.name}`,
+    normalizeVariantLabel(character.variantLabel) ? `定妆时期：${normalizeVariantLabel(character.variantLabel)}` : '定妆时期：常态（全篇单一形态）',
+    character.role ? `定位：${character.role}` : '',
+    character.personality ? `性格：${character.personality}` : '',
+    character.appearance?.trim() ? `已有描述（可优化但勿偏离剧情）：${character.appearance.trim()}` : '',
+    character.description?.trim() ? `简介：${character.description.trim()}` : '',
+    contentContext?.dramaTitle ? `作品：${contentContext.dramaTitle}` : '',
+    contentContext?.dramaGenre ? `题材：${contentContext.dramaGenre}` : '',
+    contentContext?.episodeTitle ? `本集：${contentContext.episodeTitle}` : '',
+    contentContext?.otherCharacters?.length
+      ? `同集其他角色（勿混淆）：${contentContext.otherCharacters.join('；')}`
+      : '',
+    contentContext?.mentionExcerpt?.trim()
+      ? `剧本中该角色相关段落：\n${contentContext.mentionExcerpt.trim()}`
+      : script?.trim() ? `剧本/解说稿摘录：\n${script.trim().slice(0, 3500)}` : '',
+    contentContext?.storyboardSnippets?.length
+      ? `该角色出现的镜头：\n${contentContext.storyboardSnippets.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+      : '',
+  ].filter(Boolean).join('\n\n')
+
+  const raw = (await callTextChat(system, user)).trim()
+  const cleaned = raw.replace(/^["'`]+|["'`]+$/g, '').replace(/^外貌描述[:：]\s*/i, '').trim()
+  if (!cleaned) throw new Error('AI 未返回有效外貌描述')
+  logTaskSuccess('CharacterAppearance', 'llm-generate-done', { name: character.name, length: cleaned.length })
+  return finalizeCharacterAppearance(cleaned.slice(0, 600), {
+    name: character.name,
+    role: character.role,
+  })
+}
+
+export function collectCharacterReferenceImages(
+  characters: NarrationCharacterRow[],
+  characterIds: number[],
+  max = 4,
+): string[] {
+  const refs: string[] = []
+  for (const id of characterIds) {
+    const char = characters.find(ch => ch.id === id)
+    const url = char?.imageUrl?.trim()
+    if (url && !refs.includes(url) && refs.length < max) refs.push(url)
+  }
+  return refs
+}
+
+export async function extractNarrationCharacters(
+  episodeId: number,
+  dramaId: number,
+  script: string,
+  style = 'comic',
+) {
+  const existing = db.select().from(schema.characters).all()
+    .filter(ch => ch.dramaId === dramaId && !ch.deletedAt)
+
+  let extracted: Array<{ name: string; variantLabel?: string; role?: string; appearance?: string; personality?: string }> = []
+
+  try {
+    const config = getTextConfig()
+    if (config.apiKey) {
+      logTaskProgress('NarrationChars', 'llm-extract-start', { episodeId, model: config.model })
+
+      const system = [
+        '你是影视解说项目的角色设定师，从解说文案中提取会在画面中出现的角色，并决定每个角色需要几种定妆（外貌时期）。',
+        '规则：',
+        '1) 只提取会在插画中出现的真实人物，不要提取「旁白」「解说员」「作者」',
+        '2) 输出字段：name、variant_label、role、appearance、personality',
+        '3) variant_label 表示该条定妆的时期/形态：如 童年、少年、青年、中年、老年；若全篇只有一个时期则留空或填「常态」',
+        '4) 同一人物若文案出现明显不同人生阶段（回忆、多年后、少年与晚年等），必须拆成多条记录：name 相同，variant_label 不同，appearance 各自独立',
+        '5) 同一人物若只有一个年龄阶段，只输出 1 条（variant_label 为空或常态）',
+        '6) appearance：中英混合，只写人物外貌与服饰（年龄、性别、发型、服装、体型、标志特征、动作道具）；禁止画风/艺术风格/retro/vintage look/pixel/复古风/Q版/条漫；年代只体现在服装发型（如80年代花衬衫、三七分发型），禁止写 "1980s retro style" 或 "retro hairstyle"，应写 "1980s side-part hairstyle"',
+        '7) 示例 appearance：28岁男性个体户，精干结实。\nEnglish tags: 1980s side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, bicycle',
+        '8) 合并同一人物同一时期的称呼，不要重复',
+        '只输出 JSON，不要解释。',
+      ].join('\n')
+
+      const user = JSON.stringify({
+        script: script.slice(0, 12000),
+        existing_characters: existing.filter(isVisualCharacter).map(ch => ({
+          name: ch.name,
+          variant_label: ch.variantLabel || '',
+          appearance: ch.appearance,
+        })),
+        output_format: {
+          characters: '[{ name, variant_label, role, appearance, personality }]',
+        },
+      })
+
+      const text = await callTextChat(system, user)
+      const parsed = extractJsonObject(text)
+      if (Array.isArray(parsed?.characters)) {
+        extracted = parsed.characters
+          .map((row: any) => ({
+            name: String(row?.name || '').trim(),
+            variantLabel: normalizeVariantLabel(row?.variant_label ?? row?.variantLabel),
+            role: String(row?.role || '角色').trim(),
+            appearance: sanitizeCharacterAppearance(String(row?.appearance || '').trim()),
+            personality: String(row?.personality || '').trim(),
+          }))
+          .filter((row: { name: string }) => row.name && !isNarratorCharacter(row))
+      }
+    }
+  } catch (err: any) {
+    logTaskWarn('NarrationChars', 'llm-extract-failed', { error: err.message })
+  }
+
+  if (extracted.length) {
+    extracted = await Promise.all(extracted.map(async row => ({
+      ...row,
+      appearance: row.appearance
+        ? await finalizeCharacterAppearance(row.appearance, { name: row.name, role: row.role })
+        : '',
+    })))
+  }
+
+  if (!extracted.length) {
+    logTaskWarn('NarrationChars', 'llm-extract-empty', { episodeId })
+    return {
+      created: 0,
+      updated: 0,
+      characters: getEpisodeVisualCharacters(episodeId, dramaId),
+      linked: linkAllNarrationStoryboardCharacters(episodeId, dramaId),
+    }
+  }
+
+  const ts = now()
+  let created = 0
+  let updated = 0
+
+  for (const row of extracted) {
+    const variantLabel = normalizeVariantLabel(row.variantLabel) || null
+    const match = existing.find(ch =>
+      ch.name === row.name
+      && !ch.deletedAt
+      && normalizeVariantLabel(ch.variantLabel) === normalizeVariantLabel(variantLabel),
+    )
+    if (match) {
+      const updates: Record<string, any> = { updatedAt: ts }
+      if (row.role && !match.role) updates.role = row.role
+      if (variantLabel && match.variantLabel !== variantLabel) updates.variantLabel = variantLabel
+      if (row.appearance && (!match.appearance || match.appearance.length < row.appearance.length)) {
+        updates.appearance = sanitizeCharacterAppearance(row.appearance)
+      }
+      if (row.personality && !match.personality) updates.personality = row.personality
+      if (Object.keys(updates).length > 1) {
+        db.update(schema.characters).set(updates).where(eq(schema.characters.id, match.id)).run()
+        updated++
+      }
+      linkCharacterToEpisode(episodeId, match.id)
+    } else {
+      const res = db.insert(schema.characters).values({
+        dramaId,
+        name: row.name,
+        role: row.role || '角色',
+        variantLabel,
+        appearance: sanitizeCharacterAppearance(row.appearance || ''),
+        personality: row.personality || '',
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      linkCharacterToEpisode(episodeId, Number(res.lastInsertRowid))
+      created++
+    }
+  }
+
+  const linked = linkAllNarrationStoryboardCharacters(episodeId, dramaId)
+  const characters = getEpisodeVisualCharacters(episodeId, dramaId)
+
+  logTaskSuccess('NarrationChars', 'extract-done', {
+    episodeId,
+    created,
+    updated,
+    characterCount: characters.length,
+    linkedStoryboards: linked.linkedStoryboardCount,
+  })
+
+  return { created, updated, characters, linked }
+}

@@ -420,7 +420,7 @@ const cfgTesting = ref(false)
 const cfgTestResult = ref(null)
 const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0 })
 const huobaoForm = reactive({ apiKey: '' })
-const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
+const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }, { type: 'music', label: '音乐' }]
 const providers = ['ali', 'chatfire', 'gemini', 'kling', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine']
 const providerSelectOptions = computed(() => providers.map(p => ({ label: p, value: p })))
 const serviceMeta = {
@@ -428,6 +428,7 @@ const serviceMeta = {
   image: { label: '图片', desc: '角色图、场景图、镜头图与首尾帧等静态图像生成' },
   video: { label: '视频', desc: '镜头视频生成，支持单图、多图和首尾帧模式' },
   audio: { label: '音频', desc: '角色试听、旁白与对白语音生成' },
+  music: { label: '音乐', desc: 'Suno 纯音乐 / PixVerse 音效 BGM，用于镜头配乐' },
 }
 const providerPresets = {
   text: {
@@ -436,25 +437,34 @@ const providerPresets = {
     openai: { label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'] },
   },
   image: {
+    kling: {
+      label: '4022 可灵 Kling（推荐）',
+      baseUrl: 'https://api.4022543.xyz',
+      models: ['kling-v1', 'kling-v1-5', 'kling-v2', 'kling-v2-new', 'kling-v2-1', 'kling-v3'],
+    },
     chatfire: {
-      label: '豆包绘画推荐',
+      label: '4022 网关绘画',
       baseUrl: 'https://api.4022543.xyz',
       models: [
+        'gpt-image-2-all',
+        'qwen-image-edit-2509',
+        'qwen-image-2.0-2026-03-03',
+        'qwen-image-max',
         'doubao-seedream-3-0-t2i-250415',
         'doubao-seedream-4-0-250828',
         'doubao-seedream-5-0-260128',
         'doubao-seedream-4-5-251128',
         'qwen-image-2.0-2026-03-03',
+        'qwen-image-edit-2509',
         'qwen-image-max',
       ],
     },
-    kling: {
-      label: '可灵 Kling',
-      baseUrl: 'https://api.chatfire.site',
-      models: ['kling-v2-1', 'kling-v2', 'kling-v2-new', 'kling-v1-5', 'kling-v1'],
+    ali: {
+      label: '阿里百炼直连',
+      baseUrl: 'https://dashscope.aliyuncs.com',
+      models: ['qwen-image-2.0-2026-03-03', 'qwen-image-edit-2509', 'qwen-image-max'],
     },
-    ali: { label: '阿里百炼直连', baseUrl: 'https://dashscope.aliyuncs.com', models: ['qwen-image-2.0-2026-03-03', 'qwen-image-max'] },
-    gemini: { label: 'Gemini 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3.1-flash-image'] },
+    gemini: { label: 'Gemini 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3.1-flash-image-preview', 'gemini-3.1-flash-image'] },
     volcengine: {
       label: '火山直连',
       baseUrl: 'https://ark.cn-beijing.volces.com',
@@ -473,12 +483,20 @@ const providerPresets = {
       models: ['speech-2.8-hd', 'speech-2.8-turbo', 'speech-02-turbo'],
     },
   },
+  music: {
+    chatfire: {
+      label: '4022 音乐 BGM',
+      baseUrl: 'https://api.4022543.xyz',
+      models: ['suno_music_open', 'chirp-v3-5', 'pixverse-sound-effect'],
+    },
+  },
 }
 const huobaoPresetCards = [
   { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-preview', priority: 100 },
-  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'doubao-seedream-3-0-t2i-250415', priority: 99 },
+  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2-all', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: 'https://api.chatfire.site/volcengine', model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.4022543.xyz/minimax', model: 'speech-2.8-hd', priority: 97 },
+  { serviceType: 'music', label: '音乐', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'suno_music_open', priority: 96 },
 ]
 const endpointPrefixes = {
   chatfire: '/v1',

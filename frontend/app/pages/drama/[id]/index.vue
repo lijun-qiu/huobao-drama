@@ -12,8 +12,15 @@
         <div class="head-info">
           <h1 class="page-title">{{ drama.title }}</h1>
           <div class="page-meta">
-            <span v-if="drama.style" class="style-chip">{{ drama.style }}</span>
-            <span v-if="drama.style" class="meta-divider"></span>
+            <BaseSelect
+              v-model="dramaStyle"
+              :options="styleSelectOptions"
+              placeholder="画风"
+              searchable
+              style="width:220px"
+              @update:model-value="saveDramaStyle"
+            />
+            <span class="meta-divider"></span>
             <span class="meta-item">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               {{ drama.characters?.length || 0 }} 角色
@@ -157,6 +164,7 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, dramaAPI, episodeAPI } from '~/composables/useApi'
+import { artStyleLabel, artStyleSelectOptions, normalizeArtStyle } from '~/composables/useArtStyles'
 import { DEFAULT_IMAGE_MODEL, IMAGE_MODEL_OPTIONS } from '~/composables/useEpisodeWorkflow'
 import BaseSelect from '~/components/BaseSelect.vue'
 
@@ -189,10 +197,27 @@ const videoConfigOptions = computed(() => videoConfigs.value.map(c => ({ label: 
 const audioConfigOptions = computed(() => audioConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const canCreateEpisode = computed(() => !!(newEpisodeImageConfigId.value && newEpisodeVideoConfigId.value && newEpisodeAudioConfigId.value))
 
+const styleSelectOptions = artStyleSelectOptions
+const dramaStyle = ref('')
+
 async function load() {
   try {
     drama.value = await dramaAPI.get(dramaId)
+    dramaStyle.value = normalizeArtStyle(drama.value?.style)
   } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function saveDramaStyle(style) {
+  const next = normalizeArtStyle(style)
+  if (!drama.value || next === normalizeArtStyle(drama.value.style)) return
+  try {
+    await dramaAPI.update(dramaId, { style: next })
+    drama.value.style = next
+    toast.success(`画风已切换为：${artStyleLabel(next)}，请重新生成定妆与配图`)
+  } catch (e) {
+    dramaStyle.value = normalizeArtStyle(drama.value?.style)
     toast.error(e.message)
   }
 }

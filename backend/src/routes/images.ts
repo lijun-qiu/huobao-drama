@@ -3,7 +3,14 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, created, now, badRequest } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
-import { resolveEpisodeImageModel } from '../constants/image-models.js'
+import { resolveEpisodeImageModel, imageModelMaxReferenceImages, imageModelSupportsReferenceImages } from '../constants/image-models.js'
+import {
+  collectCharacterReferenceImages,
+  enrichImagePromptWithCharacters,
+  formatCharacterDisplayName,
+  getEpisodeVisualCharacters,
+  resolveStoryboardCharacterIdsForShot,
+} from '../services/narration-characters.js'
 import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -15,13 +22,33 @@ app.post('/', async (c) => {
 
   try {
     let configId: number | undefined = body.config_id
-    let episode: { imageConfigId?: number | null; imageModel?: string | null } | null = null
+    let episode: { imageConfigId?: number | null; imageModel?: string | null; dramaId?: number } | null = null
+    let prompt = String(body.prompt || '')
+    let referenceImages: string[] | Array<{ url?: string }> | undefined = body.reference_images
+
     if (body.storyboard_id) {
       const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()
       if (sb) {
         const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
         episode = ep || null
         if (ep?.imageConfigId != null) configId = ep.imageConfigId
+
+        const resolved = resolveStoryboardCharacterIdsForShot(sb.id, { sync: true })
+        const model = resolveEpisodeImageModel(ep, body.model)
+        if (resolved.characterIds.length) {
+          const allChars = getEpisodeVisualCharacters(sb.episodeId, ep!.dramaId)
+          if (imageModelSupportsReferenceImages(model)) {
+            const maxRefs = imageModelMaxReferenceImages(model)
+            const refs = collectCharacterReferenceImages(allChars, resolved.characterIds, maxRefs)
+            if (refs.length) referenceImages = refs
+          }
+          prompt = enrichImagePromptWithCharacters(prompt, allChars, resolved.characterIds)
+          logTaskStart('ImageAPI', 'resolve-characters', {
+            storyboardId: sb.id,
+            characterIds: resolved.characterIds,
+            labels: resolved.characters.map(ch => formatCharacterDisplayName(ch)),
+          })
+        }
       }
     }
 
@@ -40,10 +67,10 @@ app.post('/', async (c) => {
       dramaId: body.drama_id,
       sceneId: body.scene_id,
       characterId: body.character_id,
-      prompt: body.prompt,
+      prompt,
       model,
       size: body.size,
-      referenceImages: body.reference_images,
+      referenceImages: Array.isArray(referenceImages) ? referenceImages as string[] : undefined,
       frameType: body.frame_type,
       configId,
     })
