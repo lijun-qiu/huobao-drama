@@ -9,7 +9,8 @@
     "build": "tsc",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "shot-images": "tsx scripts/batch-shot-images.ts"
   },
   "keywords": [],
   "author": "",

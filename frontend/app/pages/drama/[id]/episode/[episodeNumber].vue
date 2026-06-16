@@ -1342,7 +1342,7 @@
           <!-- Sub: Shots (Narration) -->
           <div v-else-if="prodTab === 'shots' && isNarrationMode" class="prod-content">
             <div class="narration-hint">
-              <strong>配图策略：</strong>按场景密切换图（同图最多沿用 1 句）；默认完整单图，可手动切两宫格。下方可编辑配图文案后生成。顶部可复制/上传需配图镜头（复制每批最多 10 条）。
+              <strong>配图策略：</strong>按场景密切换图（同图最多沿用 1 句）；默认完整单图，可手动切两宫格。外部出图可将 1.png/2.png 重命名为 #序号#镜头ID 后，用「文件夹上传」按 ID 一一对应。
             </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
@@ -1360,6 +1360,7 @@
                   {{ narrationCopyBatchOptions.length > 1 ? `复制描述词 (${narrationCopyBatchOptions.find(o => o.value === narrationCopyBatchIndex)?.label || '1-10'})` : '一键复制描述词' }}
                 </button>
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerAllShotImageUpload">一键上传全部（{{ narrationNeedImageCount }}）</button>
+                <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerShotFolderUpload" title="选择已重命名为 #序号#镜头ID 的文件夹">文件夹上传</button>
                 <button class="btn btn-primary btn-sm" :disabled="isBatchRunning('narrationImages') || !narrationImagesPendingCount" @click="batchNarrationShotImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                   生成剩余{{ narrationImagesPendingCount ? ` (${narrationImagesPendingCount})` : '' }}
@@ -2216,6 +2217,15 @@
       @change="onImageUploadSelected"
     />
     <input
+      ref="shotFolderUploadInputRef"
+      type="file"
+      accept="image/png,image/jpeg,image/webp,image/gif"
+      multiple
+      webkitdirectory
+      class="sr-only-file-input"
+      @change="onShotFolderUploadSelected"
+    />
+    <input
       ref="audioUploadInputRef"
       type="file"
       accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,.mp3,.wav,.m4a,.aac,.ogg"
@@ -2282,6 +2292,7 @@ import {
   narrationStoryboardStep,
 } from '~/composables/useEpisodeWorkflow'
 import { artStyleLabel } from '~/composables/useArtStyles'
+import { parseShotImageFilename } from '~/utils/shotImageFilename'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 definePageMeta({ layout: 'studio' })
@@ -4707,6 +4718,7 @@ async function copyTextToClipboard(text) {
 }
 
 const imageUploadInputRef = ref(null)
+const shotFolderUploadInputRef = ref(null)
 const imageUploadTarget = ref(null)
 const audioUploadInputRef = ref(null)
 const audioUploadTarget = ref(null)
@@ -4905,6 +4917,95 @@ async function applyShotUploadedImage(sbId, path) {
   }
 }
 
+function triggerShotFolderUpload() {
+  const list = narrationShotsNeedingImage(sbs.value)
+  const ids = list.map(sb => sb.id)
+  if (!ids.length) {
+    toast.warning('暂无需配图镜头')
+    return
+  }
+  imageUploadTarget.value = { kind: 'shot-batch', ids, matchByFilename: true }
+  shotFolderUploadInputRef.value?.click()
+}
+
+function resolveImageUploadPairs(files, target) {
+  const ids = target.ids || []
+  const parsed = files.map(file => ({
+    file,
+    storyboardId: parseShotImageFilename(file.name)?.storyboardId ?? null,
+  }))
+  const useFilename = target.matchByFilename
+    || (target.kind === 'shot-batch' && parsed.length > 0 && parsed.every(item => item.storyboardId != null))
+
+  if (useFilename) {
+    const validSet = new Set(ids)
+    const pairs = []
+    const unmatched = []
+    for (const item of parsed) {
+      if (item.storyboardId && validSet.has(item.storyboardId)) {
+        pairs.push({ file: item.file, id: item.storyboardId })
+      } else {
+        unmatched.push(item.file.name)
+      }
+    }
+    if (!pairs.length) {
+      throw new Error('没有可匹配的图片（文件名需为 #序号#镜头ID，如 #1#127.png）')
+    }
+    return { pairs, unmatched }
+  }
+
+  if (files.length !== ids.length) {
+    throw new Error(`请一次选择 ${ids.length} 张图片（当前选了 ${files.length} 张），按列表顺序对应`)
+  }
+  return {
+    pairs: files.map((file, i) => ({ file, id: ids[i] })),
+    unmatched: [],
+  }
+}
+
+async function processImageUploadPairs(pairs, target) {
+  let ok = 0
+  for (const { file, id } of pairs) {
+    try {
+      const path = await uploadImageFile(file)
+      if (target.kind === 'character-batch') {
+        await applyCharacterUploadedImage(id, path)
+      } else {
+        await applyShotUploadedImage(id, path)
+      }
+      ok++
+    } catch (err) {
+      console.error(err)
+    }
+  }
+  await refresh()
+  return ok
+}
+
+async function onShotFolderUploadSelected(event) {
+  const files = Array.from(event.target.files || []).filter(file => file.type.startsWith('image/'))
+  event.target.value = ''
+  const target = imageUploadTarget.value
+  imageUploadTarget.value = null
+  if (!files.length || !target) return
+
+  try {
+    const { pairs, unmatched } = resolveImageUploadPairs(files, target)
+    const ok = await processImageUploadPairs(pairs, target)
+    if (unmatched.length) {
+      toast.warning(`已上传 ${ok} 张，${unmatched.length} 个文件无法匹配（需 #序号#镜头ID）`)
+      return
+    }
+    if (ok === pairs.length) {
+      toast.success(`已按文件名匹配上传 ${ok} 张配图`)
+    } else {
+      toast.warning(`上传完成 ${ok}/${pairs.length}，部分失败请重试`)
+    }
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
 async function onImageUploadSelected(event) {
   const files = Array.from(event.target.files || []).filter(file => file.type.startsWith('image/'))
   event.target.value = ''
@@ -4914,33 +5015,22 @@ async function onImageUploadSelected(event) {
 
   const ids = target.ids || []
   if (!ids.length) return
-  if (files.length !== ids.length) {
-    toast.error(`请一次选择 ${ids.length} 张图片（当前选了 ${files.length} 张），按列表顺序对应`)
-    return
-  }
 
   try {
-    let ok = 0
-    for (let i = 0; i < ids.length; i++) {
-      try {
-        const path = await uploadImageFile(files[i])
-        if (target.kind === 'character-batch') {
-          await applyCharacterUploadedImage(ids[i], path)
-        } else {
-          await applyShotUploadedImage(ids[i], path)
-        }
-        ok++
-      } catch (err) {
-        console.error(err)
-      }
+    const { pairs, unmatched } = resolveImageUploadPairs(files, target)
+    const ok = await processImageUploadPairs(pairs, target)
+    if (unmatched.length) {
+      toast.warning(`已上传 ${ok} 张，${unmatched.length} 个文件无法匹配`)
+      return
     }
-    await refresh()
-    if (ok === ids.length) {
+    if (ok === pairs.length) {
       toast.success(target.kind === 'character-batch'
         ? `已全部上传 ${ok} 张定妆图`
-        : `已全部上传 ${ok} 张配图`)
+        : target.matchByFilename || pairs.some(p => parseShotImageFilename(p.file.name))
+          ? `已按文件名匹配上传 ${ok} 张配图`
+          : `已全部上传 ${ok} 张配图`)
     } else {
-      toast.warning(`上传完成 ${ok}/${ids.length}，部分失败请重试`)
+      toast.warning(`上传完成 ${ok}/${pairs.length}，部分失败请重试`)
     }
   } catch (e) {
     toast.error(e.message)
