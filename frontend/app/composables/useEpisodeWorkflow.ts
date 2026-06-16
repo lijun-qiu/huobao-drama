@@ -1,4 +1,4 @@
-import { artStylePrompt } from '~/composables/useArtStyles'
+import { artStylePrompt, resolveTitleVisualHook, sanitizeSceneImagePrompt, SCENE_STYLE_GUARD } from '~/composables/useArtStyles'
 
 export type ProductionMode = 'drama' | 'narration'
 
@@ -215,6 +215,11 @@ export function narrationShotNeedsOwnImage(sb: any) {
   return meta.narration_image_mode === 'new'
 }
 
+export function resolveNarrationParagraphLayout(sb: any): 'single' | 'diptych' {
+  const meta = parseNarrationImageMeta(sb)
+  return meta.paragraph_layout === 'diptych' ? 'diptych' : 'single'
+}
+
 export function getNarrationShotOwnImage(sb: any) {
   return sb?.composed_image || sb?.composedImage || null
 }
@@ -259,22 +264,26 @@ export function buildNarrationImagePrompt(sb: any, style = 'comic') {
   if (!narrationShotNeedsOwnImage(sb)) return ''
   const meta = parseNarrationImageMeta(sb)
   if (meta.narration_shot_type === 'title') {
-    const hook = meta.title_hook || meta.title_full || extractNarrationSentence(sb)
+    const hook = resolveTitleVisualHook(meta.title_full, meta.title_hook)
+      || meta.title_hook || meta.title_full || extractNarrationSentence(sb)
     if (!hook) return ''
     return [
-      'cinematic opening background scene, single full illustration',
+      'Chinese short drama narration opening background, single full illustration',
       'absolutely no text, no letters, no words, no watermark, no captions on image',
+      'NOT romantic couple, NOT clock faces, NOT roses, NOT dreamlike abstract wallpaper, NOT pixel art, NOT retro photo filter',
       artStylePrompt(style, 'title'),
-      `atmospheric background mood for story theme: ${hook}`,
+      `visual theme based on story hook: ${sanitizeSceneImagePrompt(hook)}`,
+      'concrete era-appropriate environment matching the hook (street market, shop interior, city street, etc)',
       'clean center area reserved for dynamic title overlay, 16:9 landscape, high quality',
     ].join(', ')
   }
   const storedPrompt = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
   const sceneContent = meta.scene_content || extractNarrationSentence(sb)
   if (!storedPrompt && !sceneContent) return ''
-  if (storedPrompt) return storedPrompt
+  if (storedPrompt) return [SCENE_STYLE_GUARD, sanitizeSceneImagePrompt(storedPrompt)].join(', ')
   if (meta.paragraph_layout === 'diptych') {
     return [
+      SCENE_STYLE_GUARD,
       'single 16:9 illustration with exactly 2 horizontal panels side by side, diptych layout, one image file',
       'only left panel and right panel, no third panel, no vertical stack',
       artStylePrompt(style, 'diptych'),
@@ -284,6 +293,7 @@ export function buildNarrationImagePrompt(sb: any, style = 'comic') {
     ].join(', ')
   }
   return [
+    SCENE_STYLE_GUARD,
     'single full illustration, one complete scene only',
     'no grid, no collage, no multi-panel, no comic strip, no split screen, no storyboard layout',
     artStylePrompt(style, 'scene'),
@@ -377,6 +387,21 @@ export function findPortraitReferenceCharacter(
   return withImage(siblings)
 }
 
+/** 跨角色画风锚定：取同项目已有定妆（优先青年形态） */
+export function findDramaStyleAnchorCharacter(
+  chars: any[],
+  char: { id?: number },
+) {
+  const candidates = (chars || [])
+    .filter(ch => ch.id !== char.id && (ch?.image_url || ch?.imageUrl))
+    .sort((a, b) => {
+      const byStage = variantPortraitSortOrder(a.variant_label || a.variantLabel) - variantPortraitSortOrder(b.variant_label || b.variantLabel)
+      if (byStage !== 0) return byStage
+      return Number(a.id || 0) - Number(b.id || 0)
+    })
+  return candidates[0] || null
+}
+
 export function sortCharactersForPortraitGeneration(chars: any[]) {
   return [...(chars || [])].sort((a, b) => {
     const byStage = variantPortraitSortOrder(a.variant_label || a.variantLabel) - variantPortraitSortOrder(b.variant_label || b.variantLabel)
@@ -409,7 +434,7 @@ export function enrichNarrationPromptWithCharacters(
     const label = formatCharacterDisplayName(ch)
     return app ? `${label} (${app})` : label
   }).join('; ')
-  return `${base}, characters in scene: ${hints}, keep each character appearance consistent with reference images for the same life stage, same face and outfit within the same variant`
+  return `${base}, characters in scene: ${hints}, keep each character appearance consistent with reference images for the same life stage, same face and outfit within the same variant, match reference image line art and cel shading exactly`
 }
 
 export function collectNarrationCharacterReferenceImages(

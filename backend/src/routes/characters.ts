@@ -305,6 +305,50 @@ app.post('/:id/recognize-portrait', async (c) => {
   }
 })
 
+// GET /characters/:id/portrait-prompt — 预览定妆生图完整描述词
+app.get('/:id/portrait-prompt', async (c) => {
+  const id = Number(c.req.param('id'))
+  const episodeId = Number(c.req.query('episode_id') || 0)
+  if (!episodeId) return badRequest(c, 'episode_id is required')
+
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  if (!char) return badRequest(c, 'Character not found')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, char.dramaId)).all()
+  const style = normalizeArtStyle(drama?.style)
+  const useReference = c.req.query('use_reference') !== 'false'
+
+  let appearance = char.appearance || ''
+  const cleanedAppearance = await finalizeCharacterAppearance(appearance || char.description || '', {
+    name: char.name,
+    role: char.role,
+  })
+  if (cleanedAppearance) appearance = cleanedAppearance
+
+  const resolved = resolveCharacterPortraitGeneration({
+    id: char.id,
+    name: char.name,
+    dramaId: char.dramaId,
+    appearance,
+    description: char.description,
+    personality: char.personality,
+    role: char.role,
+    variantLabel: char.variantLabel,
+    imageUrl: char.imageUrl,
+  }, style, { useReference })
+
+  return success(c, {
+    prompt: resolved.prompt,
+    appearance,
+    use_reference: useReference,
+    reference_character_id: resolved.referenceCharacterId || null,
+    style_anchor_character_id: resolved.styleAnchorCharacterId || null,
+  })
+})
+
 // POST /characters/:id/generate-image
 app.post('/:id/generate-image', async (c) => {
   const id = Number(c.req.param('id'))
@@ -369,6 +413,8 @@ app.post('/:id/generate-image', async (c) => {
       used_portrait_reference: !!(useReference && resolved.referenceCharacterId && referenceImages?.length),
       reference_character_id: resolved.referenceCharacterId || null,
       reference_character_variant: resolved.referenceCharacterVariant || null,
+      used_style_anchor: !!(useReference && resolved.styleAnchorCharacterId && referenceImages?.length),
+      style_anchor_character_id: resolved.styleAnchorCharacterId || null,
       used_youth_reference: !!(useReference && getVariantAgeGroup(resolved.referenceCharacterVariant) === 'youth' && referenceImages?.length),
       youth_character_id: getVariantAgeGroup(resolved.referenceCharacterVariant) === 'youth' ? resolved.referenceCharacterId : null,
       appearance_auto_enriched: appearanceAutoEnriched,
@@ -426,6 +472,27 @@ app.post('/batch-generate-images', async (c) => {
   const results: number[] = []
   for (const char of chars) {
     try {
+      if (useReference) {
+        const resolved = resolveCharacterPortraitGeneration({
+          id: char.id,
+          name: char.name,
+          dramaId: char.dramaId,
+          appearance: char.appearance,
+          description: char.description,
+          personality: char.personality,
+          role: char.role,
+          variantLabel: char.variantLabel,
+          imageUrl: char.imageUrl,
+        }, style, { useReference })
+
+        if (resolved.styleAnchorCharacterId) {
+          const anchor = chars.find(item => item.id === resolved.styleAnchorCharacterId)
+          if (anchor && !anchor.imageUrl?.trim()) {
+            await waitForCharacterImage(resolved.styleAnchorCharacterId)
+          }
+        }
+      }
+
       const genId = await submitCharacterPortrait(char, ep, style, useReference)
       results.push(genId)
 

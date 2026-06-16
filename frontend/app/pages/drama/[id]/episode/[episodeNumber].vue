@@ -152,7 +152,7 @@
           </div>
 
           <div class="narration-hint" style="margin-bottom:12px">
-            <strong>角色定妆参考：</strong>从解说文案提取会在画面出现的角色；若文案含不同年龄/时期（回忆、多年后等），会<strong>自动拆成多条定妆</strong>（如 张三·青年、张三·老年）。<strong>中年/老年形态会以青年定妆图为参考</strong>生成，请先完成青年定妆；后续配图按镜头关联对应形态参考图。
+            <strong>角色定妆参考：</strong>从解说文案提取会在画面出现的角色；若文案含不同年龄/时期，会<strong>自动拆成多条定妆</strong>。中年/老年会以青年定妆作参考；不同角色之间自动对齐画风。顶部可<strong>一键复制/上传全部</strong>定妆（上传时按列表顺序一次选齐对应张数）。
           </div>
 
           <div class="prod-image-model-bar" style="margin-bottom:12px">
@@ -197,6 +197,8 @@
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ visualChars.length }} 个画面角色</span>
               <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" :disabled="!visualChars.length" @click="copyAllCharPortraitPrompts">一键复制全部描述词</button>
+                <button class="btn btn-sm" :disabled="!visualChars.length" @click="triggerAllCharImageUpload">一键上传全部（{{ visualChars.length }}）</button>
                 <button class="btn btn-sm" @click="addNarrationCharacter">添加角色</button>
                 <button class="btn btn-sm" :disabled="isBatchRunning('charImages') || !charImagesPendingCount" @click="batchCharImages">
                   生成定妆图{{ charImagesPendingCount ? ` (${charImagesPendingCount})` : '' }}
@@ -549,7 +551,7 @@
                 <span class="locked-config">视频模型 · {{ lockedVideoConfigLabel }}</span>
               </template>
               <template v-if="isNarrationMode">
-                <span class="tag dim" style="font-size:11px">按段落配图 · AI文案</span>
+                <span class="tag dim" style="font-size:11px">按场景配图 · AI文案</span>
               </template>
               <button class="btn btn-sm" :disabled="rn || narrationBreaking" @click="isNarrationMode ? doNarrationBreakdown() : doBreakdown()">
                 <Loader2 v-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" :size="11" class="animate-spin" />
@@ -893,10 +895,10 @@
             <div class="empty-desc">{{ isNarrationMode ? '按标点拆分旁白（。，、；等）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
             <div v-if="!isNarrationMode" class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
             <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
-              <strong>配图规则：</strong>拆镜按规则（一句一镜、按段落配图）；配图文案由<strong>文本 AI</strong>生成，失败时自动退回规则模板。内容多时用两宫格。
+              <strong>配图规则：</strong>拆镜一句一镜；配图按<strong>场景切换</strong>密切换图（同图最多沿用 1 句）。配图文案由文本 AI 生成，默认完整单图，可在配图页切换两宫格。
             </div>
             <div v-if="isNarrationMode" style="margin-bottom:10px">
-              <span class="tag">按段落配图 · AI文案</span>
+              <span class="tag">按场景配图 · AI文案</span>
             </div>
             <button class="btn btn-primary" :disabled="narrationBreaking" @click="isNarrationMode ? doNarrationBreakdown() : doBreakdown()">
               <Loader2 v-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" :size="13" class="animate-spin" />
@@ -1001,6 +1003,8 @@
               <span class="dim" style="font-size:12px">{{ visualChars.length }} 个需生成形象角色</span>
               <span v-if="chars.length > visualChars.length" class="tag">旁白仅保留声音</span>
               <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" :disabled="!visualChars.length" @click="copyAllCharPortraitPrompts">一键复制全部描述词</button>
+                <button class="btn btn-sm" :disabled="!visualChars.length" @click="triggerAllCharImageUpload">一键上传全部（{{ visualChars.length }}）</button>
                 <button class="btn btn-sm" :disabled="isBatchRunning('charImages') || !charImagesPendingCount" @click="batchCharImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                   生成剩余{{ charImagesPendingCount ? ` (${charImagesPendingCount})` : '' }}
@@ -1103,7 +1107,54 @@
           <!-- Sub: Dubbing -->
           <div v-else-if="prodTab === 'dubbing'" class="prod-content">
             <div v-if="isNarrationMode" class="narration-hint">
-              <strong>配音策略：</strong>解说模式<strong>默认本地 Edge TTS</strong>（免 MiniMax 计费）。批量生成时本地模式<strong>最多 6 路并发</strong>，比逐条快很多。
+              <strong>配音策略：</strong>先<strong>上传 MP3</strong>（可多段），确认无误后点<strong>按文案裁剪</strong>。系统会先调用 Whisper 转 SRT 字幕，再与分镜旁白对齐后裁剪（需在设置中配置支持转写的文本 API）。也可逐镜上传或 TTS 生成。
+            </div>
+            <div v-else class="narration-hint">
+              <strong>配音策略：</strong>先上传 MP3，再点「按文案裁剪」分配到各镜台词；或逐镜上传 / TTS 生成。
+            </div>
+            <div class="uploaded-audio-panel" :class="{ 'is-empty': !uploadedEpisodeAudio.length }">
+              <div class="uploaded-audio-head">
+                <span class="tag mono">已上传 {{ uploadedEpisodeAudio.length }} 段</span>
+                <span v-if="ttsEligibleCount" class="dim" style="font-size:11px">
+                  可多选或分多次添加 · 裁剪时 Whisper 转 SRT 对齐
+                </span>
+                <div class="ml-auto flex gap-1">
+                  <button
+                    class="btn btn-sm"
+                    type="button"
+                    :disabled="narrationAudioUploading || !ttsEligibleCount"
+                    @click="triggerEpisodeNarrationAudioUpload(false)"
+                  >
+                    {{ narrationAudioUploading ? '上传中…' : (uploadedEpisodeAudio.length ? '继续添加 MP3' : '添加 MP3（可多选）') }}
+                  </button>
+                  <button
+                    v-if="uploadedEpisodeAudio.length"
+                    class="btn btn-sm"
+                    type="button"
+                    @click="clearUploadedEpisodeAudio"
+                  >
+                    清空
+                  </button>
+                </div>
+              </div>
+              <div v-if="!uploadedEpisodeAudio.length" class="uploaded-audio-empty dim">
+                尚未添加音频。可一次多选或分多次追加；裁剪时会先合成整段、转 SRT 字幕并与旁白文案对齐。
+              </div>
+              <div v-else class="uploaded-audio-list">
+                <div v-for="(file, idx) in uploadedEpisodeAudio" :key="file.path" class="uploaded-audio-item">
+                  <span class="uploaded-audio-idx">#{{ String(idx + 1).padStart(2, '0') }}</span>
+                  <div class="uploaded-audio-copy">
+                    <div class="uploaded-audio-name" :title="file.name">{{ file.name }}</div>
+                    <audio
+                      :src="getUploadedAudioUrl(file.path)"
+                      controls
+                      preload="metadata"
+                      class="uploaded-audio-player"
+                    />
+                  </div>
+                  <button class="btn btn-sm" type="button" title="移除" @click="removeUploadedEpisodeAudio(idx)">移除</button>
+                </div>
+              </div>
             </div>
             <div v-if="isNarrationMode" class="local-tts-bar">
               <label class="local-tts-toggle">
@@ -1126,6 +1177,13 @@
               <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已就绪</span>
               <span class="tag">{{ localTtsEnabled ? '本地 Edge TTS' : lockedAudioConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
+                <button
+                  class="btn btn-sm btn-primary"
+                  :disabled="narrationAudioSplitting || !uploadedEpisodeAudio.length || !ttsEligibleCount"
+                  @click="splitEpisodeNarrationAudio"
+                >
+                  {{ narrationAudioSplitting ? '裁剪中…' : `按文案裁剪（${uploadedEpisodeAudio.length} 段）` }}
+                </button>
                 <button class="btn btn-sm btn-primary" :disabled="isBatchRunning('tts') || !ttsPendingCount" @click="batchShotTTS">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
                   生成剩余{{ ttsPendingCount ? ` (${ttsPendingCount})` : '' }}
@@ -1166,6 +1224,7 @@
                   <audio v-if="getEffectiveTTSUrl(sb)" :src="'/' + getEffectiveTTSUrl(sb)" controls preload="none" class="dub-audio" />
                   <div v-else class="dim" style="font-size:12px">尚未生成语音文件</div>
                   <div class="ml-auto flex gap-1">
+                    <button class="btn btn-sm" @click="triggerShotTtsUpload(sb.id)">上传 MP3</button>
                     <button class="btn btn-sm" @click="genShotTTS(sb, hasNarrationShotOwnTts(sb))">
                       {{ hasNarrationShotOwnTts(sb) ? '重新生成' : '生成配音' }}
                     </button>
@@ -1283,12 +1342,24 @@
           <!-- Sub: Shots (Narration) -->
           <div v-else-if="prodTab === 'shots' && isNarrationMode" class="prod-content">
             <div class="narration-hint">
-              <strong>配图策略：</strong>每段 1 张图（内容多时为两宫格）；下方可编辑<strong>配图文案</strong>，修改后点生成即按新提示词出图。
+              <strong>配图策略：</strong>按场景密切换图（同图最多沿用 1 句）；默认完整单图，可手动切两宫格。下方可编辑配图文案后生成。顶部可复制/上传需配图镜头（复制每批最多 10 条）。
             </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ shotImgCount }}/{{ narrationNeedImageCount }} 需配图</span>
-              <div class="ml-auto flex gap-1">
+              <div class="ml-auto flex gap-1 items-center">
+                <BaseSelect
+                  v-if="narrationCopyBatchOptions.length > 1"
+                  :model-value="narrationCopyBatchIndex"
+                  :options="narrationCopyBatchOptions"
+                  placeholder="批次"
+                  style="min-width:96px"
+                  @update:model-value="narrationCopyBatchIndex = Number($event) || 1"
+                />
+                <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="copyNarrationShotPromptsBatch">
+                  {{ narrationCopyBatchOptions.length > 1 ? `复制描述词 (${narrationCopyBatchOptions.find(o => o.value === narrationCopyBatchIndex)?.label || '1-10'})` : '一键复制描述词' }}
+                </button>
+                <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerAllShotImageUpload">一键上传全部（{{ narrationNeedImageCount }}）</button>
                 <button class="btn btn-primary btn-sm" :disabled="isBatchRunning('narrationImages') || !narrationImagesPendingCount" @click="batchNarrationShotImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                   生成剩余{{ narrationImagesPendingCount ? ` (${narrationImagesPendingCount})` : '' }}
@@ -1329,6 +1400,29 @@
                       @blur="updateNarrationImagePrompt(sb, $event.target.value)"
                     />
                   </label>
+                  <div
+                    v-if="narrationShotNeedsOwnImage(sb) && !isNarrationTitleShot(sb)"
+                    class="narration-shot-layout-row"
+                    @click.stop
+                  >
+                    <span class="dim">版式</span>
+                    <button
+                      type="button"
+                      class="btn btn-sm"
+                      :class="{ 'btn-primary': resolveNarrationParagraphLayout(sb) === 'single' }"
+                      @click="setNarrationShotLayout(sb, 'single')"
+                    >
+                      完整单图
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-sm"
+                      :class="{ 'btn-primary': resolveNarrationParagraphLayout(sb) === 'diptych' }"
+                      @click="setNarrationShotLayout(sb, 'diptych')"
+                    >
+                      两宫格
+                    </button>
+                  </div>
                 </div>
                 <div class="prod-actions">
                   <button
@@ -1340,6 +1434,13 @@
                     {{ isPendingNarrationShot(sb.id) ? '生成中' : (hasNarrationShotImage(sb) ? '重新生成' : '生成配图') }}
                   </button>
                   <button v-else class="btn btn-sm" @click="markNarrationShotNeedImage(sb)">改为需配图</button>
+                  <button
+                    class="btn btn-sm"
+                    :disabled="isPendingNarrationShot(sb.id)"
+                    @click="triggerShotImageUpload(sb.id)"
+                  >
+                    上传图片
+                  </button>
                   <button
                     v-if="!hasNarrationShotImage(sb)"
                     class="btn btn-sm"
@@ -1895,6 +1996,37 @@
             </template>
           </div>
           <div class="export-list">
+            <div class="export-list-head">开幕视频</div>
+            <div class="export-opening-panel">
+              <div class="dim" style="font-size:11px;line-height:1.6;margin-bottom:10px">
+                从本集已生成/上传的配图中<strong>随机选 8 张</strong>，合成翻页片头；配音与字幕为「今天要体验的人生是」。
+              </div>
+              <div class="dim" style="font-size:11px;margin-bottom:10px">可用配图 {{ illustrationImageCount }} 张</div>
+              <template v-if="openingVideoProcessing">
+                <div class="export-opening-status">
+                  <Loader2 :size="16" class="animate-spin" style="color:var(--accent)" />
+                  <span>正在生成开幕视频…</span>
+                </div>
+              </template>
+              <template v-else-if="openingVideoUrl">
+                <video :key="openingVideoSrc" :src="openingVideoSrc" controls class="export-opening-video" />
+                <div class="export-opening-actions">
+                  <button class="btn btn-sm" :disabled="!illustrationImageCount" @click="generateOpeningVideo">重新生成</button>
+                  <a :href="openingVideoSrc" download class="btn btn-sm btn-primary">下载</a>
+                </div>
+              </template>
+              <template v-else>
+                <div v-if="openingVideoError" class="dim" style="font-size:11px;color:var(--danger);margin-bottom:8px">{{ openingVideoError }}</div>
+                <button
+                  class="btn btn-primary btn-sm"
+                  style="width:100%"
+                  :disabled="!illustrationImageCount || openingVideoProcessing"
+                  @click="generateOpeningVideo"
+                >
+                  生成开幕视频
+                </button>
+              </template>
+            </div>
             <div class="export-list-head">成片 BGM</div>
             <div class="export-bgm-panel">
               <label class="export-bgm-toggle">
@@ -2075,6 +2207,22 @@
       </div>
     </main>
     </div>
+    <input
+      ref="imageUploadInputRef"
+      type="file"
+      accept="image/png,image/jpeg,image/webp,image/gif"
+      multiple
+      class="sr-only-file-input"
+      @change="onImageUploadSelected"
+    />
+    <input
+      ref="audioUploadInputRef"
+      type="file"
+      accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,.mp3,.wav,.m4a,.aac,.ogg"
+      multiple
+      class="sr-only-file-input"
+      @change="onAudioUploadSelected"
+    />
   </div>
 </template>
 
@@ -2084,7 +2232,7 @@ import { toast } from 'vue-sonner'
 import {
   Users, MapPin, Video, ImageIcon, Layers, Mic2, Music, FileText, FolderKanban, Clapperboard, Download,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, musicAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, musicAPI, uploadAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import {
   parseProductionMode,
@@ -2108,6 +2256,7 @@ import {
   imageModelPriceLabel,
   resolveEpisodeImageModel,
   narrationShotNeedsOwnImage,
+  resolveNarrationParagraphLayout,
   isNarrationTitleShot,
   getNarrationShotOwnImage,
   resolveNarrationEffectiveImage,
@@ -2127,6 +2276,7 @@ import {
   getVariantAgeGroup,
   findYouthBaseCharacter,
   findPortraitReferenceCharacter,
+  findDramaStyleAnchorCharacter,
   sortCharactersForPortraitGeneration,
   dramaStoryboardStep,
   narrationStoryboardStep,
@@ -2202,6 +2352,24 @@ const mergeVideoSrc = computed(() => {
   if (!mergeUrl.value) return ''
   const v = mergeData.value?.id || mergeData.value?.completed_at || mergeData.value?.completedAt || Date.now()
   return `/${mergeUrl.value}?v=${encodeURIComponent(String(v))}`
+})
+
+const illustrationImageCount = computed(() => {
+  const urls = new Set()
+  for (const sb of sbs.value) {
+    const img = sb.composed_image || sb.composedImage || sb.first_frame_image || sb.firstFrameImage
+    if (img) urls.add(img)
+  }
+  return urls.size
+})
+const openingVideoUrl = computed(() => episode.value?.opening_video_url || episode.value?.openingVideoUrl || null)
+const openingVideoError = computed(() => episode.value?.opening_video_error || episode.value?.openingVideoError || '')
+const openingVideoProcessing = ref(false)
+let openingPollTimer = null
+const openingVideoSrc = computed(() => {
+  if (!openingVideoUrl.value) return ''
+  const v = episode.value?.updated_at || episode.value?.updatedAt || Date.now()
+  return `/${openingVideoUrl.value}?v=${encodeURIComponent(String(v))}`
 })
 
 const scriptStep = ref(0)
@@ -2456,7 +2624,7 @@ function buildNarrationMetaForShot(options) {
     narration_tts_mode: 'new',
   }
   if (baseMeta.paragraph_index != null) meta.paragraph_index = baseMeta.paragraph_index
-  if (baseMeta.paragraph_layout) meta.paragraph_layout = baseMeta.paragraph_layout
+  meta.paragraph_layout = baseMeta.paragraph_layout === 'diptych' ? 'diptych' : 'single'
   if (baseMeta.scene_content) meta.scene_content = baseMeta.scene_content
   return JSON.stringify(meta)
 }
@@ -2822,6 +2990,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleImageViewerKeydown)
   stopBgmPoll()
+  stopOpeningPoll()
 })
 
 function isPendingSceneImage(id) {
@@ -3436,6 +3605,27 @@ const shotImgCount = computed(() => {
   return sbs.value.filter(s => s.first_frame_image || s.firstFrameImage || s.last_frame_image || s.lastFrameImage || s.composed_image || s.composedImage).length
 })
 const narrationNeedImageCount = computed(() => narrationShotsNeedingImage(sbs.value).length)
+const NARRATION_PROMPT_COPY_BATCH_SIZE = 10
+const narrationCopyBatchIndex = ref(1)
+const narrationCopyBatchOptions = computed(() => {
+  const total = narrationNeedImageCount.value
+  if (!total) return []
+  const batchCount = Math.ceil(total / NARRATION_PROMPT_COPY_BATCH_SIZE)
+  return Array.from({ length: batchCount }, (_, idx) => {
+    const start = idx * NARRATION_PROMPT_COPY_BATCH_SIZE + 1
+    const end = Math.min((idx + 1) * NARRATION_PROMPT_COPY_BATCH_SIZE, total)
+    return { value: idx + 1, label: `${start}-${end}` }
+  })
+})
+watch(narrationCopyBatchOptions, (opts) => {
+  if (!opts.length) {
+    narrationCopyBatchIndex.value = 1
+    return
+  }
+  if (!opts.some(opt => opt.value === narrationCopyBatchIndex.value)) {
+    narrationCopyBatchIndex.value = opts[0].value
+  }
+})
 
 const ttsPendingCount = computed(() => {
   if (isNarrationMode.value) {
@@ -3485,7 +3675,7 @@ const narrationBreakdownPanel = computed(() => {
   const titleHook = s?.title_hook ?? s?.titleHook ?? null
   const paragraphCount = s?.paragraph_count ?? s?.paragraphCount ?? null
   const diptychCount = s?.diptych_count ?? s?.diptychCount ?? 0
-  const imageNeeded = s?.image_needed_count ?? s?.imageNeededCount ?? narrationNeedImageCount.value
+  const imageNeeded = narrationNeedImageCount.value
   const unitPrice = imageModelUnitPrice(episodeImageModel.value)
   const estImageCost = Math.round(imageNeeded * unitPrice * 100) / 100
   const priceLabel = imageModelPriceLabel(episodeImageModel.value)
@@ -3493,9 +3683,9 @@ const narrationBreakdownPanel = computed(() => {
   const detectSource = s?.image_detect_source ?? s?.imageDetectSource
   const detectMode = s?.image_detect_mode ?? s?.imageDetectMode ?? imageDetectMode.value
   const detectLabel = detectSource === 'paragraph+llm'
-    ? '按段落配图 · AI文案'
+    ? '按场景配图 · AI文案'
     : (detectMode === 'paragraph' || detectSource === 'paragraph'
-      ? '按段落配图 · 规则文案'
+      ? '按场景配图 · 规则文案'
       : (detectMode === 'conservative'
         ? (detectSource === 'llm' ? '省钱 · AI识别' : '省钱 · 规则识别')
         : (detectSource === 'llm' ? '标准 · AI识别' : detectSource === 'heuristic' ? '标准 · 规则识别' : '标准')))
@@ -3516,15 +3706,24 @@ const narrationBreakdownPanel = computed(() => {
   }
 })
 
+function syncNarrationBreakdownImageCount() {
+  if (!epId.value || !isNarrationMode.value || !narrationBreakdownSummary.value || !sbs.value.length) return
+  const live = narrationNeedImageCount.value
+  const cached = narrationBreakdownSummary.value.image_needed_count ?? narrationBreakdownSummary.value.imageNeededCount ?? 0
+  if (live === cached) return
+  persistNarrationBreakdownSummary({ ...narrationBreakdownSummary.value, image_needed_count: live })
+}
+
 function persistNarrationBreakdownSummary(res) {
   if (!epId.value) return
+  const liveImageNeeded = sbs.value.length ? narrationNeedImageCount.value : null
   const payload = {
     count: res?.count ?? 0,
     sentence_count: res?.sentence_count ?? res?.sentenceCount ?? 0,
     title_count: res?.title_count ?? res?.titleCount ?? 0,
     title_image_count: res?.title_image_count ?? res?.titleImageCount ?? 0,
     title_hook: res?.title_hook ?? res?.titleHook ?? null,
-    image_needed_count: res?.image_needed_count ?? res?.imageNeededCount ?? 0,
+    image_needed_count: liveImageNeeded ?? res?.image_needed_count ?? res?.imageNeededCount ?? 0,
     paragraph_count: res?.paragraph_count ?? res?.paragraphCount ?? 0,
     diptych_count: res?.diptych_count ?? res?.diptychCount ?? 0,
     image_detect_source: res?.image_detect_source ?? res?.imageDetectSource ?? null,
@@ -4155,6 +4354,7 @@ async function refresh() {
       else if (epHasScript || epHasContent) scriptStep.value = 1
       else scriptStep.value = 0
       await loadLatestGridImage()
+      syncNarrationBreakdownImageCount()
       if (isNarrationMode.value && panel.value === 'production' && !['voice', 'chars', 'dubbing', 'bgm', 'shots', 'compose'].includes(prodTab.value)) {
         prodTab.value = 'voice'
       }
@@ -4483,6 +4683,329 @@ async function watchCharImageResult(charId, generationId, attempts = 36, delay =
   return false
 }
 
+async function copyTextToClipboard(text) {
+  const value = String(text || '').trim()
+  if (!value) {
+    toast.warning('暂无描述词')
+    return false
+  }
+  try {
+    await navigator.clipboard.writeText(value)
+    return true
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = value
+    ta.style.position = 'fixed'
+    ta.style.left = '-9999px'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    if (!ok) toast.error('复制失败，请手动复制')
+    return ok
+  }
+}
+
+const imageUploadInputRef = ref(null)
+const imageUploadTarget = ref(null)
+const audioUploadInputRef = ref(null)
+const audioUploadTarget = ref(null)
+const narrationAudioSplitting = ref(false)
+const narrationAudioUploading = ref(false)
+const uploadedEpisodeAudio = ref([])
+
+function pendingAudioStorageKey() {
+  return `episode-${epId.value}-pending-audio`
+}
+
+function loadUploadedEpisodeAudio() {
+  if (typeof window === 'undefined') return
+  try {
+    const raw = window.localStorage.getItem(pendingAudioStorageKey())
+    uploadedEpisodeAudio.value = raw ? JSON.parse(raw) : []
+  } catch {
+    uploadedEpisodeAudio.value = []
+  }
+}
+
+function saveUploadedEpisodeAudio() {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(pendingAudioStorageKey(), JSON.stringify(uploadedEpisodeAudio.value))
+}
+
+function clearUploadedEpisodeAudio() {
+  uploadedEpisodeAudio.value = []
+  saveUploadedEpisodeAudio()
+}
+
+function removeUploadedEpisodeAudio(index) {
+  uploadedEpisodeAudio.value = uploadedEpisodeAudio.value.filter((_, i) => i !== index)
+  saveUploadedEpisodeAudio()
+}
+
+function getUploadedAudioUrl(path) {
+  const normalized = String(path || '').replace(/^\/+/, '')
+  return normalized ? `/${normalized}` : ''
+}
+
+watch(epId, () => loadUploadedEpisodeAudio(), { immediate: true })
+
+function triggerEpisodeNarrationAudioUpload(replace = false) {
+  if (!ttsEligibleCount.value) {
+    toast.warning('请先完成分镜并填写旁白文案')
+    return
+  }
+  audioUploadTarget.value = { kind: 'episode-upload', replace: !!replace }
+  if (audioUploadInputRef.value) {
+    audioUploadInputRef.value.multiple = true
+  }
+  audioUploadInputRef.value?.click()
+}
+
+async function splitEpisodeNarrationAudio() {
+  if (!uploadedEpisodeAudio.value.length) {
+    toast.warning('请先上传 MP3')
+    return
+  }
+  narrationAudioSplitting.value = true
+  try {
+    toast.info('正在转写字幕并按文案对齐裁剪…')
+    const paths = uploadedEpisodeAudio.value.map(item => item.path)
+    const res = await episodeAPI.splitNarrationAudio(epId.value, paths)
+    await refresh()
+    const count = res?.assigned_count ?? res?.assignedCount ?? 0
+    const alignMode = res?.align_mode ?? res?.alignMode
+    const merged = res?.merged
+    const alignScore = res?.align_score ?? res?.alignScore
+    const alignHintMap = {
+      srt: '（SRT 字幕对齐）',
+      speech: '（句间静音对齐）',
+      boundary: '（上传段边界对齐）',
+      weighted: '（文案时长比例对齐）',
+    }
+    const scoreHint = typeof alignScore === 'number' ? `，匹配度 ${Math.round(alignScore * 100)}%` : ''
+    const alignHint = alignHintMap[alignMode] || ''
+    const mergeHint = merged ? '（多段已先合成）' : ''
+    toast.success(`已裁剪分配 ${count} 条配音${mergeHint}${alignHint}${scoreHint}`)
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationAudioSplitting.value = false
+  }
+}
+
+function triggerShotTtsUpload(sbId) {
+  audioUploadTarget.value = { kind: 'shot', id: sbId }
+  if (audioUploadInputRef.value) {
+    audioUploadInputRef.value.multiple = false
+  }
+  audioUploadInputRef.value?.click()
+}
+
+async function onAudioUploadSelected(event) {
+  const files = Array.from(event.target.files || [])
+    .filter(f => f.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg)$/i.test(f.name))
+  event.target.value = ''
+  const target = audioUploadTarget.value
+  audioUploadTarget.value = null
+  if (!files.length || !target) return
+
+  try {
+    if (target.kind === 'episode-upload') {
+      narrationAudioUploading.value = true
+      toast.info(`正在上传 ${files.length} 段音频…`)
+      const entries = []
+      for (const file of files) {
+        const uploaded = await uploadAPI.audio(file)
+        const path = uploaded?.path || String(uploaded?.url || '').replace(/^\//, '')
+        if (!path) throw new Error('上传失败')
+        entries.push({ path, name: file.name })
+      }
+      uploadedEpisodeAudio.value = target.replace
+        ? entries
+        : [...uploadedEpisodeAudio.value, ...entries]
+      saveUploadedEpisodeAudio()
+      toast.success(`已添加 ${entries.length} 段，当前共 ${uploadedEpisodeAudio.value.length} 段，可先试听后裁剪`)
+    } else if (target.kind === 'shot') {
+      const file = files[0]
+      const uploaded = await uploadAPI.audio(file)
+      const path = uploaded?.path || String(uploaded?.url || '').replace(/^\//, '')
+      if (!path) throw new Error('上传失败')
+      await storyboardAPI.uploadTTS(target.id, path)
+      await refresh()
+      toast.success('本镜配音已上传')
+    }
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationAudioUploading.value = false
+  }
+}
+
+function triggerAllCharImageUpload() {
+  const ids = sortCharactersForPortraitGeneration(visualChars.value).map(c => c.id)
+  if (!ids.length) {
+    toast.warning('暂无角色')
+    return
+  }
+  imageUploadTarget.value = { kind: 'character-batch', ids }
+  imageUploadInputRef.value?.click()
+}
+
+function triggerAllShotImageUpload() {
+  const list = narrationShotsNeedingImage(sbs.value)
+  const ids = list.map(sb => sb.id)
+  if (!ids.length) {
+    toast.warning('暂无需配图镜头')
+    return
+  }
+  imageUploadTarget.value = { kind: 'shot-batch', ids }
+  imageUploadInputRef.value?.click()
+}
+
+function triggerShotImageUpload(sbId) {
+  imageUploadTarget.value = { kind: 'shot-batch', ids: [sbId] }
+  imageUploadInputRef.value?.click()
+}
+
+async function uploadImageFile(file) {
+  const uploaded = await uploadAPI.image(file)
+  const path = uploaded?.path || String(uploaded?.url || '').replace(/^\//, '')
+  if (!path) throw new Error('上传失败')
+  return path
+}
+
+async function applyCharacterUploadedImage(charId, path) {
+  await characterAPI.update(charId, { image_url: path })
+  const row = chars.value.find(ch => ch.id === charId)
+  if (row) {
+    row.image_url = path
+    row.imageUrl = path
+  }
+}
+
+async function applyShotUploadedImage(sbId, path) {
+  const sb = sbs.value.find(item => item.id === sbId)
+  const updates = { composed_image: path }
+  if (sb) {
+    const meta = parseNarrationImageMeta(sb)
+    if (meta.narration_image_mode !== 'new') {
+      updates.reference_images = JSON.stringify({
+        narration_image_mode: 'new',
+        scene_content: resolveSceneContentForShot(sbs.value, sb),
+      })
+    }
+  }
+  await storyboardAPI.update(sbId, updates)
+  const row = sbs.value.find(item => item.id === sbId)
+  if (row) {
+    row.composed_image = path
+    row.composedImage = path
+    if (updates.reference_images) row.reference_images = updates.reference_images
+  }
+}
+
+async function onImageUploadSelected(event) {
+  const files = Array.from(event.target.files || []).filter(file => file.type.startsWith('image/'))
+  event.target.value = ''
+  const target = imageUploadTarget.value
+  imageUploadTarget.value = null
+  if (!files.length || !target) return
+
+  const ids = target.ids || []
+  if (!ids.length) return
+  if (files.length !== ids.length) {
+    toast.error(`请一次选择 ${ids.length} 张图片（当前选了 ${files.length} 张），按列表顺序对应`)
+    return
+  }
+
+  try {
+    let ok = 0
+    for (let i = 0; i < ids.length; i++) {
+      try {
+        const path = await uploadImageFile(files[i])
+        if (target.kind === 'character-batch') {
+          await applyCharacterUploadedImage(ids[i], path)
+        } else {
+          await applyShotUploadedImage(ids[i], path)
+        }
+        ok++
+      } catch (err) {
+        console.error(err)
+      }
+    }
+    await refresh()
+    if (ok === ids.length) {
+      toast.success(target.kind === 'character-batch'
+        ? `已全部上传 ${ok} 张定妆图`
+        : `已全部上传 ${ok} 张配图`)
+    } else {
+      toast.warning(`上传完成 ${ok}/${ids.length}，部分失败请重试`)
+    }
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function copyAllCharPortraitPrompts() {
+  const list = sortCharactersForPortraitGeneration(visualChars.value)
+  if (!list.length) {
+    toast.warning('暂无角色')
+    return
+  }
+  const blocks = []
+  for (const charRow of list) {
+    try {
+      const useReference = isCharPortraitUseReference(charRow.id)
+      const res = await characterAPI.getPortraitPrompt(charRow.id, epId.value, { useReference })
+      if (res?.prompt) blocks.push(`【${formatCharacterDisplayName(charRow)}】\n${res.prompt}`)
+    } catch {
+      const fallback = String(charRow?.appearance || charRow?.description || '').trim()
+      if (fallback) blocks.push(`【${formatCharacterDisplayName(charRow)}】\n${fallback}`)
+    }
+  }
+  if (!blocks.length) {
+    toast.warning('暂无描述词')
+    return
+  }
+  const copied = await copyTextToClipboard(blocks.join('\n\n'))
+  if (copied) toast.success(`已复制全部 ${blocks.length} 条定妆描述词`)
+}
+
+async function copyNarrationShotPromptsBatch() {
+  const list = narrationShotsNeedingImage(sbs.value)
+  if (!list.length) {
+    toast.warning('暂无需配图镜头')
+    return
+  }
+  const batchIdx = Math.max(1, Number(narrationCopyBatchIndex.value) || 1)
+  const start = (batchIdx - 1) * NARRATION_PROMPT_COPY_BATCH_SIZE
+  const batch = list.slice(start, start + NARRATION_PROMPT_COPY_BATCH_SIZE)
+  if (!batch.length) {
+    toast.warning('当前批次无镜头')
+    return
+  }
+  const blocks = batch.map((sb) => {
+    const prompt = getNarrationImagePromptText(sb)
+    const i = sbs.value.findIndex(s => s.id === sb.id)
+    const label = `#${String(i + 1).padStart(2, '0')} ${extractNarrationSentence(sb) || '镜头'}`
+    return prompt ? `【${label}】\n${prompt}` : ''
+  }).filter(Boolean)
+  if (!blocks.length) {
+    toast.warning('当前批次暂无描述词')
+    return
+  }
+  const copied = await copyTextToClipboard(blocks.join('\n\n'))
+  if (!copied) return
+  const rangeStart = start + 1
+  const rangeEnd = start + batch.length
+  if (blocks.length < batch.length) {
+    toast.success(`已复制 ${blocks.length}/${batch.length} 条（${rangeStart}-${rangeEnd}，${batch.length - blocks.length} 条暂无文案）`)
+    return
+  }
+  toast.success(`已复制 ${blocks.length} 条描述词（${rangeStart}-${rangeEnd}）`)
+}
+
 async function genCharImg(id) {
   const useReference = isCharPortraitUseReference(id)
   const beforeChar = chars.value.find(c => c.id === id)
@@ -4502,6 +5025,8 @@ async function genCharImg(id) {
       ? '（纯文生图）'
       : result?.used_portrait_reference
       ? `（参考：${result?.reference_character_variant || '同角色定妆'}）`
+      : result?.used_style_anchor
+      ? '（画风锚定：项目已有定妆）'
       : '（无可用参考，纯文生图）'
     toast.success(`定妆生成中 · ${result?.model || episodeImageModel.value}${refHint}`)
     await refresh()
@@ -4585,6 +5110,15 @@ async function batchCharImages() {
             return !!(row?.image_url || row?.imageUrl)
           }, 36)
           await refresh()
+        } else if (!ref) {
+          const anchor = findDramaStyleAnchorCharacter(chars.value, char)
+          if (anchor && pending.some(c => c.id === anchor.id && !(c.image_url || c.imageUrl))) {
+            await watchAsyncResult(() => {
+              const row = chars.value.find(c => c.id === anchor.id)
+              return !!(row?.image_url || row?.imageUrl)
+            }, 36)
+            await refresh()
+          }
         }
       }
       await characterAPI.generateImage(char.id, epId.value, { useReference })
@@ -4804,7 +5338,7 @@ function narrationShotImageLabel(s) {
       : `${paraHint}${layoutHint} · 待生成配图${sceneHint}`
   }
   if (hasNarrationShotImage(s) && meta.narration_image_mode === 'copy') return '已复用上一镜配图'
-  if (!narrationShotNeedsOwnImage(s)) return '同段 · 沿用上一张'
+  if (!narrationShotNeedsOwnImage(s)) return '沿用上一张'
   if (resolveNarrationEffectiveImage(sbs.value, s).inherited) return '同段 · 合成沿用前图'
   return '同段 · 沿用上一张'
 }
@@ -4843,18 +5377,60 @@ async function clearNarrationShotImage(sb) {
 async function markNarrationShotNeedImage(sb) {
   const sceneContent = resolveSceneContentForShot(sbs.value, sb)
   const style = drama.value?.style || 'comic'
+  const meta = {
+    narration_image_mode: 'new',
+    scene_content: sceneContent,
+    paragraph_layout: 'single',
+  }
   const draft = {
     ...sb,
-    reference_images: JSON.stringify({ narration_image_mode: 'new', scene_content: sceneContent }),
+    reference_images: JSON.stringify(meta),
     image_prompt: null,
     imagePrompt: null,
   }
   await storyboardAPI.update(sb.id, {
-    reference_images: JSON.stringify({ narration_image_mode: 'new', scene_content: sceneContent }),
+    reference_images: JSON.stringify(meta),
     image_prompt: buildNarrationImagePrompt(draft, style),
   })
   toast.success('已标记为需配图')
   await refresh()
+}
+
+async function setNarrationShotLayout(sb, layout) {
+  if (resolveNarrationParagraphLayout(sb) === layout) return
+  const meta = parseNarrationImageMeta(sb)
+  let parsed = {}
+  const raw = sb?.reference_images || sb?.referenceImages
+  if (raw) {
+    try {
+      parsed = typeof raw === 'object' ? { ...raw } : JSON.parse(raw)
+    } catch {
+      parsed = {}
+    }
+  }
+  parsed.narration_image_mode = meta.narration_image_mode || 'new'
+  parsed.paragraph_layout = layout
+  if (meta.scene_content) parsed.scene_content = meta.scene_content
+  if (meta.paragraph_index != null) parsed.paragraph_index = meta.paragraph_index
+  if (meta.narration_shot_type) parsed.narration_shot_type = meta.narration_shot_type
+  if (meta.narration_tts_mode) parsed.narration_tts_mode = meta.narration_tts_mode
+
+  const style = drama.value?.style || 'comic'
+  const draft = {
+    ...sb,
+    reference_images: JSON.stringify(parsed),
+    image_prompt: null,
+    imagePrompt: null,
+  }
+  const newPrompt = buildNarrationImagePrompt(draft, style)
+  await storyboardAPI.update(sb.id, {
+    reference_images: JSON.stringify(parsed),
+    image_prompt: newPrompt || null,
+  })
+  sb.reference_images = JSON.stringify(parsed)
+  sb.image_prompt = newPrompt
+  sb.imagePrompt = newPrompt
+  toast.success(layout === 'diptych' ? '已切换为两宫格' : '已切换为完整单图')
 }
 function isPendingNarrationShot(id) { return pendingNarrationShotIds.value.includes(id) }
 
@@ -5211,6 +5787,47 @@ async function cancelMerge() {
     mergeData.value = { ...(mergeData.value || {}), status: 'cancelled' }
     toast.info('已取消生成')
   } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+function stopOpeningPoll() {
+  if (openingPollTimer) {
+    clearInterval(openingPollTimer)
+    openingPollTimer = null
+  }
+}
+
+function startOpeningPoll() {
+  stopOpeningPoll()
+  openingPollTimer = setInterval(async () => {
+    try {
+      const status = await episodeAPI.openingVideoStatus(epId.value)
+      if (status?.status === 'processing') return
+      stopOpeningPoll()
+      openingVideoProcessing.value = false
+      await refresh()
+      if (status?.status === 'completed') toast.success('开幕视频已生成')
+      else if (status?.status === 'failed') toast.error(status?.opening_video_error || '开幕视频生成失败')
+    } catch {
+      stopOpeningPoll()
+      openingVideoProcessing.value = false
+    }
+  }, 2500)
+}
+
+async function generateOpeningVideo() {
+  if (!illustrationImageCount.value) {
+    toast.warning('暂无可用配图，请先生成或上传镜头配图')
+    return
+  }
+  try {
+    openingVideoProcessing.value = true
+    await episodeAPI.generateOpeningVideo(epId.value)
+    toast.success('开幕视频生成中…')
+    startOpeningPoll()
+  } catch (e) {
+    openingVideoProcessing.value = false
     toast.error(e.message)
   }
 }
@@ -6136,6 +6753,69 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
   user-select: none;
 }
 .local-tts-toggle input { accent-color: var(--accent); }
+
+.uploaded-audio-panel {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(27, 41, 64, 0.16);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.uploaded-audio-panel.is-empty {
+  border-style: dashed;
+  opacity: 0.95;
+}
+.uploaded-audio-empty {
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 4px 2px 2px;
+}
+.uploaded-audio-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.uploaded-audio-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.uploaded-audio-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+}
+.uploaded-audio-idx {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-3);
+  padding-top: 2px;
+}
+.uploaded-audio-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.uploaded-audio-name {
+  font-size: 12px;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.uploaded-audio-player {
+  width: 100%;
+  height: 32px;
+}
 .tag.warn { color: #b45309; border-color: rgba(180, 83, 9, 0.25); background: rgba(251, 191, 36, 0.12); }
 
 .narration-breakdown-panel {
@@ -6240,6 +6920,18 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
   margin-top: 8px;
   font-size: 10px;
 }
+.narration-shot-layout-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 10px;
+}
+.narration-shot-layout-row .btn {
+  flex: 1 1 72px;
+  justify-content: center;
+}
 .narration-shot-prompt-textarea {
   font-size: 11px;
   line-height: 1.5;
@@ -6294,6 +6986,17 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
 .asset-name { font-size: 13px; font-weight: 600; }
 .asset-meta { font-size: 11px; }
 .asset-foot { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-top: 1px solid var(--border); }
+.sr-only-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* Frame grid */
 .frame-grid { display: flex; flex-direction: column; gap: 8px; }
@@ -6396,8 +7099,8 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
   line-height: 1.45;
   color: var(--error);
 }
-.prod-actions { display: flex; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid rgba(27, 41, 64, 0.08); }
-.prod-actions .btn { flex: 1; justify-content: center; }
+.prod-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid rgba(27, 41, 64, 0.08); }
+.prod-actions .btn { flex: 1 1 120px; justify-content: center; }
 
 /* Image viewer */
 .image-viewer-overlay {
@@ -6834,6 +7537,10 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
 .export-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; width: 100%; max-width: 720px; }
 .export-list { width: 280px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
 .export-bgm-panel { padding: 10px 12px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.export-opening-panel { padding: 10px 12px 12px; border-bottom: 1px solid var(--border); }
+.export-opening-video { width: 100%; border-radius: 8px; background: #000; margin-bottom: 8px; }
+.export-opening-actions { display: flex; gap: 8px; }
+.export-opening-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); }
 .export-bgm-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); cursor: pointer; }
 .export-bgm-toggle input { accent-color: var(--accent); }
 .export-bgm-fields { display: flex; flex-direction: column; gap: 8px; }

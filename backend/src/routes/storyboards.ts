@@ -8,6 +8,7 @@ import { findReusableTtsByText, narrationShotNeedsOwnTts, parseDialogueForTTS, r
 import { isNarrationStoryboard, parseNarrationImageMeta } from '../services/narration-image.js'
 import { formatCharacterDisplayName, resolveStoryboardCharacterIdsForShot } from '../services/narration-characters.js'
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
+import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -299,6 +300,21 @@ app.post('/:id/generate-tts', async (c) => {
     })
   } catch (err: any) {
     logTaskError('StoryboardAPI', 'generate-tts', { storyboardId: id, voiceId, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /storyboards/:id/upload-tts — 上传单镜配音 mp3
+app.post('/:id/upload-tts', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const audioPath = String(body.audio_path || body.audioPath || '').trim()
+  if (!audioPath) return badRequest(c, '请提供 audio_path')
+
+  try {
+    const result = await applyUploadedTtsToStoryboard(id, audioPath)
+    return success(c, result)
+  } catch (err: any) {
     return badRequest(c, err.message)
   }
 })

@@ -55,6 +55,12 @@ export const episodeAPI = {
   extractNarrationCharacters: (id: number, options?: { script?: string; style?: string }) =>
     api.post(`/episodes/${id}/extract-narration-characters`, options || {}),
   linkNarrationCharacters: (id: number) => api.post(`/episodes/${id}/link-narration-characters`),
+  generateOpeningVideo: (id: number) => api.post(`/episodes/${id}/generate-opening-video`, {}),
+  openingVideoStatus: (id: number) => api.get(`/episodes/${id}/opening-video`),
+  splitNarrationAudio: (id: number, audioPaths: string | string[]) =>
+    api.post(`/episodes/${id}/split-narration-audio`, {
+      audio_paths: Array.isArray(audioPaths) ? audioPaths : [audioPaths],
+    }),
 }
 
 export const storyboardAPI = {
@@ -62,13 +68,43 @@ export const storyboardAPI = {
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
   generateTTS: (id: number, options?: { force?: boolean; local_tts?: boolean; local_voice?: string }) =>
     api.post(`/storyboards/${id}/generate-tts`, options || {}),
+  uploadTTS: (id: number, audioPath: string) =>
+    api.post(`/storyboards/${id}/upload-tts`, { audio_path: audioPath }),
   resolveCharacters: (id: number) => api.post(`/storyboards/${id}/resolve-characters`, {}),
   del: (id: number) => api.del(`/storyboards/${id}`),
+}
+
+export const uploadAPI = {
+  image: async (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const resp = await fetch(`${BASE}/upload/image`, { method: 'POST', body: form })
+    const json = await resp.json()
+    if (!resp.ok || (json.code && json.code >= 400)) {
+      throw new Error(json.message || `${resp.status}`)
+    }
+    return json.data ?? json
+  },
+  audio: async (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const resp = await fetch(`${BASE}/upload/audio`, { method: 'POST', body: form })
+    const json = await resp.json()
+    if (!resp.ok || (json.code && json.code >= 400)) {
+      throw new Error(json.message || `${resp.status}`)
+    }
+    return json.data ?? json
+  },
 }
 
 export const characterAPI = {
   create: (data: any) => api.post('/characters', data),
   update: (id: number, data: any) => api.put(`/characters/${id}`, data),
+  getPortraitPrompt: (id: number, episodeId: number, options?: { useReference?: boolean }) => {
+    const query = new URLSearchParams({ episode_id: String(episodeId) })
+    if (options?.useReference === false) query.set('use_reference', 'false')
+    return api.get<{ prompt: string }>(`/characters/${id}/portrait-prompt?${query.toString()}`)
+  },
   voiceSample: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId }),
   generateImage: (id: number, episodeId: number, options?: { useReference?: boolean }) =>
     api.post(`/characters/${id}/generate-image`, {

@@ -112,6 +112,30 @@ export function findPortraitReferenceCharacter(
   return withImage(siblings)
 }
 
+/** 跨角色画风锚定：取同项目已有定妆（优先青年形态），供新角色对齐线稿/赛璐璐 */
+export function findDramaStyleAnchorCharacter(
+  dramaId: number,
+  excludeId?: number,
+): NarrationCharacterRow | null {
+  const candidates = db.select().from(schema.characters).all()
+    .filter(ch => ch.dramaId === dramaId && !ch.deletedAt && ch.id !== excludeId && ch.imageUrl?.trim())
+    .map(ch => ({
+      id: ch.id,
+      name: ch.name,
+      role: ch.role,
+      appearance: ch.appearance,
+      variantLabel: ch.variantLabel,
+      personality: ch.personality,
+      imageUrl: ch.imageUrl,
+    }))
+    .sort((a, b) => {
+      const byStage = variantPortraitSortOrder(a.variantLabel) - variantPortraitSortOrder(b.variantLabel)
+      if (byStage !== 0) return byStage
+      return a.id - b.id
+    })
+  return candidates[0] || null
+}
+
 function variantAgeOrder(group: VariantAgeGroup): number {
   const order: Record<VariantAgeGroup, number> = {
     child: 0,
@@ -246,6 +270,8 @@ export function detectCharacterIdsInText(text: string, characters: NarrationChar
   const normalized = String(text || '').trim()
   if (!normalized || !characters.length) return []
 
+  const found = new Set<number>()
+
   const mentionedNames: string[] = []
   const sorted = [...characters].sort((a, b) => b.name.length - a.name.length)
   for (const char of sorted) {
@@ -254,15 +280,87 @@ export function detectCharacterIdsInText(text: string, characters: NarrationChar
     if (normalized.includes(name) && !mentionedNames.includes(name)) mentionedNames.push(name)
   }
 
-  const found: number[] = []
   for (const name of mentionedNames) {
     const variants = characters.filter(ch => ch.name.trim() === name)
     if (!variants.length) continue
     if (variants.length === 1) {
-      found.push(variants[0].id)
+      found.add(variants[0].id)
       continue
     }
-    found.push(pickBestVariantForText(normalized, variants).id)
+    found.add(pickBestVariantForText(normalized, variants).id)
+  }
+
+  for (const id of detectCharacterIdsFromAppearanceHints(normalized, characters)) {
+    found.add(id)
+  }
+  for (const id of detectFirstPersonProtagonistIds(normalized, characters)) {
+    found.add(id)
+  }
+
+  return [...found]
+}
+
+function extractAppearanceMatchTags(appearance: string): string[] {
+  const app = String(appearance || '').trim()
+  if (!app) return []
+  const englishTags = app.match(/english tags:\s*(.+)/i)?.[1]
+  const raw = englishTags || app
+  return raw.split(/[,，;；]/).map(t => t.trim().toLowerCase()).filter(t => t.length >= 5)
+}
+
+function detectCharacterIdsFromAppearanceHints(text: string, characters: NarrationCharacterRow[]): number[] {
+  const normalized = String(text || '').toLowerCase()
+  if (!normalized) return []
+
+  const byName = new Map<string, NarrationCharacterRow[]>()
+  for (const ch of characters) {
+    const name = ch.name.trim()
+    if (!name) continue
+    if (!byName.has(name)) byName.set(name, [])
+    byName.get(name)!.push(ch)
+  }
+
+  const found: number[] = []
+  for (const [, variants] of byName) {
+    let bestVariant: NarrationCharacterRow | null = null
+    let bestScore = 0
+    for (const variant of variants) {
+      const app = String(variant.appearance || '').toLowerCase()
+      if (!app) continue
+      let score = 0
+      for (const tag of extractAppearanceMatchTags(app)) {
+        if (normalized.includes(tag)) score += tag.length >= 10 ? 4 : 2
+      }
+      const textAge = normalized.match(/(\d{1,2})[- ]?year[- ]?old/)?.[1]
+      const appAge = app.match(/(\d{1,2})[- ]?year[- ]?old/)?.[1] || app.match(/(\d{1,2})\s*岁/)?.[1]
+      if (textAge && appAge && textAge === appAge) score += 12
+      if (score > bestScore) {
+        bestScore = score
+        bestVariant = variant
+      }
+    }
+    if (bestVariant && bestScore >= 4) found.push(bestVariant.id)
+  }
+  return found
+}
+
+function detectFirstPersonProtagonistIds(text: string, characters: NarrationCharacterRow[]): number[] {
+  const hasFirstPerson = /(?:^|[\s，,。！？；:：])我(?:的|在|把|被|会|要|也|都|还|就|则|便|曾|已|将|想|说|看|走|来|去|得|给|让|用|做|吃|喝|买|卖|开|关|拿|带|找|等|站|坐|躺|睡|醒|爱|恨|觉得|认为|知道|发现|想起|决定|开始|继续|完成|辞|推|摆)/.test(text)
+  if (!hasFirstPerson) return []
+
+  const protagonistNames = new Set(
+    characters
+      .filter(ch => ch.name === '主角' || /主角|主人公|个体户|男主|女主/.test(String(ch.role || '')))
+      .map(ch => ch.name.trim())
+      .filter(Boolean),
+  )
+  if (!protagonistNames.size) return []
+
+  const found: number[] = []
+  for (const name of protagonistNames) {
+    const variants = characters.filter(ch => ch.name.trim() === name)
+    if (!variants.length) continue
+    found.push(variants.length === 1 ? variants[0].id : pickBestVariantForText(text, variants).id)
   }
   return found
 }
@@ -458,7 +556,7 @@ export async function finalizeCharacterAppearance(
 export function buildCharacterPortraitPrompt(
   char: { name: string; appearance?: string | null; description?: string | null; personality?: string | null; role?: string | null; variantLabel?: string | null },
   style = 'webtoon',
-  options?: { portraitReference?: boolean; referenceVariantLabel?: string | null },
+  options?: { portraitReference?: boolean; referenceVariantLabel?: string | null; styleAnchorReference?: boolean },
 ) {
   const normalizedStyle = normalizeArtStyle(style)
   const rawAppearance = sanitizeCharacterAppearance(char.appearance?.trim() || char.description?.trim() || '')
@@ -471,6 +569,9 @@ export function buildCharacterPortraitPrompt(
   const refHint = options?.portraitReference
     ? buildPortraitReferenceHint(ageGroup, getVariantAgeGroup(options.referenceVariantLabel))
     : ''
+  const styleAnchorHint = options?.styleAnchorReference
+    ? 'match reference image art style, line weight, flat cel shading, and color technique ONLY, generate a completely different character per appearance description, do NOT copy face identity or outfit from reference'
+    : ''
   const framing = resolvePortraitFraming(`${rawAppearance} ${cleanTags}`)
   return [
     PORTRAIT_STYLE_GUARD,
@@ -479,6 +580,7 @@ export function buildCharacterPortraitPrompt(
     `${char.name}${stage ? ` (${stage})` : ''}, character reference portrait for animation production`,
     stage ? `life stage: ${stage}` : '',
     refHint,
+    styleAnchorHint,
     appearance ? `appearance: ${appearance}` : '',
     cleanTags ? `costume and props: ${cleanTags}` : '',
     role ? `role: ${role}` : '',
@@ -508,13 +610,19 @@ export function resolveCharacterPortraitGeneration(
     ? findPortraitReferenceCharacter(char.dramaId, char.name, char.id, char.variantLabel)
     : null
   const refUrl = refChar?.imageUrl?.trim() || null
+  const styleAnchor = useReference && !refUrl
+    ? findDramaStyleAnchorCharacter(char.dramaId, char.id)
+    : null
+  const styleAnchorUrl = styleAnchor?.imageUrl?.trim() || null
 
   const referenceImages: string[] = []
   if (useReference && refUrl) referenceImages.push(refUrl)
+  if (useReference && styleAnchorUrl) referenceImages.push(styleAnchorUrl)
 
   const prompt = buildCharacterPortraitPrompt(char, style, {
     portraitReference: !!(useReference && refUrl),
     referenceVariantLabel: refChar?.variantLabel,
+    styleAnchorReference: !!(useReference && styleAnchorUrl),
   })
 
   return {
@@ -522,6 +630,7 @@ export function resolveCharacterPortraitGeneration(
     referenceImages: referenceImages.length ? referenceImages : undefined,
     referenceCharacterId: refChar?.id,
     referenceCharacterVariant: refChar?.variantLabel || null,
+    styleAnchorCharacterId: styleAnchor?.id,
     /** @deprecated use referenceCharacterId */
     youthCharacterId: getVariantAgeGroup(refChar?.variantLabel) === 'youth' ? refChar?.id : undefined,
   }
@@ -554,7 +663,7 @@ export function enrichImagePromptWithCharacters(
     return app ? `${label} (${app})` : label
   }).join('; ')
 
-  return `${base}, characters in scene: ${hints}, keep each character appearance consistent with reference images for the same life stage, same face and outfit within the same variant`
+  return `${base}, characters in scene: ${hints}, keep each character appearance consistent with reference images for the same life stage, same face and outfit within the same variant, match reference image line art and cel shading exactly`
 }
 
 export async function generateCharacterAppearance(params: {
@@ -591,6 +700,7 @@ export async function generateCharacterAppearance(params: {
     '- 渲染/画风词：retro style, vintage look, pixel, webtoon, chibi, anime style, 复古风, Q版, 条漫, 像素',
     '- 把年代写成画风：禁止 "1980s retro style"，应写 "1980s side-part hairstyle, floral shirt, bell-bottom pants"',
     '- 禁止 vintage bicycle，应写 bicycle 或 pushing a bicycle',
+    '- 禁止 wedding dress / red roses / evening gown 等浪漫海报元素，服装写具体款式如 red dress、floral shirt',
     '示例（好）：28-year-old male, 1980s side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, pushing a bicycle',
     '示例（差）：28-year-old male, 1980s retro style, vintage look, retro hairstyle',
     '输出格式：一段中文外貌描述 + 换行 + English tags: 英文逗号分隔的具体发型/服装/配饰/道具（生图必用），如 English tags: 1980s side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, bicycle',

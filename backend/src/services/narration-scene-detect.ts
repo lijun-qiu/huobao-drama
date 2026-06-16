@@ -1,6 +1,6 @@
 import { getTextConfig, getTextProviderBaseUrl } from './ai.js'
 import { joinProviderUrl } from './adapters/url.js'
-import { artStylePrompt } from '../constants/art-styles.js'
+import { artStylePrompt, sanitizeSceneImagePrompt } from '../constants/art-styles.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 
 export type NarrationSentenceItem = {
@@ -20,6 +20,7 @@ export type ImageDetectMode = 'paragraph' | 'conservative' | 'balanced'
 const STRONG_SCENE_SHIFT_RE = /来到|走(进|向|出|到)|跑进|冲进|踏入|进入|离开|走出|返回|回到|抵达|赶到|第二天|翌日|次日|多年后|数年后|几年后|几小时后|清晨|黎明|黄昏|傍晚|夜里|深夜|天亮|小时候|闪回|回忆|镜头一转|画面一转|另一边|另一处|转场|切换|与此同时/
 const SCENE_SHIFT_RE = /路过|推开|打开|转入|同一时间|不久后|片刻后|随即|来到|走(进|向|出|到)|进入|离开|返回|回到|抵达|第二天|翌日|清晨|黄昏|夜里|闪回|转场|切换/
 const SCENE_OPENING_RE = /^(在|于|当|随着|这时|此时|只见|眼前|身后|门口|屋里|室内|室外|大街上|[^，,]{2,16}(里|中|外|内|旁|边|前|后|上|下))[，,]/
+const BEAT_SHIFT_RE = /然而|但是|可是|与此同时|另一边|同时|接着|随后|就在这时|不料|突然|转眼/
 
 /** 解说分镜：遇标点即拆，一句一镜 */
 const PUNCT_BOUNDARY_RE = /(?<=[。！？；，、,.!?;])\s*/
@@ -123,15 +124,17 @@ export function consolidateShortSceneSegments(
   return result
 }
 
-/** 规则兜底：换段落、场景词、地点/时间起句 → 新配图 */
+/** 规则兜底：换段落、场景词、地点/时间起句、叙事节拍转折 → 新配图 */
 export function detectImageNeedsHeuristic(items: NarrationSentenceItem[]): boolean[] {
   return items.map((item, index) => {
     if (index === 0) return true
     const prev = items[index - 1]
     const sentence = item.sentence
     if (item.paragraphIndex !== prev.paragraphIndex) return true
+    if (STRONG_SCENE_SHIFT_RE.test(sentence)) return true
     if (SCENE_SHIFT_RE.test(sentence)) return true
     if (SCENE_OPENING_RE.test(sentence)) return true
+    if (BEAT_SHIFT_RE.test(sentence)) return true
     return false
   })
 }
@@ -370,16 +373,17 @@ export async function generateParagraphImagePromptsWithLLM(
     })
 
     const system = [
-      '你是影视解说分镜美术指导。拆镜结构已由规则确定（一句旁白一镜、按内容段落配图），你的任务是写 AI 文生图用的英文 image_prompt。',
+      '你是影视解说分镜美术指导。拆镜结构已由规则确定（一句旁白一镜、按场景密切换图），你的任务是写 AI 文生图用的英文 image_prompt。',
       '硬性规则：',
-      '1) 每个段落综合该段全部旁白句，提炼地点、人物、动作、氛围，不要只写首句',
+      '1) 每个配图段综合该段旁白句，提炼地点、人物、动作、氛围；段越短越聚焦当前画面，不要写未出现的后续情节',
       `2) 画风：${artStylePrompt(style, 'scene')}, 16:9 landscape, high quality, no text, no watermark`,
-      '3) layout=single：单张完整场景插画。prompt 以 "single full illustration, one complete scene only" 开头，并写明 no grid, no collage, no multi-panel, no split screen',
-      '4) layout=diptych：横向两宫格（仍算一张图）。prompt 以 "single 16:9 illustration with exactly 2 horizontal panels side by side, diptych layout, one image file" 开头，分别描述 left panel 与 right panel 的场景',
-      '5) 片头标题图：氛围背景，预留中央叠字区域，绝对无文字 no text no letters no words',
+      '3) layout=single（默认）：单张完整场景插画，完整概括该段旁白。prompt 以 "single full illustration, one complete scene only" 开头，并写明 no grid, no collage, no multi-panel, no split screen',
+      '4) 仅当输入 layout=diptych 时才写两宫格：横向两宫格（仍算一张图）。prompt 以 "single 16:9 illustration with exactly 2 horizontal panels side by side, diptych layout, one image file" 开头，分别描述 left panel 与 right panel',
+      '5) 片头标题图：与故事 hook 对应的具体时代/场景背景（如 80 年代夜市、杂货铺），预留中央叠字区域，绝对无文字 no text no letters no words',
       '6) 除 diptych 两宫格式外，禁止 grid/panel/collage/strip/storyboard 等词',
+      '7) 禁止 romantic couple、clock faces、roses、ethereal、dreamlike、nostalgic filter、retro filter、pixel art 等会把画风带偏的词；写 1980s-era 场景即可，不要写 1980s retro',
       characters.length
-        ? '7) 若段落涉及已知角色，prompt 中必须写出其外貌特征并保持与角色设定一致（same face, same outfit）'
+        ? '8) 若段落涉及已知角色，prompt 中必须写出其外貌特征并保持与角色设定一致（same face, same outfit）'
         : '',
       '只输出 JSON，不要解释。',
     ].filter(Boolean).join('\n')
@@ -420,13 +424,13 @@ export async function generateParagraphImagePromptsWithLLM(
         const startIndex = Number(row?.start_index ?? paragraphs[i]?.startIndex)
         const prompt = String(row?.image_prompt || '').trim()
         if (!Number.isFinite(startIndex) || !prompt) continue
-        promptsByStartIndex.set(startIndex, prompt)
+        promptsByStartIndex.set(startIndex, sanitizeSceneImagePrompt(prompt))
       }
       if (promptsByStartIndex.size !== paragraphs.length) return null
     }
 
     const titlePrompt = titleHook
-      ? String(parsed?.title_image_prompt || '').trim() || null
+      ? sanitizeSceneImagePrompt(String(parsed?.title_image_prompt || '').trim()) || null
       : null
 
     logTaskSuccess('NarrationScene', 'llm-paragraph-prompt-done', {

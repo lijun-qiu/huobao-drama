@@ -1,4 +1,4 @@
-import { artStylePrompt } from '../constants/art-styles.js'
+import { artStylePrompt, sanitizeSceneImagePrompt, SCENE_STYLE_GUARD } from '../constants/art-styles.js'
 
 export type NarrationImageMode = 'new' | 'inherit' | 'copy'
 export type NarrationShotType = 'title' | 'normal'
@@ -99,6 +99,7 @@ export function buildNarrationSceneImagePrompt(sentences: string[], style = 'com
   const main = summarizeSceneMainContent(sentences)
   if (!main) return ''
   return [
+    SCENE_STYLE_GUARD,
     'single full illustration, one complete scene only',
     'no grid, no collage, no multi-panel, no comic strip, no split screen, no storyboard layout',
     artStylePrompt(style, 'scene'),
@@ -114,6 +115,7 @@ export function buildNarrationDiptychImagePrompt(sentences: string[], style = 'c
   const right = summarizeSceneMainContent(sentences.slice(mid))
   if (!left && !right) return ''
   return [
+    SCENE_STYLE_GUARD,
     'single 16:9 illustration with exactly 2 horizontal panels side by side, diptych layout, one image file',
     'only left panel and right panel, no third panel, no vertical stack',
     artStylePrompt(style, 'diptych'),

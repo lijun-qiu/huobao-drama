@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
-import { artStylePrompt } from '../constants/art-styles.js'
+import { artStylePrompt, sanitizeSceneImagePrompt } from '../constants/art-styles.js'
 import {
   buildNarrationImageMeta,
   buildParagraphImagePrompt,
@@ -77,12 +77,25 @@ export function extractTitleHook(title: string) {
   return hook
 }
 
+/** 片头配图用：优先从完整标题提取主题，避免「今天体验的人生剧本是」这类前缀句 */
+export function resolveTitleVisualHook(titleFull?: string | null, titleHook?: string | null): string {
+  const full = String(titleFull || '').trim()
+  if (full) return extractTitleHook(full)
+  const hook = String(titleHook || '').trim()
+  if (!hook) return ''
+  const stripped = extractTitleHook(hook)
+  return stripped && stripped !== hook ? stripped : extractTitleHook(hook)
+}
+
 export function buildTitleImagePrompt(moodHint: string, style = 'comic') {
+  const hook = sanitizeSceneImagePrompt(moodHint)
   return [
-    'cinematic opening background scene, single full illustration',
+    'Chinese short drama narration opening background, single full illustration',
     'absolutely no text, no letters, no words, no watermark, no captions on image',
+    'NOT romantic couple, NOT clock faces, NOT roses, NOT dreamlike abstract wallpaper, NOT pixel art, NOT retro photo filter',
     artStylePrompt(style, 'title'),
-    `atmospheric background mood for story theme: ${moodHint}`,
+    `visual theme based on story hook: ${hook}`,
+    'concrete era-appropriate environment matching the hook (street market, shop interior, city street, etc)',
     'clean center area reserved for dynamic title overlay, 16:9 landscape, high quality',
   ].join(', ')
 }
@@ -123,9 +136,9 @@ export async function breakdownNarrationEpisode(
     paragraphPromptByAnchor.set(para.startIndex, { content, prompt, layout: para.layout })
   })
 
-  const titleHook = titleItems.length ? extractTitleHook(titleItems[0].sentence) : null
+  const titleVisualHook = title ? extractTitleHook(title) : null
   let imagePromptSource: 'paragraph+llm' | 'paragraph' = 'paragraph'
-  let titleImagePrompt = titleHook ? buildTitleImagePrompt(titleHook, style) : null
+  let titleImagePrompt = titleVisualHook ? buildTitleImagePrompt(titleVisualHook, style) : null
   const episodeCharacters = getEpisodeVisualCharacters(episodeId, ep.dramaId)
 
   const llmPrompts = await generateParagraphImagePromptsWithLLM(
@@ -135,17 +148,17 @@ export async function breakdownNarrationEpisode(
       sentences: para.sentences,
       layout: para.layout,
     })),
-    { titleHook, titleFull: title || null, style, characters: episodeCharacters },
+    { titleHook: titleVisualHook, titleFull: title || null, style, characters: episodeCharacters },
   )
   if (llmPrompts) {
     imagePromptSource = 'paragraph+llm'
-    if (llmPrompts.titlePrompt) titleImagePrompt = llmPrompts.titlePrompt
+    if (llmPrompts.titlePrompt) titleImagePrompt = sanitizeSceneImagePrompt(llmPrompts.titlePrompt)
     paragraphs.forEach((para) => {
       const llmPrompt = llmPrompts.promptsByStartIndex.get(para.startIndex)
       if (!llmPrompt) return
       paragraphPromptByAnchor.set(para.startIndex, {
         content: summarizeSceneMainContent(para.sentences),
-        prompt: llmPrompt,
+        prompt: sanitizeSceneImagePrompt(llmPrompt),
         layout: para.layout,
       })
     })
@@ -187,7 +200,7 @@ export async function breakdownNarrationEpisode(
         referenceImages: buildNarrationImageMeta(needsTitleImage ? 'new' : 'inherit', {
           narration_shot_type: 'title',
           narration_tts_mode: 'new',
-          title_hook: extractTitleHook(sentence),
+          title_hook: titleVisualHook || extractTitleHook(sentence),
           title_full: titleFull,
         }),
         shotType: '标题',
@@ -197,7 +210,11 @@ export async function breakdownNarrationEpisode(
         createdAt: ts,
         updatedAt: ts,
       }).run()
-      linkStoryboardCharactersFromText(Number(res.lastInsertRowid), sentence, episodeCharacters)
+      linkStoryboardCharactersFromText(
+        Number(res.lastInsertRowid),
+        [titleFull, titleVisualHook, needsTitleImage ? titleImagePrompt : '', sentence].filter(Boolean).join('\n'),
+        episodeCharacters,
+      )
     })
   }
 
@@ -224,7 +241,7 @@ export async function breakdownNarrationEpisode(
         narration_tts_mode: 'new',
         scene_content: paraInfo?.content,
         paragraph_index: para?.index,
-        paragraph_layout: para?.layout,
+        paragraph_layout: para?.layout || 'single',
       }),
       shotType: '中景',
       angle: '平视',
@@ -233,7 +250,11 @@ export async function breakdownNarrationEpisode(
       createdAt: ts,
       updatedAt: ts,
     }).run()
-    linkStoryboardCharactersFromText(Number(res.lastInsertRowid), sentence, episodeCharacters)
+    linkStoryboardCharactersFromText(
+      Number(res.lastInsertRowid),
+      [sentence, paraInfo?.content, paraInfo?.prompt].filter(Boolean).join('\n'),
+      episodeCharacters,
+    )
   })
 
   db.update(schema.episodes)
@@ -246,7 +267,7 @@ export async function breakdownNarrationEpisode(
     sentence_count: sentenceItems.length,
     title_count: titleItems.length,
     title_image_count: titleItems.length ? 1 : 0,
-    title_hook: titleItems.length ? extractTitleHook(titleItems[0].sentence) : null,
+    title_hook: titleVisualHook,
     paragraph_count: paragraphs.length,
     diptych_count: diptychCount,
     image_needed_count: imageNeededCount,

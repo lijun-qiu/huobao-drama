@@ -7,6 +7,8 @@ import { breakdownNarrationEpisode } from '../services/narration-breakdown.js'
 import { sortStoryboardsByOrder } from '../services/narration-image.js'
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
+import { isOpeningVideoProcessing, startOpeningVideoGeneration } from '../services/ffmpeg-opening.js'
+import { splitNarrationAudioForEpisode } from '../services/narration-audio-split.js'
 
 const app = new Hono()
 
@@ -216,6 +218,26 @@ app.post('/:id/link-narration-characters', async (c) => {
   })
 })
 
+// POST /episodes/:id/split-narration-audio — Whisper 转 SRT 后按分镜文案对齐裁剪配音
+app.post('/:id/split-narration-audio', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const body = await c.req.json().catch(() => ({}))
+  const audioPaths = Array.isArray(body.audio_paths)
+    ? body.audio_paths.map((p: unknown) => String(p || '').trim()).filter(Boolean)
+    : [String(body.audio_path || body.audioPath || '').trim()].filter(Boolean)
+  if (!audioPaths.length) return badRequest(c, '请提供 audio_path 或 audio_paths')
+
+  try {
+    const result = await splitNarrationAudioForEpisode(episodeId, audioPaths)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
 // POST /episodes/:id/narration-breakdown — 解说文案按句拆分分镜
 app.post('/:id/narration-breakdown', async (c) => {
   const episodeId = Number(c.req.param('id'))
@@ -237,6 +259,33 @@ app.post('/:id/narration-breakdown', async (c) => {
   } catch (err: any) {
     return badRequest(c, err.message)
   }
+})
+
+// POST /episodes/:id/generate-opening-video — 开幕视频（随机8张配图翻页 + 配音字幕）
+app.post('/:id/generate-opening-video', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  if (isOpeningVideoProcessing(episodeId)) {
+    return badRequest(c, '开幕视频正在生成中，请稍候')
+  }
+
+  startOpeningVideoGeneration(episodeId)
+  return success(c, { status: 'processing' })
+})
+
+// GET /episodes/:id/opening-video — 查询开幕视频状态
+app.get('/:id/opening-video', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  return success(c, {
+    status: isOpeningVideoProcessing(episodeId)
+      ? 'processing'
+      : (ep.openingVideoUrl ? 'completed' : (ep.openingVideoError ? 'failed' : 'idle')),
+    opening_video_url: ep.openingVideoUrl,
+    opening_video_error: ep.openingVideoError,
+  })
 })
 
 export default app

@@ -120,6 +120,13 @@ export function artStylePrompt(style?: string | null, context: ArtStyleContext =
   return STYLE_PROMPTS[key]?.[context] || STYLE_PROMPTS[DEFAULT_ART_STYLE][context]
 }
 
+export const SCENE_STYLE_GUARD = [
+  'CRITICAL ART STYLE: Chinese short-drama 2D anime scene illustration',
+  'thin clean line art, flat soft cel shading, normal body proportions',
+  'FORBIDDEN: semi-realistic, digital painting, painterly, manhua concept art, soft gradient shading, thick outlines, photorealistic',
+  'FORBIDDEN: pixel art, retro filter, film grain, romantic wallpaper, bishounen bishoujo poster',
+].join(', ')
+
 const APPEARANCE_STYLE_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\b1980s side-part (hairstyle|haircut|hair)\b/gi, 'side-part $1'],
   [/\b1980s-era\b/gi, ''],
@@ -127,6 +134,11 @@ const APPEARANCE_STYLE_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\b1980s?\s+(wavy|curly)\b/gi, 'wavy'],
   [/\bstylish\s+80s\s+dress\b/gi, 'stylish dress'],
   [/\b80s?\s+dress\b/gi, 'dress'],
+  [/\bred\s+wedding\s+dress\b/gi, 'red dress'],
+  [/\bwedding\s+dress\b/gi, 'dress'],
+  [/\bevening\s+gown\b/gi, 'dress'],
+  [/\bred\s+roses?\b/gi, ''],
+  [/\bholding\s+roses?\b/gi, ''],
   [/\b1990s?\s+business\b/gi, 'business'],
   [/\b19\d0s?\s+(business|fashionable|fashion|style|look|aesthetic)\b/gi, ''],
   [/\b19\d0s?\b/gi, ''],
@@ -178,6 +190,10 @@ const CONFLICTING_STYLE_PATTERNS = [
   /semi-?chibi/gi,
   /Q版/gi,
   /条漫/gi,
+  /romantic\s+poster/gi,
+  /concept\s+art\s+poster/gi,
+  /movie\s+poster/gi,
+  /digital\s+painting\s+portrait/gi,
 ]
 
 function tidyAppearancePunctuation(text: string): string {
@@ -206,4 +222,37 @@ export function sanitizeCharacterAppearance(appearance?: string | null): string 
 /** @deprecated alias */
 export function sanitizeAppearanceForPortrait(appearance?: string | null): string {
   return sanitizeCharacterAppearance(appearance)
+}
+
+const SCENE_PROMPT_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\b1980s?\s*retro\b/gi, '1980s-era'],
+  [/\b80s?\s*retro\b/gi, '1980s-era'],
+  [/\b90s?\s*retro\b/gi, '1990s-era'],
+  [/\bretro\s+(street|market|background|filter|style|look|aesthetic)\b/gi, '$1'],
+  [/\bwarm\s+nostalgic\s+lighting\b/gi, 'warm natural lighting'],
+  [/\bnostalg(?:ic|ia)\b/gi, ''],
+  [/\bchanging\s+times\b/gi, ''],
+  [/\bsense\s+of\s+nostalgia\b/gi, ''],
+  [/\bethereal\b/gi, ''],
+  [/\bdreamlike\b/gi, ''],
+  [/\bromantic\b/gi, ''],
+  [/\bclock\s*faces?\b/gi, ''],
+  [/\bfloating\s+clocks?\b/gi, ''],
+  [/\bwhite\s+roses?\b/gi, ''],
+  [/\bshattered\s+glass\b/gi, ''],
+  [/\bfloating\s+debris\b/gi, ''],
+  [/\bcouple\s+silhouette\b/gi, ''],
+  [/\bwallpaper\s+aesthetic\b/gi, ''],
+  [/\bfilm\s+grain\b/gi, ''],
+  [/\bvintage\s+photo\s+filter\b/gi, ''],
+]
+
+/** 清洗场景/片头配图 prompt：去掉会把模型带偏的复古/浪漫/抽象装饰词 */
+export function sanitizeSceneImagePrompt(prompt?: string | null): string {
+  let text = String(prompt || '').trim()
+  if (!text) return ''
+  for (const [pattern, replacement] of SCENE_PROMPT_REPLACEMENTS) {
+    text = text.replace(pattern, replacement)
+  }
+  return tidyAppearancePunctuation(text)
 }

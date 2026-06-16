@@ -120,6 +120,75 @@ export function artStylePrompt(style?: string | null, context: ArtStyleContext =
   return STYLE_PROMPTS[key]?.[context] || STYLE_PROMPTS[DEFAULT_ART_STYLE][context]
 }
 
+export const SCENE_STYLE_GUARD = [
+  'CRITICAL ART STYLE: Chinese short-drama 2D anime scene illustration',
+  'thin clean line art, flat soft cel shading, normal body proportions',
+  'FORBIDDEN: semi-realistic, digital painting, painterly, manhua concept art, soft gradient shading, thick outlines, photorealistic',
+  'FORBIDDEN: pixel art, retro filter, film grain, romantic wallpaper, bishounen bishoujo poster',
+].join(', ')
+
+const SCENE_PROMPT_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\b1980s?\s*retro\b/gi, '1980s-era'],
+  [/\b80s?\s*retro\b/gi, '1980s-era'],
+  [/\b90s?\s*retro\b/gi, '1990s-era'],
+  [/\bretro\s+(street|market|background|filter|style|look|aesthetic)\b/gi, '$1'],
+  [/\bwarm\s+nostalgic\s+lighting\b/gi, 'warm natural lighting'],
+  [/\bnostalg(?:ic|ia)\b/gi, ''],
+  [/\bchanging\s+times\b/gi, ''],
+  [/\bsense\s+of\s+nostalgia\b/gi, ''],
+  [/\bethereal\b/gi, ''],
+  [/\bdreamlike\b/gi, ''],
+  [/\bromantic\b/gi, ''],
+  [/\bclock\s*faces?\b/gi, ''],
+  [/\bfloating\s+clocks?\b/gi, ''],
+  [/\bwhite\s+roses?\b/gi, ''],
+  [/\bshattered\s+glass\b/gi, ''],
+  [/\bfloating\s+debris\b/gi, ''],
+  [/\bcouple\s+silhouette\b/gi, ''],
+  [/\bwallpaper\s+aesthetic\b/gi, ''],
+  [/\bfilm\s+grain\b/gi, ''],
+  [/\bvintage\s+photo\s+filter\b/gi, ''],
+]
+
+function tidyScenePrompt(text: string): string {
+  return text
+    .replace(/\s{2,}/g, ' ')
+    .replace(/[,，;；]\s*[,，;；]+/g, ', ')
+    .replace(/^[,，;；\s]+|[,，;；\s]+$/g, '')
+    .trim()
+}
+
+export function sanitizeSceneImagePrompt(prompt?: string | null): string {
+  let text = String(prompt || '').trim()
+  if (!text) return ''
+  for (const [pattern, replacement] of SCENE_PROMPT_REPLACEMENTS) {
+    text = text.replace(pattern, replacement)
+  }
+  return tidyScenePrompt(text)
+}
+
+export function extractTitleHook(title: string) {
+  let hook = title
+    .replace(/^今天体验的人生剧本是[，,]?\s*/, '')
+    .replace(/^(?:本期|本集)?人生剧本\s*[:：]?\s*/, '')
+    .replace(/^【|】$/g, '')
+    .replace(/^[，,、\s]+/, '')
+    .trim()
+  if (!hook) hook = title.trim()
+  const firstSegment = hook.split(/[，,]/)[0]?.trim() || hook
+  if (firstSegment.length >= 6 && firstSegment.length <= 22) return firstSegment
+  if (hook.length > 20) return hook.slice(0, 20)
+  return hook
+}
+
+export function resolveTitleVisualHook(titleFull?: string | null, titleHook?: string | null): string {
+  const full = String(titleFull || '').trim()
+  if (full) return extractTitleHook(full)
+  const hook = String(titleHook || '').trim()
+  if (!hook) return ''
+  return extractTitleHook(hook)
+}
+
 export const artStyleSelectOptions = ART_STYLES.map(item => ({
   label: `${item.label} — ${item.description}`,
   value: item.value,
