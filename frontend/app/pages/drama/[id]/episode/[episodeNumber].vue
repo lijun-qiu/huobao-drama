@@ -1025,7 +1025,7 @@
           <!-- Sub: Dubbing -->
           <div v-else-if="prodTab === 'dubbing'" class="prod-content">
             <div v-if="isNarrationMode" class="narration-hint">
-              <strong>配音策略：</strong>先<strong>上传 MP3</strong>（可多段），确认无误后点<strong>按文案裁剪</strong>。系统会先调用 Whisper 转 SRT 字幕，再与分镜旁白对齐后裁剪（需在设置中配置支持转写的文本 API）。也可逐镜上传或 TTS 生成。
+              <strong>配音策略：</strong>先<strong>上传 MP3</strong>（可多段），确认无误后点<strong>按文案裁剪</strong>。系统会 Whisper 转写后与分镜旁白对齐；<strong>多段 MP3 按音频时长比例分配到各镜</strong>，单段则按字幕/文案时间轴匹配。
             </div>
             <div v-else class="narration-hint">
               <strong>配音策略：</strong>先上传 MP3，再点「按文案裁剪」分配到各镜台词；或逐镜上传 / TTS 生成。
@@ -1910,7 +1910,26 @@
           </div>
           <div class="export-opening-body">
             <div class="narration-hint" style="margin-bottom:16px">
-              从本集已生成/上传的配图中<strong>随机选 8 张</strong>，合成翻页片头；配音与字幕为「今天要体验的人生是」。
+              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每次转场叠加书本翻页音效）。上传 MP3 后按配音时长生成，并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未上传时为 2 秒片头 + 翻页音效。
+            </div>
+            <div class="opening-audio-panel" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px">
+              <div style="font-size:13px;font-weight:600;margin-bottom:8px">开幕配音（MP3）</div>
+              <div class="export-bar" style="margin-bottom:10px">
+                <button class="btn" :disabled="openingAudioUploading" @click="triggerOpeningAudioUpload">
+                  {{ openingAudioUploading ? '上传中…' : (openingAudioUrl ? '更换 MP3' : '上传 MP3') }}
+                </button>
+                <audio v-if="openingAudioSrc" :src="openingAudioSrc" controls style="height:32px;max-width:280px" />
+                <span v-if="openingAudioUrl" class="tag tag-success">已上传</span>
+              </div>
+              <label class="field-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:4px">字幕文案（屏幕水平垂直居中）</label>
+              <input
+                v-model="openingSubtitleText"
+                class="input"
+                type="text"
+                placeholder="体验365个人生副本"
+                style="width:100%;max-width:480px"
+                @change="saveOpeningSubtitle"
+              />
             </div>
             <template v-if="openingVideoProcessing">
               <div class="step-empty">
@@ -1921,6 +1940,9 @@
             </template>
             <template v-else-if="openingVideoUrl">
               <video :key="openingVideoSrc" :src="openingVideoSrc" controls class="export-video" />
+              <div v-if="openingVideoError" class="narration-hint" style="margin-top:12px;color:var(--danger)">
+                上次生成失败：{{ openingVideoError }}（下方为旧版本，请重新生成）
+              </div>
               <div class="export-bar">
                 <span class="tag tag-success">已生成</span>
                 <button class="btn" :disabled="!illustrationImageCount" @click="generateOpeningVideo">重新生成</button>
@@ -2367,11 +2389,22 @@ const illustrationImageCount = computed(() => {
 })
 const openingVideoUrl = computed(() => episode.value?.opening_video_url || episode.value?.openingVideoUrl || null)
 const openingVideoError = computed(() => episode.value?.opening_video_error || episode.value?.openingVideoError || '')
+const openingAudioUrl = computed(() => episode.value?.opening_audio_url || episode.value?.openingAudioUrl || '')
+const openingAudioSrc = computed(() => openingAudioUrl.value ? `/${openingAudioUrl.value.replace(/^\//, '')}` : '')
+const OPENING_SUBTITLE_DEFAULT = '体验365个人生副本'
+const OPENING_SUBTITLE_LEGACY = '今天要体验的人生是'
+function resolveOpeningSubtitleText(stored) {
+  const trimmed = String(stored || '').trim()
+  if (!trimmed || trimmed === OPENING_SUBTITLE_LEGACY) return OPENING_SUBTITLE_DEFAULT
+  return trimmed
+}
+const openingSubtitleText = ref(OPENING_SUBTITLE_DEFAULT)
+const openingAudioUploading = ref(false)
 const openingVideoProcessing = ref(false)
 let openingPollTimer = null
 const openingVideoSrc = computed(() => {
   if (!openingVideoUrl.value) return ''
-  const v = episode.value?.updated_at || episode.value?.updatedAt || Date.now()
+  const v = openingVideoUrl.value.split('/').pop() || episode.value?.updated_at || episode.value?.updatedAt || Date.now()
   return `/${openingVideoUrl.value}?v=${encodeURIComponent(String(v))}`
 })
 
@@ -4405,6 +4438,7 @@ async function refresh() {
     const ep = drama.value.episodes?.find(e => (e.episode_number || e.episodeNumber) === episodeNumber)
     if (ep) {
       episode.value = ep
+      openingSubtitleText.value = resolveOpeningSubtitleText(ep.opening_subtitle_text || ep.openingSubtitleText)
       syncEpisodeImageModel(ep)
       syncEpisodeTextModel(ep)
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
@@ -4911,6 +4945,25 @@ function triggerShotTtsUpload(sbId) {
   audioUploadInputRef.value?.click()
 }
 
+function triggerOpeningAudioUpload() {
+  audioUploadTarget.value = { kind: 'opening' }
+  if (audioUploadInputRef.value) {
+    audioUploadInputRef.value.multiple = false
+  }
+  audioUploadInputRef.value?.click()
+}
+
+async function saveOpeningSubtitle() {
+  if (!epId.value || !openingAudioUrl.value) return
+  try {
+    const path = openingAudioUrl.value.replace(/^\//, '')
+    await episodeAPI.uploadOpeningAudio(epId.value, path, openingSubtitleText.value.trim())
+    await refresh()
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
 async function onAudioUploadSelected(event) {
   const files = Array.from(event.target.files || [])
     .filter(f => f.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg)$/i.test(f.name))
@@ -4943,11 +4996,21 @@ async function onAudioUploadSelected(event) {
       await storyboardAPI.uploadTTS(target.id, path)
       await refresh()
       toast.success('本镜配音已上传')
+    } else if (target.kind === 'opening') {
+      openingAudioUploading.value = true
+      const file = files[0]
+      const uploaded = await uploadAPI.audio(file)
+      const path = uploaded?.path || String(uploaded?.url || '').replace(/^\//, '')
+      if (!path) throw new Error('上传失败')
+      await episodeAPI.uploadOpeningAudio(epId.value, path, openingSubtitleText.value.trim())
+      await refresh()
+      toast.success('开幕配音已上传，可点击生成开幕视频')
     }
   } catch (e) {
     toast.error(e.message)
   } finally {
     narrationAudioUploading.value = false
+    openingAudioUploading.value = false
   }
 }
 

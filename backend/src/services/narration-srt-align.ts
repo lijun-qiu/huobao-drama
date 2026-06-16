@@ -108,6 +108,144 @@ function fallbackProportionalGroups(scripts: string[], cues: SrtCue[]): AlignGro
   return groups
 }
 
+const MIN_SEGMENT_SEC = 0.35
+
+function buildSpokenTimeline(cues: SrtCue[]): { text: string; times: number[] } {
+  let text = ''
+  const times: number[] = []
+  for (const cue of cues) {
+    const norm = normalizeAlignText(cue.text)
+    if (!norm) continue
+    const dur = Math.max(0.01, cue.end - cue.start)
+    for (let i = 0; i < norm.length; i++) {
+      text += norm[i]
+      times.push(cue.start + (dur * (i + 0.5)) / norm.length)
+    }
+  }
+  return { text, times }
+}
+
+function findTextPosition(spoken: string, pattern: string, from: number): number {
+  if (!pattern) return from
+  const exact = spoken.indexOf(pattern, from)
+  if (exact >= 0) return exact
+
+  let bestIdx = from
+  let bestCost = 1
+  const searchEnd = Math.min(spoken.length, from + Math.max(pattern.length * 3, 24))
+  for (let i = from; i < searchEnd; i++) {
+    for (let len = Math.max(1, pattern.length - 2); len <= pattern.length + 3; len++) {
+      if (i + len > spoken.length) break
+      const cost = textMismatchCost(pattern, spoken.slice(i, i + len))
+      if (cost < bestCost) {
+        bestCost = cost
+        bestIdx = i
+      }
+    }
+  }
+  return bestIdx
+}
+
+/** 按转写文本顺序在时间轴上定位每镜文案 */
+export function alignStoryboardsByTranscriptTimeline(
+  scripts: string[],
+  cues: SrtCue[],
+  totalDuration: number,
+): { ranges: TimeRange[]; alignScore: number } {
+  const { text: spoken, times } = buildSpokenTimeline(cues)
+  if (!spoken || !times.length) {
+    return alignStoryboardsByWeightedDuration(scripts, totalDuration)
+  }
+
+  const ranges: TimeRange[] = []
+  let cursor = 0
+  let totalCost = 0
+
+  for (let i = 0; i < scripts.length; i++) {
+    const norm = normalizeAlignText(scripts[i])
+    if (!norm) {
+      const prevEnd = ranges[i - 1]?.end ?? 0
+      ranges.push({ start: prevEnd, end: prevEnd })
+      continue
+    }
+
+    const startPos = findTextPosition(spoken, norm, cursor)
+    const endPos = Math.min(spoken.length, startPos + Math.max(1, norm.length))
+    cursor = Math.max(cursor, endPos)
+
+    const startTime = times[Math.min(startPos, times.length - 1)] ?? 0
+    let endTime = times[Math.min(Math.max(startPos, endPos - 1), times.length - 1)] ?? startTime
+    if (endTime <= startTime) endTime = Math.min(totalDuration, startTime + MIN_SEGMENT_SEC)
+
+    if (i > 0 && startTime < ranges[i - 1].end) {
+      const prevEnd = ranges[i - 1].end
+      ranges.push({ start: prevEnd, end: Math.max(prevEnd + MIN_SEGMENT_SEC, endTime) })
+    } else {
+      ranges.push({ start: startTime, end: Math.max(startTime + MIN_SEGMENT_SEC, endTime) })
+    }
+
+    totalCost += textMismatchCost(scripts[i], spoken.slice(startPos, endPos))
+  }
+
+  if (ranges.length) {
+    ranges[ranges.length - 1].end = Math.min(totalDuration, Math.max(ranges[ranges.length - 1].end, ranges[ranges.length - 1].start + MIN_SEGMENT_SEC))
+  }
+
+  const alignScore = Math.max(0, 1 - totalCost / Math.max(1, scripts.length))
+  return { ranges, alignScore }
+}
+
+/** 按文案字数比例切分音频时长 */
+export function alignStoryboardsByWeightedDuration(
+  scripts: string[],
+  totalDuration: number,
+): { ranges: TimeRange[]; alignScore: number } {
+  const weights = scripts.map(text => Math.max(1, normalizeAlignText(text).length))
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0) || scripts.length
+  const ranges: TimeRange[] = []
+  let cursor = 0
+
+  for (let i = 0; i < scripts.length; i++) {
+    const share = i === scripts.length - 1
+      ? Math.max(MIN_SEGMENT_SEC, totalDuration - cursor)
+      : Math.max(MIN_SEGMENT_SEC, (weights[i] / totalWeight) * totalDuration)
+    const end = i === scripts.length - 1 ? totalDuration : Math.min(totalDuration, cursor + share)
+    ranges.push({ start: cursor, end: Math.max(cursor + MIN_SEGMENT_SEC, end) })
+    cursor = ranges[ranges.length - 1].end
+  }
+
+  if (ranges.length) ranges[ranges.length - 1].end = totalDuration
+  return { ranges, alignScore: 0.45 }
+}
+
+function pickBestAlignment(
+  scripts: string[],
+  cues: SrtCue[],
+  totalDuration: number,
+): { ranges: TimeRange[]; alignScore: number; mode: 'srt' | 'timeline' | 'weighted' } {
+  const srt = alignStoryboardsToSrt(scripts, cues)
+  const timeline = alignStoryboardsByTranscriptTimeline(scripts, cues, totalDuration)
+  const weighted = alignStoryboardsByWeightedDuration(scripts, totalDuration)
+
+  const candidates = [
+    { ...srt, mode: 'srt' as const },
+    { ...timeline, mode: 'timeline' as const },
+    { ...weighted, mode: 'weighted' as const },
+  ].sort((a, b) => b.alignScore - a.alignScore)
+
+  const best = candidates[0]
+  if (best.alignScore >= 0.15) return best
+
+  // 字幕段远少于分镜时，时间轴/比例切分通常更可靠
+  if (cues.length < scripts.length * 0.6) {
+    const timelinePick = timeline.alignScore >= weighted.alignScore
+      ? { ...timeline, mode: 'timeline' as const }
+      : { ...weighted, mode: 'weighted' as const }
+    return timelinePick
+  }
+  return best.alignScore > 0 ? best : { ...weighted, mode: 'weighted' as const }
+}
+
 /** 将 SRT 字幕 cue 与分镜文案顺序对齐，返回每镜时间区间 */
 export function alignStoryboardsToSrt(scripts: string[], cues: SrtCue[]): {
   ranges: TimeRange[]
@@ -130,4 +268,13 @@ export function alignStoryboardsToSrt(scripts: string[], cues: SrtCue[]): {
   const alignScore = Math.max(0, 1 - totalCost / Math.max(1, scripts.length))
 
   return { ranges, alignScore }
+}
+
+export function resolveStoryboardAudioRanges(
+  scripts: string[],
+  cues: SrtCue[],
+  totalDuration: number,
+): { ranges: TimeRange[]; alignScore: number; mode: 'srt' | 'timeline' | 'weighted' } {
+  if (!cues.length) throw new Error('字幕为空，无法对齐')
+  return pickBestAlignment(scripts, cues, totalDuration)
 }

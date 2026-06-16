@@ -390,6 +390,8 @@ ensureColumn('storyboards', 'bgm_generation_id', 'INTEGER')
 ensureColumn('characters', 'variant_label', 'TEXT')
 ensureColumn('episodes', 'opening_video_url', 'TEXT')
 ensureColumn('episodes', 'opening_video_error', 'TEXT')
+ensureColumn('episodes', 'opening_audio_url', 'TEXT')
+ensureColumn('episodes', 'opening_subtitle_text', 'TEXT')
 
 // 历史默认迁移为 GPT Image（4022 OpenAI 兼容，文生图 + edits 参考图定妆）
 try {

@@ -9,7 +9,7 @@ import { sortStoryboardsByOrder } from '../services/narration-image.js'
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel } from '../constants/text-models.js'
-import { isOpeningVideoProcessing, startOpeningVideoGeneration } from '../services/ffmpeg-opening.js'
+import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration } from '../services/ffmpeg-opening.js'
 import { splitNarrationAudioForEpisode } from '../services/narration-audio-split.js'
 
 const app = new Hono()
@@ -308,7 +308,36 @@ app.post('/:id/narration-breakdown', async (c) => {
   }
 })
 
-// POST /episodes/:id/generate-opening-video — 开幕视频（随机8张配图翻页 + 配音字幕）
+// POST /episodes/:id/opening-audio — 上传开幕配音 MP3 并可选保存字幕文案
+app.post('/:id/opening-audio', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const body = await c.req.json().catch(() => ({}))
+  const audioPath = String(body.audio_path || body.audioPath || '').trim()
+  if (!audioPath) return badRequest(c, '请提供 audio_path')
+
+  const subtitleText = body.subtitle_text ?? body.subtitleText
+  const updates: Record<string, unknown> = {
+    openingAudioUrl: audioPath.replace(/^\//, ''),
+    updatedAt: now(),
+  }
+  if (subtitleText !== undefined) {
+    updates.openingSubtitleText = resolveOpeningSubtitleText(String(subtitleText)) || null
+  } else if (!ep.openingSubtitleText?.trim() || ep.openingSubtitleText.trim() === '今天要体验的人生是') {
+    updates.openingSubtitleText = resolveOpeningSubtitleText(null)
+  }
+
+  db.update(schema.episodes).set(updates).where(eq(schema.episodes.id, episodeId)).run()
+  const [updated] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  return success(c, {
+    opening_audio_url: updated.openingAudioUrl,
+    opening_subtitle_text: resolveOpeningSubtitleText(updated.openingSubtitleText),
+  })
+})
+
+// POST /episodes/:id/generate-opening-video — 开幕视频（翻页片头 + 可选上传配音/字幕）
 app.post('/:id/generate-opening-video', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
@@ -329,9 +358,15 @@ app.get('/:id/opening-video', async (c) => {
   return success(c, {
     status: isOpeningVideoProcessing(episodeId)
       ? 'processing'
-      : (ep.openingVideoUrl ? 'completed' : (ep.openingVideoError ? 'failed' : 'idle')),
+      : ep.openingVideoError
+        ? 'failed'
+        : ep.openingVideoUrl
+          ? 'completed'
+          : 'idle',
     opening_video_url: ep.openingVideoUrl,
     opening_video_error: ep.openingVideoError,
+    opening_audio_url: ep.openingAudioUrl,
+    opening_subtitle_text: resolveOpeningSubtitleText(ep.openingSubtitleText),
   })
 })
 

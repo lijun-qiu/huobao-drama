@@ -62,6 +62,11 @@ export const episodeAPI = {
   linkNarrationCharacters: (id: number) => api.post(`/episodes/${id}/link-narration-characters`),
   generateOpeningVideo: (id: number) => api.post(`/episodes/${id}/generate-opening-video`, {}),
   openingVideoStatus: (id: number) => api.get(`/episodes/${id}/opening-video`),
+  uploadOpeningAudio: (id: number, audioPath: string, subtitleText?: string) =>
+    api.post(`/episodes/${id}/opening-audio`, {
+      audio_path: audioPath,
+      ...(subtitleText !== undefined ? { subtitle_text: subtitleText } : {}),
+    }),
   splitNarrationAudio: (id: number, audioPaths: string | string[]) =>
     api.post(`/episodes/${id}/split-narration-audio`, {
       audio_paths: Array.isArray(audioPaths) ? audioPaths : [audioPaths],

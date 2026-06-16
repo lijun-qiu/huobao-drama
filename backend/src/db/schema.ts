@@ -40,6 +40,8 @@ export const episodes = sqliteTable('episodes', {
   audioConfigId: integer('audio_config_id'),
   openingVideoUrl: text('opening_video_url'),
   openingVideoError: text('opening_video_error'),
+  openingAudioUrl: text('opening_audio_url'),
+  openingSubtitleText: text('opening_subtitle_text'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),

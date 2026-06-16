@@ -11,7 +11,10 @@ import { getAbsolutePath } from '../utils/storage.js'
 import { sortStoryboardsByOrder } from './narration-image.js'
 import { parseDialogueForTTS } from './narration-tts.js'
 import { transcribeAudioToSrt } from './audio-transcribe.js'
-import { alignStoryboardsToSrt } from './narration-srt-align.js'
+import {
+  normalizeAlignText,
+  resolveStoryboardAudioRanges,
+} from './narration-srt-align.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -147,6 +150,7 @@ async function splitAudioToTargetsBySrt(
   audioRelativePath: string,
   ts: string,
   merged: boolean,
+  alignModeHint: 'srt' | 'boundary' = 'srt',
 ) {
   const inputAbs = getAbsolutePath(audioRelativePath)
   if (!fs.existsSync(inputAbs)) throw new Error(`音频文件不存在：${audioRelativePath}`)
@@ -154,11 +158,7 @@ async function splitAudioToTargetsBySrt(
   const totalDuration = await probeMediaDuration(inputAbs)
   const scripts = targets.map(item => item.parsed.pureText)
   const { srtPath, cues } = await transcribeAudioToSrt(inputAbs)
-  const aligned = alignStoryboardsToSrt(scripts, cues)
-
-  if (aligned.alignScore < 0.15) {
-    throw new Error('字幕与分镜文案匹配度过低，请确认录音内容与旁白文案一致，并检查设置中的文本 API 是否支持 Whisper 转写')
-  }
+  const aligned = resolveStoryboardAudioRanges(scripts, cues, totalDuration)
 
   const results: Array<{ storyboard_id: number; tts_audio_url: string; duration: number }> = []
   for (let i = 0; i < targets.length; i++) {
@@ -177,10 +177,85 @@ async function splitAudioToTargetsBySrt(
     results,
     sourceDuration: totalDuration,
     mode: (merged ? 'merged' : 'single') as 'merged' | 'single',
-    align_mode: 'srt' as const,
+    align_mode: alignModeHint === 'boundary' ? 'boundary' as const : aligned.mode,
     align_score: aligned.alignScore,
     srt_path: srtPath,
     subtitle_count: cues.length,
+  }
+}
+
+async function splitTargetsByAudioFiles(
+  targets: TtsTarget[],
+  audioRelativePaths: string[],
+): Promise<TtsTarget[][]> {
+  if (audioRelativePaths.length <= 1) return [targets]
+
+  const durations = await Promise.all(
+    audioRelativePaths.map(async (relativePath) => {
+      const abs = getAbsolutePath(relativePath)
+      if (!fs.existsSync(abs)) throw new Error(`音频文件不存在：${relativePath}`)
+      return probeMediaDuration(abs)
+    }),
+  )
+  const totalAudio = durations.reduce((sum, d) => sum + d, 0) || durations.length
+
+  const weights = targets.map(item => Math.max(1, normalizeAlignText(item.parsed.pureText).length))
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0) || targets.length
+  const groups: TtsTarget[][] = audioRelativePaths.map(() => [])
+  let fileIdx = 0
+  let weightAcc = 0
+  const fileWeightLimits = durations.map((_, idx) =>
+    durations.slice(0, idx + 1).reduce((sum, d) => sum + d, 0) / totalAudio,
+  )
+
+  for (let i = 0; i < targets.length; i++) {
+    weightAcc += weights[i] / totalWeight
+    while (fileIdx < fileWeightLimits.length - 1 && weightAcc > fileWeightLimits[fileIdx]) {
+      fileIdx++
+    }
+    groups[fileIdx].push(targets[i])
+  }
+
+  for (let i = 0; i < groups.length - 1; i++) {
+    if (!groups[i].length && groups[i + 1].length) {
+      groups[i].push(groups[i + 1].shift()!)
+    }
+  }
+
+  return groups.filter(group => group.length)
+}
+
+async function splitAudioByFileBoundaries(
+  targets: TtsTarget[],
+  audioRelativePaths: string[],
+  ts: string,
+) {
+  const groups = await splitTargetsByAudioFiles(targets, audioRelativePaths)
+  const allResults: Array<{ storyboard_id: number; tts_audio_url: string; duration: number }> = []
+  let sourceDuration = 0
+  let alignScoreSum = 0
+  let subtitleCount = 0
+  let srtPath: string | undefined
+
+  for (let i = 0; i < audioRelativePaths.length; i++) {
+    const group = groups[i] || []
+    if (!group.length) continue
+    const payload = await splitAudioToTargetsBySrt(group, audioRelativePaths[i], ts, false, 'boundary')
+    allResults.push(...payload.results)
+    sourceDuration += payload.sourceDuration
+    alignScoreSum += payload.align_score
+    subtitleCount += payload.subtitle_count
+    srtPath = payload.srt_path
+  }
+
+  return {
+    results: allResults,
+    sourceDuration,
+    mode: 'multi' as const,
+    align_mode: 'boundary' as const,
+    align_score: alignScoreSum / Math.max(1, audioRelativePaths.length),
+    srt_path: srtPath,
+    subtitle_count: subtitleCount,
   }
 }
 
@@ -212,13 +287,14 @@ export async function splitNarrationAudioForEpisode(episodeId: number, audioInpu
     episodeId,
     audioCount: audioPaths.length,
     shotCount: targets.length,
-    mode: 'srt',
+    mode: audioPaths.length > 1 ? 'boundary' : 'srt',
   })
 
   const ts = now()
   const merged = audioPaths.length > 1
-  const sourcePath = await prepareEpisodeAudioSource(audioPaths)
-  const payload = await splitAudioToTargetsBySrt(targets, sourcePath, ts, merged)
+  const payload = merged
+    ? await splitAudioByFileBoundaries(targets, audioPaths, ts)
+    : await splitAudioToTargetsBySrt(targets, audioPaths[0], ts, false)
 
   logTaskSuccess('NarrationAudioSplit', 'split', {
     episodeId,
