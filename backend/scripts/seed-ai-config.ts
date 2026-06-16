@@ -1,26 +1,11 @@
-import { readFileSync, existsSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { eq } from 'drizzle-orm'
+import { loadEnvLocal } from '../src/utils/load-env-local.js'
 import { db, schema } from '../src/db/index.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const envPath = resolve(__dirname, '../../.env.local')
-
-function loadEnvFile(path: string) {
-  if (!existsSync(path)) return
-  for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const idx = trimmed.indexOf('=')
-    if (idx === -1) continue
-    const key = trimmed.slice(0, idx).trim()
-    const value = trimmed.slice(idx + 1).trim()
-    if (!process.env[key]) process.env[key] = value
-  }
-}
-
-loadEnvFile(envPath)
+loadEnvLocal(resolve(__dirname, '../../.env.local'))
 
 const apiKey = process.env.AI_API_KEY?.trim()
 const baseUrl = (process.env.AI_BASE_URL || 'https://api.4022543.xyz').replace(/\/+$/, '')
@@ -31,7 +16,7 @@ if (!apiKey) {
 }
 
 const PRESET_SERVICES = [
-  { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl, model: 'gemini-3-pro-preview', priority: 100 },
+  { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl, model: 'deepseek-v4-pro,gpt-4o', priority: 100 },
   { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl, model: 'gpt-image-2-all', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: `${baseUrl}/volcengine`, model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: `${baseUrl}/minimax`, model: 'speech-2.8-hd', priority: 97 },
@@ -45,8 +30,12 @@ const AGENT_DEFAULTS = [
   { agentType: 'grid_prompt_generator', name: '图片提示词生成' },
 ] as const
 
-const AGENT_MODEL = 'gemini-3-pro-preview'
+const AGENT_MODEL = 'deepseek-v4-pro'
 const ts = new Date().toISOString()
+
+function presetModels(model: string): string[] {
+  return model.split(',').map(s => s.trim()).filter(Boolean)
+}
 
 for (const preset of PRESET_SERVICES) {
   const existing = preset.serviceType === 'image'
@@ -62,7 +51,7 @@ for (const preset of PRESET_SERVICES) {
     name: `默认${preset.label}服务`,
     baseUrl: preset.baseUrl,
     apiKey,
-    model: JSON.stringify([preset.model]),
+    model: JSON.stringify(presetModels(preset.model)),
     priority: preset.priority,
     isActive: true,
     updatedAt: ts,

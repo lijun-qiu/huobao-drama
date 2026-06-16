@@ -37,12 +37,13 @@ app.post('/', async (c) => {
         const model = resolveEpisodeImageModel(ep, body.model)
         if (resolved.characterIds.length) {
           const allChars = getEpisodeVisualCharacters(sb.episodeId, ep!.dramaId)
+          const [drama] = db.select({ style: schema.dramas.style }).from(schema.dramas).where(eq(schema.dramas.id, ep!.dramaId)).all()
           if (imageModelSupportsReferenceImages(model)) {
             const maxRefs = imageModelMaxReferenceImages(model)
             const refs = collectCharacterReferenceImages(allChars, resolved.characterIds, maxRefs)
             if (refs.length) referenceImages = refs
           }
-          prompt = enrichImagePromptWithCharacters(prompt, allChars, resolved.characterIds)
+          prompt = enrichImagePromptWithCharacters(prompt, allChars, resolved.characterIds, drama?.style)
           logTaskStart('ImageAPI', 'resolve-characters', {
             storyboardId: sb.id,
             characterIds: resolved.characterIds,

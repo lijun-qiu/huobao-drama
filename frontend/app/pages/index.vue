@@ -140,18 +140,22 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import { dramaAPI } from '~/composables/useApi'
-import { DEFAULT_ART_STYLE, artStyleLabel, artStyleSelectOptions } from '~/composables/useArtStyles'
+import { NARRATION_MINIMAL_STYLE, artStyleLabel, artStyleSelectOptions } from '~/composables/useArtStyles'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 const dramas = ref([])
 const loading = ref(false)
 const showCreate = ref(false)
-const form = ref({ title: '', total_episodes: 1, style: DEFAULT_ART_STYLE, production_mode: 'narration' })
+const form = ref({ title: '', total_episodes: 1, style: NARRATION_MINIMAL_STYLE, production_mode: 'narration' })
 const styleSelectOptions = artStyleSelectOptions
 const modeSelectOptions = [
   { label: '解说视频（配图+旁白）', value: 'narration' },
   { label: '漫剧短剧（完整流程）', value: 'drama' },
 ]
+
+watch(() => form.value.production_mode, (mode) => {
+  if (mode === 'narration') form.value.style = NARRATION_MINIMAL_STYLE
+})
 
 async function load() {
   loading.value = true

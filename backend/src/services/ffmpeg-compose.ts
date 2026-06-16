@@ -180,8 +180,8 @@ function buildImageMotionFilter() {
   return `scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fps=${fps},format=yuv420p`
 }
 
-/** 同配图多镜：每镜线性推近 0.02，换图后从 1.0 重新起算 */
-const SAME_IMAGE_ZOOM_STEP = 0.02
+/** 配图页推镜：偶数页每镜 1→1.03 放大，奇数页每镜 1.03→1 缩小 */
+const SAME_IMAGE_ZOOM_STEP = 0.03
 const COMPOSE_FPS = 25
 
 type VisualStoryboard = {
@@ -199,37 +199,40 @@ function getStoryboardVisualKey(sb: VisualStoryboard, storyboards: VisualStorybo
   return `${visual.type}:${visual.path}`
 }
 
-/** 当前镜头在同一张配图连续分组内的序号（0 起） */
-function getSameImageShotIndex(storyboardId: number, episodeStoryboards: VisualStoryboard[]) {
+/** 当前镜头在分集内的配图页序号（0 起，换图 +1） */
+function getVisualPageIndex(storyboardId: number, episodeStoryboards: VisualStoryboard[]) {
   const ordered = sortStoryboardsByOrder(episodeStoryboards)
   const idx = ordered.findIndex(sb => sb.id === storyboardId)
   if (idx < 0) return 0
 
-  const currentKey = getStoryboardVisualKey(ordered[idx], ordered)
-  let groupStart = idx
-  for (let i = idx - 1; i >= 0; i--) {
-    if (getStoryboardVisualKey(ordered[i], ordered) === currentKey) {
-      groupStart = i
-    } else {
-      break
+  let pageIndex = 0
+  let prevKey = getStoryboardVisualKey(ordered[0], ordered)
+  for (let i = 1; i <= idx; i++) {
+    const currKey = getStoryboardVisualKey(ordered[i], ordered)
+    if (currKey !== prevKey) {
+      pageIndex++
+      prevKey = currKey
     }
   }
-  return idx - groupStart
+  return pageIndex
 }
 
 function durationToFrameCount(durationSec: number, fps = COMPOSE_FPS) {
   return Math.max(2, Math.round(durationSec * fps))
 }
 
-function buildShotZoomRange(shotIndex: number) {
-  const startZ = 1 + shotIndex * SAME_IMAGE_ZOOM_STEP
-  return { startZ, endZ: startZ + SAME_IMAGE_ZOOM_STEP }
+function buildShotZoomRange(pageIndex: number) {
+  const peakZ = 1 + SAME_IMAGE_ZOOM_STEP
+  if (pageIndex % 2 === 0) {
+    return { startZ: 1, endZ: peakZ }
+  }
+  return { startZ: peakZ, endZ: 1 }
 }
 
-/** 单镜配图：从 startZ 线性推至 endZ（中心缩放） */
-function buildShotZoomMotionFilter(shotIndex: number, durationSec: number, fps = COMPOSE_FPS) {
+/** 单镜配图：按配图页决定放大或缩小（中心缩放） */
+function buildShotZoomMotionFilter(pageIndex: number, durationSec: number, fps = COMPOSE_FPS) {
   const frames = durationToFrameCount(durationSec, fps)
-  const { startZ, endZ } = buildShotZoomRange(shotIndex)
+  const { startZ, endZ } = buildShotZoomRange(pageIndex)
   const delta = endZ - startZ
   return [
     'scale=8000:-1',
@@ -238,22 +241,21 @@ function buildShotZoomMotionFilter(shotIndex: number, durationSec: number, fps =
   ].join(',')
 }
 
-/** 同配图多句：按各句时长分段连续推镜（第 1 句 1→1.02，第 2 句 1.02→1.04…） */
-function buildGroupProgressiveZoomFilter(shotDurationsSec: number[], fps = COMPOSE_FPS) {
+/** 同配图多句：每句独立推/拉镜，方向由配图页序号决定 */
+function buildGroupProgressiveZoomFilter(shotDurationsSec: number[], pageIndex: number, fps = COMPOSE_FPS) {
   const frameCounts = shotDurationsSec.map(d => durationToFrameCount(d, fps))
   const totalFrames = frameCounts.reduce((sum, count) => sum + count, 0)
+  const { startZ, endZ } = buildShotZoomRange(pageIndex)
+  const delta = endZ - startZ
 
-  const zForShot = (shotIndex: number, startFrame: number, frames: number) => {
-    const { startZ, endZ } = buildShotZoomRange(shotIndex)
-    const delta = endZ - startZ
-    return `${startZ}+${delta}*(on-${startFrame})/${frames - 1}`
-  }
+  const zForShot = (startFrame: number, frames: number) =>
+    `${startZ}+${delta}*(on-${startFrame})/${frames - 1}`
 
   let startFrame = 0
-  let zExpr = zForShot(0, 0, frameCounts[0])
+  let zExpr = zForShot(0, frameCounts[0])
   for (let i = 1; i < frameCounts.length; i++) {
     startFrame += frameCounts[i - 1]
-    zExpr = `if(gte(on,${startFrame}),${zForShot(i, startFrame, frameCounts[i])},${zExpr})`
+    zExpr = `if(gte(on,${startFrame}),${zForShot(startFrame, frameCounts[i])},${zExpr})`
   }
 
   return [
@@ -393,6 +395,7 @@ export async function renderSameImageGroupSegment(
   }>,
   imageAbsPath: string,
   outputPath: string,
+  pageIndex = 0,
 ): Promise<number> {
   const tempDir = path.join(STORAGE_ROOT, 'temp')
   fs.mkdirSync(tempDir, { recursive: true })
@@ -448,7 +451,7 @@ export async function renderSameImageGroupSegment(
   await concatAudioFiles(audioPaths, mergedAudioPath)
 
   await new Promise<void>((resolve, reject) => {
-    const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec)]
+    const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex)]
     if (supportsSubtitleFilter()) {
       filters.push(buildSubtitleFilter(subtitlePath, titleMode))
     }
@@ -650,12 +653,12 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         logTaskProgress('ComposeTask', 'black-frame-compose', { storyboardId, duration: clipDuration })
       } else if (visual!.type === 'image') {
         const useTitleDynamic = !!isTitleShot
-        const sameImageShotIndex = useTitleDynamic ? undefined : getSameImageShotIndex(storyboardId, episodeStoryboards)
+        const visualPageIndex = useTitleDynamic ? undefined : getVisualPageIndex(storyboardId, episodeStoryboards)
         if (useTitleDynamic) {
           const baseVideo = await getSharedImageBaseVideo(visual!.path, { dynamic: true })
           cmd = cmd.input(baseVideo)
         } else {
-          filters.unshift(buildShotZoomMotionFilter(sameImageShotIndex!, clipDuration))
+          filters.unshift(buildShotZoomMotionFilter(visualPageIndex!, clipDuration))
           cmd = cmd.input(visual!.path).inputOptions(['-loop', '1'])
         }
         logTaskProgress('ComposeTask', 'image-slideshow-compose', {
@@ -664,7 +667,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
           inherited: visual!.inherited || false,
           sharedBase: useTitleDynamic,
           titleDynamic: useTitleDynamic,
-          sameImageShotIndex,
+          visualPageIndex,
         })
       } else {
         cmd = cmd.input(visual!.path)

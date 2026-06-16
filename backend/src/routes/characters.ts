@@ -9,7 +9,8 @@ import { generateCharacterAppearance, resolveCharacterPortraitGeneration, resolv
 import { buildCharacterAppearanceContext } from '../services/ai-description-context.js'
 import { recognizePortraitImage } from '../services/kling-image-recognize.js'
 import { resolveEpisodeImageModel, imageModelSupportsReferenceImages } from '../constants/image-models.js'
-import { normalizeArtStyle, sanitizeCharacterAppearance } from '../constants/art-styles.js'
+import { resolveEpisodeTextModel } from '../constants/text-models.js'
+import { normalizeArtStyle, sanitizeCharacterAppearance, isNarrationMinimalStyle } from '../constants/art-styles.js'
 import { logTaskError, logTaskStart, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -50,6 +51,7 @@ async function submitCharacterPortrait(
   const cleanedAppearance = await finalizeCharacterAppearance(appearance || char.description || '', {
     name: char.name,
     role: char.role,
+    minimal: isNarrationMinimalStyle(style),
   })
   if (cleanedAppearance && cleanedAppearance !== appearance) {
     appearance = cleanedAppearance
@@ -221,6 +223,7 @@ app.post('/:id/generate-appearance', async (c) => {
 
   let script = String(body.script || body.content || '').trim()
   let style = 'comic'
+  let textModel: string | null = null
   const episodeId = body.episode_id ? Number(body.episode_id) : undefined
   if (episodeId) {
     const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
@@ -228,6 +231,7 @@ app.post('/:id/generate-appearance', async (c) => {
       script = script || String(ep.scriptContent || ep.content || '').trim()
       const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
       style = drama?.style || style
+      textModel = resolveEpisodeTextModel(ep, body.text_model)
     }
   }
   if (!script) {
@@ -253,6 +257,7 @@ app.post('/:id/generate-appearance', async (c) => {
       script,
       style: contentCtx.dramaStyle || style,
       contentContext: contentCtx,
+      textModel,
     })
     db.update(schema.characters)
       .set({ appearance, updatedAt: now() })
@@ -288,9 +293,10 @@ app.post('/:id/recognize-portrait', async (c) => {
     const description = await recognizePortraitImage(imagePath, episodeConfigId)
     if (!description) return badRequest(c, '识图未返回有效描述')
 
+    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, char.dramaId)).all()
     const merged = await finalizeCharacterAppearance(
       [char.appearance?.trim(), description.trim()].filter(Boolean).join('; '),
-      { name: char.name, role: char.role },
+      { name: char.name, role: char.role, minimal: isNarrationMinimalStyle(drama?.style) },
     )
     db.update(schema.characters)
       .set({ appearance: merged, updatedAt: now() })
@@ -325,6 +331,7 @@ app.get('/:id/portrait-prompt', async (c) => {
   const cleanedAppearance = await finalizeCharacterAppearance(appearance || char.description || '', {
     name: char.name,
     role: char.role,
+    minimal: isNarrationMinimalStyle(style),
   })
   if (cleanedAppearance) appearance = cleanedAppearance
 
@@ -371,6 +378,7 @@ app.post('/:id/generate-image', async (c) => {
   const cleanedAppearance = await finalizeCharacterAppearance(appearance || char.description || '', {
     name: char.name,
     role: char.role,
+    minimal: isNarrationMinimalStyle(style),
   })
   if (cleanedAppearance && cleanedAppearance !== appearance) {
     appearance = cleanedAppearance

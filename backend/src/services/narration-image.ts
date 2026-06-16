@@ -1,4 +1,11 @@
-import { artStylePrompt, sanitizeSceneImagePrompt, SCENE_STYLE_GUARD } from '../constants/art-styles.js'
+import {
+  artStylePrompt,
+  buildNarrationDiptychImagePromptContent,
+  buildNarrationSceneImagePromptFromSentences,
+  isNarrationMinimalStyle,
+  SCENE_STYLE_GUARD,
+  type NarrationScenePromptOptions,
+} from '../constants/art-styles.js'
 
 export type NarrationImageMode = 'new' | 'inherit' | 'copy'
 export type NarrationShotType = 'title' | 'normal'
@@ -12,10 +19,18 @@ export interface NarrationImageMeta {
   title_full?: string
   /** 同场景多句旁白汇总后的主要内容，用于配图提示词 */
   scene_content?: string
+  /** 配图段完整旁白句（与拆镜段落一致） */
+  narration_lines?: string[]
+  /** 配图专用：合并后的语义句（句号级），与分镜短句分离 */
+  image_narration_lines?: string[]
   /** 内容段落序号（正文从 0 起） */
   paragraph_index?: number
   /** 段落配图版式：单图或两宫格 */
   paragraph_layout?: ParagraphLayout
+  /** 文案空行分段序号（旁白分镜时写入，配图分镜用于换景检测） */
+  script_paragraph_index?: number
+  /** 正文分镜序号（旁白分镜时写入） */
+  body_sentence_index?: number
 }
 
 /**
@@ -58,8 +73,16 @@ export function parseNarrationImageMeta(referenceImages?: string | null): Narrat
       title_hook: parsed?.title_hook || undefined,
       title_full: parsed?.title_full || undefined,
       scene_content: parsed?.scene_content || undefined,
+      narration_lines: Array.isArray(parsed?.narration_lines)
+        ? parsed.narration_lines.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
+      image_narration_lines: Array.isArray(parsed?.image_narration_lines)
+        ? parsed.image_narration_lines.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
       paragraph_index: typeof parsed?.paragraph_index === 'number' ? parsed.paragraph_index : undefined,
       paragraph_layout: parsed?.paragraph_layout === 'diptych' ? 'diptych' : parsed?.paragraph_layout === 'single' ? 'single' : undefined,
+      script_paragraph_index: typeof parsed?.script_paragraph_index === 'number' ? parsed.script_paragraph_index : undefined,
+      body_sentence_index: typeof parsed?.body_sentence_index === 'number' ? parsed.body_sentence_index : undefined,
     }
   } catch {}
   return { narration_image_mode: 'inherit' }
@@ -67,7 +90,7 @@ export function parseNarrationImageMeta(referenceImages?: string | null): Narrat
 
 export function buildNarrationImageMeta(
   mode: NarrationImageMode,
-  extra?: Partial<Pick<NarrationImageMeta, 'narration_shot_type' | 'narration_tts_mode' | 'title_hook' | 'title_full' | 'scene_content' | 'paragraph_index' | 'paragraph_layout'>>,
+  extra?: Partial<Omit<NarrationImageMeta, 'narration_image_mode'>>,
 ) {
   return JSON.stringify({
     narration_image_mode: mode,
@@ -95,7 +118,14 @@ export function summarizeSceneMainContent(sentences: string[]): string {
 }
 
 /** 根据段落主要内容生成配图提示词 */
-export function buildNarrationSceneImagePrompt(sentences: string[], style = 'comic'): string {
+export function buildNarrationSceneImagePrompt(
+  sentences: string[],
+  style = 'comic',
+  options?: NarrationScenePromptOptions,
+): string {
+  if (isNarrationMinimalStyle(style)) {
+    return buildNarrationSceneImagePromptFromSentences(sentences, options)
+  }
   const main = summarizeSceneMainContent(sentences)
   if (!main) return ''
   return [
@@ -109,11 +139,18 @@ export function buildNarrationSceneImagePrompt(sentences: string[], style = 'com
 }
 
 /** 段落内容较多时用横向两宫格，仍算「一段一图」 */
-export function buildNarrationDiptychImagePrompt(sentences: string[], style = 'comic'): string {
+export function buildNarrationDiptychImagePrompt(
+  sentences: string[],
+  style = 'comic',
+  options?: NarrationScenePromptOptions,
+): string {
   const mid = Math.max(1, Math.ceil(sentences.length / 2))
   const left = summarizeSceneMainContent(sentences.slice(0, mid))
   const right = summarizeSceneMainContent(sentences.slice(mid))
   if (!left && !right) return ''
+  if (isNarrationMinimalStyle(style)) {
+    return buildNarrationDiptychImagePromptContent(left || right, right || left, options)
+  }
   return [
     SCENE_STYLE_GUARD,
     'single 16:9 illustration with exactly 2 horizontal panels side by side, diptych layout, one image file',
@@ -125,10 +162,15 @@ export function buildNarrationDiptychImagePrompt(sentences: string[], style = 'c
   ].join(', ')
 }
 
-export function buildParagraphImagePrompt(sentences: string[], layout: ParagraphLayout, style = 'comic'): string {
+export function buildParagraphImagePrompt(
+  sentences: string[],
+  layout: ParagraphLayout,
+  style = 'comic',
+  options?: NarrationScenePromptOptions,
+): string {
   return layout === 'diptych'
-    ? buildNarrationDiptychImagePrompt(sentences, style)
-    : buildNarrationSceneImagePrompt(sentences, style)
+    ? buildNarrationDiptychImagePrompt(sentences, style, options)
+    : buildNarrationSceneImagePrompt(sentences, style, options)
 }
 
 export function isNarrationTitleShotMeta(meta: NarrationImageMeta) {

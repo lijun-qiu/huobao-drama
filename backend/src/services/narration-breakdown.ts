@@ -1,22 +1,22 @@
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
-import { artStylePrompt, sanitizeSceneImagePrompt } from '../constants/art-styles.js'
+import {
+  buildNarrationTitleImagePromptContent,
+  artStylePrompt,
+  isNarrationMinimalStyle,
+  sanitizeSceneImagePrompt,
+} from '../constants/art-styles.js'
 import {
   buildNarrationImageMeta,
-  buildParagraphImagePrompt,
-  summarizeSceneMainContent,
 } from './narration-image.js'
 import {
   getEpisodeVisualCharacters,
   linkStoryboardCharactersFromText,
 } from './narration-characters.js'
-import { buildNarrationParagraphs, type NarrationParagraph } from './narration-paragraph.js'
 import {
-  generateParagraphImagePromptsWithLLM,
   splitNarrationSentencesWithMeta,
   splitTitleSentencesWithMeta,
-  type ImageDetectMode,
 } from './narration-scene-detect.js'
 
 const TITLE_PREFIX_RE = /^标题\s*[:：]\s*(.+)$/i
@@ -87,7 +87,18 @@ export function resolveTitleVisualHook(titleFull?: string | null, titleHook?: st
   return stripped && stripped !== hook ? stripped : extractTitleHook(hook)
 }
 
-export function buildTitleImagePrompt(moodHint: string, style = 'comic') {
+export function buildTitleImagePrompt(
+  moodHint: string,
+  style = 'comic',
+  ctx?: { titleFull?: string | null; bodySentences?: string[] },
+) {
+  if (isNarrationMinimalStyle(style)) {
+    return buildNarrationTitleImagePromptContent(moodHint, {
+      titleFull: ctx?.titleFull,
+      titleHook: moodHint,
+      bodySentences: ctx?.bodySentences,
+    })
+  }
   const hook = sanitizeSceneImagePrompt(moodHint)
   return [
     'Chinese short drama narration opening background, single full illustration',
@@ -95,7 +106,6 @@ export function buildTitleImagePrompt(moodHint: string, style = 'comic') {
     'NOT romantic couple, NOT clock faces, NOT roses, NOT dreamlike abstract wallpaper, NOT pixel art, NOT retro photo filter',
     artStylePrompt(style, 'title'),
     `visual theme based on story hook: ${hook}`,
-    'concrete era-appropriate environment matching the hook (street market, shop interior, city street, etc)',
     'clean center area reserved for dynamic title overlay, 16:9 landscape, high quality',
   ].join(', ')
 }
@@ -111,11 +121,10 @@ export function estimateNarrationDuration(sentence: string, isTitle = false) {
   return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
 }
 
-export async function breakdownNarrationEpisode(
+/** 旁白分镜：按标点拆 TTS 镜头，不处理配图段落与配图文案 */
+export async function breakdownNarrationStoryboards(
   episodeId: number,
-  style = 'comic',
   scriptOverride?: string,
-  imageDetectMode: ImageDetectMode = 'paragraph',
 ) {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error('Episode not found')
@@ -128,41 +137,8 @@ export async function breakdownNarrationEpisode(
   const sentenceItems = splitNarrationSentencesWithMeta(body)
   if (!titleItems.length && !sentenceItems.length) throw new Error('未能从文案中拆分出有效句子')
 
-  const paragraphs = buildNarrationParagraphs(sentenceItems)
-  const paragraphPromptByAnchor = new Map<number, { content: string; prompt: string; layout: 'single' | 'diptych' }>()
-  paragraphs.forEach((para) => {
-    const content = summarizeSceneMainContent(para.sentences)
-    const prompt = buildParagraphImagePrompt(para.sentences, para.layout, style)
-    paragraphPromptByAnchor.set(para.startIndex, { content, prompt, layout: para.layout })
-  })
-
   const titleVisualHook = title ? extractTitleHook(title) : null
-  let imagePromptSource: 'paragraph+llm' | 'paragraph' = 'paragraph'
-  let titleImagePrompt = titleVisualHook ? buildTitleImagePrompt(titleVisualHook, style) : null
   const episodeCharacters = getEpisodeVisualCharacters(episodeId, ep.dramaId)
-
-  const llmPrompts = await generateParagraphImagePromptsWithLLM(
-    paragraphs.map((para: NarrationParagraph) => ({
-      index: para.index,
-      startIndex: para.startIndex,
-      sentences: para.sentences,
-      layout: para.layout,
-    })),
-    { titleHook: titleVisualHook, titleFull: title || null, style, characters: episodeCharacters },
-  )
-  if (llmPrompts) {
-    imagePromptSource = 'paragraph+llm'
-    if (llmPrompts.titlePrompt) titleImagePrompt = sanitizeSceneImagePrompt(llmPrompts.titlePrompt)
-    paragraphs.forEach((para) => {
-      const llmPrompt = llmPrompts.promptsByStartIndex.get(para.startIndex)
-      if (!llmPrompt) return
-      paragraphPromptByAnchor.set(para.startIndex, {
-        content: summarizeSceneMainContent(para.sentences),
-        prompt: sanitizeSceneImagePrompt(llmPrompt),
-        layout: para.layout,
-      })
-    })
-  }
 
   const ts = now()
   const existingStoryboardIds = db.select().from(schema.storyboards)
@@ -177,18 +153,14 @@ export async function breakdownNarrationEpisode(
   db.delete(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId)).run()
 
   let totalDuration = 0
-  let imageNeededCount = 0
   let storyboardNumber = 0
-  const diptychCount = paragraphs.filter(p => p.layout === 'diptych').length
 
   if (titleItems.length) {
     const titleFull = title!
-    titleItems.forEach((item, titleIndex) => {
+    titleItems.forEach((item) => {
       const sentence = item.sentence
       const duration = estimateNarrationDuration(sentence, true)
-      const needsTitleImage = titleIndex === 0
       storyboardNumber++
-      if (needsTitleImage) imageNeededCount++
       totalDuration += duration
       const res = db.insert(schema.storyboards).values({
         episodeId,
@@ -196,8 +168,8 @@ export async function breakdownNarrationEpisode(
         title: '片头标题',
         description: sentence,
         dialogue: `剧中：${sentence}`,
-        imagePrompt: needsTitleImage ? titleImagePrompt : null,
-        referenceImages: buildNarrationImageMeta(needsTitleImage ? 'new' : 'inherit', {
+        imagePrompt: null,
+        referenceImages: buildNarrationImageMeta('inherit', {
           narration_shot_type: 'title',
           narration_tts_mode: 'new',
           title_hook: titleVisualHook || extractTitleHook(sentence),
@@ -212,13 +184,11 @@ export async function breakdownNarrationEpisode(
       }).run()
       linkStoryboardCharactersFromText(
         Number(res.lastInsertRowid),
-        [titleFull, titleVisualHook, needsTitleImage ? titleImagePrompt : '', sentence].filter(Boolean).join('\n'),
+        [titleFull, titleVisualHook, sentence].filter(Boolean).join('\n'),
         episodeCharacters,
       )
     })
   }
-
-  imageNeededCount += paragraphs.length
 
   sentenceItems.forEach((item, index) => {
     const sentence = item.sentence
@@ -226,22 +196,17 @@ export async function breakdownNarrationEpisode(
     totalDuration += duration
     storyboardNumber++
 
-    const paraInfo = paragraphPromptByAnchor.get(index)
-    const isParagraphAnchor = !!paraInfo
-    const para = paragraphs.find(p => p.startIndex === index)
-
     const res = db.insert(schema.storyboards).values({
       episodeId,
       storyboardNumber,
       title: sentence.slice(0, 12) || `镜头${storyboardNumber}`,
       description: sentence,
       dialogue: `旁白：${sentence}`,
-      imagePrompt: paraInfo?.prompt || null,
-      referenceImages: buildNarrationImageMeta(isParagraphAnchor ? 'new' : 'inherit', {
+      imagePrompt: null,
+      referenceImages: buildNarrationImageMeta('inherit', {
         narration_tts_mode: 'new',
-        scene_content: paraInfo?.content,
-        paragraph_index: para?.index,
-        paragraph_layout: para?.layout || 'single',
+        script_paragraph_index: item.paragraphIndex,
+        body_sentence_index: index,
       }),
       shotType: '中景',
       angle: '平视',
@@ -252,7 +217,7 @@ export async function breakdownNarrationEpisode(
     }).run()
     linkStoryboardCharactersFromText(
       Number(res.lastInsertRowid),
-      [sentence, paraInfo?.content, paraInfo?.prompt].filter(Boolean).join('\n'),
+      sentence,
       episodeCharacters,
     )
   })
@@ -266,14 +231,17 @@ export async function breakdownNarrationEpisode(
     count: storyboardNumber,
     sentence_count: sentenceItems.length,
     title_count: titleItems.length,
-    title_image_count: titleItems.length ? 1 : 0,
     title_hook: titleVisualHook,
-    paragraph_count: paragraphs.length,
-    diptych_count: diptychCount,
-    image_needed_count: imageNeededCount,
-    image_detect_source: imagePromptSource,
-    image_prompt_source: imagePromptSource === 'paragraph+llm' ? 'llm' : 'template',
-    image_detect_mode: imageDetectMode === 'balanced' || imageDetectMode === 'conservative' ? 'paragraph' : imageDetectMode,
     total_duration: totalDuration,
   }
+}
+
+/** @deprecated 请分别调用 breakdownNarrationStoryboards 与 breakdownNarrationImages */
+export async function breakdownNarrationEpisode(
+  episodeId: number,
+  style = 'comic',
+  scriptOverride?: string,
+  _imageDetectMode?: import('./narration-scene-detect.js').ImageDetectMode,
+) {
+  return breakdownNarrationStoryboards(episodeId, scriptOverride)
 }

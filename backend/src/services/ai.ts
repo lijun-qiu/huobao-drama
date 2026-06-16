@@ -76,9 +76,11 @@ export function getActiveConfig(serviceType: ServiceType): AIConfig | null {
   }
 }
 
-export function getTextConfig(): AIConfig {
+export function getTextConfig(modelOverride?: string | null): AIConfig {
   const config = getActiveConfig('text')
   if (!config) throw new Error('No active text AI config')
+  const override = String(modelOverride || '').trim()
+  if (override) return { ...config, model: override }
   return config
 }
 

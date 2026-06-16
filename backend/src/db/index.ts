@@ -382,6 +382,7 @@ function ensureColumn(table: string, column: string, definition: string) {
 
 ensureColumn('episodes', 'image_config_id', 'INTEGER')
 ensureColumn('episodes', 'image_model', 'TEXT')
+ensureColumn('episodes', 'text_model', 'TEXT')
 ensureColumn('episodes', 'video_config_id', 'INTEGER')
 ensureColumn('episodes', 'audio_config_id', 'INTEGER')
 ensureColumn('storyboards', 'bgm_audio_url', 'TEXT')
@@ -419,6 +420,57 @@ try {
   `)
 } catch {
   // ignore migration errors on fresh DB
+}
+
+// 文本模型默认 deepseek-v4-pro
+try {
+  sqlite.exec(`
+    UPDATE episodes
+    SET text_model = 'deepseek-v4-pro'
+    WHERE text_model IS NULL
+       OR TRIM(text_model) = ''
+       OR text_model IN ('gemini-3-pro-preview', 'gemini-3-flash-preview', 'google/gemini-3-flash-preview', 'gpt-4.1-mini')
+  `)
+  sqlite.exec(`
+    UPDATE ai_service_configs
+    SET model = '["deepseek-v4-pro","gpt-4o"]',
+        updated_at = datetime('now')
+    WHERE service_type = 'text'
+      AND (
+        model IS NULL
+        OR TRIM(model) = ''
+        OR model LIKE '%gemini-3-pro-preview%'
+        OR model LIKE '%gemini-3-flash%'
+        OR model NOT LIKE '%deepseek-v4-pro%'
+      )
+  `)
+  sqlite.exec(`
+    UPDATE agent_configs
+    SET model = 'deepseek-v4-pro',
+        updated_at = datetime('now')
+    WHERE model IS NULL
+       OR TRIM(model) = ''
+       OR model IN ('gemini-3-pro-preview', 'gemini-3-flash-preview', 'google/gemini-3-flash-preview', 'gpt-4.1-mini')
+  `)
+} catch {
+  // ignore
+}
+
+// 文本服务统一走 4022 代理
+try {
+  sqlite.exec(`
+    UPDATE ai_service_configs
+    SET base_url = 'https://api.4022543.xyz',
+        updated_at = datetime('now')
+    WHERE service_type = 'text'
+      AND (
+        base_url IS NULL
+        OR TRIM(base_url) = ''
+        OR base_url LIKE '%chatfire.site%'
+      )
+  `)
+} catch {
+  // ignore
 }
 
 // 旧项目默认 webtoon(Q版) → 短剧动漫(正常比例)

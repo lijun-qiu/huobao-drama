@@ -3,10 +3,12 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, notFound, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
-import { breakdownNarrationEpisode } from '../services/narration-breakdown.js'
+import { breakdownNarrationStoryboards } from '../services/narration-breakdown.js'
+import { breakdownNarrationImages } from '../services/narration-image-breakdown.js'
 import { sortStoryboardsByOrder } from '../services/narration-image.js'
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
+import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel } from '../constants/text-models.js'
 import { isOpeningVideoProcessing, startOpeningVideoGeneration } from '../services/ffmpeg-opening.js'
 import { splitNarrationAudioForEpisode } from '../services/narration-audio-split.js'
 
@@ -33,6 +35,7 @@ app.post('/', async (c) => {
     title: body.title || `第${nextNum}集`,
     imageConfigId: body.image_config_id,
     imageModel: body.image_model || DEFAULT_IMAGE_MODEL,
+    textModel: body.text_model || DEFAULT_TEXT_MODEL,
     videoConfigId: body.video_config_id,
     audioConfigId: body.audio_config_id,
     createdAt: ts,
@@ -47,6 +50,7 @@ app.post('/', async (c) => {
     title: ep.title,
     image_config_id: ep.imageConfigId,
     image_model: ep.imageModel || DEFAULT_IMAGE_MODEL,
+    text_model: ep.textModel || DEFAULT_TEXT_MODEL,
     video_config_id: ep.videoConfigId,
     audio_config_id: ep.audioConfigId,
   })
@@ -57,7 +61,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -72,6 +76,7 @@ app.put('/:id', async (c) => {
   if ('description' in updates) drizzleUpdates.description = updates.description
   if ('status' in updates) drizzleUpdates.status = updates.status
   if ('image_model' in updates) drizzleUpdates.imageModel = updates.image_model
+  if ('text_model' in updates) drizzleUpdates.textModel = updates.text_model
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
   return success(c)
@@ -191,10 +196,17 @@ app.post('/:id/extract-narration-characters', async (c) => {
   if (!script) return badRequest(c, '请先填写解说文案')
 
   try {
-    const result = await extractNarrationCharacters(episodeId, ep.dramaId, script, style)
+    const result = await extractNarrationCharacters(
+      episodeId,
+      ep.dramaId,
+      script,
+      style,
+      resolveEpisodeTextModel(ep, body.text_model),
+    )
     return success(c, {
       created: result.created,
       updated: result.updated,
+      archived: result.archived ?? 0,
       characters: toSnakeCaseArray(result.characters),
       linked_storyboard_count: result.linked.linkedStoryboardCount,
       storyboard_count: result.linked.storyboardCount,
@@ -238,8 +250,24 @@ app.post('/:id/split-narration-audio', async (c) => {
   }
 })
 
-// POST /episodes/:id/narration-breakdown — 解说文案按句拆分分镜
-app.post('/:id/narration-breakdown', async (c) => {
+// POST /episodes/:id/narration-storyboard-breakdown — 旁白分镜（TTS 粒度，不含配图）
+app.post('/:id/narration-storyboard-breakdown', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const script = String(body.script || '').trim()
+    const result = await breakdownNarrationStoryboards(episodeId, script || undefined)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/narration-image-breakdown — 配图分镜（场景换图 + 配图文案）
+app.post('/:id/narration-image-breakdown', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const body = await c.req.json().catch(() => ({}))
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
@@ -252,9 +280,28 @@ app.post('/:id/narration-breakdown', async (c) => {
   }
 
   try {
+    const mode = body.image_detect_mode === 'conservative'
+      ? 'conservative'
+      : body.image_detect_mode === 'balanced'
+        ? 'balanced'
+        : 'paragraph'
+    const result = await breakdownNarrationImages(episodeId, style, mode)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/narration-breakdown — 兼容旧接口，等同旁白分镜
+app.post('/:id/narration-breakdown', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
     const script = String(body.script || '').trim()
-    const mode = 'paragraph' as const
-    const result = await breakdownNarrationEpisode(episodeId, style, script || undefined, mode)
+    const result = await breakdownNarrationStoryboards(episodeId, script || undefined)
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)

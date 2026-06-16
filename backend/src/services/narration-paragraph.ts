@@ -1,8 +1,8 @@
-import type { NarrationSentenceItem } from './narration-scene-detect.js'
+import type { NarrationSentenceItem, ImageDetectMode } from './narration-scene-detect.js'
 import {
   buildSceneSegments,
-  detectImageNeedsHeuristic,
-  ensureMaxNarrationGap,
+  detectImageNeedsBalanced,
+  detectImageNeedsConservative,
 } from './narration-scene-detect.js'
 
 export type ParagraphLayout = 'single' | 'diptych'
@@ -15,14 +15,16 @@ export type NarrationParagraph = {
   layout: ParagraphLayout
 }
 
-/** 同图最多连续沿用 1 句，第 2 句无场景切换也强制换新配图 */
-const MAX_INHERIT_GAP = 2
-
-/** 按场景切换 + 最长沿用链切分；每段首镜配图，减少长段共用一张 */
-export function buildNarrationParagraphs(items: NarrationSentenceItem[]): NarrationParagraph[] {
+/** 按场景切换切分配图段；同场景根据内容适当沿用，约每 2–3 句一图 */
+export function buildNarrationParagraphs(
+  items: NarrationSentenceItem[],
+  imageDetectMode: ImageDetectMode = 'paragraph',
+): NarrationParagraph[] {
   if (!items.length) return []
 
-  const needs = ensureMaxNarrationGap(items, detectImageNeedsHeuristic(items), MAX_INHERIT_GAP)
+  const needs = imageDetectMode === 'conservative'
+    ? detectImageNeedsConservative(items)
+    : detectImageNeedsBalanced(items)
   const segments = buildSceneSegments(items, needs)
 
   return segments.map((seg, index) => ({

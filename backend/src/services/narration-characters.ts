@@ -1,9 +1,9 @@
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
-import { artStylePrompt, normalizeArtStyle, sanitizeCharacterAppearance, sanitizeAppearanceForPortrait } from '../constants/art-styles.js'
+import { artStylePrompt, isNarrationMinimalStyle, normalizeArtStyle, sanitizeCharacterAppearance, sanitizeAppearanceForPortrait, buildMinimalPortraitPostureHint, buildNarrationPortraitPromptContent, appendToNarrationBracket } from '../constants/art-styles.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
-import { getTextConfig, getTextProviderBaseUrl } from './ai.js'
+import { getActiveConfig, getTextConfig, getTextProviderBaseUrl } from './ai.js'
 import { joinProviderUrl } from './adapters/url.js'
 import { parseNarrationImageMeta } from './narration-image.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
@@ -227,6 +227,56 @@ export function isNarratorCharacter(char: { name?: string | null; role?: string 
 
 export function isVisualCharacter(char: { name?: string | null; role?: string | null }) {
   return !isNarratorCharacter(char)
+}
+
+export function isProtagonistCharacter(char: { name?: string | null; role?: string | null }) {
+  const name = String(char.name || '').trim()
+  const role = String(char.role || '').trim()
+  if (/^(男主|女主|主角|主人公)$/.test(name)) return true
+  if (/主角|主人公|男主|女主|第一人称|叙述者/.test(role)) return true
+  return false
+}
+
+function isFirstPersonNarrative(script: string): boolean {
+  return /(?:^|[\s，,。！？；:：])我(?:的|在|把|被|会|要|也|都|还|就|则|便|曾|已|将|想|说|看|走|来|去|得|给|让|用|做|吃|喝|买|卖|开|关|拿|带|找|等|站|坐|躺|睡|醒|爱|恨|觉得|认为|知道|发现|想起|决定|开始|继续|完成|辞|推|摆)/.test(script)
+}
+
+/** 解说定妆只保留主人公；第一人称文案优先保留同名多阶段记录 */
+export function filterNarrationProtagonistOnly<T extends { name: string; role?: string | null }>(
+  rows: T[],
+  script: string,
+): T[] {
+  const protagonistRows = rows.filter(row => isProtagonistCharacter(row))
+  if (protagonistRows.length) return protagonistRows
+
+  if (isFirstPersonNarrative(script) && rows.length) {
+    const byName = new Map<string, T[]>()
+    for (const row of rows) {
+      const name = row.name.trim()
+      if (!name) continue
+      if (!byName.has(name)) byName.set(name, [])
+      byName.get(name)!.push(row)
+    }
+    let best: T[] = []
+    for (const group of byName.values()) {
+      if (group.length > best.length) best = group
+    }
+    if (best.length) return best
+  }
+
+  return rows.slice(0, 1)
+}
+
+function archiveNonProtagonistCharacters(dramaId: number, keepNames: Set<string>): number {
+  const ts = now()
+  let archived = 0
+  for (const ch of db.select().from(schema.characters).all()) {
+    if (ch.dramaId !== dramaId || ch.deletedAt || !isVisualCharacter(ch)) continue
+    if (keepNames.has(ch.name.trim())) continue
+    db.update(schema.characters).set({ deletedAt: ts, updatedAt: ts }).where(eq(schema.characters.id, ch.id)).run()
+    archived++
+  }
+  return archived
 }
 
 function linkCharacterToEpisode(episodeId: number, characterId: number) {
@@ -454,8 +504,8 @@ function extractJsonObject(text: string) {
   }
 }
 
-export async function callTextChat(system: string, user: string): Promise<string> {
-  const config = getTextConfig()
+export async function callTextChat(system: string, user: string, modelOverride?: string | null): Promise<string> {
+  const config = getTextConfig(modelOverride)
   const url = joinProviderUrl(getTextProviderBaseUrl(config), '/chat/completions', '')
 
   const resp = await fetch(url, {
@@ -472,6 +522,7 @@ export async function callTextChat(system: string, user: string): Promise<string
       ],
       temperature: 0.2,
     }),
+    signal: AbortSignal.timeout(120_000),
   })
 
   if (!resp.ok) {
@@ -482,7 +533,15 @@ export async function callTextChat(system: string, user: string): Promise<string
   return json.choices?.[0]?.message?.content || ''
 }
 
-function resolvePortraitFraming(_appearance: string): string {
+function resolvePortraitFraming(style: string, _appearance: string): string {
+  if (isNarrationMinimalStyle(style)) {
+    return [
+      'single stick figure with two small black dot eyes on plain light gray background',
+      'simple dot eyes only, distinguish by posture and small props, NOT detailed face, NOT realistic portrait',
+      'NOT movie poster, NOT scenic background, NOT environmental illustration',
+      'NOT pixel art, NOT retro photo filter, NOT dithered shading',
+    ].join(', ')
+  }
   return [
     'character design reference sheet for animation production',
     'isolated single character on plain light gray studio background',
@@ -498,16 +557,16 @@ const PORTRAIT_STYLE_GUARD = [
 ].join(', ')
 
 function extractEnglishAppearanceTags(appearance: string): { body: string; tags: string } {
-  const match = appearance.match(/(?:^|\n)\s*English tags:\s*(.+)$/im)
+  const match = appearance.match(/\bEnglish tags:\s*(.+)$/im)
   if (!match) return { body: appearance.trim(), tags: '' }
   return {
-    body: appearance.replace(/(?:^|\n)\s*English tags:\s*.+$/im, '').trim(),
+    body: appearance.replace(/\s*\bEnglish tags:\s*.+$/im, '').trim(),
     tags: match[1].trim(),
   }
 }
 
 export function hasEnglishAppearanceTags(appearance?: string | null): boolean {
-  return /(?:^|\n)\s*English tags:\s*\S/im.test(String(appearance || ''))
+  return /\bEnglish tags:\s*\S/i.test(String(appearance || ''))
 }
 
 async function generateEnglishAppearanceTags(
@@ -532,13 +591,17 @@ async function generateEnglishAppearanceTags(
   return tags
 }
 
-/** 清洗 + 补全 English tags（缺失时自动调用 LLM） */
+/** 清洗 + 补全 English tags（缺失时自动调用 LLM）；素体模式仅保留中文动作描述 */
 export async function finalizeCharacterAppearance(
   appearance: string,
-  context?: { name?: string | null; role?: string | null },
+  context?: { name?: string | null; role?: string | null; minimal?: boolean },
 ): Promise<string> {
   let text = sanitizeCharacterAppearance(appearance)
   if (!text) return text
+  if (context?.minimal) {
+    const { body } = extractEnglishAppearanceTags(text)
+    return sanitizeCharacterAppearance(body || text).slice(0, 200)
+  }
   if (hasEnglishAppearanceTags(text)) {
     const { body, tags } = extractEnglishAppearanceTags(text)
     const cleanedBody = sanitizeCharacterAppearance(body)
@@ -572,7 +635,19 @@ export function buildCharacterPortraitPrompt(
   const styleAnchorHint = options?.styleAnchorReference
     ? 'match reference image art style, line weight, flat cel shading, and color technique ONLY, generate a completely different character per appearance description, do NOT copy face identity or outfit from reference'
     : ''
-  const framing = resolvePortraitFraming(`${rawAppearance} ${cleanTags}`)
+  const minimal = isNarrationMinimalStyle(normalizedStyle)
+  if (minimal) {
+    const actionPlot = appearance || buildMinimalPortraitPostureHint(char.variantLabel)
+    const plot = [
+      char.name,
+      stage ? `${stage}阶段` : '',
+      actionPlot,
+    ].filter(Boolean).join('，')
+    const scene = '浅灰纯色背景，单人全身素体小人定妆参考图，无环境无场景元素'
+    return buildNarrationPortraitPromptContent(scene, plot)
+  }
+
+  const framing = resolvePortraitFraming(normalizedStyle, `${rawAppearance} ${cleanTags}`)
   return [
     PORTRAIT_STYLE_GUARD,
     stylePrompt,
@@ -605,7 +680,9 @@ export function resolveCharacterPortraitGeneration(
   style = 'comic',
   options?: { useReference?: boolean },
 ) {
-  const useReference = options?.useReference !== false
+  const normalizedStyle = normalizeArtStyle(style)
+  const minimal = isNarrationMinimalStyle(normalizedStyle)
+  const useReference = !minimal && options?.useReference !== false
   const refChar = useReference
     ? findPortraitReferenceCharacter(char.dramaId, char.name, char.id, char.variantLabel)
     : null
@@ -648,6 +725,7 @@ export function enrichImagePromptWithCharacters(
   prompt: string,
   characters: NarrationCharacterRow[],
   characterIds?: number[],
+  style?: string | null,
 ) {
   const base = String(prompt || '').trim()
   if (!base) return base
@@ -656,6 +734,15 @@ export function enrichImagePromptWithCharacters(
     ? characters.filter(ch => characterIds.includes(ch.id))
     : characters
   if (!relevant.length) return base
+
+  if (isNarrationMinimalStyle(style)) {
+    const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
+    const addition = `场景中出现素体小人角色：${names}，仅通过动作姿态区分，不写服装细节`
+    if (/【左格/.test(base) && /【右格/.test(base)) {
+      return appendToNarrationBracket(appendToNarrationBracket(base, '左格', addition), '右格', addition)
+    }
+    return appendToNarrationBracket(base, '剧情', addition)
+  }
 
   const hints = relevant.map(ch => {
     const app = ch.appearance?.trim()
@@ -677,6 +764,7 @@ export async function generateCharacterAppearance(params: {
   }
   script?: string
   style?: string
+  textModel?: string | null
   contentContext?: {
     dramaTitle?: string
     dramaGenre?: string
@@ -687,9 +775,21 @@ export async function generateCharacterAppearance(params: {
     otherCharacters?: string[]
   }
 }): Promise<string> {
-  const { character, script, style = 'comic', contentContext } = params
-  logTaskProgress('CharacterAppearance', 'llm-generate-start', { name: character.name, model: getTextConfig().model })
-  const system = [
+  const { character, script, style = 'comic', textModel, contentContext } = params
+  const minimal = isNarrationMinimalStyle(style)
+  logTaskProgress('CharacterAppearance', 'llm-generate-start', { name: character.name, model: getTextConfig(textModel).model })
+  const system = minimal
+    ? [
+      '你是解说素体小人项目的角色动作标注助手。',
+      '本项目定妆图是「白色圆头素体小人，两个小黑点眼睛」，只通过动作姿态和简单道具区分人生阶段，不写任何服装/发型/复杂五官/年代。',
+      '根据剧本情节，只输出该人生阶段的「两个小黑点眼睛 + 动作姿态 + 可选简单道具轮廓」，20-60 字中文。',
+      '示例（青年）：两个小黑点眼睛，推着手推车站立，夜市摆摊姿态',
+      '示例（中年）：两个小黑点眼睛，坐于柜台后，手持茶杯，老板姿态',
+      '示例（老年）：两个小黑点眼睛，坐于凳上，手持圆扇，略佝偻',
+      '禁止：花衬衫、西装、墨镜、皱纹、复杂五官、无眼睛、80年代、English tags',
+      '只输出正文，不要标题、markdown、JSON。',
+    ].join('\n')
+    : [
     '你是影视角色定妆造型设计助手。',
     '必须根据解说稿/剧本中该角色的出场情节、对白、行为来推断外貌，与故事时代、题材、氛围一致。',
     '不要写与内容无关的通用模板；若剧本暗示年龄/职业/身份，外貌要体现。',
@@ -728,10 +828,11 @@ export async function generateCharacterAppearance(params: {
       : '',
   ].filter(Boolean).join('\n\n')
 
-  const raw = (await callTextChat(system, user)).trim()
+  const raw = (await callTextChat(system, user, textModel)).trim()
   const cleaned = raw.replace(/^["'`]+|["'`]+$/g, '').replace(/^外貌描述[:：]\s*/i, '').trim()
   if (!cleaned) throw new Error('AI 未返回有效外貌描述')
   logTaskSuccess('CharacterAppearance', 'llm-generate-done', { name: character.name, length: cleaned.length })
+  if (minimal) return sanitizeCharacterAppearance(cleaned).slice(0, 200)
   return finalizeCharacterAppearance(cleaned.slice(0, 600), {
     name: character.name,
     role: character.role,
@@ -757,28 +858,38 @@ export async function extractNarrationCharacters(
   dramaId: number,
   script: string,
   style = 'comic',
+  textModel?: string | null,
 ) {
   const existing = db.select().from(schema.characters).all()
     .filter(ch => ch.dramaId === dramaId && !ch.deletedAt)
 
   let extracted: Array<{ name: string; variantLabel?: string; role?: string; appearance?: string; personality?: string }> = []
 
+  const activeText = getActiveConfig('text')
+  if (!activeText?.apiKey?.trim()) {
+    throw new Error('请先在「设置 → AI 服务」中配置并启用文本 API（如 ChatFire + deepseek-v4-pro），并填写 API Key')
+  }
+
   try {
-    const config = getTextConfig()
-    if (config.apiKey) {
-      logTaskProgress('NarrationChars', 'llm-extract-start', { episodeId, model: config.model })
+    const config = getTextConfig(textModel)
+    if (!config.apiKey?.trim()) {
+      throw new Error('文本 AI 服务未填写 API Key，请在设置中完善配置')
+    }
+
+    logTaskProgress('NarrationChars', 'llm-extract-start', { episodeId, model: config.model })
 
       const system = [
-        '你是影视解说项目的角色设定师，从解说文案中提取会在画面中出现的角色，并决定每个角色需要几种定妆（外貌时期）。',
+        '你是影视解说项目的角色设定师。解说视频采用极简素体小人画风，画面里只需给「主人公」做定妆参考，配角不需要单独定妆。',
         '规则：',
-        '1) 只提取会在插画中出现的真实人物，不要提取「旁白」「解说员」「作者」',
-        '2) 输出字段：name、variant_label、role、appearance、personality',
-        '3) variant_label 表示该条定妆的时期/形态：如 童年、少年、青年、中年、老年；若全篇只有一个时期则留空或填「常态」',
-        '4) 同一人物若文案出现明显不同人生阶段（回忆、多年后、少年与晚年等），必须拆成多条记录：name 相同，variant_label 不同，appearance 各自独立',
-        '5) 同一人物若只有一个年龄阶段，只输出 1 条（variant_label 为空或常态）',
-        '6) appearance：中英混合，只写人物外貌与服饰（年龄、性别、发型、服装、体型、标志特征、动作道具）；禁止画风/艺术风格/retro/vintage look/pixel/复古风/Q版/条漫；年代只体现在服装发型（如80年代花衬衫、三七分发型），禁止写 "1980s retro style" 或 "retro hairstyle"，应写 "1980s side-part hairstyle"',
-        '7) 示例 appearance：28岁男性个体户，精干结实。\nEnglish tags: 1980s side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, bicycle',
-        '8) 合并同一人物同一时期的称呼，不要重复',
+        '1) 只提取主人公（男主/女主/主角），不要提取配角（妻子、店员、朋友、提亲者等）',
+        '2) 不要提取「旁白」「解说员」「作者」',
+        '3) 输出字段：name、variant_label、role、appearance、personality',
+        '4) variant_label 表示该条定妆的时期/形态：如 童年、少年、青年、中年、老年；若全篇只有一个时期则留空或填「常态」',
+        '5) 同一主人公若文案出现明显不同人生阶段（回忆、多年后、少年与晚年等），必须拆成多条记录：name 相同，variant_label 不同，appearance 各自独立',
+        '6) 第一人称「我」叙述时，name 用「男主」或「女主」，并按青年/中年/老年等阶段拆分 variant_label',
+        '7) appearance：中英混合，只写人物外貌与服饰（年龄、性别、发型、服装、体型、标志特征、动作道具）；禁止画风/艺术风格/retro/vintage look/pixel/复古风/Q版/条漫；年代只体现在服装发型（如80年代花衬衫、三七分发型），禁止写 "1980s retro style" 或 "retro hairstyle"，应写 "1980s side-part hairstyle"',
+        '8) 示例 appearance：28岁男性个体户，精干结实。\nEnglish tags: 1980s side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, bicycle',
+        '9) 合并同一人物同一时期的称呼，不要重复',
         '只输出 JSON，不要解释。',
       ].join('\n')
 
@@ -794,7 +905,7 @@ export async function extractNarrationCharacters(
         },
       })
 
-      const text = await callTextChat(system, user)
+      const text = await callTextChat(system, user, textModel)
       const parsed = extractJsonObject(text)
       if (Array.isArray(parsed?.characters)) {
         extracted = parsed.characters
@@ -806,19 +917,22 @@ export async function extractNarrationCharacters(
             personality: String(row?.personality || '').trim(),
           }))
           .filter((row: { name: string }) => row.name && !isNarratorCharacter(row))
+        extracted = filterNarrationProtagonistOnly(extracted, script)
+      } else {
+        logTaskWarn('NarrationChars', 'llm-extract-invalid-json', { preview: text.slice(0, 200) })
       }
-    }
   } catch (err: any) {
     logTaskWarn('NarrationChars', 'llm-extract-failed', { error: err.message })
+    throw err
   }
 
   if (extracted.length) {
-    extracted = await Promise.all(extracted.map(async row => ({
+    extracted = extracted.map(row => ({
       ...row,
       appearance: row.appearance
-        ? await finalizeCharacterAppearance(row.appearance, { name: row.name, role: row.role })
+        ? sanitizeCharacterAppearance(row.appearance).slice(0, 600)
         : '',
-    })))
+    }))
   }
 
   if (!extracted.length) {
@@ -826,6 +940,7 @@ export async function extractNarrationCharacters(
     return {
       created: 0,
       updated: 0,
+      archived: 0,
       characters: getEpisodeVisualCharacters(episodeId, dramaId),
       linked: linkAllNarrationStoryboardCharacters(episodeId, dramaId),
     }
@@ -834,6 +949,11 @@ export async function extractNarrationCharacters(
   const ts = now()
   let created = 0
   let updated = 0
+  const keepNames = new Set(extracted.map(row => row.name.trim()).filter(Boolean))
+  const archived = archiveNonProtagonistCharacters(dramaId, keepNames)
+  if (archived) {
+    logTaskProgress('NarrationChars', 'archived-non-protagonist', { dramaId, archived, keepNames: [...keepNames] })
+  }
 
   for (const row of extracted) {
     const variantLabel = normalizeVariantLabel(row.variantLabel) || null
@@ -878,9 +998,10 @@ export async function extractNarrationCharacters(
     episodeId,
     created,
     updated,
+    archived,
     characterCount: characters.length,
     linkedStoryboards: linked.linkedStoryboardCount,
   })
 
-  return { created, updated, characters, linked }
+  return { created, updated, archived, characters, linked }
 }

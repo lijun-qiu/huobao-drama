@@ -1,3 +1,7 @@
+import { loadEnvLocal } from './utils/load-env-local.js'
+
+loadEnvLocal()
+
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { Hono } from 'hono'
@@ -25,6 +29,7 @@ import webhooks from './routes/webhooks.js'
 import aiVoices from './routes/aiVoices.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
 import { resumePendingBgmTasks } from './services/bgm-generation.js'
+import { syncEnvAiConfig } from './services/sync-env-ai-config.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -78,5 +83,6 @@ app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
 
 const port = Number(process.env.PORT || 5679)
 console.log(`🚀 Huobao Drama TS server on http://localhost:${port}`)
+syncEnvAiConfig()
 resumePendingBgmTasks()
 serve({ fetch: app.fetch, port })

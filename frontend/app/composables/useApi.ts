@@ -50,9 +50,14 @@ export const episodeAPI = {
   scenes: (id: number) => api.get(`/episodes/${id}/scenes`),
   storyboards: (id: number) => api.get(`/episodes/${id}/storyboards`),
   pipelineStatus: (id: number) => api.get(`/episodes/${id}/pipeline-status`),
+  narrationStoryboardBreakdown: (id: number, options?: { script?: string }) =>
+    api.post(`/episodes/${id}/narration-storyboard-breakdown`, options || {}),
+  narrationImageBreakdown: (id: number, options?: { style?: string; image_detect_mode?: 'paragraph' | 'conservative' | 'balanced' }) =>
+    api.post(`/episodes/${id}/narration-image-breakdown`, options || {}),
+  /** @deprecated 等同 narrationStoryboardBreakdown */
   narrationBreakdown: (id: number, options?: { style?: string; script?: string; image_detect_mode?: 'paragraph' | 'conservative' | 'balanced' }) =>
-    api.post(`/episodes/${id}/narration-breakdown`, options || {}),
-  extractNarrationCharacters: (id: number, options?: { script?: string; style?: string }) =>
+    api.post(`/episodes/${id}/narration-storyboard-breakdown`, { script: options?.script }),
+  extractNarrationCharacters: (id: number, options?: { script?: string; style?: string; text_model?: string }) =>
     api.post(`/episodes/${id}/extract-narration-characters`, options || {}),
   linkNarrationCharacters: (id: number) => api.post(`/episodes/${id}/link-narration-characters`),
   generateOpeningVideo: (id: number) => api.post(`/episodes/${id}/generate-opening-video`, {}),

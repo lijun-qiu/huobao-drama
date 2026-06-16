@@ -35,6 +35,7 @@ export const episodes = sqliteTable('episodes', {
   thumbnail: text('thumbnail'),
   imageConfigId: integer('image_config_id'),
   imageModel: text('image_model'),
+  textModel: text('text_model'),
   videoConfigId: integer('video_config_id'),
   audioConfigId: integer('audio_config_id'),
   openingVideoUrl: text('opening_video_url'),

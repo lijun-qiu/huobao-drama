@@ -395,6 +395,7 @@ import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, 
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, agentConfigAPI, skillsAPI } from '~/composables/useApi'
+import { TEXT_MODEL_OPTIONS } from '~/composables/useEpisodeWorkflow'
 import brandLogo from '~/assets/huobao-logo.png'
 
 const showBrandImage = ref(true)
@@ -432,7 +433,7 @@ const serviceMeta = {
 }
 const providerPresets = {
   text: {
-    chatfire: { label: 'ChatFire 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3-pro-preview'] },
+    chatfire: { label: '4022 文本（推荐）', baseUrl: 'https://api.4022543.xyz', models: ['deepseek-v4-pro', 'gpt-4o'] },
     openrouter: { label: 'OpenRouter 推荐', baseUrl: 'https://openrouter.ai/api', models: ['google/gemini-3-flash-preview'] },
     openai: { label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'] },
   },
@@ -492,7 +493,7 @@ const providerPresets = {
   },
 }
 const huobaoPresetCards = [
-  { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-preview', priority: 100 },
+  { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'deepseek-v4-pro', priority: 100 },
   { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2-all', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: 'https://api.chatfire.site/volcengine', model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.4022543.xyz/minimax', model: 'speech-2.8-hd', priority: 97 },
@@ -723,21 +724,29 @@ function getAgentCfg(type) {
 }
 
 const textModelGroups = computed(() => {
-  return cfgs.value
+  const fromConfigs = cfgs.value
     .filter(c => c.service_type === 'text' && c.is_active && c.api_key)
     .map(c => ({
       label: `${c.provider} — ${c.name}`,
       models: Array.isArray(c.model) ? c.model : (c.model ? [c.model] : []),
     }))
     .filter(g => g.models.length > 0)
+
+  if (fromConfigs.length) return fromConfigs
+
+  return [{
+    label: 'ChatFire — 文本',
+    models: TEXT_MODEL_OPTIONS.map(item => item.value),
+  }]
 })
 
-const textModelSelectOptions = computed(() =>
-  textModelGroups.value.map(g => ({
+const textModelSelectOptions = computed(() => {
+  const labelByValue = Object.fromEntries(TEXT_MODEL_OPTIONS.map(item => [item.value, item.label]))
+  return textModelGroups.value.map(g => ({
     label: g.label,
-    options: g.models.map(m => ({ label: m, value: m })),
+    options: g.models.map(m => ({ label: labelByValue[m] || m, value: m })),
   }))
-)
+})
 
 async function loadAgents() {
   try { agentCfgs.value = await agentConfigAPI.list() }

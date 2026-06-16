@@ -307,7 +307,7 @@ async function buildMergeSegments(
         .filter((sb): sb is ComposedStoryboard => !!sb)
 
       if (imagePath && groupStoryboards.length === group.clips.length) {
-        const duration = await renderSameImageGroupSegment(groupStoryboards, imagePath, tempPath)
+        const duration = await renderSameImageGroupSegment(groupStoryboards, imagePath, tempPath, i)
         segments.push({ path: tempPath, duration, temp: true })
       } else {
         await concatClipsToFile(group.clips, tempPath, run)

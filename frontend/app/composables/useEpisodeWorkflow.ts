@@ -1,8 +1,32 @@
-import { artStylePrompt, resolveTitleVisualHook, sanitizeSceneImagePrompt, SCENE_STYLE_GUARD } from '~/composables/useArtStyles'
+import {
+  artStylePrompt,
+  buildNarrationDiptychImagePromptContent,
+  buildNarrationSceneImagePromptFromSentences,
+  buildNarrationTitleImagePromptContent,
+  mergeStoryboardLinesForImagePrompt,
+  isNarrationMinimalStyle,
+  resolveTitleVisualHook,
+  sanitizeSceneImagePrompt,
+  appendToNarrationBracket,
+  finalizeNarrationImagePrompt,
+  SCENE_STYLE_GUARD,
+} from '~/composables/useArtStyles'
 
 export type ProductionMode = 'drama' | 'narration'
 
 export const DEFAULT_IMAGE_MODEL = 'gpt-image-2-all'
+
+export const DEFAULT_TEXT_MODEL = 'deepseek-v4-pro'
+
+export const TEXT_MODEL_OPTIONS = [
+  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent，OpenAI 兼容）' },
+  { value: 'gpt-4o', label: 'GPT-4o · OpenAI 兼容' },
+] as const
+
+export function resolveEpisodeTextModel(ep?: { text_model?: string | null; textModel?: string | null } | null) {
+  const picked = String(ep?.text_model || ep?.textModel || '').trim()
+  return picked || DEFAULT_TEXT_MODEL
+}
 
 export const IMAGE_MODEL_OPTIONS = [
   { value: 'gpt-image-2-all', label: 'GPT Image 2 · ¥0.21/张（默认·文生图+参考图定妆）' },
@@ -101,11 +125,14 @@ export function parseDramaMetadata(drama: any) {
 }
 
 export function narrationStoryboardPrompt(style = 'comic') {
+  const styleHint = isNarrationMinimalStyle(style)
+    ? `${NARRATION_IMAGE_STYLE_CORE}。禁止在 image_prompt 中写年代/年份和具体服装描述；人物统一为白色圆头素体小人且必须有两个小黑点眼睛，只写动作姿态。`
+    : `${artStylePrompt(style, 'agent')}。`
   return [
     '这是旁白解说视频，必须按「一句旁白 = 一个镜头」拆分，严禁把多句旁白合并到同一镜头。',
     '以句号、问号、感叹号、分号、逗号、顿号或换行作为分镜边界，每个标点（或换行）后单独一镜，严禁合并。',
     '所有 dialogue 统一写为「旁白：单句内容」，每镜 dialogue 只能有一句旁白。',
-    `image_prompt 必须是单张完整插画，描述该场景段落的「主要视觉画面」（综合同场景全部旁白，不要只写首句），画风要求：${artStylePrompt(style, 'agent')}。`,
+    `image_prompt 必须是单张完整插画，描述该场景段落的「主要视觉画面」（综合同场景全部旁白，不要只写首句），画风要求：${styleHint}`,
     '严禁在 image_prompt 中出现 grid、panel、宫格、分格、多格、collage、split、strip 等词。',
     '不要填写 video_prompt，duration 按该句旁白字数估算（约 4 字/秒）。',
     '完成后调用 save_storyboards 保存。',
@@ -133,8 +160,13 @@ export interface NarrationImageMeta {
   narration_tts_mode?: 'new' | 'inherit' | 'copy'
   title_hook?: string
   title_full?: string
+  scene_content?: string
+  narration_lines?: string[]
+  image_narration_lines?: string[]
   paragraph_index?: number
   paragraph_layout?: 'single' | 'diptych'
+  script_paragraph_index?: number
+  body_sentence_index?: number
 }
 
 export function isNarrationStoryboard(sb: any) {
@@ -159,8 +191,16 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
       title_hook: raw.title_hook,
       title_full: raw.title_full,
       scene_content: raw.scene_content,
+      narration_lines: Array.isArray(raw.narration_lines)
+        ? raw.narration_lines.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
+      image_narration_lines: Array.isArray(raw.image_narration_lines)
+        ? raw.image_narration_lines.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
       paragraph_index: typeof raw.paragraph_index === 'number' ? raw.paragraph_index : undefined,
       paragraph_layout: raw.paragraph_layout === 'diptych' ? 'diptych' : raw.paragraph_layout === 'single' ? 'single' : undefined,
+      script_paragraph_index: typeof raw.script_paragraph_index === 'number' ? raw.script_paragraph_index : undefined,
+      body_sentence_index: typeof raw.body_sentence_index === 'number' ? raw.body_sentence_index : undefined,
     }
   }
   try {
@@ -173,8 +213,16 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
       title_hook: parsed?.title_hook,
       title_full: parsed?.title_full,
       scene_content: parsed?.scene_content,
+      narration_lines: Array.isArray(parsed?.narration_lines)
+        ? parsed.narration_lines.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
+      image_narration_lines: Array.isArray(parsed?.image_narration_lines)
+        ? parsed.image_narration_lines.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
       paragraph_index: typeof parsed?.paragraph_index === 'number' ? parsed.paragraph_index : undefined,
       paragraph_layout: parsed?.paragraph_layout === 'diptych' ? 'diptych' : parsed?.paragraph_layout === 'single' ? 'single' : undefined,
+      script_paragraph_index: typeof parsed?.script_paragraph_index === 'number' ? parsed.script_paragraph_index : undefined,
+      body_sentence_index: typeof parsed?.body_sentence_index === 'number' ? parsed.body_sentence_index : undefined,
     }
   } catch {}
   return { narration_image_mode: 'inherit' }
@@ -197,6 +245,19 @@ export function compareStoryboardOrder(a: any, b: any) {
 
 export function sortStoryboards(list: any[]) {
   return [...list].sort(compareStoryboardOrder)
+}
+
+/** 收集当前镜头之前的全部旁白句，供配图【剧情】全文连贯 */
+export function collectPriorNarrationLines(storyboards: any[], currentSb: any): string[] {
+  const ordered = sortStoryboards(storyboards)
+  const idx = ordered.findIndex(sb => sb.id === currentSb.id)
+  if (idx <= 0) return []
+  const prior: string[] = []
+  for (let i = 0; i < idx; i++) {
+    const line = extractNarrationSentence(ordered[i]).trim()
+    if (line) prior.push(line)
+  }
+  return prior
 }
 
 export function hasDuplicateStoryboardNumbers(list: any[]) {
@@ -260,28 +321,68 @@ export function resolveSceneContentForShot(storyboards: any[], sb: any): string 
   return `${first}。${sentences.slice(1, -1).join('，')}。${last}`
 }
 
-export function buildNarrationImagePrompt(sb: any, style = 'comic') {
+export function collectBodyNarrationLines(storyboards: any[]): string[] {
+  return sortStoryboards(storyboards)
+    .filter(sb => !isNarrationTitleShot(sb))
+    .map(sb => extractNarrationSentence(sb).trim())
+    .filter(Boolean)
+}
+
+export function collectBodyNarrationLineIndex(storyboards: any[], currentSb: any): number {
+  const ordered = sortStoryboards(storyboards).filter(sb => !isNarrationTitleShot(sb))
+  return ordered.findIndex(sb => sb.id === currentSb.id)
+}
+
+export function buildNarrationImagePrompt(sb: any, style = 'comic', allSbs?: any[]) {
   if (!narrationShotNeedsOwnImage(sb)) return ''
+  const fullNarrationLines = allSbs?.length ? collectBodyNarrationLines(allSbs) : []
+  const bodyIndex = allSbs?.length ? collectBodyNarrationLineIndex(allSbs, sb) : -1
+  const promptOptions = {
+    fullNarrationLines,
+    timelineUpToIndex: bodyIndex > 0 ? bodyIndex : undefined,
+  }
+  const bodySentences = fullNarrationLines
   const meta = parseNarrationImageMeta(sb)
+  const minimal = isNarrationMinimalStyle(style)
   if (meta.narration_shot_type === 'title') {
     const hook = resolveTitleVisualHook(meta.title_full, meta.title_hook)
       || meta.title_hook || meta.title_full || extractNarrationSentence(sb)
     if (!hook) return ''
+    if (minimal) {
+      return buildNarrationTitleImagePromptContent(hook, {
+        titleFull: meta.title_full,
+        titleHook: hook,
+        bodySentences,
+      })
+    }
     return [
       'Chinese short drama narration opening background, single full illustration',
       'absolutely no text, no letters, no words, no watermark, no captions on image',
       'NOT romantic couple, NOT clock faces, NOT roses, NOT dreamlike abstract wallpaper, NOT pixel art, NOT retro photo filter',
       artStylePrompt(style, 'title'),
       `visual theme based on story hook: ${sanitizeSceneImagePrompt(hook)}`,
-      'concrete era-appropriate environment matching the hook (street market, shop interior, city street, etc)',
       'clean center area reserved for dynamic title overlay, 16:9 landscape, high quality',
     ].join(', ')
   }
   const storedPrompt = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
   const sceneContent = meta.scene_content || extractNarrationSentence(sb)
-  if (!storedPrompt && !sceneContent) return ''
-  if (storedPrompt) return [SCENE_STYLE_GUARD, sanitizeSceneImagePrompt(storedPrompt)].join(', ')
+  const narrationLines = meta.image_narration_lines?.length
+    ? meta.image_narration_lines
+    : meta.narration_lines?.length
+      ? mergeStoryboardLinesForImagePrompt(meta.narration_lines)
+      : sceneContent
+        ? mergeStoryboardLinesForImagePrompt(sceneContent.split(/[。！？]+/).map(s => s.trim()).filter(Boolean))
+        : [extractNarrationSentence(sb)].map(s => s.trim()).filter(Boolean)
+  if (!storedPrompt && !sceneContent && !narrationLines.length) return ''
+  if (storedPrompt) {
+    return minimal
+      ? finalizeNarrationImagePrompt(storedPrompt, { narrationLines, ...promptOptions })
+      : [SCENE_STYLE_GUARD, sanitizeSceneImagePrompt(storedPrompt)].join(', ')
+  }
   if (meta.paragraph_layout === 'diptych') {
+    if (minimal) {
+      return buildNarrationDiptychImagePromptContent(sceneContent, '旁白场景延续', promptOptions)
+    }
     return [
       SCENE_STYLE_GUARD,
       'single 16:9 illustration with exactly 2 horizontal panels side by side, diptych layout, one image file',
@@ -291,6 +392,12 @@ export function buildNarrationImagePrompt(sb: any, style = 'comic') {
       'right panel scene: continuation of narration scene',
       'high quality, no text, no watermark',
     ].join(', ')
+  }
+  if (minimal) {
+    return buildNarrationSceneImagePromptFromSentences(
+      narrationLines.length ? narrationLines : sceneContent,
+      promptOptions,
+    )
   }
   return [
     SCENE_STYLE_GUARD,
@@ -424,11 +531,20 @@ export function enrichNarrationPromptWithCharacters(
   prompt: string,
   chars: any[],
   characterIds: number[],
+  style = 'comic',
 ) {
   const base = String(prompt || '').trim()
   if (!base) return base
   const relevant = chars.filter(ch => characterIds.includes(ch.id))
   if (!relevant.length) return base
+  if (isNarrationMinimalStyle(style)) {
+    const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
+    const addition = `场景中出现素体小人角色：${names}，仅通过动作姿态区分，不写服装细节`
+    if (/【左格/.test(base) && /【右格/.test(base)) {
+      return appendToNarrationBracket(appendToNarrationBracket(base, '左格', addition), '右格', addition)
+    }
+    return appendToNarrationBracket(base, '剧情', addition)
+  }
   const hints = relevant.map(ch => {
     const app = String(ch.appearance || ch.description || '').trim()
     const label = formatCharacterDisplayName(ch)
@@ -458,14 +574,16 @@ export function buildNarrationImageGeneratePayload(
   extra: Record<string, any> = {},
   model?: string | null,
   characterIds?: number[],
+  allSbs?: any[],
 ) {
   const resolvedIds = characterIds?.length
     ? characterIds
     : getStoryboardCharacterIdsFromShot(sb)
-  const basePrompt = buildNarrationImagePrompt(sb, style)
-  const prompt = enrichNarrationPromptWithCharacters(basePrompt, chars, resolvedIds)
+  const basePrompt = buildNarrationImagePrompt(sb, style, allSbs)
+  const prompt = enrichNarrationPromptWithCharacters(basePrompt, chars, resolvedIds, style)
+  const minimal = isNarrationMinimalStyle(style)
   const maxRefs = imageModelMaxReferenceImages(model)
-  const referenceImages = imageModelSupportsReferenceImages(model)
+  const referenceImages = !minimal && imageModelSupportsReferenceImages(model)
     ? collectNarrationCharacterReferenceImages(chars, resolvedIds, maxRefs)
     : []
   return {
@@ -550,7 +668,7 @@ export function narrationTtsReady(storyboards: any[]) {
 }
 
 export function workflowStepTotal(mode: ProductionMode) {
-  return mode === 'narration' ? 9 : 11
+  return mode === 'narration' ? 10 : 12
 }
 
 export interface WorkflowState {
@@ -569,6 +687,7 @@ export interface WorkflowState {
   shotVidCount: number
   composedCount: number
   mergeUrl: boolean
+  openingVideoUrl?: boolean
   bgmAppliedCount?: number
 }
 
@@ -583,6 +702,7 @@ export function workflowProgress(mode: ProductionMode, s: WorkflowState) {
     if (s.sbsCount && (s.bgmAppliedCount ?? 0) > 0) p++
     if (s.sbsCount && (s.narrationImagesReady ?? s.shotImgCount === s.sbsCount)) p++
     if (s.sbsCount && s.composedCount === s.sbsCount) p++
+    if (s.openingVideoUrl) p++
     if (s.mergeUrl) p++
     return Math.min(p, workflowStepTotal(mode))
   }
@@ -596,6 +716,7 @@ export function workflowProgress(mode: ProductionMode, s: WorkflowState) {
   if (s.shotImgCount > 0) p++
   if (s.shotVidCount > 0) p++
   if (s.sbsCount && s.composedCount === s.sbsCount) p++
+  if (s.openingVideoUrl) p++
   if (s.mergeUrl) p++
   return p
 }
@@ -608,7 +729,6 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
         label: '解说',
         items: [
           { key: 'script:raw', label: '文案输入', desc: '粘贴解说稿', done: s.rawContent },
-          { key: 'script:characters', label: '角色定妆', desc: '提取并生成参考图', done: s.charsCount > 0 },
           { key: 'script:storyboard', label: '旁白分镜', desc: '拆成镜头', done: s.sbsCount > 0 },
         ],
       },
@@ -628,6 +748,7 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
         id: 'export',
         label: '导出',
         items: [
+          { key: 'export:opening', label: '开幕视频', desc: '翻页片头', done: !!s.openingVideoUrl },
           { key: 'export:merge', label: '拼接导出', desc: '完整 MP4', done: s.mergeUrl },
         ],
       },
@@ -637,7 +758,7 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
 }
 
 export function narrationStoryboardStep() {
-  return 2
+  return 1
 }
 
 export function dramaStoryboardStep() {
@@ -647,8 +768,7 @@ export function dramaStoryboardStep() {
 export function resolveScriptStep(mode: ProductionMode, key: string) {
   if (mode === 'narration') {
     if (key === 'script:raw') return 0
-    if (key === 'script:characters') return 1
-    if (key === 'script:storyboard') return 2
+    if (key === 'script:storyboard') return 1
     return 0
   }
   const stepMap: Record<string, number> = {
@@ -661,12 +781,17 @@ export function resolveScriptStep(mode: ProductionMode, key: string) {
   return stepMap[key] ?? 0
 }
 
-export function resolveActiveSubStepKey(mode: ProductionMode, panel: string, scriptStep: number, prodTab: string) {
-  if (panel === 'export') return 'export:merge'
+export function resolveActiveSubStepKey(
+  mode: ProductionMode,
+  panel: string,
+  scriptStep: number,
+  prodTab: string,
+  exportTab = 'merge',
+) {
+  if (panel === 'export') return exportTab === 'opening' ? 'export:opening' : 'export:merge'
   if (panel === 'production') return `prod:${prodTab}`
   if (mode === 'narration') {
-    if (scriptStep === 2) return 'script:storyboard'
-    if (scriptStep === 1) return 'script:characters'
+    if (scriptStep === 1) return 'script:storyboard'
     return 'script:raw'
   }
   if (scriptStep === 0) return 'script:raw'
@@ -676,9 +801,8 @@ export function resolveActiveSubStepKey(mode: ProductionMode, panel: string, scr
   return 'script:storyboard'
 }
 
-export function inferNarrationScriptStep(ep: any, sbsCount: number, charsCount: number) {
-  if (sbsCount > 0) return 2
-  if (charsCount > 0) return 1
-  if (ep?.content || ep?.script_content || ep?.scriptContent) return 1
+export function inferNarrationScriptStep(ep: any, sbsCount: number, _charsCount: number) {
+  if (sbsCount > 0) return 1
+  if (ep?.content || ep?.script_content || ep?.scriptContent) return 0
   return 0
 }
