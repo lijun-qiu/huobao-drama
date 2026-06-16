@@ -2029,7 +2029,7 @@
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
                 <div class="empty-title">生成全集视频</div>
-                <div class="empty-desc">将 {{ composedCount }}/{{ sbs.length }} 个已合成镜头拼接为完整视频{{ composedCount < sbs.length ? '（需全部镜头合成完成）' : '' }}{{ exportMixBgm && exportBgmMusicId ? '，并混入所选 BGM' : '' }}</div>
+                <div class="empty-desc">将 {{ composedCount }}/{{ sbs.length }} 个已合成镜头拼接为完整视频{{ composedCount < sbs.length ? '（需全部镜头合成完成）' : '' }}{{ exportIncludeOpening && openingVideoUrl ? '，片头加入开幕视频' : '' }}{{ exportMixBgm && exportBgmMusicId ? '，并混入所选 BGM' : '' }}</div>
                 <button class="btn btn-primary" :disabled="composedCount === 0 || composedCount < sbs.length || mergeProcessing" @click="doMerge" style="margin-top:12px">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   开始生成
@@ -2038,7 +2038,17 @@
             </template>
           </div>
           <div class="export-list">
-            <div class="export-list-head">成片 BGM</div>
+            <div class="export-list-head">导出选项</div>
+            <div class="export-bgm-panel">
+              <label class="export-bgm-toggle">
+                <input v-model="exportIncludeOpening" type="checkbox" />
+                <span>拼接时加入开幕视频</span>
+              </label>
+              <div v-if="exportIncludeOpening && !openingVideoUrl" class="dim" style="font-size:11px;line-height:1.5;margin-top:6px">
+                尚未生成开幕视频，导出时将跳过片头；请先在「开幕视频」步骤生成。
+              </div>
+            </div>
+            <div class="export-list-head" style="margin-top:12px">成片 BGM</div>
             <div class="export-bgm-panel">
               <label class="export-bgm-toggle">
                 <input v-model="exportMixBgm" type="checkbox" />
@@ -2424,6 +2434,7 @@ const bgmAppliedCount = computed(() => sbs.value.filter(s => s.bgm_audio_url || 
 const bgmCompletedCount = computed(() => bgmLibrary.value.filter(m => m.status === 'completed').length)
 const bgmPendingCount = computed(() => bgmLibrary.value.filter(m => ['pending', 'processing'].includes(m.status)).length)
 const exportMixBgm = ref(true)
+const exportIncludeOpening = ref(true)
 const exportBgmMusicId = ref(null)
 const exportBgmVolume = ref(22)
 const exportBgmApplying = ref(false)
@@ -2512,6 +2523,7 @@ function restoreLocalTtsPrefs() {
 function persistExportBgmPrefs() {
   if (typeof window === 'undefined' || !epId.value) return
   window.localStorage.setItem(`episode-${epId.value}-export-mix-bgm`, exportMixBgm.value ? '1' : '0')
+  window.localStorage.setItem(`episode-${epId.value}-export-include-opening`, exportIncludeOpening.value ? '1' : '0')
   window.localStorage.setItem(`episode-${epId.value}-export-bgm-id`, exportBgmMusicId.value ? String(exportBgmMusicId.value) : '')
   window.localStorage.setItem(`episode-${epId.value}-export-bgm-vol`, String(exportBgmVolume.value))
 }
@@ -2520,6 +2532,8 @@ function restoreExportBgmPrefs() {
   if (typeof window === 'undefined' || !epId.value) return
   const mix = window.localStorage.getItem(`episode-${epId.value}-export-mix-bgm`)
   exportMixBgm.value = mix === null ? true : mix === '1'
+  const opening = window.localStorage.getItem(`episode-${epId.value}-export-include-opening`)
+  exportIncludeOpening.value = opening === null ? true : opening === '1'
   const id = window.localStorage.getItem(`episode-${epId.value}-export-bgm-id`)
   exportBgmMusicId.value = id ? Number(id) : null
   const vol = window.localStorage.getItem(`episode-${epId.value}-export-bgm-vol`)
@@ -2527,7 +2541,10 @@ function restoreExportBgmPrefs() {
 }
 
 function buildMergePayload() {
-  const payload = { cancel_running: true }
+  const payload = {
+    cancel_running: true,
+    include_opening_video: exportIncludeOpening.value,
+  }
   if (exportMixBgm.value && exportBgmMusicId.value) {
     payload.bgm_music_id = exportBgmMusicId.value
     payload.bgm_volume = Math.max(0.05, Math.min(0.5, exportBgmVolume.value / 100))
@@ -6106,6 +6123,9 @@ async function doMerge(options = {}) {
     toast.error(`尚有 ${sbs.value.length - composedCount.value} 个镜头未合成（${composedCount.value}/${sbs.value.length}），请先在「镜头合成」完成后再导出`)
     return false
   }
+  if (exportIncludeOpening.value && !openingVideoUrl.value) {
+    toast.warning('尚未生成开幕视频，将仅拼接镜头内容')
+  }
   if (exportMixBgm.value && !exportBgmMusicId.value && exportBgmOptions.value.length) {
     exportBgmMusicId.value = exportBgmOptions.value[0].value
   }
@@ -6237,7 +6257,7 @@ async function loadVoices() {
 
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
 watch([localTtsEnabled, localEdgeVoiceId], persistLocalTtsPrefs)
-watch([exportMixBgm, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
+watch([exportMixBgm, exportIncludeOpening, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
 watch(exportBgmOptions, (opts) => {
   if (!exportBgmMusicId.value && opts.length) exportBgmMusicId.value = opts[0].value
 })

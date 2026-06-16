@@ -163,11 +163,12 @@ export const composeAPI = {
   status: (epId: number) => api.get(`/compose/episodes/${epId}/compose-status`),
 }
 export const mergeAPI = {
-  merge: (epId: number, options?: { cancel_running?: boolean; bgm_music_id?: number; bgm_volume?: number }) =>
+  merge: (epId: number, options?: { cancel_running?: boolean; bgm_music_id?: number; bgm_volume?: number; include_opening_video?: boolean }) =>
     api.post(`/merge/episodes/${epId}/merge`, {
       cancel_running: options?.cancel_running !== false,
       bgm_music_id: options?.bgm_music_id,
       bgm_volume: options?.bgm_volume,
+      include_opening_video: options?.include_opening_video,
     }),
   cancel: (epId: number) => api.post(`/merge/episodes/${epId}/merge/cancel`),
   status: (epId: number) => api.get(`/merge/episodes/${epId}/merge`),

@@ -56,6 +56,8 @@ export type MergeProgress = {
 export type MergeOptions = {
   bgmMusicId?: number
   bgmVolume?: number
+  /** 是否在成片前拼接开幕视频，默认 true */
+  includeOpeningVideo?: boolean
 }
 
 const activeMerges = new Map<number, ActiveMergeRun>()
@@ -336,6 +338,29 @@ function resolveMergeBgmPath(musicId: number): string | null {
   return fs.existsSync(abs) ? abs : null
 }
 
+function resolveEpisodeOpeningVideoAbs(episodeId: number): string | null {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  const rel = ep?.openingVideoUrl?.trim()
+  if (!rel) return null
+  const abs = toAbsPath(rel)
+  return fs.existsSync(abs) ? abs : null
+}
+
+async function prependOpeningToMergedVideo(
+  openingAbsPath: string,
+  bodyPath: string,
+  run: ActiveMergeRun,
+): Promise<void> {
+  const tempOut = `${bodyPath}.opening.mp4`
+  const clips: ClipSegment[] = [
+    { path: openingAbsPath, duration: await getVideoDuration(openingAbsPath), storyboardId: 0 },
+    { path: bodyPath, duration: await getVideoDuration(bodyPath), storyboardId: 0 },
+  ]
+  await concatClipsToFile(clips, tempOut, run)
+  if (fs.existsSync(bodyPath)) fs.unlinkSync(bodyPath)
+  fs.renameSync(tempOut, bodyPath)
+}
+
 async function mixBgmIntoMergedVideo(
   videoPath: string,
   bgmAbsPath: string,
@@ -400,7 +425,13 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number, opt
     throw new Error(`部分镜头视频文件缺失（${missing.length}/${videos.length}），请重新合成后再导出`)
   }
 
-  logTaskStart('MergeTask', 'episode-merge', { episodeId, dramaId, clips: videos.length, bgmMusicId: options.bgmMusicId })
+  logTaskStart('MergeTask', 'episode-merge', {
+    episodeId,
+    dramaId,
+    clips: videos.length,
+    bgmMusicId: options.bgmMusicId,
+    includeOpeningVideo: options.includeOpeningVideo !== false,
+  })
 
   supersedeStaleMerges(episodeId)
 
@@ -424,6 +455,7 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number, opt
     logTaskError('MergeTask', 'episode-merge', { mergeId, episodeId, error: err.message })
     console.error(`[Merge] Failed:`, err)
     clearMergeProgress(episodeId)
+    activeMerges.delete(episodeId)
     db.update(schema.videoMerges)
       .set({ status: 'failed', errorMsg: err.message })
       .where(eq(schema.videoMerges.id, mergeId)).run()
@@ -608,8 +640,8 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     throw err
   }
 
-  activeMerges.delete(episodeId)
   if (run.cancelled) {
+    activeMerges.delete(episodeId)
     clearMergeProgress(episodeId)
     cleanupTempFiles(tempFiles)
     if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
@@ -617,6 +649,28 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
   }
 
   cleanupTempFiles(tempFiles)
+
+  const includeOpeningVideo = options.includeOpeningVideo !== false
+  if (includeOpeningVideo && !run.cancelled) {
+    const openingAbs = resolveEpisodeOpeningVideoAbs(episodeId)
+    if (openingAbs) {
+      setMergeProgress(episodeId, {
+        mergeId,
+        phase: 'finalizing',
+        percent: 88,
+        message: '正在拼接开幕视频…',
+        updatedAt: Date.now(),
+      })
+      try {
+        await prependOpeningToMergedVideo(openingAbs, outputPath, run)
+        totalDurationSec += await getVideoDuration(openingAbs)
+      } catch (err: any) {
+        throw new Error(`开幕视频拼接失败: ${err.message}`)
+      }
+    }
+  }
+
+  if (run.cancelled) return
 
   if (options.bgmMusicId && !run.cancelled) {
     const bgmAbs = resolveMergeBgmPath(options.bgmMusicId)
@@ -655,7 +709,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
 
   // 更新 merge 记录
   db.update(schema.videoMerges)
-    .set({ status: 'completed', mergedUrl: mergedRelative, duration, completedAt: now() })
+    .set({ status: 'completed', mergedUrl: mergedRelative, duration, completedAt: now(), errorMsg: null })
     .where(eq(schema.videoMerges.id, mergeId)).run()
 
   // 更新 episode
@@ -671,6 +725,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     updatedAt: Date.now(),
   })
   clearMergeProgress(episodeId)
+  activeMerges.delete(episodeId)
 
   logTaskSuccess('MergeTask', 'episode-merge', {
     mergeId,
@@ -680,5 +735,6 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     clips: storyboards.length,
     pageFlipTransitions: usePageFlip ? groups.length - 1 : 0,
     bgmMusicId: options.bgmMusicId,
+    includeOpeningVideo,
   })
 }

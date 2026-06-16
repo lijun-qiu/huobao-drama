@@ -22,6 +22,11 @@ function reconcileStaleMerge(episodeId: number, latest: typeof schema.videoMerge
   if (!['processing', 'pending'].includes(latest.status || '')) return latest
   if (isMergeActive(episodeId, latest.id)) return latest
 
+  const progress = getMergeProgress(episodeId)
+  if (progress?.mergeId === latest.id && Date.now() - progress.updatedAt < 120_000) {
+    return latest
+  }
+
   db.update(schema.videoMerges)
     .set({ status: 'failed', errorMsg: '拼接因服务重启或热更新中断，请点击「重新拼接」', completedAt: now() })
     .where(eq(schema.videoMerges.id, latest.id))
@@ -89,12 +94,14 @@ app.post('/episodes/:id/merge', async (c) => {
 
   const bgmMusicId = body?.bgm_music_id ? Number(body.bgm_music_id) : undefined
   const bgmVolume = body?.bgm_volume != null ? Number(body.bgm_volume) : undefined
+  const includeOpeningVideo = body?.include_opening_video !== false
 
   try {
-    logTaskStart('MergeAPI', 'episode-merge', { episodeId, dramaId: ep.dramaId, bgmMusicId })
+    logTaskStart('MergeAPI', 'episode-merge', { episodeId, dramaId: ep.dramaId, bgmMusicId, includeOpeningVideo })
     const mergeId = await mergeEpisodeVideos(episodeId, ep.dramaId, {
       bgmMusicId: bgmMusicId && Number.isFinite(bgmMusicId) ? bgmMusicId : undefined,
       bgmVolume: bgmVolume != null && Number.isFinite(bgmVolume) ? bgmVolume : undefined,
+      includeOpeningVideo,
     })
     logTaskSuccess('MergeAPI', 'episode-merge', { episodeId, mergeId })
     return success(c, { merge_id: mergeId, status: 'processing' })
