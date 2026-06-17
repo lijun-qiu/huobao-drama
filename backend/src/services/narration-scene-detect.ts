@@ -698,8 +698,7 @@ export async function generateParagraphImagePromptsWithLLM(
 ): Promise<{ titlePrompt: string | null; promptsByStartIndex: Map<number, string> } | null> {
   const style = options?.style || 'comic'
   const textModel = options?.textModel || null
-  // 结构化 JSON 批量配图：关闭思考模式，避免 content 为空、响应过慢与网关截断
-  const textThinking = false
+  const textThinking = options?.textThinking ?? true
   const titleHook = options?.titleHook?.trim() || null
   const titleFull = options?.titleFull?.trim() || null
   const characters = options?.characters || []
