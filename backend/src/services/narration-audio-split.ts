@@ -12,8 +12,8 @@ import { parseDialogueForTTS } from './narration-tts.js'
 import { transcribeAudioToSrt, formatSrtTimestamp } from './audio-transcribe.js'
 import {
   resolveStoryboardAudioRanges,
-  textMatchScore,
-  textMismatchCost,
+  mapScriptSegmentsToCues,
+  normalizeAlignText,
 } from './narration-srt-align.js'
 import type { SrtCue } from './audio-transcribe.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
@@ -95,7 +95,6 @@ async function splitAudioToTargetsBySrt(
   audioRelativePath: string,
   ts: string,
   merged: boolean,
-  alignModeHint: 'srt' | 'content_match' = 'srt',
 ) {
   const inputAbs = getAbsolutePath(audioRelativePath)
   if (!fs.existsSync(inputAbs)) throw new Error(`音频文件不存在：${audioRelativePath}`)
@@ -124,11 +123,12 @@ async function splitAudioToTargetsBySrt(
     results,
     sourceDuration: totalDuration,
     mode: (merged ? 'merged' : 'single') as 'merged' | 'single',
-    align_mode: alignModeHint === 'content_match' ? 'content_match' as const : aligned.mode,
+    align_mode: aligned.mode,
     align_score: aligned.alignScore,
     srt_path: srtPath,
     subtitle_count: cues.length,
     srt_cached: srtCached,
+    srt_cached_count: srtCached ? 1 : 0,
     srt_files: [buildSrtFilePayload({
       audioPath: audioRelativePath,
       spokenText: cuesToSpokenText(cues),
@@ -136,7 +136,7 @@ async function splitAudioToTargetsBySrt(
       srtPath,
       duration: totalDuration,
       cached: srtCached,
-    })],
+    }, scripts)],
   }
 }
 
@@ -162,10 +162,14 @@ export type NarrationSrtFilePayload = {
     start_label: string
     end_label: string
     text: string
+    script_text: string
   }>
 }
 
-function buildSrtFilePayload(transcript: AudioTranscript): NarrationSrtFilePayload {
+function buildSrtFilePayload(transcript: AudioTranscript, scripts: string[] = []): NarrationSrtFilePayload {
+  const scriptSegments = scripts.length
+    ? mapScriptSegmentsToCues(scripts, transcript.cues)
+    : transcript.cues.map(() => '')
   return {
     audio_path: transcript.audioPath,
     srt_path: transcript.srtPath,
@@ -179,20 +183,37 @@ function buildSrtFilePayload(transcript: AudioTranscript): NarrationSrtFilePaylo
       start_label: formatSrtTimestamp(cue.start),
       end_label: formatSrtTimestamp(cue.end),
       text: cue.text,
+      script_text: scriptSegments[idx] || '',
     })),
   }
 }
 
-export async function transcribeNarrationAudioFiles(audioInput: string | string[]) {
+export async function transcribeNarrationAudioFiles(audioInput: string | string[], episodeId?: number) {
   const audioPaths = (Array.isArray(audioInput) ? audioInput : [audioInput])
     .map(p => String(p || '').trim())
     .filter(Boolean)
   if (!audioPaths.length) throw new Error('请提供音频文件')
 
   const transcripts = await buildAudioTranscripts(audioPaths)
+  let srtFiles = transcripts.map(t => buildSrtFilePayload(t))
+
+  if (episodeId) {
+    const targets = getEpisodeTtsTargets(episodeId)
+    if (targets.length) {
+      const groups = matchTranscriptsToTargets(targets, transcripts)
+      srtFiles = transcripts.map((transcript) => {
+        const group = groups.find(item => item.transcript.audioPath === transcript.audioPath)
+        const scripts = group
+          ? group.targetIndices.map(i => targets[i].parsed.pureText)
+          : []
+        return buildSrtFilePayload(transcript, scripts)
+      })
+    }
+  }
+
   return {
     segment_count: audioPaths.length,
-    srt_files: transcripts.map(buildSrtFilePayload),
+    srt_files: srtFiles,
   }
 }
 
@@ -204,10 +225,6 @@ type ContentMatchGroup = {
 
 function cuesToSpokenText(cues: SrtCue[]): string {
   return cues.map(cue => cue.text).join('')
-}
-
-function combinedTargetScript(targets: TtsTarget[], indices: number[]): string {
-  return indices.map(i => targets[i].parsed.pureText).join('')
 }
 
 async function buildAudioTranscripts(audioRelativePaths: string[]): Promise<AudioTranscript[]> {
@@ -227,127 +244,133 @@ async function buildAudioTranscripts(audioRelativePaths: string[]): Promise<Audi
   }))
 }
 
-/** 段数与分镜相同时：按转写内容与旁白文案最优匹配（与上传顺序无关） */
-function matchEqualCountByContent(
-  targets: TtsTarget[],
-  transcripts: AudioTranscript[],
-): ContentMatchGroup[] {
-  const n = targets.length
-  const pairs: Array<{ ti: number; ai: number; cost: number }> = []
-  for (let ti = 0; ti < n; ti++) {
-    for (let ai = 0; ai < n; ai++) {
-      pairs.push({
-        ti,
-        ai,
-        cost: textMismatchCost(targets[ti].parsed.pureText, transcripts[ai].spokenText),
-      })
-    }
-  }
-  pairs.sort((a, b) => a.cost - b.cost)
+function targetCharWeight(target: TtsTarget): number {
+  return Math.max(1, normalizeAlignText(target.parsed.pureText).length)
+}
 
-  const targetUsed = Array(n).fill(false)
-  const audioUsed = Array(n).fill(false)
+function greedyAssignPairs(
+  n: number,
+  pairs: Array<{ ti: number; ai: number; cost: number }>,
+): Map<number, number> {
+  pairs.sort((a, b) => a.cost - b.cost)
+  const leftUsed = Array(n).fill(false)
+  const rightUsed = Array(n).fill(false)
   const assignment = new Map<number, number>()
 
   for (const pair of pairs) {
-    if (targetUsed[pair.ti] || audioUsed[pair.ai]) continue
-    targetUsed[pair.ti] = true
-    audioUsed[pair.ai] = true
+    if (leftUsed[pair.ti] || rightUsed[pair.ai]) continue
+    leftUsed[pair.ti] = true
+    rightUsed[pair.ai] = true
     assignment.set(pair.ti, pair.ai)
   }
 
   for (let ti = 0; ti < n; ti++) {
     if (assignment.has(ti)) continue
-    let bestAi = -1
-    let bestCost = Infinity
     for (let ai = 0; ai < n; ai++) {
-      if (audioUsed[ai]) continue
-      const cost = textMismatchCost(targets[ti].parsed.pureText, transcripts[ai].spokenText)
-      if (cost < bestCost) {
-        bestCost = cost
-        bestAi = ai
-      }
-    }
-    if (bestAi >= 0) {
-      audioUsed[bestAi] = true
-      assignment.set(ti, bestAi)
+      if (rightUsed[ai]) continue
+      rightUsed[ai] = true
+      assignment.set(ti, ai)
+      break
     }
   }
 
+  return assignment
+}
+
+/** 段数与分镜相同：按字数占比 vs 音频时长占比匹配（不依赖 Whisper 错字） */
+function matchEqualCountByDuration(
+  targets: TtsTarget[],
+  transcripts: AudioTranscript[],
+): ContentMatchGroup[] {
+  const n = targets.length
+  const charWeights = targets.map(targetCharWeight)
+  const totalChars = charWeights.reduce((sum, w) => sum + w, 0) || n
+  const durations = transcripts.map(t => t.duration)
+  const totalDur = durations.reduce((sum, d) => sum + d, 0) || n
+
+  const pairs: Array<{ ti: number; ai: number; cost: number }> = []
+  for (let ti = 0; ti < n; ti++) {
+    const charShare = charWeights[ti] / totalChars
+    for (let ai = 0; ai < n; ai++) {
+      const durShare = durations[ai] / totalDur
+      pairs.push({ ti, ai, cost: Math.abs(charShare - durShare) })
+    }
+  }
+
+  const assignment = greedyAssignPairs(n, pairs)
   return targets.map((_, ti) => {
     const ai = assignment.get(ti)
-    if (ai == null) throw new Error(`镜头 #${targets[ti].sb.storyboardNumber} 未找到匹配的配音段，请检查上传内容`)
-    const transcript = transcripts[ai]
-    const matchScore = textMatchScore(targets[ti].parsed.pureText, transcript.spokenText)
-    return { targetIndices: [ti], transcript, matchScore }
+    if (ai == null) throw new Error(`镜头 #${targets[ti].sb.storyboardNumber} 未找到匹配的配音段`)
+    return { targetIndices: [ti], transcript: transcripts[ai], matchScore: 1 }
   })
 }
 
-/** 音频段少于分镜：将连续分镜分组后按文案内容匹配到各段音频 */
-function matchFewerAudiosByContent(
+/** 音频段少于分镜：按各段时长占比划分连续分镜组 */
+function matchFewerAudiosByDuration(
   targets: TtsTarget[],
   transcripts: AudioTranscript[],
 ): ContentMatchGroup[] {
   const n = targets.length
   const m = transcripts.length
-  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(Number.POSITIVE_INFINITY))
-  const parent: Array<Array<{ prevI: number; transcriptIdx: number; start: number } | null>> =
-    Array.from({ length: m + 1 }, () => Array(n + 1).fill(null))
-  dp[0][0] = 0
-
-  for (let j = 0; j < m; j++) {
-    for (let i = j; i <= n - (m - j); i++) {
-      if (!Number.isFinite(dp[j][i])) continue
-      const minEnd = i + 1
-      const maxEnd = n - (m - j - 1)
-      for (let end = minEnd; end <= maxEnd; end++) {
-        const script = combinedTargetScript(targets, Array.from({ length: end - i }, (_, k) => i + k))
-        const cost = textMismatchCost(script, transcripts[j].spokenText)
-        const next = dp[j][i] + cost
-        if (next < dp[j + 1][end]) {
-          dp[j + 1][end] = next
-          parent[j + 1][end] = { prevI: i, transcriptIdx: j, start: i }
-        }
-      }
-    }
-  }
-
-  if (!Number.isFinite(dp[m][n])) {
-    throw new Error('无法将配音段与分镜旁白对齐，请确认每段音频内容与分镜文案对应')
-  }
+  const charWeights = targets.map(targetCharWeight)
+  const totalChars = charWeights.reduce((sum, w) => sum + w, 0) || n
+  const durations = transcripts.map(t => t.duration)
+  const totalDur = durations.reduce((sum, d) => sum + d, 0) || m
 
   const groups: ContentMatchGroup[] = []
-  let i = n
-  let j = m
-  while (j > 0) {
-    const node = parent[j][i]
-    if (!node) break
-    const indices = Array.from({ length: i - node.start }, (_, k) => node.start + k)
-    const transcript = transcripts[node.transcriptIdx]
-    groups.unshift({
+  let ti = 0
+
+  for (let j = 0; j < m; j++) {
+    const isLast = j === m - 1
+    const targetChars = isLast
+      ? charWeights.slice(ti).reduce((sum, w) => sum + w, 0)
+      : (durations[j] / totalDur) * totalChars
+
+    const indices: number[] = []
+    let acc = 0
+    while (ti < n) {
+      if (!isLast && indices.length > 0 && acc >= targetChars) break
+      indices.push(ti)
+      acc += charWeights[ti]
+      ti++
+    }
+    if (!indices.length && ti < n) {
+      indices.push(ti++)
+    }
+
+    groups.push({
       targetIndices: indices,
-      transcript,
-      matchScore: textMatchScore(combinedTargetScript(targets, indices), transcript.spokenText),
+      transcript: transcripts[j],
+      matchScore: 1,
     })
-    i = node.start
-    j = node.transcriptIdx
+  }
+
+  while (ti < n) {
+    groups[groups.length - 1].targetIndices.push(ti++)
   }
 
   return groups
 }
 
-/** 音频段多于分镜：为每个分镜挑选最匹配的音频段 */
-function matchMoreAudiosByContent(
+/** 音频段多于分镜：按字数占比 vs 时长占比为每镜挑选音频 */
+function matchMoreAudiosByDuration(
   targets: TtsTarget[],
   transcripts: AudioTranscript[],
 ): ContentMatchGroup[] {
+  const charWeights = targets.map(targetCharWeight)
+  const totalChars = charWeights.reduce((sum, w) => sum + w, 0) || targets.length
+  const durations = transcripts.map(t => t.duration)
+  const totalDur = durations.reduce((sum, d) => sum + d, 0) || transcripts.length
+
   const audioUsed = Array(transcripts.length).fill(false)
   return targets.map((target, ti) => {
+    const charShare = charWeights[ti] / totalChars
     let bestAi = -1
     let bestCost = Infinity
     for (let ai = 0; ai < transcripts.length; ai++) {
       if (audioUsed[ai]) continue
-      const cost = textMismatchCost(target.parsed.pureText, transcripts[ai].spokenText)
+      const durShare = durations[ai] / totalDur
+      const cost = Math.abs(charShare - durShare)
       if (cost < bestCost) {
         bestCost = cost
         bestAi = ai
@@ -355,12 +378,7 @@ function matchMoreAudiosByContent(
     }
     if (bestAi < 0) throw new Error(`镜头 #${target.sb.storyboardNumber} 未找到匹配的配音段`)
     audioUsed[bestAi] = true
-    const transcript = transcripts[bestAi]
-    return {
-      targetIndices: [ti],
-      transcript,
-      matchScore: textMatchScore(target.parsed.pureText, transcript.spokenText),
-    }
+    return { targetIndices: [ti], transcript: transcripts[bestAi], matchScore: 1 }
   })
 }
 
@@ -373,12 +391,12 @@ function matchTranscriptsToTargets(
     return [{
       targetIndices: targets.map((_, i) => i),
       transcript: transcripts[0],
-      matchScore: textMatchScore(combinedTargetScript(targets, targets.map((_, i) => i)), transcripts[0].spokenText),
+      matchScore: 1,
     }]
   }
-  if (transcripts.length === targets.length) return matchEqualCountByContent(targets, transcripts)
-  if (transcripts.length < targets.length) return matchFewerAudiosByContent(targets, transcripts)
-  return matchMoreAudiosByContent(targets, transcripts)
+  if (transcripts.length === targets.length) return matchEqualCountByDuration(targets, transcripts)
+  if (transcripts.length < targets.length) return matchFewerAudiosByDuration(targets, transcripts)
+  return matchMoreAudiosByDuration(targets, transcripts)
 }
 
 async function assignGroupToStoryboards(
@@ -394,13 +412,8 @@ async function assignGroupToStoryboards(
   srtCached: boolean
 }> {
   const groupTargets = group.targetIndices.map(i => targets[i])
-  const shouldTrimInsideFile = groupTargets.length === 1
-    && (
-      group.transcript.cues.length > 1
-      || textMismatchCost(groupTargets[0].parsed.pureText, group.transcript.spokenText) > 0.18
-    )
 
-  if (groupTargets.length === 1 && !shouldTrimInsideFile) {
+  if (groupTargets.length === 1) {
     const clipPath = await importWholeAudioFile(group.transcript.audioPath)
     const result = await assignStoryboardTtsClip(groupTargets[0].sb.id, clipPath, ts)
     return {
@@ -418,7 +431,6 @@ async function assignGroupToStoryboards(
     group.transcript.audioPath,
     ts,
     false,
-    'content_match',
   )
   return {
     results: payload.results,
@@ -437,6 +449,7 @@ async function splitAudioByContentMatch(
 ) {
   const transcripts = await buildAudioTranscripts(audioRelativePaths)
   const groups = matchTranscriptsToTargets(targets, transcripts)
+  const allScripts = targets.map(t => t.parsed.pureText)
 
   const allResults: Array<{ storyboard_id: number; tts_audio_url: string; duration: number }> = []
   let sourceDuration = 0
@@ -459,12 +472,18 @@ async function splitAudioByContentMatch(
     results: allResults,
     sourceDuration,
     mode: 'multi' as const,
-    align_mode: 'content_match' as const,
+    align_mode: 'weighted' as const,
     align_score: alignScoreSum / Math.max(1, groups.length),
     srt_path: srtPath,
     subtitle_count: subtitleCount,
     srt_cached_count: srtCachedCount,
-    srt_files: transcripts.map(buildSrtFilePayload),
+    srt_files: transcripts.map((transcript, idx) => {
+      const group = groups.find(g => g.transcript.audioPath === transcript.audioPath)
+      const scripts = group
+        ? group.targetIndices.map(i => allScripts[i])
+        : []
+      return buildSrtFilePayload(transcript, scripts)
+    }),
   }
 }
 
@@ -496,7 +515,7 @@ export async function splitNarrationAudioForEpisode(episodeId: number, audioInpu
     episodeId,
     audioCount: audioPaths.length,
     shotCount: targets.length,
-    mode: audioPaths.length > 1 ? 'content_match' : 'srt',
+    mode: audioPaths.length > 1 ? 'multi' : 'single',
   })
 
   const ts = now()
@@ -513,7 +532,7 @@ export async function splitNarrationAudioForEpisode(episodeId: number, audioInpu
     alignMode: payload.align_mode,
     alignScore: payload.align_score,
     subtitleCount: payload.subtitle_count,
-    srtCachedCount: payload.srt_cached_count ?? (payload.srt_cached ? 1 : 0),
+    srtCachedCount: payload.srt_cached_count ?? ('srt_cached' in payload && payload.srt_cached ? 1 : 0),
   })
 
   return {
@@ -526,7 +545,7 @@ export async function splitNarrationAudioForEpisode(episodeId: number, audioInpu
     align_score: payload.align_score,
     srt_path: payload.srt_path,
     subtitle_count: payload.subtitle_count,
-    srt_cached_count: payload.srt_cached_count ?? (payload.srt_cached ? 1 : 0),
+    srt_cached_count: payload.srt_cached_count ?? ('srt_cached' in payload && payload.srt_cached ? 1 : 0),
     srt_files: payload.srt_files ?? [],
     clips: payload.results,
   }

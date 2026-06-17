@@ -373,27 +373,106 @@ export function alignStoryboardsByTranscriptTimeline(
   return { ranges: refined, alignScore }
 }
 
-/** 按文案字数比例切分音频时长 */
+/** 毫秒级边界，避免 171+ 分镜时浮点边界重叠导致大量 0.35s 最短片段 */
+function buildWeightedBoundaryMs(weights: number[], totalDurationSec: number): number[] {
+  const n = weights.length
+  const totalMs = Math.max(n, Math.round(totalDurationSec * 1000))
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0) || n
+  const minGapMs = Math.max(
+    Math.round(MIN_SEGMENT_SEC * 1000),
+    Math.floor(totalMs / Math.max(n * 8, n + 1)),
+  )
+
+  const boundaries = [0]
+  let accWeight = 0
+  for (let i = 0; i < n - 1; i++) {
+    accWeight += weights[i]
+    boundaries.push(Math.round((accWeight / totalWeight) * totalMs))
+  }
+  boundaries.push(totalMs)
+
+  for (let i = 1; i < boundaries.length; i++) {
+    if (boundaries[i] < boundaries[i - 1] + minGapMs) {
+      boundaries[i] = boundaries[i - 1] + minGapMs
+    }
+  }
+
+  let overflow = boundaries[n] - totalMs
+  if (overflow > 0) {
+    for (let i = n - 1; i >= 1 && overflow > 0; i--) {
+      const shrinkable = boundaries[i] - boundaries[i - 1] - minGapMs
+      if (shrinkable <= 0) continue
+      const shrink = Math.min(shrinkable, overflow)
+      for (let j = i; j <= n; j++) boundaries[j] -= shrink
+      overflow -= shrink
+    }
+    boundaries[n] = totalMs
+    for (let i = n - 1; i >= 1; i--) {
+      if (boundaries[i] <= boundaries[i - 1]) {
+        boundaries[i] = Math.min(totalMs, boundaries[i - 1] + minGapMs)
+      }
+    }
+  }
+
+  return boundaries
+}
+
+/** 按文案字数比例切分音频时长（0→总时长，按字数占比划分边界） */
 export function alignStoryboardsByWeightedDuration(
   scripts: string[],
   totalDuration: number,
 ): { ranges: TimeRange[]; alignScore: number } {
-  const weights = scripts.map(text => Math.max(1, normalizeAlignText(text).length))
-  const totalWeight = weights.reduce((sum, w) => sum + w, 0) || scripts.length
-  const ranges: TimeRange[] = []
-  let cursor = 0
+  if (!scripts.length) return { ranges: [], alignScore: 0 }
+  if (!Number.isFinite(totalDuration) || totalDuration <= 0) {
+    throw new Error('音频时长无效，无法按比例裁剪')
+  }
 
+  const weights = scripts.map(text => Math.max(1, normalizeAlignText(text).length))
+  const boundariesMs = buildWeightedBoundaryMs(weights, totalDuration)
+  const boundaries = boundariesMs.map(ms => ms / 1000)
+
+  const ranges: TimeRange[] = []
   for (let i = 0; i < scripts.length; i++) {
-    const share = i === scripts.length - 1
-      ? Math.max(MIN_SEGMENT_SEC, totalDuration - cursor)
-      : Math.max(MIN_SEGMENT_SEC, (weights[i] / totalWeight) * totalDuration)
-    const end = i === scripts.length - 1 ? totalDuration : Math.min(totalDuration, cursor + share)
-    ranges.push({ start: cursor, end: Math.max(cursor + MIN_SEGMENT_SEC, end) })
-    cursor = ranges[ranges.length - 1].end
+    const start = boundaries[i]
+    const end = i === scripts.length - 1 ? totalDuration : boundaries[i + 1]
+    ranges.push({
+      start,
+      end: Math.max(start + MIN_SEGMENT_SEC, end),
+    })
   }
 
   if (ranges.length) ranges[ranges.length - 1].end = totalDuration
-  return { ranges, alignScore: 0.45 }
+  return { ranges, alignScore: 1 }
+}
+
+/** 按字数比例将分镜文案映射到各 SRT 段（用于展示，不依赖 Whisper 错字） */
+export function mapScriptSegmentsToCues(scripts: string[], cues: SrtCue[]): string[] {
+  const fullScript = scripts.join('')
+  if (!fullScript || !cues.length) return cues.map(() => '')
+
+  const weights = cues.map(cue => {
+    const textLen = normalizeAlignText(cue.text).length
+    if (textLen > 0) return textLen
+    return Math.max(1, Math.round((cue.end - cue.start) * 4))
+  })
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0) || cues.length
+
+  const segments: string[] = []
+  let cursor = 0
+  for (let i = 0; i < cues.length; i++) {
+    const isLast = i === cues.length - 1
+    if (isLast) {
+      segments.push(fullScript.slice(cursor))
+      break
+    }
+    const share = Math.max(1, Math.round((weights[i] / totalWeight) * fullScript.length))
+    const end = Math.min(fullScript.length, cursor + share)
+    segments.push(fullScript.slice(cursor, end))
+    cursor = end
+  }
+
+  while (segments.length < cues.length) segments.push('')
+  return segments.slice(0, cues.length)
 }
 
 function pickBestAlignment(
@@ -451,15 +530,9 @@ export function alignStoryboardsToSrt(scripts: string[], cues: SrtCue[]): {
 
 export function resolveStoryboardAudioRanges(
   scripts: string[],
-  cues: SrtCue[],
+  _cues: SrtCue[],
   totalDuration: number,
-): { ranges: TimeRange[]; alignScore: number; mode: 'srt' | 'timeline' | 'weighted' } {
-  if (!cues.length) throw new Error('字幕为空，无法对齐')
-  const result = pickBestAlignment(scripts, cues, totalDuration)
-  const ranges = refineSequentialRanges(result.ranges, cues, totalDuration)
-  if (ranges.length === scripts.length && ranges.every(r => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end > r.start)) {
-    return { ...result, ranges }
-  }
-  const timeline = alignStoryboardsByTranscriptTimeline(scripts, cues, totalDuration)
-  return { ...timeline, mode: 'timeline' }
+): { ranges: TimeRange[]; alignScore: number; mode: 'weighted' } {
+  // Whisper 转写常有错字，裁剪只按分镜文案字数在整段音频上比例切分
+  return { ...alignStoryboardsByWeightedDuration(scripts, totalDuration), mode: 'weighted' }
 }

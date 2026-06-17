@@ -1025,7 +1025,7 @@
           <!-- Sub: Dubbing -->
           <div v-else-if="prodTab === 'dubbing'" class="prod-content">
             <div v-if="isNarrationMode" class="narration-hint">
-              <strong>配音策略：</strong>先<strong>上传 MP3</strong>（可多段、顺序不限），确认无误后点<strong>按文案裁剪</strong>。系统会先 Whisper 转写，再<strong>按分镜旁白内容与转写文本模糊匹配</strong>（兼容谐音错字）后裁剪；相同音频再次裁剪将复用已生成的 SRT。
+              <strong>配音策略：</strong>先<strong>上传 MP3</strong>（可多段），确认无误后点<strong>按文案裁剪</strong>。Whisper 字幕仅作预览参考（常有错字）；<strong>裁剪按分镜旁白字数在音频总时长上比例切分</strong>，相同音频再次裁剪将复用已生成的 SRT。
             </div>
             <div v-else class="narration-hint">
               <strong>配音策略：</strong>先上传 MP3，再点「按文案裁剪」分配到各镜台词；或逐镜上传 / TTS 生成。
@@ -1034,7 +1034,7 @@
               <div class="uploaded-audio-head">
                 <span class="tag mono">已上传 {{ uploadedEpisodeAudio.length }} 段</span>
                 <span v-if="ttsEligibleCount" class="dim" style="font-size:11px">
-                  可多选或分多次添加 · 裁剪时 Whisper 转 SRT 对齐
+                  可多选或分多次添加 · 裁剪按字数比例切分时长
                 </span>
                 <div class="ml-auto flex gap-1">
                   <button
@@ -1056,7 +1056,7 @@
                 </div>
               </div>
               <div v-if="!uploadedEpisodeAudio.length" class="uploaded-audio-empty dim">
-                尚未添加音频。可一次多选或分多次追加；裁剪时会先合成整段、转 SRT 字幕并与旁白文案对齐。
+                尚未添加音频。可一次多选或分多次追加；裁剪时按各镜旁白字数占全文比例划分音频时间轴。
               </div>
               <div v-else class="uploaded-audio-list">
                 <div v-for="(file, idx) in uploadedEpisodeAudio" :key="file.path" class="uploaded-audio-item">
@@ -1100,7 +1100,7 @@
                 </div>
               </div>
               <div v-if="!narrationSrtFiles.length" class="narration-srt-empty dim">
-                上传 MP3 后点「预览转写字幕」查看 Whisper 生成的 SRT；裁剪完成后也会自动显示在此。
+                上传 MP3 后点「预览转写字幕」查看 Whisper 转写（常有错字，仅供参考）；列表中「分镜文案」列为按字数比例对应的正确旁白。
               </div>
               <div v-else class="narration-srt-list">
                 <div
@@ -1151,7 +1151,8 @@
                         <tr>
                           <th>#</th>
                           <th>时间</th>
-                          <th>文本</th>
+                          <th>Whisper 转写</th>
+                          <th v-if="hasSrtScriptColumn(file)">分镜文案</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1160,7 +1161,10 @@
                           <td class="mono narration-srt-time">
                             {{ cue.start_label || cue.startLabel }} → {{ cue.end_label || cue.endLabel }}
                           </td>
-                          <td>{{ cue.text }}</td>
+                          <td class="narration-srt-whisper">{{ cue.text }}</td>
+                          <td v-if="hasSrtScriptColumn(file)" class="narration-srt-script">
+                            {{ cue.script_text || cue.scriptText || '—' }}
+                          </td>
                         </tr>
                       </tbody>
                     </table>
@@ -5116,8 +5120,14 @@ function formatSrtRaw(file) {
     const idx = cue.index
     const start = cue.start_label || cue.startLabel || ''
     const end = cue.end_label || cue.endLabel || ''
-    return `${idx}\n${start} --> ${end}\n${cue.text}\n`
+    const script = cue.script_text || cue.scriptText || ''
+    const scriptLine = script ? `\n; 分镜: ${script}` : ''
+    return `${idx}\n${start} --> ${end}\n${cue.text}${scriptLine}\n`
   }).join('\n')
+}
+
+function hasSrtScriptColumn(file) {
+  return (file.cues || []).some(cue => cue.script_text || cue.scriptText)
 }
 
 function toggleSrtExpand(index) {
@@ -5185,9 +5195,8 @@ async function splitEpisodeNarrationAudio() {
       srt: '（SRT 字幕对齐）',
       speech: '（句间静音对齐）',
       boundary: '（上传段边界对齐）',
-      content_match: '（按旁白内容匹配）',
-      one_to_one: '（按旁白内容匹配）',
-      weighted: '（文案时长比例对齐）',
+      weighted: '（按字数比例切分）',
+      content_match: '（按字数比例切分）',
     }
     const scoreHint = typeof alignScore === 'number' ? `，匹配度 ${Math.round(alignScore * 100)}%` : ''
     const cacheHint = srtCachedCount > 0 ? `，复用 ${srtCachedCount} 份已生成字幕` : ''
@@ -7446,6 +7455,12 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
 }
 .narration-srt-time {
   font-size: 11px;
+}
+.narration-srt-whisper {
+  color: var(--text-3);
+}
+.narration-srt-script {
+  color: var(--text-1);
 }
 .narration-srt-raw {
   margin: 0;

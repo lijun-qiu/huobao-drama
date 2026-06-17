@@ -264,7 +264,7 @@ app.post('/:id/transcribe-narration-audio', async (c) => {
   if (!audioPaths.length) return badRequest(c, '请提供 audio_path 或 audio_paths')
 
   try {
-    const result = await transcribeNarrationAudioFiles(audioPaths)
+    const result = await transcribeNarrationAudioFiles(audioPaths, episodeId)
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)
