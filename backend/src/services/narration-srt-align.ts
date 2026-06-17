@@ -30,23 +30,100 @@ function levenshteinDistance(a: string, b: string): number {
   return dp[a.length][b.length]
 }
 
-function textMismatchCost(script: string, spoken: string): number {
+function lcsLength(a: string, b: string): number {
+  if (!a.length || !b.length) return 0
+  const dp = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0))
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1])
+    }
+  }
+  return dp[a.length][b.length]
+}
+
+function charBigrams(text: string): string[] {
+  const bigrams: string[] = []
+  for (let i = 0; i < text.length - 1; i++) bigrams.push(text.slice(i, i + 2))
+  return bigrams
+}
+
+function bigramJaccard(a: string, b: string): number {
+  if (!a || !b) return 0
+  if (a.length < 2 || b.length < 2) return a === b ? 1 : 0
+  const setA = new Set(charBigrams(a))
+  const setB = new Set(charBigrams(b))
+  let inter = 0
+  for (const gram of setA) if (setB.has(gram)) inter++
+  const union = setA.size + setB.size - inter
+  return union > 0 ? inter / union : 0
+}
+
+/** 文案与转写文本差异成本（0=完全匹配，1=完全不匹配），对谐音/错字更宽容 */
+export function textMismatchCost(script: string, spoken: string): number {
   const a = normalizeAlignText(script)
   const b = normalizeAlignText(spoken)
   if (!a && !b) return 0
   if (!a || !b) return 1
   if (a === b) return 0
   if (a.includes(b) || b.includes(a)) return 0.08
+
   const maxLen = Math.max(a.length, b.length)
-  return levenshteinDistance(a, b) / maxLen
+  const levCost = levenshteinDistance(a, b) / maxLen
+  const lcsCost = 1 - lcsLength(a, b) / maxLen
+  const bigramCost = 1 - bigramJaccard(a, b)
+  let cost = Math.min(levCost, lcsCost * 0.95, bigramCost * 0.9)
+
+  // 等长句中部分字相同 → 常见于 Whisper 谐音错字
+  if (a.length === b.length && a.length >= 3) {
+    let samePos = 0
+    for (let i = 0; i < a.length; i++) if (a[i] === b[i]) samePos++
+    const posRatio = samePos / a.length
+    if (posRatio >= 0.3) cost = Math.min(cost, (1 - posRatio) * 0.82)
+  }
+
+  // 字数接近且公共字比例高
+  const shorter = a.length <= b.length ? a : b
+  const longer = a.length <= b.length ? b : a
+  if (shorter.length >= 3 && longer.includes(shorter.slice(0, Math.min(4, shorter.length)))) {
+    cost = Math.min(cost, 0.12)
+  }
+
+  return Math.max(0, Math.min(1, cost))
+}
+
+export function textMatchScore(script: string, spoken: string): number {
+  return Math.max(0, 1 - textMismatchCost(script, spoken))
 }
 
 type AlignGroup = { startCue: number; endCue: number }
+
+const MIN_SEGMENT_SEC = 0.35
+
+function isValidAlignGroup(group: AlignGroup | undefined, cues: SrtCue[]): group is AlignGroup {
+  if (!group) return false
+  if (group.startCue < 0 || group.endCue < 0) return false
+  if (group.startCue >= cues.length || group.endCue >= cues.length) return false
+  if (group.startCue > group.endCue) return false
+  return !!cues[group.startCue] && !!cues[group.endCue]
+}
+
+function groupToTimeRange(group: AlignGroup, cues: SrtCue[]): TimeRange {
+  const startCue = cues[group.startCue]
+  const endCue = cues[group.endCue]
+  return {
+    start: startCue.start,
+    end: Math.max(startCue.start + MIN_SEGMENT_SEC, endCue.end),
+  }
+}
 
 function partitionCuesToScripts(scripts: string[], cues: SrtCue[]): AlignGroup[] {
   const n = scripts.length
   const m = cues.length
   if (!n || !m) return []
+  // 字幕段少于分镜时无法可靠按 cue 切分
+  if (m < n) return []
 
   const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(Number.POSITIVE_INFINITY))
   const parent: Array<Array<{ prevI: number; prevJ: number; startCue: number } | null>> =
@@ -88,6 +165,8 @@ function partitionCuesToScripts(scripts: string[], cues: SrtCue[]): AlignGroup[]
 }
 
 function fallbackProportionalGroups(scripts: string[], cues: SrtCue[]): AlignGroup[] {
+  if (!cues.length || scripts.length > cues.length) return []
+
   const weights = scripts.map(text => Math.max(1, normalizeAlignText(text).length))
   const totalWeight = weights.reduce((sum, w) => sum + w, 0) || scripts.length
   const groups: AlignGroup[] = []
@@ -96,19 +175,24 @@ function fallbackProportionalGroups(scripts: string[], cues: SrtCue[]): AlignGro
   for (let i = 0; i < scripts.length; i++) {
     const remainingScripts = scripts.length - i
     const remainingCues = cues.length - cueIdx
+    if (remainingCues <= 0) return []
+
     const share = i === scripts.length - 1
       ? remainingCues
       : Math.max(1, Math.round((weights[i] / totalWeight) * cues.length))
-    const count = Math.min(Math.max(1, share), Math.max(1, remainingCues - remainingScripts + 1))
+    const count = i === scripts.length - 1
+      ? remainingCues
+      : Math.min(
+        Math.max(1, share),
+        Math.max(1, remainingCues - remainingScripts + 1),
+      )
     const endCue = Math.min(cues.length - 1, cueIdx + count - 1)
     groups.push({ startCue: cueIdx, endCue })
     cueIdx = endCue + 1
   }
 
-  return groups
+  return groups.length === scripts.length ? groups : []
 }
-
-const MIN_SEGMENT_SEC = 0.35
 
 function buildSpokenTimeline(cues: SrtCue[]): { text: string; times: number[] } {
   let text = ''
@@ -125,6 +209,110 @@ function buildSpokenTimeline(cues: SrtCue[]): { text: string; times: number[] } 
   return { text, times }
 }
 
+function findTextSpan(spoken: string, pattern: string, from: number): { start: number; end: number; cost: number } {
+  const norm = normalizeAlignText(pattern)
+  if (!norm) return { start: from, end: from, cost: 1 }
+
+  const startPos = findTextPosition(spoken, norm, from)
+  let bestEnd = Math.min(spoken.length, startPos + norm.length)
+  let bestCost = textMismatchCost(pattern, spoken.slice(startPos, bestEnd))
+
+  for (let len = Math.max(1, norm.length - 5); len <= norm.length + 8; len++) {
+    if (startPos + len > spoken.length) break
+    const slice = spoken.slice(startPos, startPos + len)
+    const cost = textMismatchCost(pattern, slice)
+    if (cost < bestCost) {
+      bestCost = cost
+      bestEnd = startPos + len
+    }
+  }
+
+  return { start: startPos, end: Math.max(startPos + 1, bestEnd), cost: bestCost }
+}
+
+function timeAtTextIndex(times: number[], index: number): number {
+  if (!times.length) return 0
+  return times[Math.max(0, Math.min(times.length - 1, index))] ?? 0
+}
+
+/** 将时间范围扩展到完整 SRT 字幕段，避免在句中硬切 */
+function snapRangeToCueBoundaries(range: TimeRange, cues: SrtCue[]): TimeRange {
+  if (!cues.length) return range
+
+  let startCue = 0
+  let endCue = cues.length - 1
+  for (let i = 0; i < cues.length; i++) {
+    if (range.start <= cues[i].end + 0.05) {
+      startCue = i
+      break
+    }
+  }
+  for (let i = cues.length - 1; i >= 0; i--) {
+    if (range.end >= cues[i].start - 0.05) {
+      endCue = i
+      break
+    }
+  }
+  if (startCue > endCue) endCue = startCue
+
+  return {
+    start: cues[startCue].start,
+    end: Math.max(cues[startCue].start + MIN_SEGMENT_SEC, cues[endCue].end),
+  }
+}
+
+function findCueGapSplit(cues: SrtCue[], leftEnd: number, rightStart: number): number {
+  let bestMid = (leftEnd + rightStart) / 2
+  let bestGap = -1
+
+  for (let i = 0; i < cues.length - 1; i++) {
+    const gapStart = cues[i].end
+    const gapEnd = cues[i + 1].start
+    const gap = gapEnd - gapStart
+    const mid = (gapStart + gapEnd) / 2
+    if (gap > bestGap && mid > leftEnd - 0.15 && mid < rightStart + 0.15) {
+      bestGap = gap
+      bestMid = mid
+    }
+  }
+
+  if (bestGap >= 0.08) return bestMid
+  return Math.max(leftEnd, Math.min(rightStart, bestMid))
+}
+
+/** 消除重叠，并在相邻字幕段间隙处断句 */
+function refineSequentialRanges(ranges: TimeRange[], cues: SrtCue[], totalDuration: number): TimeRange[] {
+  if (!ranges.length) return ranges
+
+  const snapped = ranges.map(r => snapRangeToCueBoundaries(r, cues))
+  const out: TimeRange[] = [{ ...snapped[0] }]
+
+  for (let i = 1; i < snapped.length; i++) {
+    const prev = out[i - 1]
+    const curr = { ...snapped[i] }
+    if (curr.start < prev.end - 0.02) {
+      const split = findCueGapSplit(cues, prev.end, curr.start)
+      prev.end = Math.max(prev.start + MIN_SEGMENT_SEC, split)
+      curr.start = Math.max(prev.end, curr.start)
+    }
+    if (curr.end <= curr.start) {
+      curr.end = Math.min(totalDuration, curr.start + MIN_SEGMENT_SEC)
+    }
+    out.push(curr)
+  }
+
+  if (out.length) {
+    out[0].start = Math.max(0, cues[0]?.start ?? out[0].start)
+    out[out.length - 1].end = Math.min(totalDuration, Math.max(out[out.length - 1].end, cues[cues.length - 1]?.end ?? out[out.length - 1].end))
+  }
+
+  return out
+}
+
+function rangesFromCueGroups(groups: AlignGroup[], cues: SrtCue[]): TimeRange[] {
+  return groups.map(group => groupToTimeRange(group, cues))
+}
+
 function findTextPosition(spoken: string, pattern: string, from: number): number {
   if (!pattern) return from
   const exact = spoken.indexOf(pattern, from)
@@ -132,7 +320,7 @@ function findTextPosition(spoken: string, pattern: string, from: number): number
 
   let bestIdx = from
   let bestCost = 1
-  const searchEnd = Math.min(spoken.length, from + Math.max(pattern.length * 3, 24))
+  const searchEnd = Math.min(spoken.length, from + Math.max(pattern.length * 4, 48))
   for (let i = from; i < searchEnd; i++) {
     for (let len = Math.max(1, pattern.length - 2); len <= pattern.length + 3; len++) {
       if (i + len > spoken.length) break
@@ -169,30 +357,20 @@ export function alignStoryboardsByTranscriptTimeline(
       continue
     }
 
-    const startPos = findTextPosition(spoken, norm, cursor)
-    const endPos = Math.min(spoken.length, startPos + Math.max(1, norm.length))
-    cursor = Math.max(cursor, endPos)
+    const span = findTextSpan(spoken, scripts[i], cursor)
+    cursor = Math.max(cursor, span.end)
 
-    const startTime = times[Math.min(startPos, times.length - 1)] ?? 0
-    let endTime = times[Math.min(Math.max(startPos, endPos - 1), times.length - 1)] ?? startTime
+    const startTime = timeAtTextIndex(times, span.start)
+    let endTime = timeAtTextIndex(times, Math.max(span.start, span.end - 1))
     if (endTime <= startTime) endTime = Math.min(totalDuration, startTime + MIN_SEGMENT_SEC)
 
-    if (i > 0 && startTime < ranges[i - 1].end) {
-      const prevEnd = ranges[i - 1].end
-      ranges.push({ start: prevEnd, end: Math.max(prevEnd + MIN_SEGMENT_SEC, endTime) })
-    } else {
-      ranges.push({ start: startTime, end: Math.max(startTime + MIN_SEGMENT_SEC, endTime) })
-    }
-
-    totalCost += textMismatchCost(scripts[i], spoken.slice(startPos, endPos))
+    ranges.push({ start: startTime, end: Math.max(startTime + MIN_SEGMENT_SEC, endTime) })
+    totalCost += span.cost
   }
 
-  if (ranges.length) {
-    ranges[ranges.length - 1].end = Math.min(totalDuration, Math.max(ranges[ranges.length - 1].end, ranges[ranges.length - 1].start + MIN_SEGMENT_SEC))
-  }
-
+  const refined = refineSequentialRanges(ranges, cues, totalDuration)
   const alignScore = Math.max(0, 1 - totalCost / Math.max(1, scripts.length))
-  return { ranges, alignScore }
+  return { ranges: refined, alignScore }
 }
 
 /** 按文案字数比例切分音频时长 */
@@ -223,27 +401,26 @@ function pickBestAlignment(
   cues: SrtCue[],
   totalDuration: number,
 ): { ranges: TimeRange[]; alignScore: number; mode: 'srt' | 'timeline' | 'weighted' } {
-  const srt = alignStoryboardsToSrt(scripts, cues)
   const timeline = alignStoryboardsByTranscriptTimeline(scripts, cues, totalDuration)
+  const srt = alignStoryboardsToSrt(scripts, cues)
   const weighted = alignStoryboardsByWeightedDuration(scripts, totalDuration)
+  const weightedSnapped = refineSequentialRanges(weighted.ranges, cues, totalDuration)
 
   const candidates = [
-    { ...srt, mode: 'srt' as const },
     { ...timeline, mode: 'timeline' as const },
-    { ...weighted, mode: 'weighted' as const },
+    { ...srt, mode: 'srt' as const },
+    { ...weightedSnapped, alignScore: weighted.alignScore * 0.85, mode: 'weighted' as const },
   ].sort((a, b) => b.alignScore - a.alignScore)
 
   const best = candidates[0]
-  if (best.alignScore >= 0.15) return best
+  if (best.alignScore >= 0.2) return best
 
-  // 字幕段远少于分镜时，时间轴/比例切分通常更可靠
   if (cues.length < scripts.length * 0.6) {
-    const timelinePick = timeline.alignScore >= weighted.alignScore
+    return timeline.alignScore >= weighted.alignScore
       ? { ...timeline, mode: 'timeline' as const }
-      : { ...weighted, mode: 'weighted' as const }
-    return timelinePick
+      : { ...weightedSnapped, mode: 'weighted' as const }
   }
-  return best.alignScore > 0 ? best : { ...weighted, mode: 'weighted' as const }
+  return best.alignScore > 0 ? best : { ...timeline, mode: 'timeline' as const }
 }
 
 /** 将 SRT 字幕 cue 与分镜文案顺序对齐，返回每镜时间区间 */
@@ -254,11 +431,13 @@ export function alignStoryboardsToSrt(scripts: string[], cues: SrtCue[]): {
   if (!scripts.length) return { ranges: [], alignScore: 0 }
   if (!cues.length) throw new Error('字幕为空，无法对齐')
 
+  const totalDuration = cues[cues.length - 1]?.end ?? cues[0]?.end ?? MIN_SEGMENT_SEC
   const groups = partitionCuesToScripts(scripts, cues)
-  const ranges = groups.map((group) => ({
-    start: cues[group.startCue].start,
-    end: cues[group.endCue].end,
-  }))
+  if (groups.length !== scripts.length || !groups.every(group => isValidAlignGroup(group, cues))) {
+    return alignStoryboardsByTranscriptTimeline(scripts, cues, totalDuration)
+  }
+
+  const ranges = refineSequentialRanges(rangesFromCueGroups(groups, cues), cues, totalDuration)
 
   let totalCost = 0
   for (let i = 0; i < scripts.length; i++) {
@@ -276,5 +455,11 @@ export function resolveStoryboardAudioRanges(
   totalDuration: number,
 ): { ranges: TimeRange[]; alignScore: number; mode: 'srt' | 'timeline' | 'weighted' } {
   if (!cues.length) throw new Error('字幕为空，无法对齐')
-  return pickBestAlignment(scripts, cues, totalDuration)
+  const result = pickBestAlignment(scripts, cues, totalDuration)
+  const ranges = refineSequentialRanges(result.ranges, cues, totalDuration)
+  if (ranges.length === scripts.length && ranges.every(r => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end > r.start)) {
+    return { ...result, ranges }
+  }
+  const timeline = alignStoryboardsByTranscriptTimeline(scripts, cues, totalDuration)
+  return { ...timeline, mode: 'timeline' }
 }

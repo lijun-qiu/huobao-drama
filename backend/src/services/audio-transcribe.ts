@@ -1,5 +1,6 @@
 import fs from 'fs'
 import path from 'path'
+import { createHash } from 'crypto'
 import { fileURLToPath } from 'url'
 import { getTextConfig } from './ai.js'
 import { joinProviderUrl } from './adapters/url.js'
@@ -8,6 +9,7 @@ import { logTaskError, logTaskProgress, logTaskSuccess } from '../utils/task-log
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const WHISPER_MODEL = process.env.WHISPER_MODEL || 'whisper-1'
+const TRANSCRIBE_CACHE_DIR = path.join(STORAGE_ROOT, 'subtitles', 'transcribe', 'cache')
 
 export type SrtCue = {
   index: number
@@ -61,12 +63,44 @@ function cuesFromVerboseJson(payload: any): SrtCue[] {
     .filter((cue: SrtCue) => cue.text && cue.end > cue.start)
 }
 
-function saveTranscribeSrt(content: string): string {
-  const dir = path.join(STORAGE_ROOT, 'subtitles', 'transcribe')
-  fs.mkdirSync(dir, { recursive: true })
-  const filename = `transcribe-${Date.now()}.srt`
-  fs.writeFileSync(path.join(dir, filename), content, 'utf-8')
-  return `static/subtitles/transcribe/${filename}`
+function hashAudioFile(audioAbsPath: string): string {
+  return createHash('md5').update(fs.readFileSync(audioAbsPath)).digest('hex')
+}
+
+function getTranscribeCacheRelativePath(cacheKey: string): string {
+  return `static/subtitles/transcribe/cache/${cacheKey}.srt`
+}
+
+function getTranscribeCacheAbsPath(cacheKey: string): string {
+  fs.mkdirSync(TRANSCRIBE_CACHE_DIR, { recursive: true })
+  return path.join(TRANSCRIBE_CACHE_DIR, `${cacheKey}.srt`)
+}
+
+function loadCachedTranscribe(audioAbsPath: string): {
+  srt: string
+  srtPath: string
+  cues: SrtCue[]
+} | null {
+  const cacheKey = hashAudioFile(audioAbsPath)
+  const cacheAbs = getTranscribeCacheAbsPath(cacheKey)
+  if (!fs.existsSync(cacheAbs)) return null
+
+  const srt = fs.readFileSync(cacheAbs, 'utf-8')
+  const cues = parseSrtContent(srt)
+  if (!cues.length) return null
+
+  return {
+    srt,
+    srtPath: getTranscribeCacheRelativePath(cacheKey),
+    cues,
+  }
+}
+
+function saveTranscribeSrt(content: string, cacheKey: string): string {
+  fs.mkdirSync(TRANSCRIBE_CACHE_DIR, { recursive: true })
+  const cacheAbs = getTranscribeCacheAbsPath(cacheKey)
+  fs.writeFileSync(cacheAbs, content, 'utf-8')
+  return getTranscribeCacheRelativePath(cacheKey)
 }
 
 async function postWhisperRequest(
@@ -99,13 +133,29 @@ async function postWhisperRequest(
   return { body, format: responseFormat }
 }
 
-export async function transcribeAudioToSrt(audioAbsPath: string): Promise<{
+export async function transcribeAudioToSrt(
+  audioAbsPath: string,
+  options?: { force?: boolean },
+): Promise<{
   srt: string
   srtPath: string
   cues: SrtCue[]
+  cached: boolean
 }> {
   if (!fs.existsSync(audioAbsPath)) throw new Error(`音频文件不存在：${audioAbsPath}`)
 
+  if (!options?.force) {
+    const cached = loadCachedTranscribe(audioAbsPath)
+    if (cached) {
+      logTaskSuccess('AudioTranscribe', 'cache-hit', {
+        srtPath: cached.srtPath,
+        cueCount: cached.cues.length,
+      })
+      return { ...cached, cached: true }
+    }
+  }
+
+  const cacheKey = hashAudioFile(audioAbsPath)
   let srt = ''
   let cues: SrtCue[] = []
 
@@ -127,9 +177,9 @@ export async function transcribeAudioToSrt(audioAbsPath: string): Promise<{
 
   if (!cues.length) throw new Error('转写结果为空，请检查音频是否含清晰旁白人声')
 
-  const srtPath = saveTranscribeSrt(srt.endsWith('\n') ? srt : `${srt}\n`)
-  logTaskSuccess('AudioTranscribe', 'done', { cueCount: cues.length, srtPath })
-  return { srt, srtPath, cues }
+  const srtPath = saveTranscribeSrt(srt.endsWith('\n') ? srt : `${srt}\n`, cacheKey)
+  logTaskSuccess('AudioTranscribe', 'done', { cueCount: cues.length, srtPath, cached: false })
+  return { srt, srtPath, cues, cached: false }
 }
 
 export function formatSrtTimestamp(seconds: number) {

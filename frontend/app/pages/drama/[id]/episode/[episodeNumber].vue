@@ -1025,7 +1025,7 @@
           <!-- Sub: Dubbing -->
           <div v-else-if="prodTab === 'dubbing'" class="prod-content">
             <div v-if="isNarrationMode" class="narration-hint">
-              <strong>配音策略：</strong>先<strong>上传 MP3</strong>（可多段），确认无误后点<strong>按文案裁剪</strong>。系统会 Whisper 转写后与分镜旁白对齐；<strong>多段 MP3 按音频时长比例分配到各镜</strong>，单段则按字幕/文案时间轴匹配。
+              <strong>配音策略：</strong>先<strong>上传 MP3</strong>（可多段、顺序不限），确认无误后点<strong>按文案裁剪</strong>。系统会先 Whisper 转写，再<strong>按分镜旁白内容与转写文本模糊匹配</strong>（兼容谐音错字）后裁剪；相同音频再次裁剪将复用已生成的 SRT。
             </div>
             <div v-else class="narration-hint">
               <strong>配音策略：</strong>先上传 MP3，再点「按文案裁剪」分配到各镜台词；或逐镜上传 / TTS 生成。
@@ -1071,6 +1071,101 @@
                     />
                   </div>
                   <button class="btn btn-sm" type="button" title="移除" @click="removeUploadedEpisodeAudio(idx)">移除</button>
+                </div>
+              </div>
+            </div>
+            <div v-if="uploadedEpisodeAudio.length" class="narration-srt-panel">
+              <div class="narration-srt-head">
+                <span class="tag mono">Whisper 字幕 · {{ narrationSrtFiles.length ? `${narrationSrtFiles.length} 份` : '未生成' }}</span>
+                <span v-if="narrationSrtFiles.length" class="dim" style="font-size:11px">
+                  共 {{ narrationSrtCueCount }} 条 · 裁剪前可先核对转写内容
+                </span>
+                <div class="ml-auto flex gap-1">
+                  <button
+                    class="btn btn-sm"
+                    type="button"
+                    :disabled="narrationSrtPreviewing || narrationAudioSplitting"
+                    @click="previewNarrationSrt"
+                  >
+                    {{ narrationSrtPreviewing ? '转写中…' : (narrationSrtFiles.length ? '重新转写' : '预览转写字幕') }}
+                  </button>
+                  <button
+                    v-if="narrationSrtFiles.length"
+                    class="btn btn-sm"
+                    type="button"
+                    @click="clearNarrationSrtFiles"
+                  >
+                    清空字幕
+                  </button>
+                </div>
+              </div>
+              <div v-if="!narrationSrtFiles.length" class="narration-srt-empty dim">
+                上传 MP3 后点「预览转写字幕」查看 Whisper 生成的 SRT；裁剪完成后也会自动显示在此。
+              </div>
+              <div v-else class="narration-srt-list">
+                <div
+                  v-for="(file, fi) in narrationSrtFiles"
+                  :key="file.srt_path || file.srtPath || fi"
+                  class="narration-srt-file"
+                  :class="{ 'is-expanded': expandedSrtIndex === fi }"
+                >
+                  <button class="narration-srt-file-head" type="button" @click="toggleSrtExpand(fi)">
+                    <span class="narration-srt-file-title">
+                      #{{ String(fi + 1).padStart(2, '0') }} · {{ getSrtAudioName(file) }}
+                    </span>
+                    <span class="tag">{{ file.subtitle_count ?? file.subtitleCount ?? (file.cues?.length || 0) }} 条</span>
+                    <span v-if="file.cached" class="tag tag-success">缓存</span>
+                    <a
+                      class="btn btn-sm"
+                      :href="getSrtDownloadUrl(file.srt_path || file.srtPath)"
+                      download
+                      @click.stop
+                    >
+                      下载 SRT
+                    </a>
+                  </button>
+                  <div v-if="expandedSrtIndex === fi" class="narration-srt-body">
+                    <div class="narration-srt-view-tabs">
+                      <button
+                        class="btn btn-sm"
+                        type="button"
+                        :class="{ 'btn-primary': srtViewMode === 'table' }"
+                        @click="srtViewMode = 'table'"
+                      >
+                        列表
+                      </button>
+                      <button
+                        class="btn btn-sm"
+                        type="button"
+                        :class="{ 'btn-primary': srtViewMode === 'raw' }"
+                        @click="srtViewMode = 'raw'"
+                      >
+                        原始 SRT
+                      </button>
+                    </div>
+                    <div v-if="file.spoken_text || file.spokenText" class="narration-srt-spoken dim">
+                      全文：{{ file.spoken_text || file.spokenText }}
+                    </div>
+                    <table v-if="srtViewMode === 'table'" class="narration-srt-table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>时间</th>
+                          <th>文本</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="cue in file.cues || []" :key="`${cue.index}-${cue.start}`">
+                          <td class="mono">{{ cue.index }}</td>
+                          <td class="mono narration-srt-time">
+                            {{ cue.start_label || cue.startLabel }} → {{ cue.end_label || cue.endLabel }}
+                          </td>
+                          <td>{{ cue.text }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <pre v-else class="narration-srt-raw">{{ formatSrtRaw(file) }}</pre>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2040,6 +2135,19 @@
           <div class="export-list">
             <div class="export-list-head">导出选项</div>
             <div class="export-bgm-panel">
+              <label class="field-label" style="margin-bottom:4px">成片水印</label>
+              <input
+                v-model="exportWatermarkText"
+                class="input input-sm"
+                type="text"
+                placeholder="留空则不添加水印"
+                @change="saveWatermarkText"
+              />
+              <div class="dim" style="font-size:11px;line-height:1.5">
+                默认「顺拾人间」，居中靠右、左右缓慢浮动；修改后请重新「镜头合成」与「开幕视频」。
+              </div>
+            </div>
+            <div class="export-bgm-panel">
               <label class="export-bgm-toggle">
                 <input v-model="exportIncludeOpening" type="checkbox" />
                 <span>拼接时加入开幕视频</span>
@@ -2435,6 +2543,8 @@ const bgmCompletedCount = computed(() => bgmLibrary.value.filter(m => m.status =
 const bgmPendingCount = computed(() => bgmLibrary.value.filter(m => ['pending', 'processing'].includes(m.status)).length)
 const exportMixBgm = ref(true)
 const exportIncludeOpening = ref(true)
+const exportWatermarkText = ref('顺拾人间')
+let watermarkSaveTimer = null
 const exportBgmMusicId = ref(null)
 const exportBgmVolume = ref(22)
 const exportBgmApplying = ref(false)
@@ -2524,6 +2634,7 @@ function persistExportBgmPrefs() {
   if (typeof window === 'undefined' || !epId.value) return
   window.localStorage.setItem(`episode-${epId.value}-export-mix-bgm`, exportMixBgm.value ? '1' : '0')
   window.localStorage.setItem(`episode-${epId.value}-export-include-opening`, exportIncludeOpening.value ? '1' : '0')
+  window.localStorage.setItem(`episode-${epId.value}-export-watermark`, exportWatermarkText.value)
   window.localStorage.setItem(`episode-${epId.value}-export-bgm-id`, exportBgmMusicId.value ? String(exportBgmMusicId.value) : '')
   window.localStorage.setItem(`episode-${epId.value}-export-bgm-vol`, String(exportBgmVolume.value))
 }
@@ -2534,10 +2645,45 @@ function restoreExportBgmPrefs() {
   exportMixBgm.value = mix === null ? true : mix === '1'
   const opening = window.localStorage.getItem(`episode-${epId.value}-export-include-opening`)
   exportIncludeOpening.value = opening === null ? true : opening === '1'
+  const wm = window.localStorage.getItem(`episode-${epId.value}-export-watermark`)
+  if (wm != null) exportWatermarkText.value = wm
   const id = window.localStorage.getItem(`episode-${epId.value}-export-bgm-id`)
   exportBgmMusicId.value = id ? Number(id) : null
   const vol = window.localStorage.getItem(`episode-${epId.value}-export-bgm-vol`)
   if (vol) exportBgmVolume.value = Number(vol) || 22
+}
+
+function syncExportWatermarkFromEpisode(ep) {
+  if (!ep) return
+  const fromEp = ep.watermark_text ?? ep.watermarkText
+  if (fromEp != null && fromEp !== '') {
+    exportWatermarkText.value = fromEp
+    return
+  }
+  if (fromEp === '') {
+    exportWatermarkText.value = ''
+    return
+  }
+  exportWatermarkText.value = '顺拾人间'
+}
+
+async function saveWatermarkText() {
+  if (!epId.value) return
+  persistExportBgmPrefs()
+  try {
+    await episodeAPI.update(epId.value, { watermark_text: exportWatermarkText.value.trim() })
+    if (episode.value) {
+      episode.value.watermark_text = exportWatermarkText.value.trim()
+      episode.value.watermarkText = exportWatermarkText.value.trim()
+    }
+  } catch (e) {
+    toast.error(e.message || '水印设置保存失败')
+  }
+}
+
+function scheduleWatermarkSave() {
+  if (watermarkSaveTimer) clearTimeout(watermarkSaveTimer)
+  watermarkSaveTimer = setTimeout(() => { saveWatermarkText() }, 600)
 }
 
 function buildMergePayload() {
@@ -4455,6 +4601,7 @@ async function refresh() {
     const ep = drama.value.episodes?.find(e => (e.episode_number || e.episodeNumber) === episodeNumber)
     if (ep) {
       episode.value = ep
+      syncExportWatermarkFromEpisode(ep)
       openingSubtitleText.value = resolveOpeningSubtitleText(ep.opening_subtitle_text || ep.openingSubtitleText)
       syncEpisodeImageModel(ep)
       syncEpisodeTextModel(ep)
@@ -4872,7 +5019,15 @@ const audioUploadInputRef = ref(null)
 const audioUploadTarget = ref(null)
 const narrationAudioSplitting = ref(false)
 const narrationAudioUploading = ref(false)
+const narrationSrtPreviewing = ref(false)
 const uploadedEpisodeAudio = ref([])
+const narrationSrtFiles = ref([])
+const expandedSrtIndex = ref(-1)
+const srtViewMode = ref('table')
+
+const narrationSrtCueCount = computed(() =>
+  narrationSrtFiles.value.reduce((sum, file) => sum + (file.cues?.length || file.subtitle_count || file.subtitleCount || 0), 0),
+)
 
 function pendingAudioStorageKey() {
   return `episode-${epId.value}-pending-audio`
@@ -4896,6 +5051,7 @@ function saveUploadedEpisodeAudio() {
 function clearUploadedEpisodeAudio() {
   uploadedEpisodeAudio.value = []
   saveUploadedEpisodeAudio()
+  clearNarrationSrtFiles()
 }
 
 function removeUploadedEpisodeAudio(index) {
@@ -4908,7 +5064,92 @@ function getUploadedAudioUrl(path) {
   return normalized ? `/${normalized}` : ''
 }
 
-watch(epId, () => loadUploadedEpisodeAudio(), { immediate: true })
+function narrationSrtStorageKey() {
+  return `episode-${epId.value}-narration-srt`
+}
+
+function loadNarrationSrtFiles() {
+  if (typeof window === 'undefined') return
+  try {
+    const raw = window.localStorage.getItem(narrationSrtStorageKey())
+    narrationSrtFiles.value = raw ? JSON.parse(raw) : []
+    expandedSrtIndex.value = narrationSrtFiles.value.length ? 0 : -1
+  } catch {
+    narrationSrtFiles.value = []
+    expandedSrtIndex.value = -1
+  }
+}
+
+function saveNarrationSrtFiles() {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(narrationSrtStorageKey(), JSON.stringify(narrationSrtFiles.value))
+}
+
+function applyNarrationSrtFiles(files) {
+  narrationSrtFiles.value = Array.isArray(files) ? files : []
+  saveNarrationSrtFiles()
+  if (narrationSrtFiles.value.length && expandedSrtIndex.value < 0) {
+    expandedSrtIndex.value = 0
+  }
+}
+
+function clearNarrationSrtFiles() {
+  narrationSrtFiles.value = []
+  expandedSrtIndex.value = -1
+  saveNarrationSrtFiles()
+}
+
+function getSrtAudioName(file) {
+  const path = file.audio_path || file.audioPath || ''
+  const matched = uploadedEpisodeAudio.value.find(item => item.path === path)
+  if (matched?.name) return matched.name
+  return path.split('/').pop() || '音频'
+}
+
+function getSrtDownloadUrl(path) {
+  return getUploadedAudioUrl(path)
+}
+
+function formatSrtRaw(file) {
+  const cues = file.cues || []
+  return cues.map(cue => {
+    const idx = cue.index
+    const start = cue.start_label || cue.startLabel || ''
+    const end = cue.end_label || cue.endLabel || ''
+    return `${idx}\n${start} --> ${end}\n${cue.text}\n`
+  }).join('\n')
+}
+
+function toggleSrtExpand(index) {
+  expandedSrtIndex.value = expandedSrtIndex.value === index ? -1 : index
+}
+
+async function previewNarrationSrt() {
+  if (!uploadedEpisodeAudio.value.length) {
+    toast.warning('请先上传 MP3')
+    return
+  }
+  narrationSrtPreviewing.value = true
+  try {
+    toast.info('正在 Whisper 转写字幕…')
+    const paths = uploadedEpisodeAudio.value.map(item => item.path)
+    const res = await episodeAPI.transcribeNarrationAudio(epId.value, paths)
+    const files = res?.srt_files ?? res?.srtFiles ?? []
+    applyNarrationSrtFiles(files)
+    const cached = files.filter(f => f.cached).length
+    const cacheHint = cached > 0 ? `，其中 ${cached} 份来自缓存` : ''
+    toast.success(`已生成 ${files.length} 份字幕${cacheHint}`)
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationSrtPreviewing.value = false
+  }
+}
+
+watch(epId, () => {
+  loadUploadedEpisodeAudio()
+  loadNarrationSrtFiles()
+}, { immediate: true })
 
 function triggerEpisodeNarrationAudioUpload(replace = false) {
   if (!ttsEligibleCount.value) {
@@ -4929,24 +5170,30 @@ async function splitEpisodeNarrationAudio() {
   }
   narrationAudioSplitting.value = true
   try {
-    toast.info('正在转写字幕并按文案对齐裁剪…')
+    toast.info('正在按文案对齐裁剪…')
     const paths = uploadedEpisodeAudio.value.map(item => item.path)
     const res = await episodeAPI.splitNarrationAudio(epId.value, paths)
+    const srtFiles = res?.srt_files ?? res?.srtFiles
+    if (srtFiles?.length) applyNarrationSrtFiles(srtFiles)
     await refresh()
     const count = res?.assigned_count ?? res?.assignedCount ?? 0
     const alignMode = res?.align_mode ?? res?.alignMode
     const merged = res?.merged
     const alignScore = res?.align_score ?? res?.alignScore
+    const srtCachedCount = res?.srt_cached_count ?? res?.srtCachedCount ?? 0
     const alignHintMap = {
       srt: '（SRT 字幕对齐）',
       speech: '（句间静音对齐）',
       boundary: '（上传段边界对齐）',
+      content_match: '（按旁白内容匹配）',
+      one_to_one: '（按旁白内容匹配）',
       weighted: '（文案时长比例对齐）',
     }
     const scoreHint = typeof alignScore === 'number' ? `，匹配度 ${Math.round(alignScore * 100)}%` : ''
+    const cacheHint = srtCachedCount > 0 ? `，复用 ${srtCachedCount} 份已生成字幕` : ''
     const alignHint = alignHintMap[alignMode] || ''
     const mergeHint = merged ? '（多段已先合成）' : ''
-    toast.success(`已裁剪分配 ${count} 条配音${mergeHint}${alignHint}${scoreHint}`)
+    toast.success(`已裁剪分配 ${count} 条配音${mergeHint}${alignHint}${scoreHint}${cacheHint}`)
   } catch (e) {
     toast.error(e.message)
   } finally {
@@ -6258,6 +6505,10 @@ async function loadVoices() {
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
 watch([localTtsEnabled, localEdgeVoiceId], persistLocalTtsPrefs)
 watch([exportMixBgm, exportIncludeOpening, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
+watch(exportWatermarkText, () => {
+  persistExportBgmPrefs()
+  scheduleWatermarkSave()
+})
 watch(exportBgmOptions, (opts) => {
   if (!exportBgmMusicId.value && opts.length) exportBgmMusicId.value = opts[0].value
 })
@@ -7100,6 +7351,116 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
   width: 100%;
   height: 32px;
 }
+
+.narration-srt-panel {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(59, 130, 246, 0.18);
+  border-radius: 12px;
+  background: rgba(59, 130, 246, 0.04);
+}
+.narration-srt-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.narration-srt-empty {
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 2px;
+}
+.narration-srt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.narration-srt-file {
+  border-radius: 10px;
+  border: 1px solid rgba(27, 41, 64, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+.narration-srt-file.is-expanded {
+  border-color: rgba(59, 130, 246, 0.28);
+}
+.narration-srt-file-head {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+}
+.narration-srt-file-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.narration-srt-body {
+  padding: 0 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.narration-srt-view-tabs {
+  display: flex;
+  gap: 6px;
+}
+.narration-srt-spoken {
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.narration-srt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.narration-srt-table th,
+.narration-srt-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(27, 41, 64, 0.08);
+  vertical-align: top;
+  text-align: left;
+}
+.narration-srt-table th {
+  font-size: 11px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+.narration-srt-table td.mono {
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.narration-srt-time {
+  font-size: 11px;
+}
+.narration-srt-raw {
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.22);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-mono, monospace);
+}
+
 .tag.warn { color: #b45309; border-color: rgba(180, 83, 9, 0.25); background: rgba(251, 191, 36, 0.12); }
 
 .narration-breakdown-panel {

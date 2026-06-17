@@ -71,6 +71,10 @@ export const episodeAPI = {
     api.post(`/episodes/${id}/split-narration-audio`, {
       audio_paths: Array.isArray(audioPaths) ? audioPaths : [audioPaths],
     }),
+  transcribeNarrationAudio: (id: number, audioPaths: string | string[]) =>
+    api.post(`/episodes/${id}/transcribe-narration-audio`, {
+      audio_paths: Array.isArray(audioPaths) ? audioPaths : [audioPaths],
+    }),
 }
 
 export const storyboardAPI = {

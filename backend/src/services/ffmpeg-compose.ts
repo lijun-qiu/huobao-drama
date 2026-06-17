@@ -17,6 +17,7 @@ import { resolveEdgeVoice } from './edge-tts-local.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { isNarrationStoryboard, parseNarrationImageMeta, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
+import { appendWatermarkFilter, resolveWatermarkText } from './ffmpeg-watermark.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -180,8 +181,8 @@ function buildImageMotionFilter() {
   return `scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fps=${fps},format=yuv420p`
 }
 
-/** 配图页推镜：偶数页每镜 1→1.03 放大，奇数页每镜 1.03→1 缩小 */
-const SAME_IMAGE_ZOOM_STEP = 0.03
+/** 配图推镜：同图每镜 +0.02 连续放大；换图后奇数页从上一图峰值回拉至 1，再下一张从 1 重开 */
+const SAME_IMAGE_ZOOM_STEP = 0.02
 const COMPOSE_FPS = 25
 
 type VisualStoryboard = {
@@ -193,46 +194,77 @@ type VisualStoryboard = {
   firstFrameImage?: string | null
 }
 
+type VisualGroupInfo = {
+  /** 配图页序号（0 起，换图 +1） */
+  pageIndex: number
+  /** 当前镜头在同配图组内的序号（0 起） */
+  shotIndexInGroup: number
+  /** 上一配图组的镜头数（奇数页回拉时计算起点） */
+  prevGroupShotCount: number
+}
+
 function getStoryboardVisualKey(sb: VisualStoryboard, storyboards: VisualStoryboard[]) {
   const visual = resolveStoryboardVisualSource(storyboards, sb.id)
   if (!visual) return `none:${sb.id}`
   return `${visual.type}:${visual.path}`
 }
 
-/** 当前镜头在分集内的配图页序号（0 起，换图 +1） */
-function getVisualPageIndex(storyboardId: number, episodeStoryboards: VisualStoryboard[]) {
-  const ordered = sortStoryboardsByOrder(episodeStoryboards)
-  const idx = ordered.findIndex(sb => sb.id === storyboardId)
-  if (idx < 0) return 0
+function buildVisualGroups(ordered: VisualStoryboard[]) {
+  if (ordered.length === 0) return [] as { start: number; end: number }[]
 
-  let pageIndex = 0
+  const groups: { start: number; end: number }[] = []
+  let groupStart = 0
   let prevKey = getStoryboardVisualKey(ordered[0], ordered)
-  for (let i = 1; i <= idx; i++) {
+  for (let i = 1; i < ordered.length; i++) {
     const currKey = getStoryboardVisualKey(ordered[i], ordered)
     if (currKey !== prevKey) {
-      pageIndex++
+      groups.push({ start: groupStart, end: i - 1 })
+      groupStart = i
       prevKey = currKey
     }
   }
-  return pageIndex
+  groups.push({ start: groupStart, end: ordered.length - 1 })
+  return groups
+}
+
+/** 当前镜头在分集内的配图组信息 */
+function getVisualGroupInfo(storyboardId: number, episodeStoryboards: VisualStoryboard[]): VisualGroupInfo {
+  const ordered = sortStoryboardsByOrder(episodeStoryboards)
+  const idx = ordered.findIndex(sb => sb.id === storyboardId)
+  if (idx < 0) return { pageIndex: 0, shotIndexInGroup: 0, prevGroupShotCount: 0 }
+
+  const groups = buildVisualGroups(ordered)
+  const groupIndex = groups.findIndex(group => idx >= group.start && idx <= group.end)
+  const group = groups[groupIndex >= 0 ? groupIndex : 0]
+  const prevGroupShotCount = groupIndex > 0
+    ? groups[groupIndex - 1].end - groups[groupIndex - 1].start + 1
+    : 0
+
+  return {
+    pageIndex: groupIndex >= 0 ? groupIndex : 0,
+    shotIndexInGroup: idx - group.start,
+    prevGroupShotCount,
+  }
 }
 
 function durationToFrameCount(durationSec: number, fps = COMPOSE_FPS) {
   return Math.max(2, Math.round(durationSec * fps))
 }
 
-function buildShotZoomRange(pageIndex: number) {
-  const peakZ = 1 + SAME_IMAGE_ZOOM_STEP
+function buildShotZoomRange(pageIndex: number, shotIndexInGroup: number, prevGroupShotCount: number) {
   if (pageIndex % 2 === 0) {
-    return { startZ: 1, endZ: peakZ }
+    const startZ = 1 + shotIndexInGroup * SAME_IMAGE_ZOOM_STEP
+    return { startZ, endZ: startZ + SAME_IMAGE_ZOOM_STEP }
   }
-  return { startZ: peakZ, endZ: 1 }
+  const peakZ = 1 + prevGroupShotCount * SAME_IMAGE_ZOOM_STEP
+  const startZ = peakZ - shotIndexInGroup * SAME_IMAGE_ZOOM_STEP
+  return { startZ, endZ: startZ - SAME_IMAGE_ZOOM_STEP }
 }
 
-/** 单镜配图：按配图页决定放大或缩小（中心缩放） */
-function buildShotZoomMotionFilter(pageIndex: number, durationSec: number, fps = COMPOSE_FPS) {
+/** 单镜配图：同图逐镜递进缩放（中心缩放） */
+function buildShotZoomMotionFilter(info: VisualGroupInfo, durationSec: number, fps = COMPOSE_FPS) {
   const frames = durationToFrameCount(durationSec, fps)
-  const { startZ, endZ } = buildShotZoomRange(pageIndex)
+  const { startZ, endZ } = buildShotZoomRange(info.pageIndex, info.shotIndexInGroup, info.prevGroupShotCount)
   const delta = endZ - startZ
   return [
     'scale=8000:-1',
@@ -241,21 +273,27 @@ function buildShotZoomMotionFilter(pageIndex: number, durationSec: number, fps =
   ].join(',')
 }
 
-/** 同配图多句：每句独立推/拉镜，方向由配图页序号决定 */
-function buildGroupProgressiveZoomFilter(shotDurationsSec: number[], pageIndex: number, fps = COMPOSE_FPS) {
+/** 同配图多句：每句独立推/拉镜，缩放值在同图内连续递进 */
+function buildGroupProgressiveZoomFilter(
+  shotDurationsSec: number[],
+  pageIndex: number,
+  prevGroupShotCount: number,
+  fps = COMPOSE_FPS,
+) {
   const frameCounts = shotDurationsSec.map(d => durationToFrameCount(d, fps))
   const totalFrames = frameCounts.reduce((sum, count) => sum + count, 0)
-  const { startZ, endZ } = buildShotZoomRange(pageIndex)
-  const delta = endZ - startZ
 
-  const zForShot = (startFrame: number, frames: number) =>
-    `${startZ}+${delta}*(on-${startFrame})/${frames - 1}`
+  const zForShot = (shotIndex: number, startFrame: number, frames: number) => {
+    const { startZ, endZ } = buildShotZoomRange(pageIndex, shotIndex, prevGroupShotCount)
+    const delta = endZ - startZ
+    return `${startZ}+${delta}*(on-${startFrame})/${frames - 1}`
+  }
 
   let startFrame = 0
-  let zExpr = zForShot(0, frameCounts[0])
+  let zExpr = zForShot(0, 0, frameCounts[0])
   for (let i = 1; i < frameCounts.length; i++) {
     startFrame += frameCounts[i - 1]
-    zExpr = `if(gte(on,${startFrame}),${zForShot(startFrame, frameCounts[i])},${zExpr})`
+    zExpr = `if(gte(on,${startFrame}),${zForShot(i, startFrame, frameCounts[i])},${zExpr})`
   }
 
   return [
@@ -396,6 +434,7 @@ export async function renderSameImageGroupSegment(
   imageAbsPath: string,
   outputPath: string,
   pageIndex = 0,
+  prevGroupShotCount = 0,
 ): Promise<number> {
   const tempDir = path.join(STORAGE_ROOT, 'temp')
   fs.mkdirSync(tempDir, { recursive: true })
@@ -450,11 +489,18 @@ export async function renderSameImageGroupSegment(
   const mergedAudioPath = path.join(tempDir, `${uuid()}.m4a`)
   await concatAudioFiles(audioPaths, mergedAudioPath)
 
+  const [firstSb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, orderedStoryboards[0].id)).all()
+  const [ep] = firstSb
+    ? db.select().from(schema.episodes).where(eq(schema.episodes.id, firstSb.episodeId)).all()
+    : [undefined]
+  const watermarkText = resolveWatermarkText(ep?.watermarkText)
+
   await new Promise<void>((resolve, reject) => {
-    const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex)]
+    const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount)]
     if (supportsSubtitleFilter()) {
       filters.push(buildSubtitleFilter(subtitlePath, titleMode))
     }
+    appendWatermarkFilter(filters, watermarkText)
 
     let cmd = ffmpeg()
       .input(imageAbsPath)
@@ -515,6 +561,9 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
     episodeId: sb.episodeId,
   })
 
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  const watermarkText = resolveWatermarkText(ep?.watermarkText)
+
   let audioPath: string | null = null
   let bgmPath: string | null = null
   let subtitlePath: string | null = null
@@ -546,7 +595,6 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
       if (!audioPath) {
         let voiceId = 'alloy'
-        const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
         if (ep) {
           const chars = db.select().from(schema.characters)
             .where(eq(schema.characters.dramaId, ep.dramaId)).all()
@@ -645,6 +693,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
           subtitlePath,
         })
       }
+      appendWatermarkFilter(filters, watermarkText)
 
       let cmd = ffmpeg()
       if (useBlackFrame) {
@@ -653,12 +702,12 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         logTaskProgress('ComposeTask', 'black-frame-compose', { storyboardId, duration: clipDuration })
       } else if (visual!.type === 'image') {
         const useTitleDynamic = !!isTitleShot
-        const visualPageIndex = useTitleDynamic ? undefined : getVisualPageIndex(storyboardId, episodeStoryboards)
+        const visualGroupInfo = useTitleDynamic ? undefined : getVisualGroupInfo(storyboardId, episodeStoryboards)
         if (useTitleDynamic) {
           const baseVideo = await getSharedImageBaseVideo(visual!.path, { dynamic: true })
           cmd = cmd.input(baseVideo)
         } else {
-          filters.unshift(buildShotZoomMotionFilter(visualPageIndex!, clipDuration))
+          filters.unshift(buildShotZoomMotionFilter(visualGroupInfo!, clipDuration))
           cmd = cmd.input(visual!.path).inputOptions(['-loop', '1'])
         }
         logTaskProgress('ComposeTask', 'image-slideshow-compose', {
@@ -667,7 +716,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
           inherited: visual!.inherited || false,
           sharedBase: useTitleDynamic,
           titleDynamic: useTitleDynamic,
-          visualPageIndex,
+          visualGroupInfo,
         })
       } else {
         cmd = cmd.input(visual!.path)

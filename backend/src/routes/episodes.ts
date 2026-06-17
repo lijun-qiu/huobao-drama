@@ -10,7 +10,7 @@ import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel } from '../constants/text-models.js'
 import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration } from '../services/ffmpeg-opening.js'
-import { splitNarrationAudioForEpisode } from '../services/narration-audio-split.js'
+import { splitNarrationAudioForEpisode, transcribeNarrationAudioFiles } from '../services/narration-audio-split.js'
 
 const app = new Hono()
 
@@ -61,7 +61,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model', 'watermark_text']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -77,6 +77,7 @@ app.put('/:id', async (c) => {
   if ('status' in updates) drizzleUpdates.status = updates.status
   if ('image_model' in updates) drizzleUpdates.imageModel = updates.image_model
   if ('text_model' in updates) drizzleUpdates.textModel = updates.text_model
+  if ('watermark_text' in updates) drizzleUpdates.watermarkText = updates.watermark_text
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
   return success(c)
@@ -244,6 +245,26 @@ app.post('/:id/split-narration-audio', async (c) => {
 
   try {
     const result = await splitNarrationAudioForEpisode(episodeId, audioPaths)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/transcribe-narration-audio — 仅转写 SRT，不裁剪分配
+app.post('/:id/transcribe-narration-audio', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const body = await c.req.json().catch(() => ({}))
+  const audioPaths = Array.isArray(body.audio_paths)
+    ? body.audio_paths.map((p: unknown) => String(p || '').trim()).filter(Boolean)
+    : [String(body.audio_path || body.audioPath || '').trim()].filter(Boolean)
+  if (!audioPaths.length) return badRequest(c, '请提供 audio_path 或 audio_paths')
+
+  try {
+    const result = await transcribeNarrationAudioFiles(audioPaths)
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)

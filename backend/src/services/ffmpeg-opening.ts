@@ -12,6 +12,7 @@ import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { sortStoryboardsByOrder } from './narration-image.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { appendWatermarkFilter, resolveWatermarkText } from './ffmpeg-watermark.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -380,6 +381,7 @@ async function muxOpeningVideo(
   audioPath: string,
   subtitlePath: string | null,
   outputPath: string,
+  watermarkText?: string | null,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let command = ffmpeg()
@@ -391,6 +393,7 @@ async function muxOpeningVideo(
       const escaped = subtitlePath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'")
       filters.push(`ass='${escaped}'`)
     }
+    appendWatermarkFilter(filters, watermarkText)
     if (filters.length) command = command.videoFilter(filters)
 
     command
@@ -413,15 +416,27 @@ async function muxOpeningVideo(
   })
 }
 
-async function muxVideoWithAudio(videoPath: string, audioPath: string, outputPath: string): Promise<void> {
+async function muxVideoWithAudio(
+  videoPath: string,
+  audioPath: string,
+  outputPath: string,
+  watermarkText?: string | null,
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    ffmpeg()
+    const filters: string[] = []
+    appendWatermarkFilter(filters, watermarkText)
+    let command = ffmpeg()
       .input(videoPath)
       .input(audioPath)
+    if (filters.length) command = command.videoFilter(filters)
+    const videoCodec = filters.length
+      ? ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p']
+      : ['-c:v', 'copy']
+    command
       .outputOptions([
         '-map', '0:v:0',
         '-map', '1:a:0',
-        '-c:v', 'copy',
+        ...videoCodec,
         '-c:a', 'aac', '-b:a', '128k',
         '-shortest',
         '-movflags', '+faststart',
@@ -534,6 +549,8 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
         .run()
     }
 
+    const watermarkText = resolveWatermarkText(ep.watermarkText)
+
     let totalSec = OPENING_TOTAL_SEC
     let narrationAbs: string | null = null
     if (uploadedAudioRel) {
@@ -587,9 +604,9 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
         tempFiles.push(subtitlePath)
         fs.writeFileSync(subtitlePath, buildOpeningAssContent(subtitleText, totalSec), 'utf-8')
       }
-      await muxOpeningVideo(mergedVideoPath, mixedAudioPath, subtitlePath, outputAbs)
+      await muxOpeningVideo(mergedVideoPath, mixedAudioPath, subtitlePath, outputAbs, watermarkText)
     } else {
-      await muxVideoWithAudio(mergedVideoPath, flipTrackPath, outputAbs)
+      await muxVideoWithAudio(mergedVideoPath, flipTrackPath, outputAbs, watermarkText)
     }
 
     const relativePath = `static/opening/${outputFilename}`
