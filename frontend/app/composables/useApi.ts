@@ -54,10 +54,16 @@ export const episodeAPI = {
     api.post(`/episodes/${id}/narration-storyboard-breakdown`, options || {}),
   narrationImageBreakdown: (id: number, options?: { style?: string; image_detect_mode?: 'paragraph' | 'conservative' | 'balanced' }) =>
     api.post(`/episodes/${id}/narration-image-breakdown`, options || {}),
+  narrationImageBreakdownStatus: (id: number) =>
+    api.get(`/episodes/${id}/narration-image-breakdown-status`),
+  importNarrationStoryboardDesc: (id: number, text: string) =>
+    api.post(`/episodes/${id}/import-narration-storyboard-desc`, { text }),
+  importNarrationImageDesc: (id: number, text: string) =>
+    api.post(`/episodes/${id}/import-narration-image-desc`, { text }),
   /** @deprecated 等同 narrationStoryboardBreakdown */
   narrationBreakdown: (id: number, options?: { style?: string; script?: string; image_detect_mode?: 'paragraph' | 'conservative' | 'balanced' }) =>
     api.post(`/episodes/${id}/narration-storyboard-breakdown`, { script: options?.script }),
-  extractNarrationCharacters: (id: number, options?: { script?: string; style?: string; text_model?: string }) =>
+  extractNarrationCharacters: (id: number, options?: { script?: string; style?: string; text_model?: string; text_thinking?: boolean }) =>
     api.post(`/episodes/${id}/extract-narration-characters`, options || {}),
   linkNarrationCharacters: (id: number) => api.post(`/episodes/${id}/link-narration-characters`),
   generateOpeningVideo: (id: number) => api.post(`/episodes/${id}/generate-opening-video`, {}),
@@ -126,7 +132,7 @@ export const characterAPI = {
       use_reference: options?.useReference !== false,
     }),
   recognizePortrait: (id: number, episodeId: number) => api.post(`/characters/${id}/recognize-portrait`, { episode_id: episodeId }),
-  generateAppearance: (id: number, data: { episode_id?: number; script?: string; content?: string }) =>
+  generateAppearance: (id: number, data: { episode_id?: number; script?: string; content?: string; text_model?: string; text_thinking?: boolean }) =>
     api.post(`/characters/${id}/generate-appearance`, data),
   batchImages: (ids: number[], episodeId: number, options?: { useReference?: boolean }) =>
     api.post('/characters/batch-generate-images', {

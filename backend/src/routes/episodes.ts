@@ -5,12 +5,14 @@ import { success, notFound, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
 import { breakdownNarrationStoryboards } from '../services/narration-breakdown.js'
 import { breakdownNarrationImages } from '../services/narration-image-breakdown.js'
+import { getNarrationImageBreakdownProgress } from '../services/narration-image-breakdown-progress.js'
 import { sortStoryboardsByOrder } from '../services/narration-image.js'
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
-import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel } from '../constants/text-models.js'
+import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
 import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration } from '../services/ffmpeg-opening.js'
 import { splitNarrationAudioForEpisode, transcribeNarrationAudioFiles } from '../services/narration-audio-split.js'
+import { importNarrationImageDesc, importNarrationStoryboardDesc } from '../services/storyboard-desc-import.js'
 
 const app = new Hono()
 
@@ -36,6 +38,7 @@ app.post('/', async (c) => {
     imageConfigId: body.image_config_id,
     imageModel: body.image_model || DEFAULT_IMAGE_MODEL,
     textModel: body.text_model || DEFAULT_TEXT_MODEL,
+    textThinking: resolveEpisodeTextThinking(undefined, body.text_thinking),
     videoConfigId: body.video_config_id,
     audioConfigId: body.audio_config_id,
     createdAt: ts,
@@ -61,7 +64,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model', 'watermark_text']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model', 'text_thinking', 'watermark_text']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -77,6 +80,9 @@ app.put('/:id', async (c) => {
   if ('status' in updates) drizzleUpdates.status = updates.status
   if ('image_model' in updates) drizzleUpdates.imageModel = updates.image_model
   if ('text_model' in updates) drizzleUpdates.textModel = updates.text_model
+  if ('text_thinking' in updates) {
+    drizzleUpdates.textThinking = resolveEpisodeTextThinking(undefined, updates.text_thinking)
+  }
   if ('watermark_text' in updates) drizzleUpdates.watermarkText = updates.watermark_text
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
@@ -203,6 +209,7 @@ app.post('/:id/extract-narration-characters', async (c) => {
       script,
       style,
       resolveEpisodeTextModel(ep, body.text_model),
+      resolveEpisodeTextThinking(ep, body.text_thinking),
     )
     return success(c, {
       created: result.created,
@@ -285,6 +292,60 @@ app.post('/:id/narration-storyboard-breakdown', async (c) => {
   } catch (err: any) {
     return badRequest(c, err.message)
   }
+})
+
+// POST /episodes/:id/import-narration-storyboard-desc — 上传旁白分镜描述
+app.post('/:id/import-narration-storyboard-desc', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const body = await c.req.json().catch(() => ({}))
+  const text = String(body.text || body.content || '').trim()
+  if (!text) return badRequest(c, '请提供分镜描述文本')
+
+  try {
+    const result = await importNarrationStoryboardDesc(episodeId, text)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/import-narration-image-desc — 上传配图分镜描述
+app.post('/:id/import-narration-image-desc', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const body = await c.req.json().catch(() => ({}))
+  const text = String(body.text || body.content || '').trim()
+  if (!text) return badRequest(c, '请提供配图描述文本')
+
+  try {
+    const result = await importNarrationImageDesc(episodeId, text)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// GET /episodes/:id/narration-image-breakdown-status — 配图分镜进度（轮询）
+app.get('/:id/narration-image-breakdown-status', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const progress = getNarrationImageBreakdownProgress(episodeId)
+  if (!progress) {
+    return success(c, {
+      status: 'idle',
+      phase: null,
+      message: '',
+      percent: 0,
+    })
+  }
+  return success(c, progress)
 })
 
 // POST /episodes/:id/narration-image-breakdown — 配图分镜（场景换图 + 配图文案）

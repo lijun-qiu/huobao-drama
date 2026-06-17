@@ -1,16 +1,46 @@
-import { getTextConfig, getTextProviderBaseUrl } from './ai.js'
-import { joinProviderUrl } from './adapters/url.js'
+import { getTextConfig } from './ai.js'
+import { callTextChat } from './text-chat.js'
 import {
-  artStylePrompt,
-  finalizeNarrationImagePrompt,
+  buildNarrationImageDetectLLMSystem,
+  buildNarrationParagraphImagePromptLLMSystem,
+  buildNarrationSceneSegmentsImagePromptLLMSystem,
+  buildNarrationTitleImagePromptLLMSystem,
+  resolveLLMImagePrompt,
   isNarrationDateOnlySentence,
   isNarrationMinimalStyle,
-  NARRATION_IMAGE_STYLE_CORE,
-  NARRATION_PLOT_CONTINUITY_LLM_RULE,
-  NARRATION_TITLE_IMAGE_LLM_RULE,
-  sanitizeSceneImagePrompt,
 } from '../constants/art-styles.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
+import {
+  calcPromptBatchPercent,
+  type NarrationImageBreakdownProgressCallback,
+} from './narration-image-breakdown-progress.js'
+
+/** 配图段落 prompt：每批段落数（关闭思考模式，单批不宜过大以免 JSON 截断） */
+const PARAGRAPH_PROMPT_LLM_BATCH_SIZE = 10
+
+/** 配图段落 prompt：单批 LLM 超时（毫秒） */
+const PARAGRAPH_PROMPT_LLM_BATCH_TIMEOUT_MS = 300_000
+
+/** 单批失败重试次数 */
+const PARAGRAPH_PROMPT_LLM_BATCH_RETRIES = 2
+
+/** 批次之间的间隔（毫秒），减轻上游限流 */
+const PARAGRAPH_PROMPT_LLM_BATCH_GAP_MS = 2_000
+
+/** 换镜检测 LLM 超时（毫秒） */
+const IMAGE_DETECT_LLM_TIMEOUT_MS = 240_000
+
+/** 片头标题图 prompt LLM 超时（毫秒） */
+const TITLE_IMAGE_PROMPT_LLM_TIMEOUT_MS = 180_000
+
+function chunkParagraphPromptBatch<T>(items: T[], size: number): T[][] {
+  if (!items.length) return []
+  const chunks: T[][] = []
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size))
+  }
+  return chunks
+}
 
 export type NarrationSentenceItem = {
   sentence: string
@@ -131,59 +161,100 @@ export function suppressDateOnlyImageAnchors(
   return result
 }
 
+/** 正文分镜配图占比（固定 35%） */
+export const NARRATION_IMAGE_TARGET_RATIO = 0.35
+
 function finalizeImageNeeds(items: NarrationSentenceItem[], needs: boolean[]): boolean[] {
   return suppressDateOnlyImageAnchors(items, needs)
 }
 
-/** 均衡配图：换段/地点切换/叙事节拍开新图，同场景最多连续 2 句沿用，约每 1–2 句一图 */
-export function detectImageNeedsBalanced(items: NarrationSentenceItem[]): boolean[] {
-  const raw: boolean[] = []
-  let lastImageIdx = 0
-  for (let index = 0; index < items.length; index++) {
-    if (index === 0) {
-      raw.push(true)
-      continue
-    }
-    const prev = items[index - 1]
-    const sentence = items[index].sentence
-    if (isNarrationDateOnlySentence(sentence)) {
-      raw.push(false)
-      continue
-    }
-    let need = false
-    if (items[index].paragraphIndex !== prev.paragraphIndex) need = true
-    else if (STRONG_SCENE_SHIFT_RE.test(sentence)) need = true
-    else if (SCENE_SHIFT_RE.test(sentence)) need = true
-    else if (SCENE_OPENING_RE.test(sentence)) need = true
-    else if (BEAT_SHIFT_RE.test(sentence)) need = true
-    else {
-      const segText = items.slice(lastImageIdx, index).map(i => i.sentence).join('')
-      const segTags = getImageLocationTags(segText)
-      const curTags = getImageLocationTags(sentence)
-      if (curTags.some(tag => !segTags.includes(tag))) need = true
-    }
-    raw.push(need)
-    if (need) lastImageIdx = index
-  }
-  const merged = consolidateShortSceneSegments(items, raw, 2)
-  return finalizeImageNeeds(items, ensureMaxNarrationGap(items, merged, 3))
+function resolveImagePickCount(eligibleCount: number): number {
+  if (eligibleCount <= 0) return 0
+  return Math.max(1, Math.round(eligibleCount * NARRATION_IMAGE_TARGET_RATIO))
 }
 
-/** 省钱模式：段落换景 + 场景词 + 长段自动补图，约每 3–4 句一图 */
+function scoreStoryboardImagePriority(
+  items: NarrationSentenceItem[],
+  index: number,
+  llmWantsImage = false,
+): number {
+  const item = items[index]
+  const sentence = item.sentence
+  if (isNarrationDateOnlySentence(sentence)) return -1000
+
+  let score = 0
+  if (llmWantsImage) score += 100
+  if (index === 0) score += 40
+
+  if (index > 0 && items[index].paragraphIndex !== items[index - 1].paragraphIndex) score += 35
+  if (STRONG_SCENE_SHIFT_RE.test(sentence)) score += 32
+  if (SCENE_SHIFT_RE.test(sentence)) score += 24
+  if (BEAT_SHIFT_RE.test(sentence)) score += 18
+  if (SCENE_OPENING_RE.test(sentence)) score += 12
+  if (sentenceHasNewLocationTag(items, index)) score += 28
+
+  if (/批|卖|摊|店|万元|辞|创业|赚钱|租|开|推.*车|婚礼|串门|电视|网购|杂货|风光|落魄/.test(sentence)) score += 8
+  if (/年轻人|顾客|货物|商品|赶时髦/.test(sentence)) score += 6
+
+  return score
+}
+
+function sentenceHasNewLocationTag(items: NarrationSentenceItem[], index: number): boolean {
+  if (index <= 0) return false
+  const curTags = getImageLocationTags(items[index].sentence)
+  if (!curTags.length) return false
+  const priorText = items.slice(0, index).map(item => item.sentence).join('')
+  const priorTags = getImageLocationTags(priorText)
+  return curTags.some(tag => !priorTags.includes(tag))
+}
+
+/** 按分镜总数 35% 合理分配配图锚点（结合 LLM 优先级与时间线分段） */
+export function allocateImageNeedsByRatio(
+  items: NarrationSentenceItem[],
+  llmFlags?: unknown[],
+  _mode: ImageDetectMode = 'paragraph',
+): boolean[] {
+  if (!items.length) return []
+
+  const eligibleIndices = items
+    .map((item, index) => index)
+    .filter(index => !isNarrationDateOnlySentence(items[index].sentence))
+
+  const eligibleCount = eligibleIndices.length
+  if (!eligibleCount) return items.map(() => false)
+
+  const targetPick = resolveImagePickCount(eligibleCount)
+
+  const needs = items.map(() => false)
+  const segmentCount = targetPick
+  for (let segment = 0; segment < segmentCount; segment++) {
+    const start = Math.floor(segment * eligibleCount / segmentCount)
+    const end = Math.floor((segment + 1) * eligibleCount / segmentCount)
+    let bestIndex = -1
+    let bestScore = -Infinity
+    for (let pos = start; pos < end; pos++) {
+      const index = eligibleIndices[pos]
+      const llmWants = llmFlags ? !!llmFlags[index] : false
+      const score = scoreStoryboardImagePriority(items, index, llmWants)
+      if (score > bestScore) {
+        bestScore = score
+        bestIndex = index
+      }
+    }
+    if (bestIndex >= 0) needs[bestIndex] = true
+  }
+
+  return finalizeImageNeeds(items, needs)
+}
+
+/** 规则兜底：按 35% 占比分配 */
+export function detectImageNeedsBalanced(items: NarrationSentenceItem[]): boolean[] {
+  return allocateImageNeedsByRatio(items, undefined, 'balanced')
+}
+
+/** 省钱模式兜底：同样按 35% 配图 */
 export function detectImageNeedsConservative(items: NarrationSentenceItem[]): boolean[] {
-  const raw = items.map((item, index) => {
-    if (isNarrationDateOnlySentence(item.sentence)) return false
-    if (index === 0) return true
-    const prev = items[index - 1]
-    const sentence = item.sentence
-    if (item.paragraphIndex !== prev.paragraphIndex) return true
-    if (STRONG_SCENE_SHIFT_RE.test(sentence)) return true
-    if (SCENE_SHIFT_RE.test(sentence)) return true
-    if (BEAT_SHIFT_RE.test(sentence)) return true
-    return false
-  })
-  const merged = consolidateShortSceneSegments(items, raw, 2)
-  return finalizeImageNeeds(items, ensureMaxNarrationGap(items, merged, 4))
+  return allocateImageNeedsByRatio(items, undefined, 'conservative')
 }
 
 /** 同一场景连续超过 maxGap 句仍无新图 → 补一张，避免画面长时间不切换 */
@@ -272,8 +343,15 @@ export function detectImageNeedsHeuristic(items: NarrationSentenceItem[]): boole
 }
 
 function extractJsonObject(text: string) {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
-  const candidate = (fenced?.[1] || text).trim()
+  const raw = String(text || '').trim()
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    // fall through
+  }
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const candidate = (fenced?.[1] || raw).trim()
   const start = candidate.indexOf('{')
   const end = candidate.lastIndexOf('}')
   if (start < 0 || end <= start) return null
@@ -284,32 +362,72 @@ function extractJsonObject(text: string) {
   }
 }
 
-async function callTextChat(system: string, user: string, modelOverride?: string | null): Promise<string> {
-  const config = getTextConfig(modelOverride)
-  const url = joinProviderUrl(getTextProviderBaseUrl(config), '/chat/completions', '')
+function normalizeParagraphPromptRow(row: unknown): { start_index: number; image_prompt: string } | null {
+  if (!row || typeof row !== 'object') return null
+  const r = row as Record<string, unknown>
+  const startIndex = Number(r.start_index ?? r.startIndex)
+  const prompt = String(r.image_prompt ?? r.imagePrompt ?? r.prompt ?? '').trim()
+  if (!Number.isFinite(startIndex) || !prompt) return null
+  return { start_index: startIndex, image_prompt: prompt }
+}
 
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-      temperature: 0.2,
-    }),
-  })
+function parseParagraphPromptRows(
+  text: string,
+  batch: ParagraphPromptInput[],
+): Array<{ start_index: number; image_prompt: string }> | null {
+  const raw = String(text || '').trim()
+  if (!raw) return null
 
-  if (!resp.ok) {
-    throw new Error(`Text API error ${resp.status}: ${await resp.text()}`)
+  const expectedStarts = batch.map(p => p.startIndex)
+  const collect = (rows: unknown[]): Array<{ start_index: number; image_prompt: string }> | null => {
+    const normalized = rows.map(normalizeParagraphPromptRow).filter(Boolean) as Array<{
+      start_index: number
+      image_prompt: string
+    }>
+    if (normalized.length === batch.length) return normalized
+    const byStart = normalized.filter(r => expectedStarts.includes(r.start_index))
+    if (byStart.length === batch.length) return byStart
+    return null
   }
 
-  const json = await resp.json() as any
-  return json.choices?.[0]?.message?.content || ''
+  const parsed = extractJsonObject(raw)
+  const fromObject = Array.isArray(parsed?.paragraph_prompts) ? parsed.paragraph_prompts : null
+  if (fromObject) {
+    const rows = collect(fromObject)
+    if (rows) return rows
+  }
+
+  const promptsKey = raw.match(/"paragraph_prompts"\s*:\s*(\[[\s\S]*\])/)
+  if (promptsKey?.[1]) {
+    try {
+      const arr = JSON.parse(promptsKey[1])
+      if (Array.isArray(arr)) {
+        const rows = collect(arr)
+        if (rows) return rows
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const arrayMatch = raw.match(/\[[\s\S]*\]/)
+  if (arrayMatch) {
+    try {
+      const direct = JSON.parse(arrayMatch[0])
+      if (Array.isArray(direct)) {
+        const rows = collect(direct)
+        if (rows) return rows
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 /** 按 needs_image 切分场景段落：每段首镜配图，内容覆盖该段全部旁白（含段首前的纯日期句） */
@@ -338,6 +456,7 @@ export async function generateSceneImagePromptsWithLLM(
   style = 'comic',
   textModel?: string | null,
   fullNarrationLines?: string[],
+  textThinking = true,
 ): Promise<string[] | null> {
   if (!segments.length) return []
 
@@ -347,16 +466,7 @@ export async function generateSceneImagePromptsWithLLM(
 
     logTaskProgress('NarrationScene', 'llm-scene-prompt-start', { sceneCount: segments.length, model: config.model })
 
-    const system = [
-      '你是影视解说分镜美术指导，根据每段旁白场景写出用于 AI 文生图的「单场景画面描述」。',
-      '规则：',
-      '1) 综合该段全部旁白句子，提炼地点、人物、动作与氛围，不要只描述首句',
-      '2) 每条 prompt 描述一个完整场景的主画面，适合单张插画',
-      `3) ${artStylePrompt(style, 'scene')}，电影感构图，无文字无水印`,
-      '4) 不要出现 grid、panel、宫格、分格、collage、split、strip 等词',
-      '5) 用中文描述画面内容，可夹杂少量英文风格词',
-      '只输出 JSON，不要解释。',
-    ].join('\n')
+    const system = buildNarrationSceneSegmentsImagePromptLLMSystem(style)
 
     const user = JSON.stringify({
       full_narration: fullNarrationLines?.length ? fullNarrationLines : undefined,
@@ -367,7 +477,7 @@ export async function generateSceneImagePromptsWithLLM(
       output_format: { image_prompts: 'string[]，长度与 scenes 相同' },
     })
 
-    const text = await callTextChat(system, user, textModel)
+    const text = await callTextChat(system, user, textModel, textThinking, PARAGRAPH_PROMPT_LLM_BATCH_TIMEOUT_MS)
     const parsed = extractJsonObject(text)
     const prompts = Array.isArray(parsed?.image_prompts) ? parsed.image_prompts : null
     if (!prompts || prompts.length !== segments.length) {
@@ -376,9 +486,7 @@ export async function generateSceneImagePromptsWithLLM(
     }
 
     const normalized = prompts.map((p: unknown) => (
-      isNarrationMinimalStyle(style)
-        ? finalizeNarrationImagePrompt(String(p || '').trim())
-        : sanitizeSceneImagePrompt(String(p || '').trim())
+      resolveLLMImagePrompt(String(p || '').trim(), style)
     )).filter(Boolean)
     if (normalized.length !== segments.length) return null
 
@@ -390,10 +498,22 @@ export async function generateSceneImagePromptsWithLLM(
   }
 }
 
+/** 将 LLM 优先级映射为 35% 配图分配 */
+function normalizeLLMImageDetectFlags(
+  items: NarrationSentenceItem[],
+  flags: unknown[],
+  mode: ImageDetectMode = 'paragraph',
+): boolean[] {
+  return allocateImageNeedsByRatio(items, flags, mode)
+}
+
 export async function detectImageNeedsWithLLM(
   items: NarrationSentenceItem[],
-  mode: ImageDetectMode = 'balanced',
+  mode: ImageDetectMode = 'paragraph',
   textModel?: string | null,
+  textThinking = true,
+  style = 'comic',
+  fullNarrationLines?: string[],
 ): Promise<boolean[] | null> {
   if (!items.length) return []
 
@@ -401,40 +521,27 @@ export async function detectImageNeedsWithLLM(
     const config = getTextConfig(textModel)
     if (!config.apiKey) return null
 
-    logTaskProgress('NarrationScene', 'llm-detect-start', { sentenceCount: items.length, model: config.model })
+    const detectMode = mode === 'conservative' ? 'conservative' : 'paragraph'
+    logTaskProgress('NarrationScene', 'llm-detect-start', {
+      sentenceCount: items.length,
+      model: config.model,
+      detectMode,
+    })
 
-    const system = mode === 'conservative'
-      ? [
-        '你是影视解说分镜导演，判断每句旁白是否需要配一张新插图（省钱均衡模式：比标准少配图，但不能长期不换画面）。',
-        '规则：',
-        '1) 场景/地点/时间/空间明显切换 → needs_image=true',
-        '2) 空行分段后的首句 → 通常 needs_image=true',
-        '3) 同一场景内连续动作、情绪描写 → needs_image=false',
-        '4) 正文第1句 needs_image=true（但若该句仅为日期/季节如「1985年的春天」，needs_image=false）',
-        '5) 目标密度：大约每 3–4 句配 1 张新图；同一段落内若已连续 3 句 false，下一句优先 true',
-        '6) 忽略「在xxx里，」等弱起句，除非整段确实换到新地点',
-        '7) 纯日期/季节/时段句（如「1985年的春天」「第二天清晨」）不要单独配图，needs_image=false',
-        '只输出 JSON，不要解释。',
-      ].join('\n')
-      : [
-        '你是影视解说分镜导演，负责判断每一句旁白是否需要单独配一张新插图。',
-        '规则：',
-        '1) 与上一句相比，若场景/地点/时间/空间/视角发生明显切换 → needs_image=true',
-        '2) 仍在同一场景、同一空间连续叙述、只是动作或对白延续 → needs_image=false',
-        '3) 正文第1句永远 needs_image=true（但若该句仅为日期/季节如「1985年的春天」，needs_image=false）',
-        '4) 空行分段后的首句，通常表示场景切换，优先 needs_image=true',
-        '5) 宁可多标 true，也不要把明显换场景的句子标成 false',
-        '6) 纯日期/季节/时段句不要单独配图，needs_image=false',
-        '只输出 JSON，不要解释。',
-      ].join('\n')
+    const system = buildNarrationImageDetectLLMSystem(style, detectMode)
+    const fullNarration = fullNarrationLines?.length
+      ? fullNarrationLines
+      : items.map(item => item.sentence)
 
     const user = JSON.stringify({
+      full_narration: fullNarration,
       sentences: items.map(item => item.sentence),
+      sentence_indexes: items.map((_, index) => index),
       paragraph_indexes: items.map(item => item.paragraphIndex),
       output_format: { needs_image: 'boolean[]，长度与 sentences 相同' },
     })
 
-    const text = await callTextChat(system, user, textModel)
+    const text = await callTextChat(system, user, textModel, textThinking, IMAGE_DETECT_LLM_TIMEOUT_MS)
     const parsed = extractJsonObject(text)
     const flags = Array.isArray(parsed?.needs_image) ? parsed.needs_image : null
     if (!flags || flags.length !== items.length) {
@@ -444,28 +551,20 @@ export async function detectImageNeedsWithLLM(
 
     const normalized = finalizeImageNeeds(
       items,
-      mode === 'conservative'
-        ? ensureMaxNarrationGap(
-          items,
-          consolidateShortSceneSegments(
-            items,
-            flags.map((flag: unknown, index: number) => (
-              isNarrationDateOnlySentence(items[index].sentence)
-                ? false
-                : index === 0 ? true : !!flag
-            )),
-            2,
-          ),
-          6,
-        )
-        : flags.map((flag: unknown, index: number) => (
-          isNarrationDateOnlySentence(items[index].sentence)
-            ? false
-            : index === 0 ? true : !!flag
-        )),
+      normalizeLLMImageDetectFlags(items, flags, mode),
     )
+    const llmRawCount = flags.filter((flag: unknown, index: number) => (
+      !isNarrationDateOnlySentence(items[index].sentence) && (index === 0 || !!flag)
+    )).length
     const needCount = normalized.filter(Boolean).length
-    logTaskSuccess('NarrationScene', 'llm-detect-done', { sentenceCount: items.length, imageNeededCount: needCount })
+    const eligible = items.filter(item => !isNarrationDateOnlySentence(item.sentence)).length
+    logTaskSuccess('NarrationScene', 'llm-detect-done', {
+      sentenceCount: items.length,
+      eligibleSentenceCount: eligible,
+      imageNeededCount: needCount,
+      imageRatio: eligible ? Math.round(needCount / eligible * 100) : 0,
+      llmRawImageCount: llmRawCount,
+    })
     return normalized
   } catch (err: any) {
     logTaskError('NarrationScene', 'llm-detect-failed', { error: err.message })
@@ -473,21 +572,36 @@ export async function detectImageNeedsWithLLM(
   }
 }
 
+export type ImageDetectSource = 'llm' | 'balanced' | 'conservative'
+
 export async function resolveImageNeeds(
   items: NarrationSentenceItem[],
-  mode: ImageDetectMode = 'conservative',
+  options?: {
+    mode?: ImageDetectMode
+    textModel?: string | null
+    textThinking?: boolean
+    style?: string
+    fullNarrationLines?: string[]
+  },
 ): Promise<{
   needs: boolean[]
-  source: 'llm' | 'heuristic' | 'conservative'
+  source: ImageDetectSource
 }> {
+  const mode = options?.mode || 'paragraph'
+  const fromLLM = await detectImageNeedsWithLLM(
+    items,
+    mode,
+    options?.textModel,
+    options?.textThinking ?? true,
+    options?.style || 'comic',
+    options?.fullNarrationLines,
+  )
+  if (fromLLM) return { needs: fromLLM, source: 'llm' }
+
   if (mode === 'conservative') {
-    const fromLLM = await detectImageNeedsWithLLM(items, 'conservative')
-    if (fromLLM) return { needs: fromLLM, source: 'llm' }
     return { needs: detectImageNeedsConservative(items), source: 'conservative' }
   }
-  const fromLLM = await detectImageNeedsWithLLM(items, 'balanced')
-  if (fromLLM) return { needs: fromLLM, source: 'llm' }
-  return { needs: detectImageNeedsHeuristic(items), source: 'heuristic' }
+  return { needs: detectImageNeedsBalanced(items), source: 'balanced' }
 }
 
 export type ParagraphPromptInput = {
@@ -519,6 +633,7 @@ export async function generateTitleImagePromptWithLLM(options: {
   bodySentences?: string[]
   style?: string
   textModel?: string | null
+  textThinking?: boolean
 }): Promise<string | null> {
   const titleHook = options.titleHook?.trim() || null
   const titleFull = options.titleFull?.trim() || null
@@ -526,6 +641,7 @@ export async function generateTitleImagePromptWithLLM(options: {
 
   const style = options.style || 'comic'
   const textModel = options.textModel || null
+  const textThinking = options.textThinking ?? true
   const fullNarration = buildFullNarrationForPrompt(options)
   if (!fullNarration.length) return null
 
@@ -535,24 +651,7 @@ export async function generateTitleImagePromptWithLLM(options: {
 
     logTaskProgress('NarrationScene', 'llm-title-prompt-start', { model: config.model })
 
-    const system = isNarrationMinimalStyle(style)
-      ? [
-        '你是影视解说分镜美术指导，根据整集解说全文为片头标题图写 AI 文生图用的中文 image_prompt。',
-        '硬性规则：',
-        `1) 画风固定关键词（必含）：${NARRATION_IMAGE_STYLE_CORE}`,
-        '2) 严格按此万能模板输出完整 prompt：',
-        `16:9 横屏，2D 扁平化卡通，白色圆头素体小人，两个小黑点眼睛，黑色细轮廓线，纯色平涂无复杂光影，【片头背景场景：具体地点与环境】，【主题氛围：与全文主线对应的叙事氛围】，日常低饱和配色，极简叙事动画风格，干净整洁的画面，无文字无水印，中央预留叠字区域`,
-        NARRATION_TITLE_IMAGE_LLM_RULE,
-        '3) 禁止写年代/年份和具体服装描述；禁止在画面中出现任何文字',
-        '只输出 JSON，不要解释。',
-      ].join('\n')
-      : [
-        '你是影视解说分镜美术指导，根据整集解说全文为片头标题图写 AI 文生图用的 image_prompt。',
-        `画风：${artStylePrompt(style, 'title')}, 16:9 landscape, high quality, absolutely no text, no watermark`,
-        NARRATION_TITLE_IMAGE_LLM_RULE,
-        'clean center area reserved for dynamic title overlay',
-        '只输出 JSON，不要解释。',
-      ].join('\n')
+    const system = buildNarrationTitleImagePromptLLMSystem(style)
 
     const user = JSON.stringify({
       title: { hook: titleHook || titleFull, full: titleFull || titleHook },
@@ -560,7 +659,7 @@ export async function generateTitleImagePromptWithLLM(options: {
       output_format: { title_image_prompt: 'string，片头背景完整 prompt' },
     })
 
-    const text = await callTextChat(system, user, textModel)
+    const text = await callTextChat(system, user, textModel, textThinking, TITLE_IMAGE_PROMPT_LLM_TIMEOUT_MS)
     const parsed = extractJsonObject(text)
     const prompt = String(parsed?.title_image_prompt || '').trim()
     if (!prompt) {
@@ -568,13 +667,11 @@ export async function generateTitleImagePromptWithLLM(options: {
       return null
     }
 
-    const normalized = isNarrationMinimalStyle(style)
-      ? finalizeNarrationImagePrompt(prompt, {
-        titleHook: titleHook || undefined,
-        titleFull,
-        titleBodySentences: options.bodySentences,
-      })
-      : sanitizeSceneImagePrompt(prompt)
+    const normalized = resolveLLMImagePrompt(prompt, style, {
+      titleHook: titleHook || undefined,
+      titleFull,
+      titleBodySentences: options.bodySentences,
+    })
     if (!normalized) return null
 
     logTaskSuccess('NarrationScene', 'llm-title-prompt-done', {})
@@ -585,7 +682,7 @@ export async function generateTitleImagePromptWithLLM(options: {
   }
 }
 
-/** 按段落规则拆镜后，用文本模型批量生成配图提示词（素体中文 / 其他画风英文） */
+/** 按段落规则拆镜后，用文本模型分批生成配图提示词（素体中文 / 其他画风英文） */
 export async function generateParagraphImagePromptsWithLLM(
   paragraphs: ParagraphPromptInput[],
   options?: {
@@ -593,12 +690,16 @@ export async function generateParagraphImagePromptsWithLLM(
     titleFull?: string | null
     style?: string
     textModel?: string | null
+    textThinking?: boolean
     characters?: CharacterPromptHint[]
     fullNarrationLines?: string[]
+    onProgress?: NarrationImageBreakdownProgressCallback
   },
 ): Promise<{ titlePrompt: string | null; promptsByStartIndex: Map<number, string> } | null> {
   const style = options?.style || 'comic'
   const textModel = options?.textModel || null
+  // 结构化 JSON 批量配图：关闭思考模式，避免 content 为空、响应过慢与网关截断
+  const textThinking = false
   const titleHook = options?.titleHook?.trim() || null
   const titleFull = options?.titleFull?.trim() || null
   const characters = options?.characters || []
@@ -607,129 +708,210 @@ export async function generateParagraphImagePromptsWithLLM(
 
   try {
     const config = getTextConfig(textModel)
-    if (!config.apiKey) return null
+    if (!config.apiKey) throw new Error('未配置文本模型 API Key')
+
+    const batchCount = paragraphs.length
+      ? Math.ceil(paragraphs.length / PARAGRAPH_PROMPT_LLM_BATCH_SIZE)
+      : 0
 
     logTaskProgress('NarrationScene', 'llm-paragraph-prompt-start', {
       paragraphCount: paragraphs.length,
+      batchCount,
+      batchSize: PARAGRAPH_PROMPT_LLM_BATCH_SIZE,
       hasTitle: !!titleHook,
       model: config.model,
     })
 
-    const system = isNarrationMinimalStyle(style)
-      ? [
-        '你是影视解说分镜美术指导。拆镜结构已由规则确定（一句旁白一镜、按场景换图并根据内容适当沿用），你的任务是写 AI 文生图用的中文 image_prompt。',
-        '硬性规则：',
-        '1) 每个配图段综合该段旁白句，提炼地点、人物动作、氛围；段越短越聚焦当前画面，不要写未出现的后续情节',
-        `2) 画风固定关键词（每条必含）：${NARRATION_IMAGE_STYLE_CORE}`,
-        '3) 严格按此万能模板输出完整 prompt（【】内填入具体内容，场景与剧情都要写充分、有画面感）：',
-        `16:9 横屏，2D 扁平化卡通，白色圆头素体小人，两个小黑点眼睛，黑色细轮廓线，纯色平涂无复杂光影，【场景：具体地点与环境】，【剧情：动作与互动情节】，日常低饱和配色，极简叙事动画风格，干净整洁的画面，无文字无水印`,
-        '4) 【场景】根据 narration_lines 中的地点/环境/时间感确定背景；【剧情】只写当前段主画面动作与互动，综合该段全部旁白句',
-        '5) 【场景】写清楚地点、环境陈设与氛围；【剧情】聚焦本段画面重点，不要写「前文概要」，不要写已过场情节（如当前是夜市摆摊则勿写推自行车），不要写「素体小人」，不要照抄旁白原文',
-        '6) layout=single（默认）：单张完整场景插画。禁止 grid/collage/multi-panel/split screen/storyboard',
-        '7) layout=diptych：单张 16:9 横向两宫格，左格与右格分别描述，仍是一张图',
-        '8) 片头标题图：' + NARRATION_TITLE_IMAGE_LLM_RULE.replace(/^片头标题图：/, ''),
-        '9) 禁止写年代/年份和具体服装描述；禁止在【剧情】中出现「素体小人」',
-        '10) 好示例：旁白「辞掉供销社工作推着自行车」→【场景：供销社门口春日背景】，【剧情：辞掉供销社工作，推着自行车】；旁白「去县城夜市摆地摊，身边人都说我疯了」→【场景：县城夜市街景与简化摊位】，【剧情：在摊位前整理货物，周围多人围观交谈】（勿写前文推自行车）',
-        characters.length
-          ? '11) 若段落涉及已知角色，只写其在画面中的动作与位置，不写外貌/服装/年代'
-          : '',
-        NARRATION_PLOT_CONTINUITY_LLM_RULE,
-        '12) 每条 prompt 只写当前配图段的一个场景，不要合并未出现的后续情节；不要输出负面提示词',
-        '只输出 JSON，不要解释。',
-      ].filter(Boolean).join('\n')
-      : [
-        '你是影视解说分镜美术指导。拆镜结构已由规则确定（一句旁白一镜、按场景换图并根据内容适当沿用），你的任务是写 AI 文生图用的 image_prompt。',
-        '硬性规则：',
-        '1) 每个配图段综合该段旁白句，提炼地点、人物、动作、氛围；段越短越聚焦当前画面，不要写未出现的后续情节',
-        `2) 画风：${artStylePrompt(style, 'scene')}, 16:9 landscape, high quality, no text, no watermark`,
-        '3) layout=single（默认）：单张完整场景插画。prompt 以 "single full illustration, one complete scene only" 开头，并写明 no grid, no collage, no multi-panel, no split screen',
-        '4) 仅当输入 layout=diptych 时才写两宫格：横向两宫格（仍算一张图）。分别描述 left panel 与 right panel',
-        '5) 片头标题图：' + NARRATION_TITLE_IMAGE_LLM_RULE.replace(/^片头标题图：/, ''),
-        '6) 除 diptych 两宫格式外，禁止 grid/panel/collage/strip/storyboard 等词',
-        characters.length
-          ? '7) 若段落涉及已知角色，prompt 中写出其外貌特征并保持与角色设定一致'
-          : '',
-        NARRATION_PLOT_CONTINUITY_LLM_RULE,
-        '只输出 JSON，不要解释。',
-      ].filter(Boolean).join('\n')
+    const system = buildNarrationParagraphImagePromptLLMSystem(style, {
+      hasCharacters: characters.length > 0,
+    })
+    const fullBodyLines = options?.fullNarrationLines || []
+    const protagonistHints = characters.map(ch => ({
+      name: ch.name,
+      variantLabel: (ch as { variantLabel?: string | null }).variantLabel,
+      appearance: ch.appearance,
+    }))
 
-    const user = JSON.stringify({
-      full_narration: buildFullNarrationForPrompt({
-        titleHook,
-        titleFull,
-        bodySentences: options?.fullNarrationLines,
-      }),
-      title: titleHook ? { hook: titleHook, full: titleFull || titleHook } : null,
-      characters: isNarrationMinimalStyle(style)
-        ? characters.map(ch => ({
-          name: ch.name,
-          life_stage: (ch as { variantLabel?: string | null }).variantLabel || '',
-        }))
-        : characters.map(ch => ({
-          name: ch.name,
-          appearance: ch.appearance || '',
-        })),
-      paragraphs: paragraphs.map(p => ({
-        paragraph_index: p.index,
-        start_index: p.startIndex,
-        timeline_up_to_index: p.startIndex,
-        layout: p.layout,
-        narration_lines: p.sentences,
-      })),
-      output_format: {
-        title_image_prompt: isNarrationMinimalStyle(style)
-          ? 'string | null，片头背景中文 prompt'
-          : 'string | null，片头背景英文 prompt',
-        paragraph_prompts: '[{ start_index: number, image_prompt: string }]，长度与 paragraphs 相同',
-      },
+    const fullNarration = buildFullNarrationForPrompt({
+      titleHook,
+      titleFull,
+      bodySentences: options?.fullNarrationLines,
     })
 
-    const text = await callTextChat(system, user, textModel)
-    const parsed = extractJsonObject(text)
-    const rows = Array.isArray(parsed?.paragraph_prompts) ? parsed.paragraph_prompts : null
-    if (paragraphs.length && (!rows || rows.length !== paragraphs.length)) {
-      logTaskWarn('NarrationScene', 'llm-paragraph-prompt-invalid', {
+    const characterPayload = isNarrationMinimalStyle(style)
+      ? characters.map(ch => ({
+        name: ch.name,
+        life_stage: (ch as { variantLabel?: string | null }).variantLabel || '',
+        posture_action: String(ch.appearance || '')
+          .replace(/English tags:[\s\S]*/i, '')
+          .trim()
+          .slice(0, 80),
+      }))
+      : characters.map(ch => ({
+        name: ch.name,
+        appearance: ch.appearance || '',
+      }))
+
+    const paragraphOutputHint =
+      '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；单图按六维输出；layout=diptych 按【左格】【右格】各写完整六维（见 system 规则）'
+
+    const promptsByStartIndex = new Map<number, string>()
+    const batches = chunkParagraphPromptBatch(paragraphs, PARAGRAPH_PROMPT_LLM_BATCH_SIZE)
+    const reportProgress = options?.onProgress
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex]
+      if (batchIndex > 0) await sleep(PARAGRAPH_PROMPT_LLM_BATCH_GAP_MS)
+
+      reportProgress?.({
+        status: 'processing',
+        phase: 'prompts',
+        batch: batchIndex + 1,
+        batch_count: batches.length,
+        paragraph_count: paragraphs.length,
+        message: `正在生成配图文案（第 ${batchIndex + 1}/${batches.length} 批，${batch.length} 段）…`,
+        percent: calcPromptBatchPercent(batchIndex, batches.length),
+      })
+
+      const user = JSON.stringify({
+        full_narration: fullNarration,
+        characters: characterPayload,
+        paragraphs: batch.map(p => ({
+          paragraph_index: p.index,
+          start_index: p.startIndex,
+          timeline_up_to_index: p.startIndex,
+          prior_narration: fullBodyLines.slice(0, p.startIndex),
+          layout: p.layout,
+          narration_lines: p.sentences,
+        })),
+        output_format: {
+          paragraph_prompts: paragraphOutputHint,
+        },
+      })
+
+      let rows: Array<{ start_index?: number; image_prompt?: string }> | null = null
+      let lastRaw = ''
+
+      for (let attempt = 0; attempt <= PARAGRAPH_PROMPT_LLM_BATCH_RETRIES; attempt++) {
+        if (attempt > 0) {
+          logTaskWarn('NarrationScene', 'llm-paragraph-prompt-batch-retry', {
+            batch: batchIndex + 1,
+            attempt,
+            batchCount: batches.length,
+          })
+          reportProgress?.({
+            status: 'processing',
+            phase: 'prompts',
+            batch: batchIndex + 1,
+            batch_count: batches.length,
+            message: `第 ${batchIndex + 1}/${batches.length} 批重试中（${attempt}/${PARAGRAPH_PROMPT_LLM_BATCH_RETRIES}）…`,
+            percent: calcPromptBatchPercent(batchIndex, batches.length),
+          })
+          await sleep(3_000 * attempt)
+        }
+
+        logTaskProgress('NarrationScene', 'llm-paragraph-prompt-batch', {
+          batch: batchIndex + 1,
+          batchCount: batches.length,
+          paragraphCount: batch.length,
+          attempt: attempt + 1,
+          model: config.model,
+        })
+
+        const text = await callTextChat(
+          system,
+          user,
+          textModel,
+          textThinking,
+          PARAGRAPH_PROMPT_LLM_BATCH_TIMEOUT_MS,
+          true,
+        )
+        lastRaw = text
+        rows = parseParagraphPromptRows(text, batch)
+        if (rows) break
+      }
+
+      if (!rows) {
+        logTaskWarn('NarrationScene', 'llm-paragraph-prompt-invalid', {
+          batch: batchIndex + 1,
+          batchCount: batches.length,
+          expected: batch.length,
+          got: 0,
+          responsePreview: lastRaw.slice(0, 400),
+        })
+        throw new Error(
+          `配图 AI 第 ${batchIndex + 1}/${batches.length} 批返回无效（模型未输出 paragraph_prompts JSON，可能上游限流或截断）`,
+        )
+      }
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i]
+        const startIndex = Number(row?.start_index ?? batch[i]?.startIndex)
+        const prompt = String(row?.image_prompt || '').trim()
+        if (!Number.isFinite(startIndex) || !prompt) {
+          logTaskWarn('NarrationScene', 'llm-paragraph-prompt-row-invalid', {
+            batch: batchIndex + 1,
+            row: i,
+            startIndex,
+          })
+          return null
+        }
+        promptsByStartIndex.set(startIndex, resolveLLMImagePrompt(prompt, style, {
+          narrationLines: batch[i]?.sentences,
+          fullNarrationLines: options?.fullNarrationLines,
+          timelineUpToIndex: startIndex,
+          protagonistHints,
+        }))
+      }
+
+      reportProgress?.({
+        status: 'processing',
+        phase: 'prompts',
+        batch: batchIndex + 1,
+        batch_count: batches.length,
+        message: `第 ${batchIndex + 1}/${batches.length} 批配图文案已完成`,
+        percent: calcPromptBatchPercent(batchIndex + 1, batches.length),
+      })
+    }
+
+    if (paragraphs.length && promptsByStartIndex.size !== paragraphs.length) {
+      logTaskWarn('NarrationScene', 'llm-paragraph-prompt-incomplete', {
         expected: paragraphs.length,
-        got: rows?.length || 0,
+        got: promptsByStartIndex.size,
       })
       return null
     }
 
-    const promptsByStartIndex = new Map<number, string>()
-    if (rows) {
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i]
-        const startIndex = Number(row?.start_index ?? paragraphs[i]?.startIndex)
-        const prompt = String(row?.image_prompt || '').trim()
-        if (!Number.isFinite(startIndex) || !prompt) continue
-        promptsByStartIndex.set(startIndex, isNarrationMinimalStyle(style)
-          ? finalizeNarrationImagePrompt(prompt, {
-            narrationLines: paragraphs[i]?.sentences,
-            fullNarrationLines: options?.fullNarrationLines,
-            timelineUpToIndex: startIndex,
-          })
-          : sanitizeSceneImagePrompt(prompt))
-      }
-      if (promptsByStartIndex.size !== paragraphs.length) return null
+    let titlePrompt: string | null = null
+    if (titleHook) {
+      reportProgress?.({
+        status: 'processing',
+        phase: 'title',
+        message: '正在生成片头配图文案…',
+        percent: 88,
+      })
+      titlePrompt = await generateTitleImagePromptWithLLM({
+        titleHook,
+        titleFull,
+        bodySentences: options?.fullNarrationLines,
+        style,
+        textModel,
+        textThinking,
+      })
     }
-
-    const titlePrompt = titleHook
-      ? (isNarrationMinimalStyle(style)
-        ? finalizeNarrationImagePrompt(String(parsed?.title_image_prompt || '').trim(), {
-          titleHook,
-          titleFull,
-          titleBodySentences: options?.fullNarrationLines,
-        })
-        : sanitizeSceneImagePrompt(String(parsed?.title_image_prompt || '').trim())) || null
-      : null
 
     logTaskSuccess('NarrationScene', 'llm-paragraph-prompt-done', {
       paragraphCount: paragraphs.length,
+      batchCount: batches.length,
       hasTitle: !!titlePrompt,
     })
     return { titlePrompt, promptsByStartIndex }
   } catch (err: any) {
-    logTaskError('NarrationScene', 'llm-paragraph-prompt-failed', { error: err.message })
-    return null
+    const message = String(err?.message || err || 'unknown error')
+    logTaskError('NarrationScene', 'llm-paragraph-prompt-failed', { error: message })
+    if (/aborted due to timeout/i.test(message)) {
+      throw new Error('配图 AI 调用超时，请稍后重试或减少单集配图段数')
+    }
+    throw err
   }
 }

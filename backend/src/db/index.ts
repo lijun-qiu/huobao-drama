@@ -383,6 +383,7 @@ function ensureColumn(table: string, column: string, definition: string) {
 ensureColumn('episodes', 'image_config_id', 'INTEGER')
 ensureColumn('episodes', 'image_model', 'TEXT')
 ensureColumn('episodes', 'text_model', 'TEXT')
+ensureColumn('episodes', 'text_thinking', 'INTEGER DEFAULT 1')
 ensureColumn('episodes', 'video_config_id', 'INTEGER')
 ensureColumn('episodes', 'audio_config_id', 'INTEGER')
 ensureColumn('storyboards', 'bgm_audio_url', 'TEXT')

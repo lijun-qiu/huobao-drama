@@ -9,7 +9,7 @@ import { generateCharacterAppearance, resolveCharacterPortraitGeneration, resolv
 import { buildCharacterAppearanceContext } from '../services/ai-description-context.js'
 import { recognizePortraitImage } from '../services/kling-image-recognize.js'
 import { resolveEpisodeImageModel, imageModelSupportsReferenceImages } from '../constants/image-models.js'
-import { resolveEpisodeTextModel } from '../constants/text-models.js'
+import { resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
 import { normalizeArtStyle, sanitizeCharacterAppearance, isNarrationMinimalStyle } from '../constants/art-styles.js'
 import { logTaskError, logTaskStart, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 
@@ -224,6 +224,7 @@ app.post('/:id/generate-appearance', async (c) => {
   let script = String(body.script || body.content || '').trim()
   let style = 'comic'
   let textModel: string | null = null
+  let textThinking = true
   const episodeId = body.episode_id ? Number(body.episode_id) : undefined
   if (episodeId) {
     const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
@@ -232,6 +233,7 @@ app.post('/:id/generate-appearance', async (c) => {
       const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
       style = drama?.style || style
       textModel = resolveEpisodeTextModel(ep, body.text_model)
+      textThinking = resolveEpisodeTextThinking(ep, body.text_thinking)
     }
   }
   if (!script) {
@@ -258,6 +260,7 @@ app.post('/:id/generate-appearance', async (c) => {
       style: contentCtx.dramaStyle || style,
       contentContext: contentCtx,
       textModel,
+      textThinking,
     })
     db.update(schema.characters)
       .set({ appearance, updatedAt: now() })

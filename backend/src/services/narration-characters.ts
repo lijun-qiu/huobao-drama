@@ -1,10 +1,10 @@
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
-import { artStylePrompt, isNarrationMinimalStyle, normalizeArtStyle, sanitizeCharacterAppearance, sanitizeAppearanceForPortrait, buildMinimalPortraitPostureHint, buildNarrationPortraitPromptContent, appendToNarrationBracket } from '../constants/art-styles.js'
+import { artStylePrompt, isNarrationMinimalStyle, normalizeArtStyle, sanitizeCharacterAppearance, sanitizeAppearanceForPortrait, buildMinimalPortraitPostureHint, buildNarrationPortraitPromptContent, appendToNarrationBracket, NARRATION_MINIMAL_BODY_SIZE_SPEC, NARRATION_BODY_STAGE_SIZE_HINTS, NARRATION_USE_RAW_LLM_PROMPTS } from '../constants/art-styles.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
-import { getActiveConfig, getTextConfig, getTextProviderBaseUrl } from './ai.js'
-import { joinProviderUrl } from './adapters/url.js'
+import { getActiveConfig, getTextConfig } from './ai.js'
+import { callTextChat } from './text-chat.js'
 import { parseNarrationImageMeta } from './narration-image.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 
@@ -504,34 +504,7 @@ function extractJsonObject(text: string) {
   }
 }
 
-export async function callTextChat(system: string, user: string, modelOverride?: string | null): Promise<string> {
-  const config = getTextConfig(modelOverride)
-  const url = joinProviderUrl(getTextProviderBaseUrl(config), '/chat/completions', '')
-
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-      temperature: 0.2,
-    }),
-    signal: AbortSignal.timeout(120_000),
-  })
-
-  if (!resp.ok) {
-    throw new Error(`Text API error ${resp.status}: ${await resp.text()}`)
-  }
-
-  const json = await resp.json() as any
-  return json.choices?.[0]?.message?.content || ''
-}
+export { callTextChat } from './text-chat.js'
 
 function resolvePortraitFraming(style: string, _appearance: string): string {
   if (isNarrationMinimalStyle(style)) {
@@ -735,11 +708,16 @@ export function enrichImagePromptWithCharacters(
     : characters
   if (!relevant.length) return base
 
+  if (NARRATION_USE_RAW_LLM_PROMPTS) return base
+
   if (isNarrationMinimalStyle(style)) {
     const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
-    const addition = `场景中出现素体小人角色：${names}，仅通过动作姿态区分，不写服装细节`
+    const addition = `场景中出现素体小人：主人公${names}，同框配角须同款三头身简笔素体尺寸（圆头约占身高三分之一），仅动作姿态及人生阶段微调区分，不写服装细节`
     if (/【左格/.test(base) && /【右格/.test(base)) {
       return appendToNarrationBracket(appendToNarrationBracket(base, '左格', addition), '右格', addition)
+    }
+    if (/【画面主体[：:]/.test(base)) {
+      return appendToNarrationBracket(base, '画面主体', addition)
     }
     return appendToNarrationBracket(base, '剧情', addition)
   }
@@ -765,6 +743,7 @@ export async function generateCharacterAppearance(params: {
   script?: string
   style?: string
   textModel?: string | null
+  textThinking?: boolean
   contentContext?: {
     dramaTitle?: string
     dramaGenre?: string
@@ -775,17 +754,17 @@ export async function generateCharacterAppearance(params: {
     otherCharacters?: string[]
   }
 }): Promise<string> {
-  const { character, script, style = 'comic', textModel, contentContext } = params
+  const { character, script, style = 'comic', textModel, textThinking = true, contentContext } = params
   const minimal = isNarrationMinimalStyle(style)
   logTaskProgress('CharacterAppearance', 'llm-generate-start', { name: character.name, model: getTextConfig(textModel).model })
   const system = minimal
     ? [
       '你是解说素体小人项目的角色动作标注助手。',
-      '本项目定妆图是「白色圆头素体小人，两个小黑点眼睛」，只通过动作姿态和简单道具区分人生阶段，不写任何服装/发型/复杂五官/年代。',
-      '根据剧本情节，只输出该人生阶段的「两个小黑点眼睛 + 动作姿态 + 可选简单道具轮廓」，20-60 字中文。',
-      '示例（青年）：两个小黑点眼睛，推着手推车站立，夜市摆摊姿态',
-      '示例（中年）：两个小黑点眼睛，坐于柜台后，手持茶杯，老板姿态',
-      '示例（老年）：两个小黑点眼睛，坐于凳上，手持圆扇，略佝偻',
+      `本项目定妆图是「白色圆头素体小人，两个小黑点眼睛」，通用尺寸：${NARRATION_MINIMAL_BODY_SIZE_SPEC}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}；不写服装/发型/复杂五官/年代。`,
+      '根据剧本情节，只输出该人生阶段的「两个小黑点眼睛 + 尺寸比例 + 动作姿态 + 可选简单道具」，20-60 字中文。',
+      '示例（青年）：两个小黑点眼睛，圆头约占身高三分之一三头高，推二八杠自行车轮廓站立',
+      '示例（中年）：两个小黑点眼睛，三头高躯干略宽，坐于柜台后手持茶杯',
+      '示例（老年）：两个小黑点眼睛，约2.8头高略佝偻，简化小胡子，坐于凳上手持圆扇',
       '禁止：花衬衫、西装、墨镜、皱纹、复杂五官、无眼睛、80年代、English tags',
       '只输出正文，不要标题、markdown、JSON。',
     ].join('\n')
@@ -828,7 +807,7 @@ export async function generateCharacterAppearance(params: {
       : '',
   ].filter(Boolean).join('\n\n')
 
-  const raw = (await callTextChat(system, user, textModel)).trim()
+  const raw = (await callTextChat(system, user, textModel, textThinking)).trim()
   const cleaned = raw.replace(/^["'`]+|["'`]+$/g, '').replace(/^外貌描述[:：]\s*/i, '').trim()
   if (!cleaned) throw new Error('AI 未返回有效外貌描述')
   logTaskSuccess('CharacterAppearance', 'llm-generate-done', { name: character.name, length: cleaned.length })
@@ -859,6 +838,7 @@ export async function extractNarrationCharacters(
   script: string,
   style = 'comic',
   textModel?: string | null,
+  textThinking = true,
 ) {
   const existing = db.select().from(schema.characters).all()
     .filter(ch => ch.dramaId === dramaId && !ch.deletedAt)
@@ -905,7 +885,7 @@ export async function extractNarrationCharacters(
         },
       })
 
-      const text = await callTextChat(system, user, textModel)
+      const text = await callTextChat(system, user, textModel, textThinking)
       const parsed = extractJsonObject(text)
       if (Array.isArray(parsed?.characters)) {
         extracted = parsed.characters

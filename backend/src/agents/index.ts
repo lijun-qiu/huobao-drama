@@ -8,6 +8,8 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { eq, isNull, and } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
+import { resolveEpisodeTextThinking } from '../constants/text-models.js'
+import { createTextThinkingFetch } from '../services/text-chat.js'
 import { logTaskProgress } from '../utils/task-logger.js'
 import { createScriptTools } from './tools/script-tools.js'
 import { createExtractTools } from './tools/extract-tools.js'
@@ -176,17 +178,21 @@ function getAgentConfig(agentType: string) {
   return rows.find(r => r.isActive) || rows[0] || null
 }
 
-function getModel(dbConfig: any) {
+function getModel(dbConfig: any, episodeId: number) {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  const textThinking = resolveEpisodeTextThinking(ep)
   const textConfig = getTextConfig()
   const resolvedBaseURL = getTextProviderBaseUrl(textConfig)
   logTaskProgress('AIConfig', 'text-model-endpoint', {
     provider: textConfig.provider,
     baseUrl: resolvedBaseURL,
     model: dbConfig?.model || textConfig.model,
+    textThinking,
   })
   const provider = createOpenAI({
     baseURL: resolvedBaseURL,
     apiKey: textConfig.apiKey,
+    fetch: createTextThinkingFetch(textThinking),
   } as any)
   const modelName = dbConfig?.model || textConfig.model
   return provider.chat(modelName)
@@ -197,7 +203,7 @@ export function createAgent(type: string, episodeId: number, dramaId: number): A
   if (!defaults) return null
 
   const dbConfig = getAgentConfig(type)
-  const model = getModel(dbConfig)
+  const model = getModel(dbConfig, episodeId)
   const baseInstructions = dbConfig?.systemPrompt?.trim() || defaults.instructions
   const skillInstructions = loadAgentSkills(type)
   const instructions = skillInstructions

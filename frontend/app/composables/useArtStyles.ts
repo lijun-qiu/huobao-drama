@@ -8,9 +8,19 @@ export const NARRATION_MINIMAL_STYLE = 'narration-minimal'
 /** 解说素体小人：固定五官（两个小黑点眼睛） */
 export const NARRATION_MINIMAL_EYES = '两个小黑点眼睛'
 
+/** 解说素体通用尺寸（全片统一形象） */
+export const NARRATION_MINIMAL_BODY_SIZE_SPEC =
+  '圆头直径约占全身高度三分之一，简笔躯干宽度与圆头相当，四肢黑色等粗细线，成人标准站姿总高约三个头高'
+
+export const NARRATION_BODY_CONSISTENCY_CORE =
+  `全片统一素体尺寸，${NARRATION_MINIMAL_BODY_SIZE_SPEC}`
+
+export const NARRATION_BODY_STAGE_SIZE_HINTS =
+  '童年总高约2.5头高；青年成年严格三头高；中年三头高躯干略宽；老年略佝偻约2.8头高可加小胡子'
+
 /** 解说配图万能模板：固定前缀 */
 export const NARRATION_UNIVERSAL_SCENE_PREFIX =
-  `16:9 横屏，2D 扁平化卡通，白色圆头素体小人，${NARRATION_MINIMAL_EYES}，黑色细轮廓线，纯色平涂无复杂光影`
+  `16:9 横屏，2D 扁平化卡通，白色圆头素体小人，${NARRATION_MINIMAL_EYES}，黑色细轮廓线，纯色平涂无复杂光影，${NARRATION_BODY_CONSISTENCY_CORE}`
 
 /** 解说配图万能模板：固定后缀 */
 export const NARRATION_UNIVERSAL_SCENE_SUFFIX =
@@ -18,15 +28,74 @@ export const NARRATION_UNIVERSAL_SCENE_SUFFIX =
 
 /** 解说视频模式：核心画风固定关键词（LLM 参考用） */
 export const NARRATION_IMAGE_STYLE_CORE =
-  `白色圆头素体小人、${NARRATION_MINIMAL_EYES}、黑色细轮廓线、纯色平涂无复杂光影、日常低饱和配色、极简叙事动画风格`
+  `白色圆头素体小人、${NARRATION_MINIMAL_EYES}、黑色细轮廓线、纯色平涂无复杂光影、${NARRATION_BODY_CONSISTENCY_CORE}、日常低饱和配色、极简叙事动画风格、画中所有人物均为同款素体造型与统一身形`
 
-/** 【剧情】通用：仅保留与当前画面仍相关的延续道具（不再写入全文前文概要） */
+/** 群众/路人/顾客也须同款素体 */
+export const NARRATION_CROWD_STYLE_HINT =
+  '顾客、路人、群众、年轻人等配角也须写成「素体小人」或「几位素体小人」，与主人公同款白色圆头、两个小黑点眼睛、统一身形比例，仅通过姿态/数量/位置区分'
+
+/** 解说配图六维结构 */
+export const NARRATION_IMAGE_PROMPT_SIX_PART_HINT =
+  '每条 image_prompt 按六维顺序：【画面主体】→【年代场景】→【核心细节动作】→【光影色调】→【镜头视角】→【质感要求】'
+
+/** 解说配图万能模板：六维正文 */
+export const NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE =
+  '【画面主体：入画主角与同框配角，素体须标明阶段与数量位置】，【年代场景：时代年代感、具体地点环境与关键陈设物件】，【核心细节动作：本瞬间可见动作与互动细节】，【光影色调：光线明暗、时段、冷暖与情绪色调】，【镜头视角：景别与机位，如中景平视、略俯全景】，【质感要求：画风线条涂色与画面禁忌】'
+
+/** 默认镜头视角 */
+export const NARRATION_DEFAULT_CAMERA_PROMPT = '中景平视，叙事解说构图，主体清晰'
+
+/** 素体画风质感要求 */
+export const NARRATION_MINIMAL_TEXTURE_PROMPT =
+  `2D扁平化卡通，白色圆头素体小人，两个小黑点眼睛，黑色细轮廓线，纯色平涂无复杂光影，${NARRATION_BODY_CONSISTENCY_CORE}，日常低饱和配色，极简叙事动画风格，干净整洁，无文字无水印`
+
+/** LLM：通用素体尺寸 */
+export const NARRATION_BODY_CONSISTENCY_HINT =
+  `通用素体尺寸：${NARRATION_MINIMAL_BODY_SIZE_SPEC}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}`
+
+/** LLM 光影色调须贴合当前段 */
+export const NARRATION_ATMOSPHERE_HINT =
+  '【光影色调】根据 narration_lines 写光线、时段、冷暖、人气喧闹或寂静、经营旺衰等可见基调，与年代场景和核心细节动作情绪一致'
+
+/** LLM：【年代场景】陈设（权威表述） */
+export const NARRATION_FIXTURES_HINT =
+  '【年代场景·陈设】有陈列载体时写「载体+上陈列+具体物件名」（从 prior_narration、full_narration 或 narration_lines 提取）；同场所可延续 prior 物件，场景切换时重设；禁止货物堆等泛称'
+
+/** @deprecated 使用 NARRATION_FIXTURES_HINT */
+export const NARRATION_FIXTURES_FORMAT_HINT = NARRATION_FIXTURES_HINT
+
+/** @deprecated 使用 NARRATION_FIXTURES_HINT */
+export const NARRATION_FIXTURES_DISPLAY_HINT = NARRATION_FIXTURES_HINT
+
+/** 主人公须入画且画风一致 */
+export const NARRATION_PROTAGONIST_PLOT_HINT =
+  `【画面主体】须符合通用素体尺寸（${NARRATION_MINIMAL_BODY_SIZE_SPEC}），人生阶段微调见阶段规则`
+
+export const NARRATION_CROWD_PLOT_HINT =
+  '同框配角须与主人公同款素体尺寸（三头身简笔比例），仅姿态位置不同'
+
+/** LLM 素体剧情只写可见动作 */
+export const NARRATION_MINIMAL_PLOT_VISIBILITY_HINT =
+  '【核心细节动作】只写素体小人（含主人公与群众）的可见动作与姿态，禁止内心活动与抽象情绪'
+
+/** LLM 写配图 prompt：如何通读全文 */
+export const NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE =
+  '必须先通读 full_narration 并按时间线理解剧情走向，再联合 prior_narration 与 narration_lines 写每条配图 prompt'
+
+/** 【剧情】通用：物件/品类全文连贯 */
 export const NARRATION_PLOT_CONTINUITY_HINT =
-  '货物/道具/品类须与前文已出现内容一致，且仅保留当前画面仍相关的物件'
+  '物件/品类须基于当前 narration_lines 或同场景 prior 有据；场景切换时陈设重设，禁止把早期摆摊物件带入店铺/家里/杂货铺等新场景'
+
+/** @deprecated 使用 NARRATION_FIXTURES_HINT */
+export const NARRATION_FIXTURES_CONTINUITY_HINT = NARRATION_FIXTURES_HINT
+
+/** LLM 写配图 prompt：场景与剧情质量要求（通用） */
+export const NARRATION_SCENE_PLOT_QUALITY_LLM_RULE =
+  '【年代场景】与【核心细节动作】须在同一空间；【核心细节动作】必须以素体小人写可见动作，严禁照抄旁白原文；抽象感慨句须推断成具体可画瞬间'
 
 /** 解说视频模式：负面提示词 */
 export const NARRATION_IMAGE_NEGATIVE_PROMPT =
-  '复杂五官、写实人脸、鼻子嘴巴、无眼睛、空白脸、无五官、面部皱纹、厚涂肌理、3D 建模、渐变光影、复杂纹理、半写实、西装革履、花衬衫、喇叭裤、墨镜太阳镜、具体服装款式、复古滤镜、像素风、杂乱背景'
+  '复杂五官、写实人脸、鼻子嘴巴、无眼睛、空白脸、无五官、面部皱纹、厚涂肌理、3D 建模、渐变光影、复杂纹理、半写实、角色穿西装革履、角色穿花衬衫、角色穿喇叭裤、角色戴墨镜太阳镜、角色具体服装款式、复古滤镜、像素风、杂乱背景、写实路人、不同画风角色、正常比例人体、头身比失调、长短腿、四肢粗细不一、身高参差不齐、体型不一'
 
 export const ART_STYLES = [
   {
@@ -37,7 +106,7 @@ export const ART_STYLES = [
   {
     value: NARRATION_MINIMAL_STYLE,
     label: '解说素体（极简叙事）',
-    description: '白色圆头素体小人、两个小黑点眼睛、黑色细线、扁平平涂，低饱和日常配色，短视频剧情动画质感',
+    description: '白色圆头素体、三头身简笔比例、两个黑点眼睛，全片统一尺寸，低饱和平涂',
   },
   {
     value: 'webtoon',
@@ -78,8 +147,8 @@ export const ART_STYLES = [
 
 const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
   [NARRATION_MINIMAL_STYLE]: {
-    scene: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【场景】，【剧情】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    diptych: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，单张横向两宫格，【左格场景与剧情】，【右格场景与剧情】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    scene: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    diptych: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     title: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}，中央预留叠字区域`,
     portrait: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【场景：浅灰纯色背景，单人全身素体小人定妆参考图】，【剧情：${NARRATION_MINIMAL_EYES}，人生阶段与动作姿态】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     agent: NARRATION_IMAGE_STYLE_CORE,
@@ -227,19 +296,23 @@ type NarrationPlotHint = {
 }
 
 const NARRATION_PLOT_HINTS: NarrationPlotHint[] = [
-  { re: /摆地摊|摆摊|夜市/, action: '在摊位前整理陈列货物', priority: 10, sceneTags: ['market'] },
-  { re: /生意|卖光|卖完|赶时髦|出售|卖出|热卖/, action: '向顾客展示货物并交易', priority: 10, sceneTags: ['market'] },
-  { re: /年轻人|顾客|客人|来买|挑选/, action: '几位年轻人围在摊位前挑选货物', priority: 9, sceneTags: ['market'] },
-  { re: /批发|进货|批了/, action: '在市场通道搬运整理成箱货物', priority: 9, sceneTags: ['market', 'wholesale'] },
-  { re: /固定摊位|越干越有劲/, action: '整理固定摊位上的陈列货物', priority: 9, sceneTags: ['market'] },
-  { re: /门面|服装店|开店/, action: '站在店铺门口招呼进店客人', priority: 9, sceneTags: ['shop'] },
-  { re: /辞|离开|供销社/, action: '离开供销社门口', priority: 8, sceneTags: ['supply'] },
-  { re: /推.*手推车|推车|自行车/, action: '推着手推车运送货物', priority: 8, sceneTags: ['transport'] },
-  { re: /疯|议论|说我/, action: '周围多人围观交谈，独自忙碌', priority: 7, sceneTags: ['market'] },
-  { re: /万元户/, action: '站在店铺前，周围简化钱币意象', priority: 8, sceneTags: ['shop'] },
-  { re: /赚钱|收入|越多|利润/, action: '手持简化账本查看收入', priority: 7, sceneTags: ['market', 'shop'] },
-  { re: /铁饭碗|个体户|投机/, action: '独自经营小摊忙碌', priority: 6, sceneTags: ['market'] },
-  { re: /心里有数|敢闯|改革|踏实/, action: '在摊前从容应对，继续招揽顾客', priority: 3, sceneTags: ['market'], fallback: true },
+  { re: /摆地摊|摆摊|夜市/, action: '素体小人在摊位前整理陈列货物', priority: 10, sceneTags: ['market'] },
+  { re: /生意|卖光|卖完|赶时髦|出售|卖出|热卖/, action: '素体小人向几位素体小人展示货物并交易', priority: 10, sceneTags: ['market'] },
+  { re: /年轻人|顾客|客人|来买|挑选/, action: '素体小人在摊位前忙碌，几位素体小人围在摊位前挑选货物', priority: 9, sceneTags: ['market'] },
+  { re: /批发|进货|批了/, action: '素体小人在市场通道搬运整理成箱货物', priority: 9, sceneTags: ['market', 'wholesale'] },
+  { re: /固定摊位|越干越有劲/, action: '素体小人整理固定摊位上的陈列货物', priority: 9, sceneTags: ['market'] },
+  { re: /门面|服装店|开店/, action: '素体小人站在店铺门口招呼几位素体小人进店', priority: 9, sceneTags: ['shop'] },
+  { re: /辞|离开/, action: '素体小人离开供销社门口', priority: 10, sceneTags: ['supply'] },
+  { re: /供销社/, action: '素体小人在供销社门口或营业大厅内站立行走', priority: 7, sceneTags: ['supply'] },
+  { re: /手推车|板车|独轮车/, action: '素体小人推着手推车运送货物', priority: 9, sceneTags: ['cart'] },
+  { re: /二八杠|自行车/, action: '素体小人推着二八杠自行车轮廓前行', priority: 9, sceneTags: ['bike'] },
+  { re: /推.*车/, action: '素体小人推着二八杠自行车轮廓前行', priority: 6, sceneTags: ['bike'] },
+  { re: /扇.*扇|蒲扇|乘凉|小凳/, action: '素体小人坐在门口小凳上扇蒲扇', priority: 9 },
+  { re: /疯|议论|说我/, action: '素体小人在摊位前独自忙碌，周围几位素体小人围观交谈', priority: 7, sceneTags: ['market'] },
+  { re: /万元户/, action: '素体小人站在店铺前，周围简化钱币意象', priority: 8, sceneTags: ['shop'] },
+  { re: /赚钱|收入|越多|利润/, action: '素体小人手持简化账本查看收入', priority: 7, sceneTags: ['market', 'shop'] },
+  { re: /铁饭碗|个体户|投机/, action: '素体小人独自经营小摊忙碌', priority: 6, sceneTags: ['market'] },
+  { re: /心里有数|敢闯|改革|踏实/, action: '素体小人在摊前从容应对，继续向围观的素体小人招揽', priority: 3, sceneTags: ['market'], fallback: true },
 ]
 
 function detectNarrationSceneTags(text: string): string[] {
@@ -249,7 +322,8 @@ function detectNarrationSceneTags(text: string): string[] {
   if (/批发市场|批(?:发|了)|进货/.test(text)) tags.push('wholesale')
   if (/门面|店铺|服装店|开店|租了/.test(text)) tags.push('shop')
   if (/供销社/.test(text)) tags.push('supply')
-  if (/推.*车|自行车|手推车/.test(text)) tags.push('transport')
+  if (/推.*手推车|手推车|板车/.test(text)) tags.push('cart')
+  if (/推.*车|自行车|二八杠/.test(text)) tags.push('bike')
   return tags
 }
 
@@ -281,6 +355,24 @@ function inferVisualPlotFromNarration(text: string, sceneTags?: string[]): strin
   }
   if (actions.length) return actions.join('，')
   return String(text || '').trim()
+}
+
+function inferNarrationAtmosphereFromText(text: string, sceneHint?: string): string {
+  const t = `${sceneHint || ''}${text}`
+  if (/婚礼|娶了|提亲|十里八乡|风风光光/.test(t)) return '喜庆热闹、人头攒动的欢庆氛围'
+  if (/彩电|彩色电视|串门|客厅|家里天天/.test(t)) return '温馨闲适、邻里往来的家居氛围'
+  if (/夜市|摆地摊|赶时髦|卖光|生意好|一晚上/.test(t)) return '灯火通明、喧闹繁忙的市井氛围'
+  if (/批发市场|批了一车|进货|货物堆/.test(t)) return '嘈杂忙碌、货物堆积的交易氛围'
+  if (/开店|门面|服装店|雇了|喝茶|收收钱/.test(t)) return '安稳经营、日常忙碌的店铺氛围'
+  if (/网购|客人.*少|不行了|滞销|卖不出去|砸在手里|没落/.test(t)) return '冷清落寞、客流稀少的萧条氛围'
+  if (/杂货|油盐|蒲扇|六十岁|晚年|小门面/.test(t)) return '平静怀旧、岁月悠然的低沉氛围'
+  if (/时代|浪潮|风口|裸泳|变迁|平淡如水|起起落落/.test(t)) return '宁静沉思、略带感伤的叙事氛围'
+  if (/疯了|议论|投机|铁饭碗/.test(t)) return '紧张对峙、议论纷纷的紧张氛围'
+  if (/万元户|赚钱|收入|越多|风光/.test(t)) return '兴旺得意、充满希望的喜悦氛围'
+  if (/春天|春日|清晨|黎明/.test(t)) return '和煦明亮、充满生机的春日氛围'
+  if (/1985|80年代|90年代|2000/.test(t)) return '怀旧年代感、温和复古的叙事氛围'
+  if (/供销社|辞职/.test(t)) return '平静克制、略带决心的日常氛围'
+  return '平和日常、低饱和安静的叙事氛围'
 }
 
 function inferTitleAtmosphere(hook: string): string {
@@ -349,6 +441,7 @@ export function buildTitleVisualBrief(ctx: TitleVisualContext): { scene: string;
 }
 
 const NARRATION_SCENE_KEYWORDS: Array<[RegExp, string]> = [
+  [/杂货店|杂货铺|小卖部/, '老旧杂货店门口，简化店面与玻璃橱窗'],
   [/供销社/, '供销社门口或营业大厅内景'],
   [/批发市场/, '批发市场货架通道与货物堆'],
   [/夜市|摆地摊|地摊/, '县城夜市街景与简化摊位'],
@@ -411,6 +504,118 @@ export type NarrationScenePromptOptions = {
   timelineUpToIndex?: number
   /** @deprecated 请用 fullNarrationLines */
   priorNarrationLines?: string[]
+  protagonistHints?: NarrationProtagonistHint[]
+}
+
+export type NarrationProtagonistHint = {
+  name?: string
+  variantLabel?: string | null
+  appearance?: string | null
+}
+
+function inferProtagonistStageLabel(
+  text: string,
+  hints?: NarrationProtagonistHint[],
+): string | null {
+  const t = String(text || '')
+  if (/童年|儿时|小时候|幼年/.test(t)) return '童年'
+  if (/少年|青年|18岁|20岁|小伙|年轻/.test(t)) return '青年'
+  if (/中年|而立|40岁|50岁/.test(t)) return '中年'
+  if (/老年|晚年|花甲|白发|佝偻|拄拐/.test(t)) return '老年'
+  if (!hints?.length) return null
+  for (const hint of hints) {
+    const label = String(hint.variantLabel || '').trim().replace(/期$/, '')
+    if (label && t.includes(label)) return label
+  }
+  const primary = String(hints[0]?.variantLabel || '').trim().replace(/期$/, '')
+  return primary || null
+}
+
+function pickProtagonistAppearance(
+  hints?: NarrationProtagonistHint[],
+  stage?: string | null,
+): string {
+  if (!hints?.length) return ''
+  if (stage) {
+    const matched = hints.find(h => String(h.variantLabel || '').includes(stage))
+    if (matched?.appearance) return String(matched.appearance).trim()
+  }
+  return String(hints[0]?.appearance || '').trim()
+}
+
+/** 将剧情中的群众/路人描述统一为同款素体小人 */
+export function normalizeMinimalCrowdInPlot(plot?: string | null): string {
+  let text = String(plot || '').trim()
+  if (!text) return ''
+  const replacements: Array<[RegExp, string]> = [
+    [/几位年轻人/g, '几位素体小人'],
+    [/年轻人围/g, '几位素体小人围'],
+    [/与年轻人/g, '与几位素体小人'],
+    [/向顾客/g, '向几位素体小人'],
+    [/几位顾客/g, '几位素体小人'],
+    [/顾客围/g, '几位素体小人围'],
+    [/周围多人/g, '周围几位素体小人'],
+    [/路人匆匆/g, '几位素体小人匆匆'],
+    [/行人匆匆/g, '几位素体小人匆匆路过'],
+    [/围观群众/g, '围观的几位素体小人'],
+    [/围观者/g, '围观的素体小人'],
+    [/路人/g, '素体小人路人'],
+    [/群众/g, '几位素体小人'],
+    [/招揽顾客/g, '向围观的素体小人招揽'],
+    [/进店客人/g, '几位素体小人进店'],
+    [/店员/g, '素体小人店员'],
+  ]
+  for (const [pattern, replacement] of replacements) {
+    text = text.replace(pattern, replacement)
+  }
+  return text.replace(/素体小人素体小人/g, '素体小人')
+}
+
+function formatMinimalProtagonistPlot(
+  plot: string,
+  options?: {
+    narrationText?: string
+    protagonistHints?: NarrationProtagonistHint[]
+  },
+): string {
+  const plotPart = formatNarrationPlotForPrompt(plot)
+  if (!plotPart) return ''
+  if (/素体小人|白色圆头/.test(plotPart)) return normalizeMinimalCrowdInPlot(plotPart)
+
+  const narrationText = String(options?.narrationText || plotPart)
+  const stage = inferProtagonistStageLabel(narrationText, options?.protagonistHints)
+  const subject = stage ? `${stage}期素体小人` : '素体小人'
+
+  if (/几位年轻人|顾客围|路人|围观者|群众|行人/.test(plotPart) && !/素体小人/.test(plotPart)) {
+    if (/挑选|顾客|交易|摊位|摆摊/.test(plotPart)) {
+      return normalizeMinimalCrowdInPlot(`${subject}在摊位前忙碌经营，${plotPart}`)
+    }
+  }
+
+  if (/^(在|于|站在|坐在|蹲在|倚在|靠于)/.test(plotPart)) {
+    return normalizeMinimalCrowdInPlot(`${subject}${plotPart}`)
+  }
+  if (/^(推|离开|手持|向|整理|独自|迎面|挥手)/.test(plotPart)) {
+    return normalizeMinimalCrowdInPlot(`${subject}${plotPart}`)
+  }
+
+  const appearance = pickProtagonistAppearance(options?.protagonistHints, stage)
+  if (isRawNarrationText(plotPart) && appearance) {
+    const posture = appearance
+      .replace(/English tags:[\s\S]*/i, '')
+      .replace(new RegExp(NARRATION_MINIMAL_EYES, 'g'), '')
+      .trim()
+    if (posture && posture.length <= 60) {
+      return normalizeMinimalCrowdInPlot(
+        `${subject}${posture.startsWith('在') || posture.startsWith('坐') ? '' : '在画面中'}${posture}`,
+      )
+    }
+  }
+
+  if (/摊位|摆摊|店铺|门面|供销社|市场|夜市|杂货/.test(plotPart)) {
+    return normalizeMinimalCrowdInPlot(`${subject}在画面中${plotPart}`)
+  }
+  return normalizeMinimalCrowdInPlot(`${subject}${plotPart}`)
 }
 
 function resolveFullNarrationLines(options?: NarrationScenePromptOptions): string[] {
@@ -485,10 +690,20 @@ function extractGoodsFromSingleSentence(sentence: string): string | null {
   if (truck?.[1]?.trim()) {
     return shortenNarrationClause(truck[1].trim(), 18)
   }
-  if (!/批(?:发|了)|进(?:货|了)|卖|摆摊|进货/.test(s)) return null
+  if (!/批(?:发|了)|进(?:货|了)|卖|摆摊|进货|时髦/.test(s)) return null
   const batch = s.match(/批(?:发|了)(?:了)?([^，,。！？；]{2,20})/)
   if (batch?.[1]) {
     const g = normalizeGoodsLabel(batch[1])
+    if (g && g.length >= 2) return g
+  }
+  const stock = s.match(/进(?:货|了)(?:了)?([^，,。！？；]{2,20})/)
+  if (stock?.[1]) {
+    const g = normalizeGoodsLabel(stock[1])
+    if (g && g.length >= 2) return g
+  }
+  const trendy = s.match(/赶时髦(?:的)?([^，,。！？；]{2,16})/)
+  if (trendy?.[1]) {
+    const g = normalizeGoodsLabel(trendy[1])
     if (g && g.length >= 2) return g
   }
   return null
@@ -606,7 +821,8 @@ const PERSISTENT_VISUAL_PROPS: Array<[RegExp, string]> = [
 
 /** 与特定场景绑定的道具：仅当前段仍涉及该场景/动作时才保留 */
 const SCENE_BOUND_VISUAL_PROPS: Array<[RegExp, RegExp, string]> = [
-  [/自行车|二八杠|手推车/, /推.*车|自行车|二八杠|手推车/, '自行车'],
+  [/自行车|二八杠/, /推.*车|自行车|二八杠/, '二八杠自行车'],
+  [/手推车|板车/, /手推车|板车/, '手推车'],
   [/供销社/, /供销社/, '供销社'],
   [/批发市场/, /批发市场|批(?:发|了)|进货/, '批发市场货物'],
 ]
@@ -619,57 +835,163 @@ function extractPersistentVisualProps(text: string): string[] {
   return props
 }
 
-function collectRelevantContinuityProps(priorLines: string[], currentText: string): string[] {
+function pushContinuityProp(relevant: string[], raw: string): void {
+  const prop = String(raw || '').trim()
+  if (!prop) return
+  const parts = prop.split(/[与和、]/).map(p => p.trim()).filter(p => p.length >= 2)
+  for (const part of parts) {
+    if (!relevant.includes(part)) relevant.push(part)
+  }
+}
+
+function isMarketNarrationContext(text: string, sceneTags?: string[]): boolean {
+  if (sceneTags?.includes('market')) return true
+  return /夜市|摆地摊|摊位|摆摊|整理货物|卖|批(?:发|了)|顾客|围观|挑选|交易|展示货物|货物|商品|赶时髦/.test(text)
+}
+
+function collectGoodsFromNarrationLines(lines: string[]): string[] {
+  const goods: string[] = []
+  for (const line of lines) {
+    const extracted = extractGoodsFromSingleSentence(line)
+    if (extracted) pushContinuityProp(goods, extracted)
+    for (const prop of extractPersistentVisualProps(line)) {
+      pushContinuityProp(goods, prop)
+    }
+  }
+  return goods
+}
+
+function collectRelevantContinuityProps(
+  priorLines: string[],
+  currentText: string,
+  sceneTags?: string[],
+): string[] {
   const priorFull = priorLines.join('')
   const current = String(currentText || '').trim()
-  if (!current) return []
+  const contextText = priorFull + current
+  if (!contextText.trim()) return []
 
   const relevant: string[] = []
   for (const prop of extractPersistentVisualProps(current)) {
-    if (!relevant.includes(prop)) relevant.push(prop)
+    pushContinuityProp(relevant, prop)
   }
 
-  const isMarketScene = /夜市|摆地摊|摊位|摆摊|整理货物|卖|批(?:发|了)|顾客|围观/.test(current)
+  const isMarketScene = isMarketNarrationContext(contextText, sceneTags)
   if (isMarketScene && priorFull) {
-    for (const prop of extractPersistentVisualProps(priorFull)) {
-      if (relevant.includes(prop)) continue
-      if (/批|卖|进|摊|货|赶时髦|时髦/.test(priorFull)) relevant.push(prop)
+    const priorHasGoodsCue = /批|卖|进|摊|货|赶时髦|时髦|摆摊|地摊|夜市/.test(priorFull)
+    if (priorHasGoodsCue) {
+      for (const prop of extractPersistentVisualProps(priorFull)) {
+        pushContinuityProp(relevant, prop)
+      }
+      for (const goods of collectGoodsFromNarrationLines(priorLines)) {
+        pushContinuityProp(relevant, goods)
+      }
     }
   }
 
   for (const [, sceneRe, label] of SCENE_BOUND_VISUAL_PROPS) {
-    if (sceneRe.test(current) && !relevant.includes(label)) relevant.push(label)
+    if (!sceneRe.test(current)) continue
+    if (label === '批发市场货物' && relevant.length > 0) continue
+    if (!relevant.includes(label)) relevant.push(label)
   }
 
   return relevant.slice(0, 4)
 }
 
-function resolveActiveSceneFromParts(allParts: string[], currentText: string): string {
-  if (/卖|生意|顾客|赶时髦|摆摊|摆地摊|心里有数/.test(currentText)) {
+function resolveActiveSceneFromParts(
+  allParts: string[],
+  currentText: string,
+  sceneTags?: string[],
+): string {
+  const marketActive = isMarketNarrationContext(currentText, sceneTags)
+    || sceneTags?.includes('market')
+  if (marketActive) {
+    const stallScene = allParts.find(p => /夜市|摆地摊|摊位|市场/.test(p))
+    if (stallScene) return normalizeBracketContent(stallScene)
+    return '县城夜市街景与简化摊位'
+  }
+  if (/卖|生意|顾客|赶时髦|摆摊|摆地摊|心里有数|挑选|交易/.test(currentText)) {
     const stallScene = allParts.find(p => /夜市|摆地摊|摊位/.test(p))
     if (stallScene) return normalizeBracketContent(stallScene)
   }
   return normalizeBracketContent(resolvePrimaryScene(allParts))
 }
 
-function inferActiveSceneFromContext(currentText: string, priorLines: string[]): string {
-  let parts = extractScenePartsFromNarrationText(currentText)
-  if (parts.length) return resolveActiveSceneFromParts(parts, currentText)
+function reconcileSceneWithPlot(scene: string, plot: string, sceneTags: string[]): string {
+  const sceneText = String(scene || '').trim()
+  const plotText = String(plot || '').trim()
+  if (!plotText) return sceneText
+  const isGenericStreet = /日常街道|院落/.test(sceneText) && !/夜市|摊位|市场/.test(sceneText)
+  const plotIsMarket = /摊位|摆摊|顾客|展示|交易|挑选|招揽/.test(plotText)
+  if (isGenericStreet && (plotIsMarket || sceneTags.includes('market'))) {
+    return '县城夜市街景与简化摊位'
+  }
+  return sceneText
+}
 
+function inferActiveSceneFromContext(
+  currentText: string,
+  priorLines: string[],
+  sceneTags?: string[],
+): string {
   const contextLines = [...priorLines.slice(-4), currentText].filter(Boolean)
+  const contextText = contextLines.join('')
+  const tags = sceneTags?.length ? sceneTags : detectNarrationSceneTags(contextText)
+
+  let parts = extractScenePartsFromNarrationText(currentText)
+  if (parts.length) return resolveActiveSceneFromParts(parts, contextText, tags)
+
   const allParts: string[] = []
   for (const line of contextLines) {
     for (const p of extractScenePartsFromNarrationText(line)) {
       if (!allParts.includes(p)) allParts.push(p)
     }
   }
-  if (allParts.length) return resolveActiveSceneFromParts(allParts, currentText)
+  if (allParts.length) return resolveActiveSceneFromParts(allParts, contextText, tags)
 
-  const allText = contextLines.join('')
-  if (/卖|生意|顾客|摊|批|赶时髦/.test(allText)) {
+  if (isMarketNarrationContext(contextText, tags)) {
     return '县城夜市街景与简化摊位'
   }
   return ''
+}
+
+function pickPrimaryActionLine(lines: string[], sceneHint?: string): string {
+  if (!lines.length) return ''
+  const scene = String(sceneHint || '')
+  if (/供销社/.test(scene)) {
+    const supplyLine = lines.find(l => /供销社|辞|离开|铁饭碗/.test(l))
+    if (supplyLine) return supplyLine
+  }
+  const dated = /^\d{2,4}年|春天|夏天|秋天|冬天|春日|夏日|秋日|冬日/
+  const concrete = lines.find(l => !dated.test(l.trim()) && inferVisualPlotFromNarration(l))
+  return concrete || lines[lines.length - 1]
+}
+
+function reconcilePlotVehicles(plot: string, narrationText: string): string {
+  let text = String(plot || '').trim()
+  const narr = String(narrationText || '')
+  if (!text || !narr) return text
+
+  const mentionsCart = /手推车|板车|独轮车/.test(narr)
+  const mentionsBike = /自行车|二八杠/.test(narr)
+  const mentionsVehicle = mentionsCart || mentionsBike || /推.*车/.test(narr)
+
+  if (mentionsBike && !mentionsCart && /手推车/.test(text)) {
+    text = text
+      .replace(/推着手推车运送货物/g, '推着二八杠自行车轮廓前行')
+      .replace(/手推车/g, '二八杠自行车轮廓')
+  }
+
+  if (!mentionsVehicle && /手推车|自行车|二八杠/.test(text)) {
+    if (/供销社/.test(narr) && /辞|离开|铁饭碗/.test(narr)) {
+      return '素体小人离开供销社门口'
+    }
+    if (/供销社/.test(narr)) {
+      return '素体小人在供销社门口或营业大厅内站立行走'
+    }
+  }
+
+  return text
 }
 
 function contextualizePlotForScene(
@@ -688,16 +1010,16 @@ function contextualizePlotForScene(
   const goods = props.length ? props.slice(0, 3).join('与') : ''
   if (/交易|卖|顾客|生意|挑选|展示|讨价还价/.test(base)) {
     return goods
-      ? `在摊位前向顾客展示${goods}，与年轻人讨价还价`
-      : '在摊位前向顾客展示货物，与顾客交易挑选'
+      ? `在摊位前向几位素体小人展示${goods}，与几位素体小人讨价还价`
+      : '在摊位前向几位素体小人展示货物并交易挑选'
   }
   if (/整理.*货物|整理陈列|摆摊|招揽/.test(base)) {
     return goods ? `在摊位前整理陈列${goods}` : base
   }
   if (/自信站立|简化城市|从容应对|心里有数/.test(base)) {
     return goods
-      ? `在摊位前从容展示${goods}，继续招揽顾客`
-      : '在摊位前从容应对，继续招揽顾客'
+      ? `在摊位前从容展示${goods}，继续向围观的素体小人招揽`
+      : '在摊位前从容应对，继续向围观的素体小人招揽'
   }
   if (goods && !base.includes(goods)) {
     return `在摊位前展示${goods}，${base}`
@@ -716,22 +1038,35 @@ function appendPropsToVisualPlot(plot: string, props: string[]): string {
   return base
 }
 
-function buildFocusedScenePlot(sentences: string[], priorLines?: string[], sceneHint?: string): string {
+function buildFocusedScenePlot(
+  sentences: string[],
+  priorLines?: string[],
+  sceneHint?: string,
+  protagonistHints?: NarrationProtagonistHint[],
+): string {
   const lines = sentences.map(s => String(s || '').trim()).filter(Boolean)
   if (!lines.length) return ''
   const prior = priorLines || []
   const currentText = lines.join('')
   const contextText = prior.slice(-4).join('') + currentText
   const sceneTags = detectNarrationSceneTags(contextText)
-  const props = collectRelevantContinuityProps(prior, currentText)
-  const scene = sceneHint || inferActiveSceneFromContext(currentText, prior)
+  const props = collectRelevantContinuityProps(prior, currentText, sceneTags)
+  const scene = sceneHint || inferActiveSceneFromContext(currentText, prior, sceneTags)
 
-  let plot = inferVisualPlotFromNarration(currentText, sceneTags)
+  const primaryLine = pickPrimaryActionLine(lines, scene)
+  let plot = inferVisualPlotFromNarration(primaryLine, sceneTags)
+  if (!plot || isRawNarrationText(plot)) {
+    plot = inferVisualPlotFromNarration(currentText, sceneTags)
+  }
   if (!plot || isRawNarrationText(plot)) {
     plot = normalizeBracketContent(mergeNarrationPlotSentences(lines))
   }
   plot = contextualizePlotForScene(plot, scene, props, sceneTags)
-  return appendPropsToVisualPlot(plot, props)
+  plot = reconcilePlotVehicles(plot, currentText)
+  return formatMinimalProtagonistPlot(plot, {
+    narrationText: currentText,
+    protagonistHints,
+  })
 }
 
 function narrationParagraphToVisualPlot(sentences: string[], priorLines?: string[]): string {
@@ -762,38 +1097,57 @@ function resolvePriorNarrationLines(options?: NarrationScenePromptOptions): stri
   return []
 }
 
+function inferFixturesDisplay(scene: string, props: string[], plot: string, sceneTags: string[]): string {
+  if (!props.length) return ''
+  const goods = props.slice(0, 3).join('与')
+  const ctx = `${scene}${plot}`
+  const hasFixture = /摊位|地摊|货架|柜台|桌面|展台|铺面|店铺|店面|门店|市场|铺子/.test(ctx)
+    || sceneTags.includes('market') || sceneTags.includes('shop') || sceneTags.includes('wholesale')
+  if (!hasFixture) return ''
+  if (/摊位|地摊|夜市|摆摊/.test(ctx)) return `摊位上陈列${goods}`
+  if (/货架|批发市场|仓库/.test(ctx)) return `货架与堆面上摆放${goods}`
+  if (/柜台|收银/.test(ctx)) return `柜台上摆放${goods}`
+  if (/桌面|书桌|餐桌/.test(ctx)) return `桌面上摆放${goods}`
+  if (/店铺|店面|门店|门面/.test(ctx)) return `店内货架陈列${goods}`
+  return `可见陈设包括${goods}`
+}
+
 export function parseNarrationIntoScenePlot(
   input: string | string[],
   options?: NarrationScenePromptOptions,
-): { scene: string; plot: string } {
+): { scene: string; atmosphere: string; fixtures: string; plot: string } {
   const lines = (Array.isArray(input)
     ? input
     : String(input || '').split(/[。！？]+/))
     .map(s => String(s || '').trim())
     .filter(Boolean)
-  if (!lines.length) return { scene: '', plot: '' }
+  if (!lines.length) return { scene: '', atmosphere: '', fixtures: '', plot: '' }
 
   const fullText = lines.join('')
   const priorLines = resolvePriorNarrationLines(options)
-  let scene = inferActiveSceneFromContext(fullText, priorLines)
+  const contextText = [...priorLines.slice(-4), fullText].join('')
+  const sceneTags = detectNarrationSceneTags(contextText)
+  const props = collectRelevantContinuityProps(priorLines, fullText, sceneTags)
+  let scene = inferActiveSceneFromContext(fullText, priorLines, sceneTags)
   if (!scene) {
     const allParts = extractScenePartsFromNarrationText(fullText)
     scene = normalizeBracketContent(resolvePrimaryScene(allParts))
       || (/万元户|摆地摊|赚钱|创业/.test(fullText) ? '简化县城街景，寓意经营成功氛围' : '')
   }
-  return {
-    scene,
-    plot: buildFocusedScenePlot(lines, priorLines, scene),
-  }
+  const plot = buildFocusedScenePlot(lines, priorLines, scene, options?.protagonistHints)
+  scene = reconcileSceneWithPlot(scene, plot, sceneTags)
+  const fixtures = inferFixturesDisplay(scene, props, plot, sceneTags)
+  const atmosphere = inferNarrationAtmosphereFromText(fullText, scene)
+  return { scene, fixtures, plot, atmosphere }
 }
 
 export function buildNarrationSceneImagePromptFromSentences(
   sentences: string | string[],
   options?: NarrationScenePromptOptions,
 ): string {
-  const { scene, plot } = parseNarrationIntoScenePlot(sentences, options)
-  if (!scene && !plot) return ''
-  return assembleNarrationUniversalScenePrompt(scene, plot)
+  const { scene, fixtures, plot, atmosphere } = parseNarrationIntoScenePlot(sentences, options)
+  if (!scene && !fixtures && !plot && !atmosphere) return ''
+  return assembleNarrationUniversalScenePrompt(scene, plot, { fixtures, atmosphere })
 }
 
 function enrichNarrationVisualParts(scene: string, plot: string, fallback = ''): { scene: string; plot: string } {
@@ -835,11 +1189,32 @@ export function extractNarrationPromptContentCore(raw?: string | null): string {
     ].filter(Boolean).join('，'))
   }
 
+  const subjectBracket = text.match(/【画面主体[：:]\s*([^】]+)】/)
+  const eraSceneBracket = text.match(/【年代场景[：:]\s*([^】]+)】/)
+  const actionBracket = text.match(/【核心细节动作[：:]\s*([^】]+)】/)
+  const lightingBracket = text.match(/【光影色调[：:]\s*([^】]+)】/)
+  const cameraBracket = text.match(/【镜头视角[：:]\s*([^】]+)】/)
+  const textureBracket = text.match(/【质感要求[：:]\s*([^】]+)】/)
+  if (subjectBracket || eraSceneBracket || actionBracket || lightingBracket || cameraBracket || textureBracket) {
+    return sanitizeSceneImagePrompt([
+      subjectBracket?.[1]?.trim(),
+      eraSceneBracket?.[1]?.trim(),
+      actionBracket?.[1]?.trim(),
+      lightingBracket?.[1]?.trim(),
+      cameraBracket?.[1]?.trim(),
+      textureBracket?.[1]?.trim(),
+    ].filter(Boolean).join('，'))
+  }
+
   const sceneBracket = text.match(/【场景[：:]\s*([^】]+)】/)
+  const atmosphereBracket = text.match(/【环境气氛[：:]\s*([^】]+)】/)
+  const fixturesBracket = text.match(/【陈设[：:]\s*([^】]+)】/)
   const plotBracket = text.match(/【剧情[：:]\s*([^】]+)】/)
-  if (sceneBracket || plotBracket) {
+  if (sceneBracket || atmosphereBracket || fixturesBracket || plotBracket) {
     return sanitizeSceneImagePrompt([
       sceneBracket?.[1]?.trim(),
+      atmosphereBracket?.[1]?.trim(),
+      fixturesBracket?.[1]?.trim(),
       plotBracket?.[1]?.trim(),
     ].filter(Boolean).join('，'))
   }
@@ -954,12 +1329,33 @@ export function applyNarrationStyleToPrompt(
   return sanitizeSceneImagePrompt(prompt)
 }
 
+function inferMinimalSubjectFromPlot(plot: string): string {
+  const text = String(plot || '').trim()
+  if (!text) return '素体小人主人公'
+  const stageMatch = text.match(/(青年|中年|老年)期?素体小人/)
+  if (stageMatch) return `${stageMatch[0]}与同框素体小人`
+  if (/素体小人/.test(text)) {
+    const m = text.match(/素体小人[^，,。]{0,24}/)
+    if (m) return m[0]
+  }
+  return '素体小人主人公'
+}
+
 export function assembleNarrationUniversalScenePrompt(
   scene: string,
   plot: string,
-  options?: { title?: boolean },
+  options?: {
+    title?: boolean
+    fixtures?: string
+    atmosphere?: string
+    subject?: string
+    camera?: string
+    texture?: string
+  },
 ): string {
   const scenePart = sanitizeSceneImagePrompt(scene)
+  const atmospherePart = formatNarrationPlotForPrompt(options?.atmosphere || '')
+  const fixturesPart = formatNarrationPlotForPrompt(options?.fixtures || '')
   const plotPart = formatNarrationPlotForPrompt(plot)
   let body = ''
   if (options?.title) {
@@ -969,9 +1365,17 @@ export function assembleNarrationUniversalScenePrompt(
       '中央预留叠字区域',
     ].filter(Boolean).join('，')
   } else {
+    const subjectText = formatNarrationPlotForPrompt(
+      options?.subject || inferMinimalSubjectFromPlot(plotPart),
+    )
+    const eraSceneText = [scenePart, fixturesPart].filter(Boolean).join('，')
     body = [
-      scenePart && ensureNarrationBracket('场景', scenePart),
-      plotPart && ensureNarrationBracket('剧情', plotPart),
+      subjectText && ensureNarrationBracket('画面主体', subjectText),
+      eraSceneText && ensureNarrationBracket('年代场景', eraSceneText),
+      plotPart && ensureNarrationBracket('核心细节动作', plotPart),
+      atmospherePart && ensureNarrationBracket('光影色调', atmospherePart),
+      ensureNarrationBracket('镜头视角', options?.camera || NARRATION_DEFAULT_CAMERA_PROMPT),
+      ensureNarrationBracket('质感要求', options?.texture || NARRATION_MINIMAL_TEXTURE_PROMPT),
     ].filter(Boolean).join('，')
   }
   if (!body) return ''
@@ -1078,23 +1482,16 @@ const SCENE_PROMPT_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\d{2,4}\s*年(?:的)?(?:春|夏|秋|冬)?天?/g, ''],
   [/批了一车[^，,；;]*/g, '批了一车货物'],
   [/时髦的[^，,；;]*/g, ''],
-  [/花衬衫|喇叭裤|蛤蟆镜|太阳镜|墨镜|aviator\s+sunglasses?/gi, ''],
   [/floral\s+shirt|bell-bottom|leather\s+shoes?|business\s+suit|wedding\s+dress/gi, ''],
   [/西装|革履|皮鞋|灰布衣服|中山装|唐装|婚纱|喜字|横幅|霓虹/g, ''],
-  [/摊位悬挂[^，,；;]*/g, '摊位'],
   [/满载[^，,；;]*/g, ''],
-  [/整理[^，,；;]{0,8}(喇叭裤|花衬衫|商品)/g, '整理货物'],
-  [/挑选[^，,；;]{0,8}(喇叭裤|花衬衫)/g, '挑选商品'],
-  [/递给[^，,；;]{0,8}(花衬衫|商品)/g, '递出商品'],
   [/戴[，,、\s]*(?=推|站|坐|走|$)/g, ''],
   [/脸上有[，,、\s]*/g, ''],
-  [/二八杠自行车|自行车靠在[^，,；;]*/g, ''],
-  [/靠在摊位旁/g, ''],
-  [/推着[^，,；;]{0,12}自行车/g, '推着手推车'],
+  [/二八杠自行车/g, '二八杠自行车轮廓'],
+  [/自行车靠在[^，,；;]*/g, '自行车靠在一旁'],
+  [/推着[^，,；;]{0,12}自行车/g, '推着二八杠自行车轮廓'],
   [/推着手推车/g, '推着手推车'],
   [/，停靠一旁/g, ''],
-  [/推着(?!手推车)/g, '推着手推车'],
-  [/推着，/g, '推着手推车，'],
   [/\d{2,4}年代|八十年代|九十年代/g, ''],
   [/2000年代|二十世纪/g, ''],
   [/男性角色|女性角色|年轻顾客|老年男性|老年女性|顾客|店员/g, '素体小人'],
@@ -1125,12 +1522,13 @@ export function sanitizeSceneImagePrompt(prompt?: string | null): string {
 
 export function buildMinimalPortraitPostureHint(variantLabel?: string | null): string {
   const eyes = NARRATION_MINIMAL_EYES
+  const size = NARRATION_MINIMAL_BODY_SIZE_SPEC
   const label = String(variantLabel || '').trim()
-  if (/童年|幼年|孩童|儿时|幼/.test(label)) return `小型素体小人，${eyes}，站立，简单活泼姿态`
-  if (/青年|少年|年轻/.test(label)) return `标准素体小人，${eyes}，站立或行走，可推手推车或自行车轮廓作道具`
-  if (/中年/.test(label)) return `略宽素体小人，${eyes}，坐于柜台后，放松姿态，手持茶杯`
-  if (/老年|晚年|垂暮|苍老|年迈/.test(label)) return `略佝偻素体小人，${eyes}，坐于凳上，手持圆扇`
-  return `标准素体小人，${eyes}，中性站立姿态`
+  if (/童年|幼年|孩童|儿时|幼/.test(label)) return `略矮小素体小人，${eyes}，${size}，总高约2.5头高，站立，简单活泼姿态`
+  if (/青年|少年|年轻/.test(label)) return `标准素体小人，${eyes}，${size}，站立或行走，可推二八杠自行车轮廓作道具`
+  if (/中年/.test(label)) return `标准素体小人，${eyes}，三头高躯干略宽，坐于柜台后，手持茶杯`
+  if (/老年|晚年|垂暮|苍老|年迈/.test(label)) return `略佝偻素体小人，${eyes}，总高约2.8头高，简化小胡子轮廓，坐于凳上，手持圆扇`
+  return `标准素体小人，${eyes}，${size}，中性站立姿态`
 }
 
 export function buildNarrationPortraitPromptContent(scene: string, plot: string): string {
@@ -1139,7 +1537,12 @@ export function buildNarrationPortraitPromptContent(scene: string, plot: string)
 
 function extractPromptBracketParts(raw: string): {
   scene: string
+  atmosphere: string
+  fixtures: string
   plot: string
+  subject: string
+  camera: string
+  texture: string
   title: boolean
 } {
   const text = String(raw || '').trim()
@@ -1148,20 +1551,59 @@ function extractPromptBracketParts(raw: string): {
   if (titleScene || titlePlot || /预留中央叠字|中央预留叠字/.test(text)) {
     return {
       scene: titleScene?.[1]?.trim() || '',
+      atmosphere: '',
+      fixtures: '',
       plot: titlePlot?.[1]?.trim() || '',
+      subject: '',
+      camera: '',
+      texture: '',
       title: true,
     }
   }
-  const scene = text.match(/【场景[：:]\s*([^】]+)】/)
-  const plot = text.match(/【剧情[：:]\s*([^】]+)】/)
-  if (scene || plot) {
+  const subject = text.match(/【画面主体[：:]\s*([^】]+)】/)
+  const eraScene = text.match(/【年代场景[：:]\s*([^】]+)】/)
+  const action = text.match(/【核心细节动作[：:]\s*([^】]+)】/)
+  const lighting = text.match(/【光影色调[：:]\s*([^】]+)】/)
+  const camera = text.match(/【镜头视角[：:]\s*([^】]+)】/)
+  const texture = text.match(/【质感要求[：:]\s*([^】]+)】/)
+  if (subject || eraScene || action || lighting || camera || texture) {
     return {
-      scene: scene?.[1]?.trim() || '',
-      plot: plot?.[1]?.trim() || '',
+      scene: eraScene?.[1]?.trim() || '',
+      atmosphere: lighting?.[1]?.trim() || '',
+      fixtures: '',
+      plot: action?.[1]?.trim() || '',
+      subject: subject?.[1]?.trim() || '',
+      camera: camera?.[1]?.trim() || '',
+      texture: texture?.[1]?.trim() || '',
       title: false,
     }
   }
-  return { scene: '', plot: '', title: /片头/.test(text) }
+  const scene = text.match(/【场景[：:]\s*([^】]+)】/)
+  const atmosphere = text.match(/【环境气氛[：:]\s*([^】]+)】/)
+  const fixtures = text.match(/【陈设[：:]\s*([^】]+)】/)
+  const plot = text.match(/【剧情[：:]\s*([^】]+)】/)
+  if (scene || atmosphere || fixtures || plot) {
+    return {
+      scene: scene?.[1]?.trim() || '',
+      atmosphere: atmosphere?.[1]?.trim() || '',
+      fixtures: fixtures?.[1]?.trim() || '',
+      plot: plot?.[1]?.trim() || '',
+      subject: '',
+      camera: '',
+      texture: '',
+      title: false,
+    }
+  }
+  return {
+    scene: '',
+    atmosphere: '',
+    fixtures: '',
+    plot: '',
+    subject: '',
+    camera: '',
+    texture: '',
+    title: /片头/.test(text),
+  }
 }
 
 export type FinalizeNarrationPromptOptions = {
@@ -1173,6 +1615,7 @@ export type FinalizeNarrationPromptOptions = {
   titleHook?: string
   titleFull?: string | null
   titleBodySentences?: string[]
+  protagonistHints?: NarrationProtagonistHint[]
 }
 
 export function finalizeNarrationImagePrompt(
@@ -1181,10 +1624,12 @@ export function finalizeNarrationImagePrompt(
 ): string {
   const narrationLines = options?.narrationLines?.map(s => s.trim()).filter(Boolean)
   const raw = String(prompt || '').trim()
+  if (shouldPreserveRawNarrationPrompt(raw)) return raw
+
   const isTitlePrompt = !!options?.titleHook
     || /片头|预留中央叠字|中央预留叠字|【片头背景场景|【主题氛围/.test(raw)
 
-  if (narrationLines?.length) {
+  if (narrationLines?.length && !raw) {
     if (isTitlePrompt) {
       const hook = options?.titleHook || narrationLines.join('')
       return buildNarrationTitleImagePromptContent(hook, {
@@ -1196,6 +1641,7 @@ export function finalizeNarrationImagePrompt(
     return buildNarrationSceneImagePromptFromSentences(narrationLines, {
       fullNarrationLines: options?.fullNarrationLines ?? options?.priorNarrationLines,
       timelineUpToIndex: options?.timelineUpToIndex,
+      protagonistHints: options?.protagonistHints,
     })
   }
 
@@ -1221,7 +1667,7 @@ export function finalizeNarrationImagePrompt(
   }
 
   const bracketParts = extractPromptBracketParts(raw)
-  const core = bracketParts.scene || bracketParts.plot
+  const core = bracketParts.scene || bracketParts.fixtures || bracketParts.plot || bracketParts.subject
     ? ''
     : extractNarrationPromptContentCore(raw)
 
@@ -1238,12 +1684,26 @@ export function finalizeNarrationImagePrompt(
     return assembleNarrationUniversalScenePrompt(scene, atmosphere, { title: true })
   }
 
-  if (bracketParts.scene || bracketParts.plot) {
+  if (bracketParts.scene || bracketParts.fixtures || bracketParts.plot || bracketParts.subject) {
     const enriched = enrichNarrationVisualParts(
       sanitizeSceneImagePrompt(bracketParts.scene),
-      formatNarrationPlotForPrompt(bracketParts.plot),
+      formatMinimalProtagonistPlot(
+        formatNarrationPlotForPrompt(bracketParts.plot),
+        {
+          narrationText: narrationLines?.join('') || bracketParts.plot,
+          protagonistHints: options?.protagonistHints,
+        },
+      ),
     )
-    return assembleNarrationUniversalScenePrompt(enriched.scene, enriched.plot)
+    const narrationText = narrationLines?.join('') || ''
+    return assembleNarrationUniversalScenePrompt(enriched.scene, enriched.plot, {
+      fixtures: formatNarrationPlotForPrompt(bracketParts.fixtures),
+      atmosphere: bracketParts.atmosphere
+        || inferNarrationAtmosphereFromText(narrationText, enriched.scene),
+      subject: bracketParts.subject,
+      camera: bracketParts.camera,
+      texture: bracketParts.texture,
+    })
   }
 
   if (!core) return ''
@@ -1252,6 +1712,31 @@ export function finalizeNarrationImagePrompt(
   if (enriched.scene && enriched.plot) return assembleNarrationUniversalScenePrompt(enriched.scene, enriched.plot)
   if (enriched.plot) return assembleNarrationUniversalScenePrompt(enriched.scene, enriched.plot)
   return assembleNarrationUniversalScenePrompt(enriched.scene || core, enriched.plot)
+}
+
+/** LLM 配图 prompt 原样落库、原样生图 */
+export const NARRATION_USE_RAW_LLM_PROMPTS = true
+
+/** 是否为六维（或两宫格六维）AI 配图 prompt */
+export function isStoredNarrationImagePromptComplete(raw?: string | null): boolean {
+  const text = String(raw || '').trim()
+  if (!text) return false
+  if (/【(年代场景|画面主体|核心细节动作)[：:]/.test(text)) return true
+  return /【左格[：:]/.test(text) && /【(画面主体|年代场景)[：:]/.test(text)
+}
+
+/** 纯 AI 模式下是否应原样保留 prompt */
+export function shouldPreserveRawNarrationPrompt(raw?: string | null): boolean {
+  return NARRATION_USE_RAW_LLM_PROMPTS && !!String(raw || '').trim()
+}
+
+/** 配图 prompt：有内容则原样返回（AI 落库文本不做规则清洗） */
+export function resolveNarrationImagePrompt(
+  prompt?: string | null,
+  _style?: string | null,
+  _options?: FinalizeNarrationPromptOptions,
+): string {
+  return String(prompt || '').trim()
 }
 
 export function extractTitleHook(title: string) {

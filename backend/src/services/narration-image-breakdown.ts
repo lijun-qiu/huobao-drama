@@ -1,20 +1,9 @@
 import { asc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import {
-  buildNarrationTitleImagePromptContent,
-  finalizeNarrationImagePrompt,
-  isNarrationMinimalStyle,
-  sanitizeSceneImagePrompt,
-} from '../constants/art-styles.js'
-import { resolveEpisodeTextModel } from '../constants/text-models.js'
-import {
-  buildTitleImagePrompt,
-  extractTitleHook,
-  resolveTitleVisualHook,
-} from './narration-breakdown.js'
+import { resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
+import { resolveTitleVisualHook } from './narration-breakdown.js'
 import {
   buildNarrationImageMeta,
-  buildParagraphImagePrompt,
   parseNarrationImageMeta,
   summarizeSceneMainContent,
 } from './narration-image.js'
@@ -22,7 +11,7 @@ import {
   getEpisodeVisualCharacters,
   linkStoryboardCharactersFromText,
 } from './narration-characters.js'
-import { buildNarrationParagraphs, type NarrationParagraph } from './narration-paragraph.js'
+import { buildNarrationParagraphsAsync, type NarrationParagraph } from './narration-paragraph.js'
 import {
   generateParagraphImagePromptsWithLLM,
   generateTitleImagePromptWithLLM,
@@ -30,6 +19,11 @@ import {
   type ImageDetectMode,
   type NarrationSentenceItem,
 } from './narration-scene-detect.js'
+import {
+  createNarrationImageBreakdownProgressReporter,
+  startNarrationImageBreakdownProgress,
+  updateNarrationImageBreakdownProgress,
+} from './narration-image-breakdown-progress.js'
 import { now } from '../utils/response.js'
 
 function storyboardNarrationSentence(sb: {
@@ -47,6 +41,10 @@ export async function breakdownNarrationImages(
   style = 'comic',
   imageDetectMode: ImageDetectMode = 'paragraph',
 ) {
+  startNarrationImageBreakdownProgress(episodeId)
+  const reportProgress = createNarrationImageBreakdownProgressReporter(episodeId)
+
+  try {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error('Episode not found')
 
@@ -77,21 +75,33 @@ export async function breakdownNarrationImages(
     }
   })
   const allBodySentences = sentenceItems.map(item => item.sentence)
+  const textModel = resolveEpisodeTextModel(ep)
+  const textThinking = resolveEpisodeTextThinking(ep)
 
-  const paragraphs = bodyStoryboards.length
-    ? buildNarrationParagraphs(sentenceItems, imageDetectMode)
-    : []
+  const { paragraphs, detectSource } = bodyStoryboards.length
+    ? await buildNarrationParagraphsAsync(sentenceItems, {
+      imageDetectMode,
+      textModel,
+      textThinking,
+      style,
+      fullNarrationLines: allBodySentences,
+    })
+    : { paragraphs: [] as NarrationParagraph[], detectSource: 'balanced' as const }
 
-  const paragraphPromptByAnchor = new Map<number, { content: string; prompt: string; layout: 'single' | 'diptych' }>()
+  reportProgress({
+    phase: 'detecting',
+    message: paragraphs.length
+      ? `已识别 ${paragraphs.length} 段配图，准备生成 AI 文案…`
+      : '换镜检测完成，准备生成片头文案…',
+    percent: 12,
+    paragraph_count: paragraphs.length,
+  })
+
+  const paragraphMetaByAnchor = new Map<number, { content: string; layout: 'single' | 'diptych' }>()
   paragraphs.forEach((para) => {
     const imageLines = mergeStoryboardLinesForImagePrompt(para.sentences)
-    const promptOptions = {
-      fullNarrationLines: allBodySentences,
-      timelineUpToIndex: para.startIndex,
-    }
-    paragraphPromptByAnchor.set(para.startIndex, {
+    paragraphMetaByAnchor.set(para.startIndex, {
       content: summarizeSceneMainContent(imageLines),
-      prompt: buildParagraphImagePrompt(imageLines, para.layout, style, promptOptions),
       layout: para.layout,
     })
   })
@@ -101,19 +111,14 @@ export async function breakdownNarrationImages(
     : null
   const titleFull = firstTitleMeta?.title_full || null
   const titleVisualHook = resolveTitleVisualHook(titleFull, firstTitleMeta?.title_hook)
-
-  let imagePromptSource: 'paragraph+llm' | 'paragraph' = 'paragraph'
-  const titleCtx = { titleFull, bodySentences: allBodySentences }
-  let titleImagePrompt = titleVisualHook
-    ? (isNarrationMinimalStyle(style)
-      ? buildNarrationTitleImagePromptContent(titleVisualHook, titleCtx)
-      : buildTitleImagePrompt(titleVisualHook, style, titleCtx))
-    : null
   const episodeCharacters = getEpisodeVisualCharacters(episodeId, ep.dramaId)
-  const textModel = resolveEpisodeTextModel(ep)
 
-  const llmPrompts = (paragraphs.length || titleVisualHook)
-    ? await generateParagraphImagePromptsWithLLM(
+  const paragraphPromptByAnchor = new Map<number, { content: string; prompt: string; layout: 'single' | 'diptych' }>()
+  let titleImagePrompt: string | null = null
+  const needsLlmPrompts = paragraphs.length > 0 || !!titleVisualHook
+
+  if (needsLlmPrompts) {
+    const llmPrompts = await generateParagraphImagePromptsWithLLM(
       paragraphs.map((para: NarrationParagraph) => ({
         index: para.index,
         startIndex: para.startIndex,
@@ -125,60 +130,59 @@ export async function breakdownNarrationImages(
         titleFull,
         style,
         textModel,
+        textThinking,
         characters: episodeCharacters,
         fullNarrationLines: allBodySentences,
+        onProgress: reportProgress,
       },
     )
-    : null
 
-  if (llmPrompts) {
-    imagePromptSource = 'paragraph+llm'
-    if (llmPrompts.titlePrompt) {
-      titleImagePrompt = isNarrationMinimalStyle(style)
-        ? finalizeNarrationImagePrompt(llmPrompts.titlePrompt, {
-          titleHook: titleVisualHook || undefined,
-          titleFull,
-          titleBodySentences: allBodySentences,
-        })
-        : llmPrompts.titlePrompt
+    if (!llmPrompts) {
+      throw new Error('配图 AI 文案生成失败')
     }
-    paragraphs.forEach((para) => {
-      const llmPrompt = llmPrompts.promptsByStartIndex.get(para.startIndex)
-      if (!llmPrompt) return
-      const imageNarrationLines = mergeStoryboardLinesForImagePrompt(para.sentences)
+
+    for (const para of paragraphs) {
+      const llmPrompt = String(llmPrompts.promptsByStartIndex.get(para.startIndex) || '').trim()
+      if (!llmPrompt) {
+        throw new Error(`配图 AI 未返回第 ${para.index + 1} 段的 image_prompt`)
+      }
+      const meta = paragraphMetaByAnchor.get(para.startIndex)
+      if (!meta) continue
       paragraphPromptByAnchor.set(para.startIndex, {
-        content: summarizeSceneMainContent(imageNarrationLines),
-        prompt: isNarrationMinimalStyle(style)
-          ? finalizeNarrationImagePrompt(llmPrompt, {
-            narrationLines: imageNarrationLines,
-            fullNarrationLines: allBodySentences,
-            timelineUpToIndex: para.startIndex,
-          })
-          : sanitizeSceneImagePrompt(llmPrompt),
-        layout: para.layout,
+        content: meta.content,
+        prompt: llmPrompt,
+        layout: meta.layout,
       })
-    })
-  }
+    }
 
-  if (titleVisualHook && !llmPrompts?.titlePrompt) {
-    const titleLlm = await generateTitleImagePromptWithLLM({
-      titleHook: titleVisualHook,
-      titleFull,
-      bodySentences: allBodySentences,
-      style,
-      textModel,
-    })
-    if (titleLlm) {
-      titleImagePrompt = isNarrationMinimalStyle(style)
-        ? finalizeNarrationImagePrompt(titleLlm, {
-          titleHook: titleVisualHook || undefined,
-          titleFull,
-          titleBodySentences: allBodySentences,
+    if (titleVisualHook) {
+      titleImagePrompt = String(llmPrompts.titlePrompt || '').trim() || null
+      if (!titleImagePrompt) {
+        reportProgress({
+          phase: 'title',
+          message: '正在生成片头配图文案…',
+          percent: 88,
         })
-        : titleLlm
-      if (imagePromptSource === 'paragraph') imagePromptSource = 'paragraph+llm'
+        titleImagePrompt = await generateTitleImagePromptWithLLM({
+          titleHook: titleVisualHook,
+          titleFull,
+          bodySentences: allBodySentences,
+          style,
+          textModel,
+          textThinking,
+        })
+      }
+      if (!titleImagePrompt?.trim()) {
+        throw new Error('片头配图 AI 文案生成失败')
+      }
     }
   }
+
+  reportProgress({
+    phase: 'saving',
+    message: '正在写入分镜数据…',
+    percent: 96,
+  })
 
   const ts = now()
   let imageNeededCount = 0
@@ -240,15 +244,33 @@ export async function breakdownNarrationImages(
     }
   })
 
+  reportProgress({
+    status: 'completed',
+    phase: 'done',
+    message: '配图分镜完成',
+    percent: 100,
+    paragraph_count: paragraphs.length,
+  })
+
   return {
     paragraph_count: paragraphs.length,
     diptych_count: diptychCount,
     image_needed_count: imageNeededCount,
     title_image_count: titleStoryboards.length ? 1 : 0,
     title_hook: titleVisualHook,
-    image_detect_source: imagePromptSource,
-    image_prompt_source: imagePromptSource === 'paragraph+llm' ? 'llm' : 'template',
+    image_detect_source: detectSource,
+    image_prompt_source: needsLlmPrompts ? 'llm' : null,
     image_detect_mode: imageDetectMode === 'balanced' || imageDetectMode === 'conservative' ? 'paragraph' : imageDetectMode,
     body_storyboard_count: bodyStoryboards.length,
+  }
+  } catch (err: any) {
+    const message = String(err?.message || err || '配图分镜失败')
+    updateNarrationImageBreakdownProgress(episodeId, {
+      status: 'failed',
+      phase: 'error',
+      message,
+      error: message,
+    })
+    throw err
   }
 }

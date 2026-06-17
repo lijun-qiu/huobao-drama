@@ -1,15 +1,10 @@
 import {
   artStylePrompt,
-  buildNarrationDiptychImagePromptContent,
-  buildNarrationSceneImagePromptFromSentences,
-  buildNarrationTitleImagePromptContent,
   mergeStoryboardLinesForImagePrompt,
   isNarrationMinimalStyle,
-  resolveTitleVisualHook,
-  sanitizeSceneImagePrompt,
+  resolveNarrationImagePrompt,
   appendToNarrationBracket,
-  finalizeNarrationImagePrompt,
-  SCENE_STYLE_GUARD,
+  NARRATION_USE_RAW_LLM_PROMPTS,
 } from '~/composables/useArtStyles'
 
 export type ProductionMode = 'drama' | 'narration'
@@ -17,15 +12,35 @@ export type ProductionMode = 'drama' | 'narration'
 export const DEFAULT_IMAGE_MODEL = 'gpt-image-2-all'
 
 export const DEFAULT_TEXT_MODEL = 'deepseek-v4-pro'
+export const DEFAULT_TEXT_THINKING = true
 
 export const TEXT_MODEL_OPTIONS = [
-  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent，OpenAI 兼容）' },
+  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent）' },
   { value: 'gpt-4o', label: 'GPT-4o · OpenAI 兼容' },
 ] as const
 
 export function resolveEpisodeTextModel(ep?: { text_model?: string | null; textModel?: string | null } | null) {
   const picked = String(ep?.text_model || ep?.textModel || '').trim()
   return picked || DEFAULT_TEXT_MODEL
+}
+
+export function textModelSupportsThinking(model?: string | null): boolean {
+  const m = String(model || '').trim().toLowerCase()
+  return m.includes('deepseek')
+}
+
+export function resolveEpisodeTextThinking(
+  ep?: { text_thinking?: boolean | number | null; textThinking?: boolean | number | null } | null,
+  bodyValue?: boolean | number | string | null,
+): boolean {
+  if (bodyValue !== undefined && bodyValue !== null && bodyValue !== '') {
+    if (bodyValue === false || bodyValue === 0 || bodyValue === '0') return false
+    if (bodyValue === true || bodyValue === 1 || bodyValue === '1') return true
+  }
+  const stored = ep?.text_thinking ?? ep?.textThinking
+  if (stored === false || stored === 0) return false
+  if (stored === true || stored === 1) return true
+  return DEFAULT_TEXT_THINKING
 }
 
 export const IMAGE_MODEL_OPTIONS = [
@@ -126,7 +141,7 @@ export function parseDramaMetadata(drama: any) {
 
 export function narrationStoryboardPrompt(style = 'comic') {
   const styleHint = isNarrationMinimalStyle(style)
-    ? `${NARRATION_IMAGE_STYLE_CORE}。禁止在 image_prompt 中写年代/年份和具体服装描述；人物统一为白色圆头素体小人且必须有两个小黑点眼睛，只写动作姿态。`
+    ? `${NARRATION_IMAGE_STYLE_CORE}。通用素体尺寸：圆头约占身高三分之一、成人三头高简笔比例；禁止写年代/服装；仅人生阶段可微调胖瘦/佝偻/小胡子，只写动作姿态。`
     : `${artStylePrompt(style, 'agent')}。`
   return [
     '这是旁白解说视频，必须按「一句旁白 = 一个镜头」拆分，严禁把多句旁白合并到同一镜头。',
@@ -335,36 +350,11 @@ export function collectBodyNarrationLineIndex(storyboards: any[], currentSb: any
 
 export function buildNarrationImagePrompt(sb: any, style = 'comic', allSbs?: any[]) {
   if (!narrationShotNeedsOwnImage(sb)) return ''
+  const storedPrompt = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
+  if (!storedPrompt) return ''
   const fullNarrationLines = allSbs?.length ? collectBodyNarrationLines(allSbs) : []
   const bodyIndex = allSbs?.length ? collectBodyNarrationLineIndex(allSbs, sb) : -1
-  const promptOptions = {
-    fullNarrationLines,
-    timelineUpToIndex: bodyIndex > 0 ? bodyIndex : undefined,
-  }
-  const bodySentences = fullNarrationLines
   const meta = parseNarrationImageMeta(sb)
-  const minimal = isNarrationMinimalStyle(style)
-  if (meta.narration_shot_type === 'title') {
-    const hook = resolveTitleVisualHook(meta.title_full, meta.title_hook)
-      || meta.title_hook || meta.title_full || extractNarrationSentence(sb)
-    if (!hook) return ''
-    if (minimal) {
-      return buildNarrationTitleImagePromptContent(hook, {
-        titleFull: meta.title_full,
-        titleHook: hook,
-        bodySentences,
-      })
-    }
-    return [
-      'Chinese short drama narration opening background, single full illustration',
-      'absolutely no text, no letters, no words, no watermark, no captions on image',
-      'NOT romantic couple, NOT clock faces, NOT roses, NOT dreamlike abstract wallpaper, NOT pixel art, NOT retro photo filter',
-      artStylePrompt(style, 'title'),
-      `visual theme based on story hook: ${sanitizeSceneImagePrompt(hook)}`,
-      'clean center area reserved for dynamic title overlay, 16:9 landscape, high quality',
-    ].join(', ')
-  }
-  const storedPrompt = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
   const sceneContent = meta.scene_content || extractNarrationSentence(sb)
   const narrationLines = meta.image_narration_lines?.length
     ? meta.image_narration_lines
@@ -373,40 +363,11 @@ export function buildNarrationImagePrompt(sb: any, style = 'comic', allSbs?: any
       : sceneContent
         ? mergeStoryboardLinesForImagePrompt(sceneContent.split(/[。！？]+/).map(s => s.trim()).filter(Boolean))
         : [extractNarrationSentence(sb)].map(s => s.trim()).filter(Boolean)
-  if (!storedPrompt && !sceneContent && !narrationLines.length) return ''
-  if (storedPrompt) {
-    return minimal
-      ? finalizeNarrationImagePrompt(storedPrompt, { narrationLines, ...promptOptions })
-      : [SCENE_STYLE_GUARD, sanitizeSceneImagePrompt(storedPrompt)].join(', ')
-  }
-  if (meta.paragraph_layout === 'diptych') {
-    if (minimal) {
-      return buildNarrationDiptychImagePromptContent(sceneContent, '旁白场景延续', promptOptions)
-    }
-    return [
-      SCENE_STYLE_GUARD,
-      'single 16:9 illustration with exactly 2 horizontal panels side by side, diptych layout, one image file',
-      'only left panel and right panel, no third panel, no vertical stack',
-      artStylePrompt(style, 'diptych'),
-      `left panel scene: ${sceneContent}`,
-      'right panel scene: continuation of narration scene',
-      'high quality, no text, no watermark',
-    ].join(', ')
-  }
-  if (minimal) {
-    return buildNarrationSceneImagePromptFromSentences(
-      narrationLines.length ? narrationLines : sceneContent,
-      promptOptions,
-    )
-  }
-  return [
-    SCENE_STYLE_GUARD,
-    'single full illustration, one complete scene only',
-    'no grid, no collage, no multi-panel, no comic strip, no split screen, no storyboard layout',
-    artStylePrompt(style, 'scene'),
-    `illustrate the main visual of this scene based on narration: ${sceneContent}`,
-    '16:9 landscape, high quality, no text, no watermark',
-  ].join(', ')
+  return resolveNarrationImagePrompt(storedPrompt, style, {
+    narrationLines,
+    fullNarrationLines,
+    timelineUpToIndex: bodyIndex > 0 ? bodyIndex : undefined,
+  })
 }
 
 export function isNarratorCharacter(char: any) {
@@ -535,6 +496,7 @@ export function enrichNarrationPromptWithCharacters(
 ) {
   const base = String(prompt || '').trim()
   if (!base) return base
+  if (NARRATION_USE_RAW_LLM_PROMPTS) return base
   const relevant = chars.filter(ch => characterIds.includes(ch.id))
   if (!relevant.length) return base
   if (isNarrationMinimalStyle(style)) {
@@ -542,6 +504,9 @@ export function enrichNarrationPromptWithCharacters(
     const addition = `场景中出现素体小人角色：${names}，仅通过动作姿态区分，不写服装细节`
     if (/【左格/.test(base) && /【右格/.test(base)) {
       return appendToNarrationBracket(appendToNarrationBracket(base, '左格', addition), '右格', addition)
+    }
+    if (/【画面主体[：:]/.test(base)) {
+      return appendToNarrationBracket(base, '画面主体', addition)
     }
     return appendToNarrationBracket(base, '剧情', addition)
   }

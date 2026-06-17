@@ -424,6 +424,17 @@
               <template v-if="isNarrationMode">
                 <span class="tag dim" style="font-size:11px">旁白 TTS 分镜</span>
               </template>
+              <button
+                v-if="isNarrationMode"
+                class="btn btn-sm"
+                :disabled="narrationStoryboardDescUploading || narrationBreaking"
+                title="上传 .txt 分镜描述：全文案按规则拆分，或【#01】格式逐镜填充"
+                @click="triggerNarrationStoryboardDescUpload"
+              >
+                <Loader2 v-if="narrationStoryboardDescUploading" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                上传分镜描述
+              </button>
               <button class="btn btn-sm" :disabled="rn || narrationBreaking" @click="isNarrationMode ? doNarrationBreakdown() : doBreakdown()">
                 <Loader2 v-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -764,8 +775,15 @@
             <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
               <strong>旁白分镜：</strong>按标点拆分旁白，一句一镜（TTS 粒度）。配图段落与配图文案请在制作阶段单独执行「配图分镜」。
             </div>
-            <div v-if="isNarrationMode" style="margin-bottom:10px">
+            <div v-if="isNarrationMode" style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
               <span class="tag">旁白 TTS 分镜</span>
+            </div>
+            <div v-if="isNarrationMode" class="step-empty-actions" style="margin-bottom:10px">
+              <button class="btn" :disabled="narrationStoryboardDescUploading || narrationBreaking" @click="triggerNarrationStoryboardDescUpload">
+                <Loader2 v-if="narrationStoryboardDescUploading" :size="13" class="animate-spin" />
+                <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                上传分镜描述
+              </button>
             </div>
             <button class="btn btn-primary" :disabled="narrationBreaking" @click="isNarrationMode ? doNarrationBreakdown() : doBreakdown()">
               <Loader2 v-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" :size="13" class="animate-spin" />
@@ -821,6 +839,23 @@
               style="width:360px"
               @update:model-value="onEpisodeTextModelChange"
             />
+            <div v-if="episodeTextModelSupportsThinking" class="text-thinking-toggle">
+              <span class="dim" style="font-size:12px">思考模式</span>
+              <div class="prod-tabs text-thinking-tabs">
+                <button
+                  type="button"
+                  class="prod-tab"
+                  :class="{ active: episodeTextThinking }"
+                  @click="setEpisodeTextThinking(true)"
+                >开</button>
+                <button
+                  type="button"
+                  class="prod-tab"
+                  :class="{ active: !episodeTextThinking }"
+                  @click="setEpisodeTextThinking(false)"
+                >关</button>
+              </div>
+            </div>
             <span class="tag">拆镜 / 配图文案 / 角色提取</span>
           </div>
 
@@ -912,6 +947,23 @@
                 style="width:360px"
                 @update:model-value="onEpisodeTextModelChange"
               />
+              <div v-if="episodeTextModelSupportsThinking" class="text-thinking-toggle">
+                <span class="dim" style="font-size:12px">思考模式</span>
+                <div class="prod-tabs text-thinking-tabs">
+                  <button
+                    type="button"
+                    class="prod-tab"
+                    :class="{ active: episodeTextThinking }"
+                    @click="setEpisodeTextThinking(true)"
+                  >开</button>
+                  <button
+                    type="button"
+                    class="prod-tab"
+                    :class="{ active: !episodeTextThinking }"
+                    @click="setEpisodeTextThinking(false)"
+                  >关</button>
+                </div>
+              </div>
               <span class="tag">角色提取 / AI 外貌描述</span>
             </div>
             <div class="prod-section-bar">
@@ -1371,15 +1423,60 @@
                 style="width:360px"
                 @update:model-value="onEpisodeTextModelChange"
               />
+              <div v-if="episodeTextModelSupportsThinking" class="text-thinking-toggle">
+                <span class="dim" style="font-size:12px">思考模式</span>
+                <div class="prod-tabs text-thinking-tabs">
+                  <button
+                    type="button"
+                    class="prod-tab"
+                    :class="{ active: episodeTextThinking }"
+                    @click="setEpisodeTextThinking(true)"
+                  >开</button>
+                  <button
+                    type="button"
+                    class="prod-tab"
+                    :class="{ active: !episodeTextThinking }"
+                    @click="setEpisodeTextThinking(false)"
+                  >关</button>
+                </div>
+              </div>
               <span class="tag">配图分镜 / AI 配图文案</span>
+              <button
+                class="btn btn-sm"
+                :disabled="narrationImageDescUploading || !sbs.length"
+                title="上传 .txt 配图描述：【#01】格式或逐行对应需配图镜头"
+                @click="triggerNarrationImageDescUpload"
+              >
+                <Loader2 v-if="narrationImageDescUploading" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                上传分镜描述
+              </button>
               <button
                 class="btn btn-sm btn-primary ml-auto"
                 :disabled="narrationImageBreaking || !sbs.length"
                 @click="doNarrationImageBreakdown"
               >
                 <Loader2 v-if="narrationImageBreaking" :size="11" class="animate-spin" />
-                {{ hasNarrationImageBreakdown ? '重新配图分镜' : '配图分镜' }}
+                <template v-if="narrationImageBreaking">
+                  {{ narrationImageBreakdownProgressMessage }}
+                </template>
+                <template v-else>
+                  {{ hasNarrationImageBreakdown ? '重新配图分镜' : '配图分镜' }}
+                </template>
               </button>
+            </div>
+            <div
+              v-if="narrationImageBreaking"
+              class="progress-wrap"
+              style="margin-bottom:12px"
+            >
+              <div class="progress-head">
+                <span class="progress-label">{{ narrationImageBreakdownProgressMessage }}</span>
+                <span class="progress-val">{{ narrationImageBreakdownProgressPercent }}%</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill" :style="{ width: narrationImageBreakdownProgressPercent + '%' }"></div>
+              </div>
             </div>
             <div v-if="narrationImageBreakdownPanel" class="narration-breakdown-panel" style="margin-bottom:12px">
               <div class="narration-breakdown-head">
@@ -2365,6 +2462,13 @@
       class="sr-only-file-input"
       @change="onAudioUploadSelected"
     />
+    <input
+      ref="storyboardDescUploadInputRef"
+      type="file"
+      accept=".txt,.md,text/plain"
+      class="sr-only-file-input"
+      @change="onStoryboardDescUploadSelected"
+    />
   </div>
 </template>
 
@@ -2391,9 +2495,12 @@ import {
   extractNarrationSentence,
   DEFAULT_IMAGE_MODEL,
   DEFAULT_TEXT_MODEL,
+  DEFAULT_TEXT_THINKING,
   IMAGE_MODEL_OPTIONS,
   TEXT_MODEL_OPTIONS,
   resolveEpisodeTextModel,
+  resolveEpisodeTextThinking,
+  textModelSupportsThinking,
   BGM_MODEL_OPTIONS,
   DEFAULT_BGM_MODEL,
   bgmModelLabel,
@@ -2462,6 +2569,11 @@ const panel = ref('script')
 const { running: rn, runningType: rt, run: runAgent } = useAgent()
 const narrationBreaking = ref(false)
 const narrationImageBreaking = ref(false)
+const narrationImageBreakdownProgress = ref(null)
+const narrationStoryboardDescUploading = ref(false)
+const narrationImageDescUploading = ref(false)
+const storyboardDescUploadTarget = ref(null)
+const storyboardDescUploadInputRef = ref(null)
 const narrationExtracting = ref(false)
 const narrationBreakdownSummary = ref(null)
 const imageDetectMode = ref('paragraph')
@@ -2494,7 +2606,22 @@ const mergeProgressPercent = computed(() => {
 const mergeProgressMessage = computed(() =>
   mergeData.value?.progress_message || mergeData.value?.progressMessage || '正在拼接镜头…',
 )
+const narrationImageBreakdownProgressPercent = computed(() => {
+  const p = narrationImageBreakdownProgress.value?.percent
+  return typeof p === 'number' ? Math.min(100, Math.max(0, Math.round(p))) : 0
+})
+const narrationImageBreakdownProgressMessage = computed(() => {
+  const progress = narrationImageBreakdownProgress.value
+  if (!progress) return '正在启动配图分镜…'
+  const batch = progress.batch ?? progress.batchCount
+  const batchCount = progress.batch_count ?? progress.batchCount
+  if (batch && batchCount && progress.phase === 'prompts') {
+    return progress.message || `正在生成配图文案（第 ${batch}/${batchCount} 批）…`
+  }
+  return progress.message || '配图分镜进行中…'
+})
 let mergePollTimer = null
+let narrationImageBreakdownPollTimer = null
 const mergeVideoSrc = computed(() => {
   if (!mergeUrl.value) return ''
   const v = mergeData.value?.id || mergeData.value?.completed_at || mergeData.value?.completedAt || Date.now()
@@ -3249,8 +3376,10 @@ const lockedAudioProvider = computed(() => audioConfigs.value.find(c => c.id ===
 const lockedImageConfigLabel = computed(() => configLabel(imageConfigs.value.find(c => c.id === lockedImageConfigId.value)))
 const episodeImageModel = ref(DEFAULT_IMAGE_MODEL)
 const episodeTextModel = ref(DEFAULT_TEXT_MODEL)
+const episodeTextThinking = ref(DEFAULT_TEXT_THINKING)
 const imageModelOptions = computed(() => IMAGE_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
 const textModelOptions = computed(() => TEXT_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
+const episodeTextModelSupportsThinking = computed(() => textModelSupportsThinking(episodeTextModel.value))
 const showImageModelPicker = computed(() => ['chars', 'scenes', 'shots'].includes(prodTab.value))
 const showTextModelPicker = computed(() => ['chars', 'shots'].includes(prodTab.value))
 const showBgmModelPicker = computed(() => prodTab.value === 'bgm')
@@ -3261,6 +3390,27 @@ function syncEpisodeImageModel(ep) {
 
 function syncEpisodeTextModel(ep) {
   episodeTextModel.value = resolveEpisodeTextModel(ep)
+}
+
+function syncEpisodeTextThinking(ep) {
+  episodeTextThinking.value = resolveEpisodeTextThinking(ep)
+}
+
+async function setEpisodeTextThinking(enabled) {
+  if (enabled === episodeTextThinking.value) return
+  episodeTextThinking.value = enabled
+  if (!epId.value) return
+  try {
+    await episodeAPI.update(epId.value, { text_thinking: enabled })
+    if (episode.value) {
+      episode.value.text_thinking = enabled
+      episode.value.textThinking = enabled
+    }
+    toast.success(enabled ? '思考模式已开启' : '思考模式已关闭')
+  } catch (e) {
+    syncEpisodeTextThinking(episode.value)
+    toast.error(e.message)
+  }
 }
 
 async function onEpisodeTextModelChange(model) {
@@ -3895,19 +4045,22 @@ function updateNarrationImagePromptById(id, value) {
 }
 
 function buildNarrationImageDetectLabel(detectSource, detectMode) {
-  if (detectSource === 'paragraph+llm') return '按场景配图 · AI文案'
-  if (detectMode === 'paragraph' || detectSource === 'paragraph') return '按场景配图 · 规则文案'
+  if (detectMode === 'paragraph' || detectSource === 'balanced' || detectSource === 'conservative') {
+    if (detectSource === 'llm') return '按场景配图 · AI识别'
+    if (detectSource === 'balanced' || detectSource === 'conservative') return '按场景配图 · 规则识别'
+    return '按场景配图'
+  }
   if (detectMode === 'conservative') {
     return detectSource === 'llm' ? '省钱 · AI识别' : '省钱 · 规则识别'
   }
   if (detectSource === 'llm') return '标准 · AI识别'
-  if (detectSource === 'heuristic') return '标准 · 规则识别'
+  if (detectSource === 'heuristic' || detectSource === 'balanced') return '标准 · 规则识别'
   return '标准'
 }
 
 function buildNarrationImagePromptLabel(promptSource) {
   if (promptSource === 'llm') return 'AI 配图文案'
-  if (promptSource === 'rule' || promptSource === 'heuristic') return '规则配图文案'
+  if (promptSource === 'template' || promptSource === 'rule' || promptSource === 'heuristic') return '规则配图文案'
   return null
 }
 
@@ -4609,6 +4762,7 @@ async function refresh() {
       openingSubtitleText.value = resolveOpeningSubtitleText(ep.opening_subtitle_text || ep.openingSubtitleText)
       syncEpisodeImageModel(ep)
       syncEpisodeTextModel(ep)
+      syncEpisodeTextThinking(ep)
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
       try { scenes.value = await episodeAPI.scenes(ep.id) } catch { scenes.value = [] }
       sbs.value = sortStoryboards(await episodeAPI.storyboards(ep.id))
@@ -4648,6 +4802,9 @@ async function refresh() {
   try {
     mergeData.value = await mergeAPI.status(epId.value)
     if (['processing', 'pending'].includes(mergeData.value?.status)) startMergePoll()
+  } catch {}
+  try {
+    await resumeNarrationImageBreakdownPollIfNeeded()
   } catch {}
 }
 
@@ -4735,8 +4892,52 @@ function doNarrationBreakdown() {
   })()
 }
 
+function stopNarrationImageBreakdownPoll() {
+  if (narrationImageBreakdownPollTimer) {
+    clearInterval(narrationImageBreakdownPollTimer)
+    narrationImageBreakdownPollTimer = null
+  }
+}
+
+async function pollNarrationImageBreakdownProgress() {
+  if (!epId.value) return
+  try {
+    const progress = await episodeAPI.narrationImageBreakdownStatus(epId.value)
+    narrationImageBreakdownProgress.value = progress
+    if (progress?.status === 'completed' || progress?.status === 'failed' || progress?.status === 'idle') {
+      stopNarrationImageBreakdownPoll()
+      narrationImageBreaking.value = false
+    }
+  } catch {}
+}
+
+function startNarrationImageBreakdownPoll() {
+  stopNarrationImageBreakdownPoll()
+  void pollNarrationImageBreakdownProgress()
+  narrationImageBreakdownPollTimer = setInterval(() => {
+    void pollNarrationImageBreakdownProgress()
+  }, 1500)
+}
+
+async function resumeNarrationImageBreakdownPollIfNeeded() {
+  if (!epId.value) return
+  const progress = await episodeAPI.narrationImageBreakdownStatus(epId.value)
+  narrationImageBreakdownProgress.value = progress
+  if (progress?.status === 'processing') {
+    narrationImageBreaking.value = true
+    startNarrationImageBreakdownPoll()
+  }
+}
+
 function doNarrationImageBreakdown() {
   narrationImageBreaking.value = true
+  narrationImageBreakdownProgress.value = {
+    status: 'processing',
+    phase: 'detecting',
+    message: '正在启动配图分镜…',
+    percent: 1,
+  }
+  startNarrationImageBreakdownPoll()
   const style = drama.value?.style || 'comic'
   void (async () => {
     try {
@@ -4759,9 +4960,103 @@ function doNarrationImageBreakdown() {
     } catch (e) {
       toast.error(e.message)
     } finally {
+      stopNarrationImageBreakdownPoll()
       narrationImageBreaking.value = false
+      try {
+        narrationImageBreakdownProgress.value = await episodeAPI.narrationImageBreakdownStatus(epId.value)
+      } catch {
+        narrationImageBreakdownProgress.value = null
+      }
     }
   })()
+}
+
+function triggerNarrationStoryboardDescUpload() {
+  storyboardDescUploadTarget.value = 'storyboard'
+  storyboardDescUploadInputRef.value?.click()
+}
+
+function triggerNarrationImageDescUpload() {
+  storyboardDescUploadTarget.value = 'image'
+  storyboardDescUploadInputRef.value?.click()
+}
+
+function readTextFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('读取文件失败'))
+    reader.readAsText(file, 'UTF-8')
+  })
+}
+
+async function onStoryboardDescUploadSelected(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  const target = storyboardDescUploadTarget.value
+  storyboardDescUploadTarget.value = null
+  if (!file || !target) return
+
+  try {
+    const text = String(await readTextFile(file)).trim()
+    if (!text) throw new Error('文件内容为空')
+
+    if (target === 'storyboard') {
+      narrationStoryboardDescUploading.value = true
+      const res = await episodeAPI.importNarrationStoryboardDesc(epId.value, text)
+      const mode = res?.mode
+      if (mode === 'script') {
+        localRaw.value = text
+        localScript.value = text
+        if (episode.value) {
+          episode.value.content = text
+          episode.value.script_content = text
+        }
+        const titleCount = res?.title_count ?? res?.titleCount ?? 0
+        const sentenceCount = res?.sentence_count ?? res?.sentenceCount ?? 0
+        toast.success(`已导入文案并分镜：${sentenceCount} 句 → ${res?.count || 0} 镜`)
+        persistNarrationBreakdownSummary({
+          ...res,
+          storyboard_breakdown_at: Date.now(),
+        })
+        await refresh()
+        await ensureNarratorCharacter()
+      } else if (mode === 'create') {
+        toast.success(`已创建 ${res?.count || 0} 个旁白分镜`)
+        persistNarrationBreakdownSummary({
+          count: res?.count,
+          total_duration: res?.total_duration ?? res?.totalDuration,
+          storyboard_breakdown_at: Date.now(),
+        })
+        await refresh()
+        await ensureNarratorCharacter()
+      } else {
+        const updated = res?.updated ?? 0
+        const skipped = res?.skipped ?? 0
+        toast.success(`已更新 ${updated} 镜旁白描述${skipped ? `，${skipped} 条未匹配` : ''}`)
+        await refresh()
+      }
+    } else if (target === 'image') {
+      narrationImageDescUploading.value = true
+      const res = await episodeAPI.importNarrationImageDesc(epId.value, text)
+      const updated = res?.updated ?? 0
+      const skipped = res?.skipped ?? 0
+      const mode = res?.mode === 'lines' ? '逐行' : '【#序号】'
+      toast.success(`已导入 ${updated} 条配图描述（${mode}）${skipped ? `，${skipped} 条未匹配` : ''}`)
+      if (updated > 0) {
+        persistNarrationBreakdownSummary({
+          image_breakdown_at: Date.now(),
+          image_prompt_source: 'upload',
+        })
+      }
+      await refresh()
+    }
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationStoryboardDescUploading.value = false
+    narrationImageDescUploading.value = false
+  }
 }
 
 async function doExtractNarrationCharacters() {
@@ -4773,6 +5068,7 @@ async function doExtractNarrationCharacters() {
       script,
       style,
       text_model: episodeTextModel.value,
+      text_thinking: episodeTextThinking.value,
     })
     const created = res?.created ?? 0
     const updated = res?.updated ?? 0
@@ -5606,6 +5902,7 @@ async function generateCharAppearance(id) {
       episode_id: epId.value,
       script,
       text_model: episodeTextModel.value,
+      text_thinking: episodeTextThinking.value,
     })
     const appearance = result?.appearance || ''
     if (appearance) {
@@ -5952,13 +6249,14 @@ async function setNarrationShotLayout(sb, layout) {
   if (meta.narration_tts_mode) parsed.narration_tts_mode = meta.narration_tts_mode
 
   const style = drama.value?.style || 'comic'
+  const existingPrompt = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
   const draft = {
     ...sb,
     reference_images: JSON.stringify(parsed),
-    image_prompt: null,
-    imagePrompt: null,
+    image_prompt: existingPrompt ? existingPrompt : null,
+    imagePrompt: existingPrompt ? existingPrompt : null,
   }
-  const newPrompt = buildNarrationImagePrompt(draft, style, sbs.value)
+  const newPrompt = existingPrompt || buildNarrationImagePrompt(draft, style, sbs.value)
   await storyboardAPI.update(sb.id, {
     reference_images: JSON.stringify(parsed),
     image_prompt: newPrompt || null,
@@ -5966,7 +6264,11 @@ async function setNarrationShotLayout(sb, layout) {
   sb.reference_images = JSON.stringify(parsed)
   sb.image_prompt = newPrompt
   sb.imagePrompt = newPrompt
-  toast.success(layout === 'diptych' ? '已切换为两宫格' : '已切换为完整单图')
+  toast.success(
+    existingPrompt
+      ? (layout === 'diptych' ? '已切换为两宫格，AI 配图文案已保留' : '已切换为完整单图，AI 配图文案已保留')
+      : (layout === 'diptych' ? '已切换为两宫格' : '已切换为完整单图'),
+  )
 }
 function isPendingNarrationShot(id) { return pendingNarrationShotIds.value.includes(id) }
 
@@ -7263,6 +7565,20 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
   background: rgba(255,255,255,0.03);
+}
+.text-thinking-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.text-thinking-tabs {
+  padding: 2px;
+  min-width: 72px;
+}
+.text-thinking-tabs .prod-tab {
+  min-width: 32px;
+  justify-content: center;
+  padding: 4px 10px;
 }
 .narration-hint {
   margin-bottom: 10px;

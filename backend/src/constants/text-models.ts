@@ -1,9 +1,24 @@
 export const DEFAULT_TEXT_MODEL = 'deepseek-v4-pro'
+export const DEFAULT_TEXT_THINKING = true
 
 export const TEXT_MODEL_OPTIONS = [
-  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent，OpenAI 兼容）' },
+  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent）' },
   { value: 'gpt-4o', label: 'GPT-4o · OpenAI 兼容' },
 ] as const
+
+export function resolveEpisodeTextThinking(
+  episode?: { textThinking?: boolean | null; text_thinking?: boolean | number | null } | null,
+  bodyValue?: boolean | number | string | null,
+): boolean {
+  if (bodyValue !== undefined && bodyValue !== null && bodyValue !== '') {
+    if (bodyValue === false || bodyValue === 0 || bodyValue === '0') return false
+    if (bodyValue === true || bodyValue === 1 || bodyValue === '1') return true
+  }
+  const stored = episode?.textThinking ?? episode?.text_thinking
+  if (stored === false || stored === 0) return false
+  if (stored === true || stored === 1) return true
+  return DEFAULT_TEXT_THINKING
+}
 
 export const LEGACY_DEFAULT_TEXT_MODELS = [
   'gemini-3-pro-preview',
