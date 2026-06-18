@@ -141,7 +141,7 @@ export function parseDramaMetadata(drama: any) {
 
 export function narrationStoryboardPrompt(style = 'comic') {
   const styleHint = isNarrationMinimalStyle(style)
-    ? `${NARRATION_IMAGE_STYLE_CORE}。通用素体尺寸：圆头约占身高三分之一、成人三头高简笔比例；禁止写年代/服装；仅人生阶段可微调胖瘦/佝偻/小胡子，只写动作姿态。`
+    ? `${NARRATION_IMAGE_STYLE_CORE}。通用素体尺寸：圆头约占身高三分之一、成人三头高简笔比例；禁止写年龄/服装；仅人生阶段可微调胖瘦/佝偻/小胡子，只写动作姿态。`
     : `${artStylePrompt(style, 'agent')}。`
   return [
     '这是旁白解说视频，必须按「一句旁白 = 一个镜头」拆分，严禁把多句旁白合并到同一镜头。',
@@ -171,6 +171,7 @@ export type NarrationShotType = 'title' | 'normal'
 
 export interface NarrationImageMeta {
   narration_image_mode: NarrationImageMode
+  narration_image_source?: 'upload' | 'generate'
   narration_shot_type?: NarrationShotType
   narration_tts_mode?: 'new' | 'inherit' | 'copy'
   title_hook?: string
@@ -201,6 +202,9 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
   if (typeof raw === 'object') {
     return {
       narration_image_mode: raw.narration_image_mode || 'inherit',
+      narration_image_source: raw.narration_image_source === 'upload' || raw.narration_image_source === 'generate'
+        ? raw.narration_image_source
+        : undefined,
       narration_shot_type: raw.narration_shot_type === 'title' ? 'title' : 'normal',
       narration_tts_mode: raw.narration_tts_mode,
       title_hook: raw.title_hook,
@@ -223,6 +227,9 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
     const mode = parsed?.narration_image_mode
     return {
       narration_image_mode: mode === 'new' || mode === 'copy' || mode === 'inherit' ? mode : 'inherit',
+      narration_image_source: parsed?.narration_image_source === 'upload' || parsed?.narration_image_source === 'generate'
+        ? parsed.narration_image_source
+        : undefined,
       narration_shot_type: parsed?.narration_shot_type === 'title' ? 'title' : 'normal',
       narration_tts_mode: parsed?.narration_tts_mode,
       title_hook: parsed?.title_hook,
@@ -304,17 +311,44 @@ export function resolveNarrationEffectiveImage(storyboards: any[], sb: any) {
   const ordered = sortStoryboards(storyboards)
   const idx = ordered.findIndex(item => item.id === sb.id)
   if (idx < 0) return { path: null, inherited: false, sourceId: null }
-  for (let i = idx; i >= 0; i--) {
-    const path = getNarrationShotOwnImage(ordered[i])
-    if (path) {
+
+  const meta = parseNarrationImageMeta(sb)
+  const own = getNarrationShotOwnImage(sb)
+
+  if (meta.narration_image_mode === 'new') {
+    return { path: own, inherited: false, sourceId: own ? sb.id : null }
+  }
+
+  if (own && meta.narration_image_mode === 'copy') {
+    for (let i = idx - 1; i >= 0; i--) {
+      const prevPath = getNarrationShotOwnImage(ordered[i])
+      if (prevPath) {
+        return { path: own, inherited: true, sourceId: ordered[i].id }
+      }
+    }
+    return { path: own, inherited: true, sourceId: null }
+  }
+
+  for (let i = idx - 1; i >= 0; i--) {
+    const prevMeta = parseNarrationImageMeta(ordered[i])
+    if (prevMeta.narration_image_mode === 'new') {
+      const path = getNarrationShotOwnImage(ordered[i])
       return {
         path,
-        inherited: ordered[i].id !== sb.id,
-        sourceId: ordered[i].id,
+        inherited: !!path,
+        sourceId: path ? ordered[i].id : null,
       }
     }
   }
+
   return { path: null, inherited: false, sourceId: null }
+}
+
+export function narrationShotsWithUploadedImage(storyboards: any[]) {
+  return sortStoryboards(storyboards).filter(sb => {
+    if (!getNarrationShotOwnImage(sb)) return false
+    return parseNarrationImageMeta(sb).narration_image_source === 'upload'
+  })
 }
 
 export function resolveSceneContentForShot(storyboards: any[], sb: any): string {
@@ -559,7 +593,36 @@ export function buildNarrationImageGeneratePayload(
 }
 
 export function narrationShotsNeedingImage(storyboards: any[]) {
-  return storyboards.filter(sb => narrationShotNeedsOwnImage(sb))
+  return sortStoryboards(storyboards).filter(sb => narrationShotNeedsOwnImage(sb))
+}
+
+/** 需配图但尚未生成/上传自有配图的镜头（已排序） */
+export function narrationShotsPendingImage(storyboards: any[]) {
+  return narrationShotsNeedingImage(storyboards).filter(sb => !getNarrationShotOwnImage(sb))
+}
+
+export function getNarrationShotDisplayNo(sb: any) {
+  const n = sb?.storyboard_number ?? sb?.storyboardNumber
+  if (n == null || Number.isNaN(Number(n))) return '??'
+  return String(n).padStart(2, '0')
+}
+
+/** 格式化为 #01、#05、#21 */
+export function formatNarrationShotDisplayList(
+  shots: any[],
+  options?: { prefix?: string; sep?: string },
+) {
+  const prefix = options?.prefix ?? '#'
+  const sep = options?.sep ?? '、'
+  return shots.map(sb => `${prefix}${getNarrationShotDisplayNo(sb)}`).join(sep)
+}
+
+export function formatNarrationPendingImageHint(storyboards: any[]) {
+  const pending = narrationShotsPendingImage(storyboards)
+  if (!pending.length) return ''
+  const label = formatNarrationShotDisplayList(pending)
+  if (pending.length === 1) return `${label}（最后一镜）`
+  return label
 }
 
 export function narrationShotImageReady(storyboards: any[], sb: any) {

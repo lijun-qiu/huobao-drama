@@ -10,6 +10,8 @@ import { formatCharacterDisplayName, resolveStoryboardCharacterIdsForShot } from
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { resolveTtsSpeed } from '../utils/tts-speed.js'
+import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 
 const app = new Hono()
 
@@ -184,8 +186,13 @@ app.post('/:id/generate-tts', async (c) => {
   const force = body?.force === true
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
   if (!sb) return badRequest(c, '镜头不存在')
-  // 解说镜默认本地 Edge TTS；仅显式传 local_tts: false 时才走付费 API
+  // 解说镜默认本地 TTS；仅显式传 local_tts: false 时才走付费 API
   const localTts = body?.local_tts === false ? false : (body?.local_tts === true || isNarrationStoryboard(sb))
+  const localTtsEngine = body?.local_tts_engine === 'voicebox' ? 'voicebox' : 'edge'
+  const ttsSpeed = resolveTtsSpeed(body?.tts_speed ?? body?.ttsSpeed)
+  const voiceboxInstruct = localTtsEngine === 'voicebox'
+    ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
+    : undefined
   const parsedDialogue = parseDialogueForTTS(sb.dialogue)
   if (parsedDialogue.ignorable) return badRequest(c, '该镜头没有可生成的对白或旁白')
   logTaskStart('StoryboardAPI', 'generate-tts', {
@@ -271,13 +278,18 @@ app.post('/:id/generate-tts', async (c) => {
 
   try {
     const ttsVoice = localTts
-      ? resolveEdgeVoice(body?.local_voice ? String(body.local_voice) : voiceId)
+      ? (localTtsEngine === 'voicebox'
+        ? String(body?.local_voice || voiceId)
+        : resolveEdgeVoice(body?.local_voice ? String(body.local_voice) : voiceId))
       : voiceId
     const audioPath = await generateTTS({
       text: pureDialogue,
       voice: ttsVoice,
+      speed: ttsSpeed,
       configId: localTts ? null : (ep?.audioConfigId || null),
       localTts,
+      localTtsEngine: localTts ? localTtsEngine : undefined,
+      voiceboxInstruct,
     })
   db.update(schema.storyboards)
     .set({ ttsAudioUrl: audioPath, updatedAt: now() })
@@ -296,7 +308,10 @@ app.post('/:id/generate-tts', async (c) => {
       voice_id: ttsVoice,
       text: pureDialogue,
       local_tts: localTts,
-      provider: localTts ? 'edge' : undefined,
+      local_tts_engine: localTts ? localTtsEngine : undefined,
+      tts_speed: ttsSpeed,
+      voicebox_instruct: voiceboxInstruct,
+      provider: localTts ? localTtsEngine : undefined,
     })
   } catch (err: any) {
     logTaskError('StoryboardAPI', 'generate-tts', { storyboardId: id, voiceId, error: err.message })

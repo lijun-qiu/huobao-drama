@@ -121,7 +121,7 @@ export const NARRATION_LLM_PROMPT_PATTERN =
 
 /** LLM 写片头标题图 prompt 时的规则（通用） */
 export const NARRATION_TITLE_IMAGE_LLM_RULE =
-  '片头标题图须综合 full_narration 全文（片头 hook + 正文旁白），提炼最能概括本期核心的【片头背景场景】与【主题氛围】；不局限于 hook 字面，须体现全文主线（核心事件、身份或关系转折、关键场所或物件意象等），预留中央叠字区域，绝对无文字'
+  '片头标题图须综合 full_narration 全文（片头 hook + 正文旁白），提炼最能概括本期核心的【片头背景场景】与【主题氛围】；不局限于 hook 字面，须体现全文主线（核心事件、身份或关系转折、关键场所或物件意象等），绝对无文字'
 
 /** 组装「段落配图」LLM system prompt（素体 / 其他画风） */
 export function buildNarrationParagraphImagePromptLLMSystem(
@@ -197,7 +197,7 @@ export function buildNarrationImageDetectLLMSystem(
   const detectRules = [
     '换镜判定（needs_image）：',
     '1) 通读 full_narration，结合 narration_lines 判断每句是否适合作为新配图起点',
-    '2) 全集正文分镜约 35% 需要配图（系统会按你的优先级选取，请标出相对更需要画面的句子）',
+    '2) 全集正文分镜约 30% 需要配图（系统会按你的优先级选取，请标出相对更需要画面的句子）',
     '3) needs_image=true：场景/地点/经营阶段切换、新动作、新物件、新互动、叙事节拍转折、空行分段后的新瞬间',
     '4) needs_image=false：同场景内画面可完全复用上一张、无新可视信息',
     '5) 纯日期/季节/时段句 → needs_image=false；正文首句若非纯日期句 → needs_image=true',
@@ -240,7 +240,7 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
       `硬性规则：`,
       `1) 画风固定关键词（必含）：${NARRATION_IMAGE_STYLE_CORE}`,
       '2) 严格按此万能模板输出完整 prompt：',
-      `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景：具体地点与环境】，【主题氛围：与全文主线对应的叙事氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}，中央预留叠字区域`,
+      `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景：具体地点与环境】，【主题氛围：与全文主线对应的叙事氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
       `3) ${NARRATION_TITLE_IMAGE_LLM_RULE}`,
       '4) 禁止写年代/年份和具体服装描述；禁止在画面中出现任何文字',
       '只输出 JSON，不要解释。',
@@ -251,7 +251,6 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
     NARRATION_TITLE_IMAGE_LLM_RULE,
     `画风：${artStylePrompt(style, 'title')}, 16:9 landscape, high quality, absolutely no text, no watermark`,
-    'clean center area reserved for dynamic title overlay',
     '只输出 JSON，不要解释。',
   ].join('\n')
 }
@@ -330,7 +329,7 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
   [NARRATION_MINIMAL_STYLE]: {
     scene: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     diptych: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    title: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}，中央预留叠字区域`,
+    title: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     portrait: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【场景：浅灰纯色背景，单人全身素体小人定妆参考图】，【剧情：${NARRATION_MINIMAL_EYES}，人生阶段与动作姿态】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     agent: NARRATION_IMAGE_STYLE_CORE,
   },
@@ -426,7 +425,7 @@ const NARRATION_PROMPT_BOILERPLATE_PARTS = [
   '纯色平涂无纹理渐变', '纯色平涂无复杂光影', '纯色平涂',
   '日常低饱和配色', '低饱和写实配色', '极简叙事动画风格', '极简叙事画风',
   '短视频剧情动画质感', '干净整洁的画面', '画面干净清晰', '画面干净整洁',
-  '无文字无水印', '中央预留叠字区域', '绝对无文字无字母', '绝对无文字',
+  '无文字无水印', '绝对无文字无字母', '绝对无文字',
   '扁平化平涂上色', '无渐变无复杂阴影', '极简叙事卡通画风', '场景简化还原',
   '2D扁平化卡通', 'flat cel', '卡通动画', '动画',
 ]
@@ -1871,7 +1870,6 @@ export function assembleNarrationUniversalScenePrompt(
     body = [
       scenePart && ensureNarrationBracket('片头背景场景', scenePart),
       plotPart && ensureNarrationBracket('主题氛围', plotPart),
-      '中央预留叠字区域',
     ].filter(Boolean).join('，')
   } else {
     const subjectText = formatNarrationPlotForPrompt(
@@ -2167,7 +2165,7 @@ function extractPromptBracketParts(raw: string): {
   const text = String(raw || '').trim()
   const titleScene = text.match(/【片头背景场景[：:]\s*([^】]+)】/)
   const titlePlot = text.match(/【主题氛围[：:]\s*([^】]+)】/)
-  if (titleScene || titlePlot || /预留中央叠字|中央预留叠字/.test(text)) {
+  if (titleScene || titlePlot) {
     return {
       scene: titleScene?.[1]?.trim() || '',
       atmosphere: '',
@@ -2252,7 +2250,7 @@ export function finalizeNarrationImagePrompt(
   if (shouldPreserveRawNarrationPrompt(raw)) return raw
 
   const isTitlePrompt = !!options?.titleHook
-    || /片头|预留中央叠字|中央预留叠字|【片头背景场景|【主题氛围/.test(raw)
+    || /片头|【片头背景场景|【主题氛围/.test(raw)
 
   if (narrationLines?.length && !raw) {
     if (isTitlePrompt) {
@@ -2300,7 +2298,7 @@ export function finalizeNarrationImagePrompt(
     ? ''
     : extractNarrationPromptContentCore(raw)
 
-  if (bracketParts.title || /片头|预留中央叠字|中央预留叠字/.test(raw)) {
+  if (bracketParts.title || /片头/.test(raw)) {
     const split = bracketParts.scene || bracketParts.plot
       ? bracketParts
       : (() => {

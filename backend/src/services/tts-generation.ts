@@ -9,7 +9,9 @@ import { v4 as uuid } from 'uuid'
 import { getAudioConfigById } from './ai.js'
 import { getTTSAdapter } from './adapters/registry.js'
 import { generateEdgeTTS } from './edge-tts-local.js'
+import { generateVoiceboxTTS, resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, redactUrl } from '../utils/task-logger.js'
+import { applyTtsSpeedToAudioFile, resolveTtsSpeed } from '../utils/tts-speed.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -22,14 +24,23 @@ interface TTSParams {
   emotion?: string
   configId?: number | null
   localTts?: boolean
+  localTtsEngine?: 'edge' | 'voicebox'
+  voiceboxInstruct?: string | null
 }
 
 /**
  * 生成 TTS 音频，返回本地文件路径
  */
 export async function generateTTS(params: TTSParams): Promise<string> {
+  const speed = resolveTtsSpeed(params.speed)
+
   if (params.localTts) {
-    return generateEdgeTTS(params.text, params.voice)
+    if (params.localTtsEngine === 'voicebox') {
+      const profileId = await resolveVoiceboxProfileId(params.voice)
+      const path = await generateVoiceboxTTS(params.text, profileId, null, params.voiceboxInstruct)
+      return applyTtsSpeedToAudioFile(path, speed)
+    }
+    return generateEdgeTTS(params.text, params.voice, speed)
   }
 
   const config = getAudioConfigById(params.configId)
@@ -38,6 +49,7 @@ export async function generateTTS(params: TTSParams): Promise<string> {
   logTaskStart('AudioTask', 'tts-generate', {
     provider: config.provider,
     voice: params.voice,
+    speed,
     model: params.model || config.model,
     textPreview: params.text.slice(0, 50),
     textLength: params.text.length,
@@ -51,7 +63,7 @@ export async function generateTTS(params: TTSParams): Promise<string> {
     params,
   })
 
-  const { url, method, headers, body } = adapter.buildGenerateRequest(config, params)
+  const { url, method, headers, body } = adapter.buildGenerateRequest(config, { ...params, speed })
   logTaskProgress('AudioTask', 'request', {
     provider: config.provider,
     voice: params.voice,

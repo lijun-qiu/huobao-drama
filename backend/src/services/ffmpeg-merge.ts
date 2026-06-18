@@ -12,13 +12,12 @@ import { and, eq, inArray } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
-import { renderSameImageGroupSegment } from './ffmpeg-compose.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 
-/** 换配图时用自下而上滑入过渡（ffmpeg xfade: slideup） */
+/** 换配图时画面自下而上滑入（xfade: slideup） */
 const IMAGE_CHANGE_TRANSITION = 'slideup'
 const IMAGE_CHANGE_TRANSITION_SEC = 0.45
 const MAX_XFADE_INPUTS = 48
@@ -146,14 +145,20 @@ function getVideoDuration(filePath: string): Promise<number> {
   })
 }
 
-async function concatClipsToFile(clips: ClipSegment[], outputPath: string, run?: ActiveMergeRun): Promise<void> {
-  if (clips.length === 1) {
-    fs.copyFileSync(clips[0].path, outputPath)
+/** 按镜头顺序硬切拼接，保留各镜已烧录的配音与字幕（不重渲染、不叠音） */
+async function concatComposedVideos(
+  absPaths: string[],
+  outputPath: string,
+  run: ActiveMergeRun,
+  onProgress?: (encodedSec: number) => void,
+): Promise<void> {
+  if (absPaths.length === 1) {
+    fs.copyFileSync(absPaths[0], outputPath)
     return
   }
 
   const listPath = createFfmpegListPath()
-  const listContent = clips.map(c => `file '${escapeConcatPath(c.path)}'`).join('\n')
+  const listContent = absPaths.map(p => `file '${escapeConcatPath(p)}'`).join('\n')
   fs.writeFileSync(listPath, listContent, 'utf-8')
 
   try {
@@ -164,7 +169,7 @@ async function concatClipsToFile(clips: ClipSegment[], outputPath: string, run?:
         .outputOptions([
           '-fflags', '+genpts',
           '-c:v', 'libx264',
-          '-preset', 'fast',
+          '-preset', 'medium',
           '-crf', '23',
           '-c:a', 'aac',
           '-ar', '48000',
@@ -172,8 +177,12 @@ async function concatClipsToFile(clips: ClipSegment[], outputPath: string, run?:
           '-movflags', '+faststart',
         ])
         .output(outputPath)
-      if (run) run.command = command
+      run.command = command
       command
+        .on('progress', (progress) => {
+          if (run.cancelled) return
+          onProgress?.(parseTimemark(progress.timemark || '0'))
+        })
         .on('end', () => resolve())
         .on('error', (err) => reject(err))
         .run()
@@ -183,25 +192,68 @@ async function concatClipsToFile(clips: ClipSegment[], outputPath: string, run?:
   }
 }
 
+async function concatClipsToFile(clips: ClipSegment[], outputPath: string, run?: ActiveMergeRun): Promise<void> {
+  await concatComposedVideos(
+    clips.map(c => c.path),
+    outputPath,
+    run || { mergeId: 0, cancelled: false, command: null },
+  )
+}
+
+function fmtFilterSec(sec: number): string {
+  return Math.max(0.001, sec).toFixed(3)
+}
+
+/**
+ * 换配图段之间：画面 slideup 过渡；音频硬切 concat（不用 acrossfade，避免叠音/语速错乱）。
+ * 每路视频先 trim + setpts 归零，转场前 tpad 预留叠化区，避免 xfade 期间画面卡住、切换后才开始动。
+ */
 function buildXfadeFilterScript(segmentDurations: number[]): string {
   const td = IMAGE_CHANGE_TRANSITION_SEC
-  const parts: string[] = []
-  let vLabel = '[0:v]'
-  let aLabel = '[0:a]'
-  let cumulative = segmentDurations[0]
+  const n = segmentDurations.length
+  if (n <= 1) return ''
 
-  for (let i = 1; i < segmentDurations.length; i++) {
-    const vOut = i === segmentDurations.length - 1 ? 'vout' : `v${i}`
-    const aOut = i === segmentDurations.length - 1 ? 'aout' : `a${i}`
+  const parts: string[] = []
+  const vLabels: string[] = []
+  const aLabels: string[] = []
+
+  for (let i = 0; i < n; i++) {
+    const d = segmentDurations[i]
+    const vLabel = `vin${i}`
+    const aLabel = `ain${i}`
+    const dStr = fmtFilterSec(d)
+    const tdStr = fmtFilterSec(td)
+    if (i < n - 1) {
+      parts.push(
+        `[${i}:v]fps=25,trim=duration=${dStr},setpts=PTS-STARTPTS,format=yuv420p,tpad=stop_mode=clone:stop_duration=${tdStr}[${vLabel}]`,
+      )
+    } else {
+      parts.push(
+        `[${i}:v]fps=25,trim=duration=${dStr},setpts=PTS-STARTPTS,format=yuv420p[${vLabel}]`,
+      )
+    }
+    parts.push(
+      `[${i}:a]atrim=duration=${dStr},asetpts=PTS-STARTPTS,aresample=48000[${aLabel}]`,
+    )
+    vLabels.push(`[${vLabel}]`)
+    aLabels.push(`[${aLabel}]`)
+  }
+
+  let vChain = vLabels[0]
+  let cumulative = segmentDurations[0] + td
+
+  for (let i = 1; i < n; i++) {
+    const vOut = i === n - 1 ? 'vout' : `vxf${i}`
     const offset = Math.max(0.1, cumulative - td)
     parts.push(
-      `${vLabel}[${i}:v]xfade=transition=${IMAGE_CHANGE_TRANSITION}:duration=${td}:offset=${offset.toFixed(3)}[${vOut}]`,
+      `${vChain}${vLabels[i]}xfade=transition=${IMAGE_CHANGE_TRANSITION}:duration=${fmtFilterSec(td)}:offset=${fmtFilterSec(offset)}[${vOut}]`,
     )
-    parts.push(`${aLabel}[${i}:a]acrossfade=d=${td}[${aOut}]`)
-    vLabel = `[${vOut}]`
-    aLabel = `[${aOut}]`
-    cumulative += segmentDurations[i] - td
+    vChain = `[${vOut}]`
+    const segDur = i < n - 1 ? segmentDurations[i] + td : segmentDurations[i]
+    cumulative += segDur - td
   }
+
+  parts.push(`${aLabels.join('')}concat=n=${n}:v=0:a=1[aout]`)
 
   return parts.join(';\n')
 }
@@ -230,6 +282,9 @@ async function mergeSegmentsWithPageFlip(
         '-c:v', 'libx264',
         '-preset', 'medium',
         '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        '-r', '25',
+        '-vsync', 'cfr',
         '-c:a', 'aac',
         '-ar', '48000',
         '-b:a', '192k',
@@ -265,7 +320,11 @@ async function mergeSegmentsSequential(
       const tempOut = path.join(tempDir, `${uuid()}.mp4`)
       temps.push(tempOut)
       await mergeSegmentsWithPageFlip([current, segments[i]], tempOut, run, onProgress)
-      current = { path: tempOut, duration: current.duration + segments[i].duration - IMAGE_CHANGE_TRANSITION_SEC, temp: true }
+      current = {
+        path: tempOut,
+        duration: current.duration + segments[i].duration,
+        temp: true,
+      }
     }
     fs.copyFileSync(current.path, outputPath)
   } finally {
@@ -275,14 +334,9 @@ async function mergeSegmentsSequential(
   }
 }
 
-function visualKeyToImageAbsPath(visualKey: string): string | null {
-  if (!visualKey.startsWith('image:')) return null
-  return toAbsPath(visualKey.slice('image:'.length))
-}
-
+/** 同配图组内硬切拼接已合成镜头，不重渲染 */
 async function buildMergeSegments(
   groups: VisualGroup[],
-  storyboardById: Map<number, ComposedStoryboard>,
   run: ActiveMergeRun,
   onGroupProgress?: (done: number, total: number) => void,
 ): Promise<{ segments: MergeSegment[]; temps: string[] }> {
@@ -303,20 +357,9 @@ async function buildMergeSegments(
     } else {
       const tempPath = path.join(tempDir, `${uuid()}.mp4`)
       temps.push(tempPath)
-      const imagePath = visualKeyToImageAbsPath(group.visualKey)
-      const groupStoryboards = group.clips
-        .map(clip => storyboardById.get(clip.storyboardId))
-        .filter((sb): sb is ComposedStoryboard => !!sb)
-
-      if (imagePath && groupStoryboards.length === group.clips.length) {
-        const prevGroupShotCount = i > 0 ? groups[i - 1].clips.length : 0
-        const duration = await renderSameImageGroupSegment(groupStoryboards, imagePath, tempPath, i, prevGroupShotCount)
-        segments.push({ path: tempPath, duration, temp: true })
-      } else {
-        await concatClipsToFile(group.clips, tempPath, run)
-        const duration = await getVideoDuration(tempPath)
-        segments.push({ path: tempPath, duration, temp: true })
-      }
+      await concatClipsToFile(group.clips, tempPath, run)
+      const duration = await getVideoDuration(tempPath)
+      segments.push({ path: tempPath, duration, temp: true })
     }
     onGroupProgress?.(i + 1, groups.length)
   }
@@ -516,9 +559,6 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
   if (missing.length > 0) {
     throw new Error(`部分镜头视频文件缺失（${missing.length}/${absPaths.length}），请重新合成后再导出`)
   }
-  const groups = buildVisualGroups(storyboards)
-  const usePageFlip = groups.length > 1
-  let tempFiles: string[] = []
 
   // 估算总时长，用于进度条
   let totalDurationSec = 0
@@ -534,10 +574,11 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       updatedAt: Date.now(),
     })
   }
-  if (usePageFlip) {
-    totalDurationSec -= (groups.length - 1) * IMAGE_CHANGE_TRANSITION_SEC
-  }
   if (totalDurationSec <= 0) totalDurationSec = absPaths.length * 3
+
+  const groups = buildVisualGroups(storyboards)
+  const usePageFlip = groups.length > 1
+  let tempFiles: string[] = []
 
   const outputDir = path.join(STORAGE_ROOT, 'merged')
   fs.mkdirSync(outputDir, { recursive: true })
@@ -553,7 +594,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       percent,
       message: usePageFlip
         ? `正在滑入过渡拼接 (${percent}%)…`
-        : `正在编码拼接 (${percent}%)…`,
+        : `正在拼接 ${storyboards.length} 个镜头 (${percent}%)…`,
       updatedAt: Date.now(),
     })
   }
@@ -568,8 +609,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         updatedAt: Date.now(),
       })
 
-      const storyboardById = new Map(storyboards.map(sb => [sb.id, sb]))
-      const { segments, temps } = await buildMergeSegments(groups, storyboardById, run, (done, total) => {
+      const { segments, temps } = await buildMergeSegments(groups, run, (done, total) => {
         const pct = 10 + Math.round((done / total) * 15)
         setMergeProgress(episodeId, {
           mergeId,
@@ -588,47 +628,14 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         await mergeSegmentsSequential(segments, outputPath, run, updateEncodeProgress)
       }
     } else {
-      const listPath = createFfmpegListPath()
-      tempFiles.push(listPath)
-
-      const listContent = absPaths
-        .map(p => `file '${escapeConcatPath(p)}'`)
-        .join('\n')
-      fs.writeFileSync(listPath, listContent, 'utf-8')
-
       setMergeProgress(episodeId, {
         mergeId,
         phase: 'merging',
         percent: 10,
-        message: `正在拼接 ${storyboards.length} 个镜头…`,
+        message: `正在按顺序拼接 ${storyboards.length} 个镜头…`,
         updatedAt: Date.now(),
       })
-
-      await new Promise<void>((resolve, reject) => {
-        const command = ffmpeg()
-          .input(listPath)
-          .inputOptions(['-f', 'concat', '-safe', '0'])
-          .outputOptions([
-            '-fflags', '+genpts',
-            '-c:v', 'libx264',
-            '-preset', 'medium',
-            '-crf', '23',
-            '-c:a', 'aac',
-            '-ar', '48000',
-            '-b:a', '192k',
-            '-movflags', '+faststart',
-          ])
-          .output(outputPath)
-        run.command = command
-        command
-          .on('progress', (progress) => {
-            if (run.cancelled) return
-            updateEncodeProgress(parseTimemark(progress.timemark || '0'))
-          })
-          .on('end', () => resolve())
-          .on('error', (err) => reject(err))
-          .run()
-      })
+      await concatComposedVideos(absPaths, outputPath, run, updateEncodeProgress)
     }
   } catch (err: any) {
     activeMerges.delete(episodeId)
@@ -734,6 +741,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     output: mergedRelative,
     duration,
     clips: storyboards.length,
+    mergeMode: usePageFlip ? 'slideup-audio-cut' : 'concat',
     pageFlipTransitions: usePageFlip ? groups.length - 1 : 0,
     bgmMusicId: options.bgmMusicId,
     includeOpeningVideo,

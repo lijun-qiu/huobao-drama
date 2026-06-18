@@ -11,6 +11,12 @@ import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
 import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration } from '../services/ffmpeg-opening.js'
+import { resolveEdgeVoice } from '../services/edge-tts-local.js'
+import { resolveVoiceboxProfileId } from '../services/voicebox-tts.js'
+import { generateTTS } from '../services/tts-generation.js'
+import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { resolveTtsSpeed } from '../utils/tts-speed.js'
+import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { splitNarrationAudioForEpisode, transcribeNarrationAudioFiles } from '../services/narration-audio-split.js'
 import { importNarrationImageDesc, importNarrationStoryboardDesc } from '../services/storyboard-desc-import.js'
 
@@ -417,6 +423,74 @@ app.post('/:id/opening-audio', async (c) => {
     opening_audio_url: updated.openingAudioUrl,
     opening_subtitle_text: resolveOpeningSubtitleText(updated.openingSubtitleText),
   })
+})
+
+// POST /episodes/:id/generate-opening-audio — Voicebox / Edge 本地生成开幕配音
+app.post('/:id/generate-opening-audio', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const body = await c.req.json().catch(() => ({}))
+  const subtitleText = resolveOpeningSubtitleText(
+    body.subtitle_text ?? body.subtitleText ?? ep.openingSubtitleText,
+  )
+  if (!subtitleText) return badRequest(c, '请填写字幕文案')
+
+  const localTtsEngine = body?.local_tts_engine === 'voicebox' ? 'voicebox' : 'edge'
+  const localVoice = String(body?.local_voice || body?.localVoice || '').trim()
+  const ttsSpeed = resolveTtsSpeed(body?.tts_speed ?? body?.ttsSpeed)
+  const voiceboxInstruct = localTtsEngine === 'voicebox'
+    ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
+    : undefined
+  const ttsVoice = localTtsEngine === 'voicebox'
+    ? await resolveVoiceboxProfileId(localVoice)
+    : resolveEdgeVoice(localVoice)
+
+  logTaskStart('EpisodeAPI', 'generate-opening-audio', {
+    episodeId,
+    engine: localTtsEngine,
+    voice: ttsVoice,
+    speed: ttsSpeed,
+    textPreview: subtitleText.slice(0, 40),
+  })
+
+  try {
+    const audioPath = await generateTTS({
+      text: subtitleText,
+      voice: ttsVoice,
+      speed: ttsSpeed,
+      localTts: true,
+      localTtsEngine,
+      voiceboxInstruct,
+    })
+
+    db.update(schema.episodes)
+      .set({
+        openingAudioUrl: audioPath.replace(/^\//, ''),
+        openingSubtitleText: subtitleText,
+        updatedAt: now(),
+      })
+      .where(eq(schema.episodes.id, episodeId))
+      .run()
+
+    logTaskSuccess('EpisodeAPI', 'generate-opening-audio', {
+      episodeId,
+      engine: localTtsEngine,
+      path: audioPath,
+    })
+
+    return success(c, {
+      opening_audio_url: audioPath,
+      opening_subtitle_text: subtitleText,
+      local_tts_engine: localTtsEngine,
+      tts_speed: ttsSpeed,
+      voicebox_instruct: voiceboxInstruct,
+    })
+  } catch (err: any) {
+    logTaskError('EpisodeAPI', 'generate-opening-audio', { episodeId, error: err.message })
+    return badRequest(c, err.message)
+  }
 })
 
 // POST /episodes/:id/generate-opening-video — 开幕视频（翻页片头 + 可选上传配音/字幕）

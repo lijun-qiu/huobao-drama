@@ -161,8 +161,8 @@ export function suppressDateOnlyImageAnchors(
   return result
 }
 
-/** 正文分镜配图占比（固定 35%） */
-export const NARRATION_IMAGE_TARGET_RATIO = 0.35
+/** 正文分镜配图占比（约 30%） */
+export const NARRATION_IMAGE_TARGET_RATIO = 0.3
 
 function finalizeImageNeeds(items: NarrationSentenceItem[], needs: boolean[]): boolean[] {
   return suppressDateOnlyImageAnchors(items, needs)
@@ -208,7 +208,7 @@ function sentenceHasNewLocationTag(items: NarrationSentenceItem[], index: number
   return curTags.some(tag => !priorTags.includes(tag))
 }
 
-/** 按分镜总数 35% 合理分配配图锚点（结合 LLM 优先级与时间线分段） */
+/** 按分镜总数约 30% 合理分配配图锚点（结合 LLM 优先级与时间线分段） */
 export function allocateImageNeedsByRatio(
   items: NarrationSentenceItem[],
   llmFlags?: unknown[],
@@ -247,12 +247,12 @@ export function allocateImageNeedsByRatio(
   return finalizeImageNeeds(items, needs)
 }
 
-/** 规则兜底：按 35% 占比分配 */
+/** 规则兜底：按约 30% 占比分配 */
 export function detectImageNeedsBalanced(items: NarrationSentenceItem[]): boolean[] {
   return allocateImageNeedsByRatio(items, undefined, 'balanced')
 }
 
-/** 省钱模式兜底：同样按 35% 配图 */
+/** 省钱模式兜底：同样按约 30% 配图 */
 export function detectImageNeedsConservative(items: NarrationSentenceItem[]): boolean[] {
   return allocateImageNeedsByRatio(items, undefined, 'conservative')
 }
@@ -498,7 +498,7 @@ export async function generateSceneImagePromptsWithLLM(
   }
 }
 
-/** 将 LLM 优先级映射为 35% 配图分配 */
+/** 将 LLM 优先级映射为约 30% 配图分配 */
 function normalizeLLMImageDetectFlags(
   items: NarrationSentenceItem[],
   flags: unknown[],

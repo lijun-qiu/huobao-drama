@@ -53,6 +53,10 @@ export const NARRATION_MINIMAL_TEXTURE_PROMPT =
 export const NARRATION_BODY_CONSISTENCY_HINT =
   `通用素体尺寸：${NARRATION_MINIMAL_BODY_SIZE_SPEC}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}`
 
+/** 主人公须入画且画风一致 */
+export const NARRATION_PROTAGONIST_PLOT_HINT =
+  `【画面主体】须符合通用素体尺寸（${NARRATION_MINIMAL_BODY_SIZE_SPEC}），人生阶段微调见阶段规则`
+
 /** LLM 光影色调须贴合当前段 */
 export const NARRATION_ATMOSPHERE_HINT =
   '【光影色调】根据 narration_lines 写光线、时段、冷暖、人气喧闹或寂静、经营旺衰等可见基调，与年代场景和核心细节动作情绪一致'
@@ -66,10 +70,6 @@ export const NARRATION_FIXTURES_FORMAT_HINT = NARRATION_FIXTURES_HINT
 
 /** @deprecated 使用 NARRATION_FIXTURES_HINT */
 export const NARRATION_FIXTURES_DISPLAY_HINT = NARRATION_FIXTURES_HINT
-
-/** 主人公须入画且画风一致 */
-export const NARRATION_PROTAGONIST_PLOT_HINT =
-  `【画面主体】须符合通用素体尺寸（${NARRATION_MINIMAL_BODY_SIZE_SPEC}），人生阶段微调见阶段规则`
 
 export const NARRATION_CROWD_PLOT_HINT =
   '同框配角须与主人公同款素体尺寸（三头身简笔比例），仅姿态位置不同'
@@ -149,7 +149,7 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
   [NARRATION_MINIMAL_STYLE]: {
     scene: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     diptych: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    title: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}，中央预留叠字区域`,
+    title: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     portrait: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【场景：浅灰纯色背景，单人全身素体小人定妆参考图】，【剧情：${NARRATION_MINIMAL_EYES}，人生阶段与动作姿态】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     agent: NARRATION_IMAGE_STYLE_CORE,
   },
@@ -245,7 +245,7 @@ const NARRATION_PROMPT_BOILERPLATE_PARTS = [
   '纯色平涂无纹理渐变', '纯色平涂无复杂光影', '纯色平涂',
   '日常低饱和配色', '低饱和写实配色', '极简叙事动画风格', '极简叙事画风',
   '短视频剧情动画质感', '干净整洁的画面', '画面干净清晰', '画面干净整洁',
-  '无文字无水印', '中央预留叠字区域', '绝对无文字无字母', '绝对无文字',
+  '无文字无水印', '绝对无文字无字母', '绝对无文字',
   '扁平化平涂上色', '无渐变无复杂阴影', '极简叙事卡通画风', '场景简化还原',
   '2D扁平化卡通', 'flat cel', '卡通动画', '动画',
 ]
@@ -1362,7 +1362,6 @@ export function assembleNarrationUniversalScenePrompt(
     body = [
       scenePart && ensureNarrationBracket('片头背景场景', scenePart),
       plotPart && ensureNarrationBracket('主题氛围', plotPart),
-      '中央预留叠字区域',
     ].filter(Boolean).join('，')
   } else {
     const subjectText = formatNarrationPlotForPrompt(
@@ -1548,7 +1547,7 @@ function extractPromptBracketParts(raw: string): {
   const text = String(raw || '').trim()
   const titleScene = text.match(/【片头背景场景[：:]\s*([^】]+)】/)
   const titlePlot = text.match(/【主题氛围[：:]\s*([^】]+)】/)
-  if (titleScene || titlePlot || /预留中央叠字|中央预留叠字/.test(text)) {
+  if (titleScene || titlePlot) {
     return {
       scene: titleScene?.[1]?.trim() || '',
       atmosphere: '',
@@ -1627,7 +1626,7 @@ export function finalizeNarrationImagePrompt(
   if (shouldPreserveRawNarrationPrompt(raw)) return raw
 
   const isTitlePrompt = !!options?.titleHook
-    || /片头|预留中央叠字|中央预留叠字|【片头背景场景|【主题氛围/.test(raw)
+    || /片头|【片头背景场景|【主题氛围/.test(raw)
 
   if (narrationLines?.length && !raw) {
     if (isTitlePrompt) {
@@ -1671,7 +1670,7 @@ export function finalizeNarrationImagePrompt(
     ? ''
     : extractNarrationPromptContentCore(raw)
 
-  if (bracketParts.title || /片头|预留中央叠字|中央预留叠字/.test(raw)) {
+  if (bracketParts.title || /片头/.test(raw)) {
     const split = bracketParts.scene || bracketParts.plot
       ? bracketParts
       : (() => {
@@ -1730,7 +1729,7 @@ export function shouldPreserveRawNarrationPrompt(raw?: string | null): boolean {
   return NARRATION_USE_RAW_LLM_PROMPTS && !!String(raw || '').trim()
 }
 
-/** 配图 prompt：有内容则原样返回（AI 落库文本不做规则清洗） */
+/** 配图 prompt：有内容则原样返回 */
 export function resolveNarrationImagePrompt(
   prompt?: string | null,
   _style?: string | null,

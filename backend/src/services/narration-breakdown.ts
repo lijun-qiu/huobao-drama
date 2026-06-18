@@ -106,7 +106,7 @@ export function buildTitleImagePrompt(
     'NOT romantic couple, NOT clock faces, NOT roses, NOT dreamlike abstract wallpaper, NOT pixel art, NOT retro photo filter',
     artStylePrompt(style, 'title'),
     `visual theme based on story hook: ${hook}`,
-    'clean center area reserved for dynamic title overlay, 16:9 landscape, high quality',
+    '16:9 landscape, high quality',
   ].join(', ')
 }
 

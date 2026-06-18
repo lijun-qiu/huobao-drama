@@ -13,6 +13,7 @@ export type ParagraphLayout = 'single' | 'diptych'
 
 export interface NarrationImageMeta {
   narration_image_mode: NarrationImageMode
+  narration_image_source?: 'upload' | 'generate'
   narration_shot_type?: NarrationShotType
   narration_tts_mode?: 'new' | 'inherit' | 'copy'
   title_hook?: string
@@ -66,6 +67,9 @@ export function parseNarrationImageMeta(referenceImages?: string | null): Narrat
     const shotType = parsed?.narration_shot_type
     return {
       narration_image_mode: mode === 'new' || mode === 'copy' || mode === 'inherit' ? mode : 'inherit',
+      narration_image_source: parsed?.narration_image_source === 'upload' || parsed?.narration_image_source === 'generate'
+        ? parsed.narration_image_source
+        : undefined,
       narration_shot_type: shotType === 'title' ? 'title' : 'normal',
       narration_tts_mode: parsed?.narration_tts_mode === 'new' || parsed?.narration_tts_mode === 'copy' || parsed?.narration_tts_mode === 'inherit'
         ? parsed.narration_tts_mode
@@ -218,15 +222,41 @@ export function resolveStoryboardVisualSource(storyboards: VisualSb[], storyboar
   const idx = ordered.findIndex(sb => sb.id === storyboardId)
   if (idx < 0) return null
 
-  for (let i = idx; i >= 0; i--) {
-    const visual = getStoryboardDirectVisual(ordered[i])
-    if (visual) {
+  const sb = ordered[idx]
+  const meta = parseNarrationImageMeta(sb.referenceImages)
+  const ownVisual = getStoryboardDirectVisual(sb)
+
+  if (meta.narration_image_mode === 'new') {
+    if (!ownVisual) return null
+    return { ...ownVisual, inherited: false, inheritedFrom: null }
+  }
+
+  if (ownVisual && meta.narration_image_mode === 'copy') {
+    for (let i = idx - 1; i >= 0; i--) {
+      const prevVisual = getStoryboardDirectVisual(ordered[i])
+      if (prevVisual) {
+        return {
+          ...ownVisual,
+          inherited: true,
+          inheritedFrom: ordered[i].id,
+        }
+      }
+    }
+    return { ...ownVisual, inherited: true, inheritedFrom: null }
+  }
+
+  for (let i = idx - 1; i >= 0; i--) {
+    const prevMeta = parseNarrationImageMeta(ordered[i].referenceImages)
+    if (prevMeta.narration_image_mode === 'new') {
+      const visual = getStoryboardDirectVisual(ordered[i])
+      if (!visual) return null
       return {
         ...visual,
-        inherited: visual.sourceId !== storyboardId,
-        inheritedFrom: visual.sourceId !== storyboardId ? visual.sourceId : null,
+        inherited: true,
+        inheritedFrom: ordered[i].id,
       }
     }
   }
+
   return null
 }

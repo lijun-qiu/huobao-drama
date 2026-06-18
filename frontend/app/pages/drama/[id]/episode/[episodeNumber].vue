@@ -1128,6 +1128,16 @@
             </div>
             <div v-if="uploadedEpisodeAudio.length" class="narration-srt-panel">
               <div class="narration-srt-head">
+                <button
+                  class="narration-srt-panel-toggle"
+                  type="button"
+                  :title="narrationSrtPanelOpen ? '收起字幕预览' : '展开字幕预览'"
+                  @click="narrationSrtPanelOpen = !narrationSrtPanelOpen"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :style="{ transform: narrationSrtPanelOpen ? 'rotate(90deg)' : 'rotate(0deg)' }">
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                </button>
                 <span class="tag mono">Whisper 字幕 · {{ narrationSrtFiles.length ? `${narrationSrtFiles.length} 份` : '未生成' }}</span>
                 <span v-if="narrationSrtFiles.length" class="dim" style="font-size:11px">
                   共 {{ narrationSrtCueCount }} 条 · 裁剪前可先核对转写内容
@@ -1151,6 +1161,7 @@
                   </button>
                 </div>
               </div>
+              <div v-if="narrationSrtPanelOpen">
               <div v-if="!narrationSrtFiles.length" class="narration-srt-empty dim">
                 上传 MP3 后点「预览转写字幕」查看 Whisper 转写（常有错字，仅供参考）；列表中「分镜文案」列为按字数比例对应的正确旁白。
               </div>
@@ -1224,27 +1235,81 @@
                   </div>
                 </div>
               </div>
+              </div>
             </div>
             <div v-if="isNarrationMode" class="local-tts-bar">
               <label class="local-tts-toggle">
                 <input v-model="localTtsEnabled" type="checkbox" />
-                <span>本地配音（Edge TTS · 免 API）</span>
+                <span>本地配音（免 API）</span>
               </label>
+              <BaseSelect
+                v-if="localTtsEnabled"
+                :model-value="localTtsEngine"
+                :options="localTtsEngineOptions"
+                placeholder="选择引擎"
+                style="min-width:160px"
+                @update:model-value="localTtsEngine = $event"
+              />
+              <BaseSelect
+                v-if="localTtsEnabled"
+                :model-value="localTtsSpeed"
+                :options="localTtsSpeedOptions"
+                placeholder="语速"
+                style="min-width:120px"
+                @update:model-value="localTtsSpeed = Number($event) || DEFAULT_TTS_SPEED"
+              />
               <BaseSelect
                 v-if="localTtsEnabled"
                 :model-value="localEdgeVoiceId"
                 :options="edgeVoiceSelectOptions"
-                placeholder="选择本地音色"
+                :placeholder="localTtsEngine === 'voicebox' ? '选择 Voicebox 音色' : '选择本地音色'"
                 searchable
                 style="min-width:220px"
                 @update:model-value="localEdgeVoiceId = $event"
               />
-              <span v-else class="tag warn">将使用付费 API：{{ lockedAudioConfigLabel }}</span>
+              <BaseSelect
+                v-if="localTtsEnabled && localTtsEngine === 'voicebox'"
+                :model-value="localVoiceboxInstructPreset"
+                :options="voiceboxInstructOptions"
+                placeholder="风格/感情"
+                style="min-width:140px"
+                @update:model-value="localVoiceboxInstructPreset = $event"
+              />
+              <input
+                v-if="localTtsEnabled && localTtsEngine === 'voicebox' && localVoiceboxInstructPreset === VOICEBOX_INSTRUCT_CUSTOM"
+                v-model="localVoiceboxInstructCustom"
+                class="input"
+                type="text"
+                placeholder="如：沉稳有感情，语速适中"
+                style="min-width:200px;max-width:280px"
+                @change="persistLocalTtsPrefs"
+              />
+              <button
+                v-if="localTtsEnabled"
+                class="btn btn-sm"
+                type="button"
+                :disabled="localTtsPreviewing || !localEdgeVoiceId || (localTtsEngine === 'voicebox' && !voiceboxAvailable) || (localTtsEngine === 'voicebox' && !selectedVoiceboxVoiceReady())"
+                @click="previewLocalTtsVoice()"
+              >
+                {{ localTtsPreviewing ? '试听生成中…' : '试听' }}
+              </button>
+              <audio
+                v-if="localTtsEnabled && localTtsPreviewSrc"
+                :key="localTtsPreviewSrc"
+                :src="localTtsPreviewSrc"
+                controls
+                preload="metadata"
+                class="local-tts-preview-player"
+              />
+              <span v-if="localTtsEnabled && localTtsEngine === 'voicebox' && voiceboxAvailable" class="tag ok">Voicebox 已连接</span>
+              <span v-else-if="localTtsEnabled && localTtsEngine === 'voicebox' && !voiceboxAvailable" class="tag warn">Voicebox 未运行</span>
+              <span v-else-if="!localTtsEnabled" class="tag warn">将使用付费 API：{{ lockedAudioConfigLabel }}</span>
             </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条旁白</span>
               <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已就绪</span>
-              <span class="tag">{{ localTtsEnabled ? '本地 Edge TTS' : lockedAudioConfigLabel }}</span>
+              <span v-if="localTtsEnabled" class="tag">{{ localTtsEngineLabel }} · {{ localTtsSpeedLabel }}{{ localVoiceboxInstructLabel ? ` · ${localVoiceboxInstructLabel}` : '' }}</span>
+              <span v-else class="tag">{{ lockedAudioConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
                 <button
                   class="btn btn-sm btn-primary"
@@ -1411,7 +1476,7 @@
           <!-- Sub: Shots (Narration) -->
           <div v-else-if="prodTab === 'shots' && isNarrationMode" class="prod-content">
             <div class="narration-hint">
-              <strong>配图策略：</strong>先点「配图分镜」按场景换图并生成配图文案，再批量生成配图。同场景可沿用；默认完整单图，可手动切两宫格。
+              <strong>配图策略：</strong>先点「配图分镜」按场景换图并生成配图文案，再批量生成配图。同场景可沿用；默认完整单图，可手动切两宫格。上传配图用「上传下一张」，同段 inherit 镜头自动沿用，<strong>不会跨到下一个需配图镜头</strong>。
             </div>
             <div class="prod-image-model-bar" style="margin-bottom:12px">
               <span class="dim" style="font-size:12px">文本模型</span>
@@ -1501,23 +1566,47 @@
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ shotImgCount }}/{{ narrationNeedImageCount }} 需配图</span>
+              <span
+                v-if="narrationImagesPendingCount"
+                class="tag mono"
+                style="max-width:min(100%, 420px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                :title="`未生成配图：${narrationImagesPendingLabel}`"
+              >
+                待生成 {{ narrationImagesPendingHint }}
+              </span>
               <div class="ml-auto flex gap-1 items-center">
                 <BaseSelect
                   v-if="narrationCopyBatchOptions.length > 1"
-                  :model-value="narrationCopyBatchIndex"
                   :options="narrationCopyBatchOptions"
+                  :model-value="narrationCopyBatchIndex"
                   placeholder="批次"
                   style="min-width:96px"
                   @update:model-value="narrationCopyBatchIndex = Number($event) || 1"
                 />
+                <button class="btn btn-sm" :disabled="!narrationImagesPendingCount" @click="triggerNextShotImageUpload" title="上传一张配图到下一个待配图镜头，同段 inherit 镜头自动沿用">
+                  上传下一张{{ nextPendingNarrationShot ? ` (#${getNarrationShotDisplayNo(nextPendingNarrationShot)})` : '' }}
+                </button>
+                <button
+                  v-if="uploadedNarrationImageCount"
+                  class="btn btn-sm"
+                  title="清除所有手动上传的配图（不影响 AI 生成）"
+                  @click="clearUploadedNarrationShotImages"
+                >
+                  清除已上传配图 ({{ uploadedNarrationImageCount }})
+                </button>
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="copyNarrationShotPromptsBatch">
-                  {{ narrationCopyBatchOptions.length > 1 ? `复制描述词 (${narrationCopyBatchOptions.find(o => o.value === narrationCopyBatchIndex)?.label || '1-10'})` : '一键复制描述词' }}
+                  {{ narrationCopyBatchOptions.length > 1 ? `复制描述词 (${narrationCopyBatchOptions.find(o => o.value === narrationCopyBatchIndex)?.label || '#01-#10'})` : `一键复制描述词（${narrationNeedImageCount}）` }}
                 </button>
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerAllShotImageUpload">一键上传全部（{{ narrationNeedImageCount }}）</button>
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerShotFolderUpload" title="选择已重命名为 #序号#镜头ID 的文件夹">文件夹上传</button>
-                <button class="btn btn-primary btn-sm" :disabled="isBatchRunning('narrationImages') || !narrationImagesPendingCount" @click="batchNarrationShotImages">
+                <button
+                  class="btn btn-primary btn-sm"
+                  :disabled="isBatchRunning('narrationImages') || !narrationImagesPendingCount"
+                  :title="narrationImagesPendingCount ? `将生成：${narrationImagesPendingLabel}` : ''"
+                  @click="batchNarrationShotImages"
+                >
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-                  生成剩余{{ narrationImagesPendingCount ? ` (${narrationImagesPendingCount})` : '' }}
+                  生成剩余{{ narrationImagesPendingCount ? ` (${narrationImagesPendingHint})` : '' }}
                 </button>
               </div>
             </div>
@@ -1536,9 +1625,10 @@
                   <div v-else class="prod-cover-empty">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                   </div>
-                  <span class="prod-idx">#{{ String(i+1).padStart(2,'0') }}</span>
+                  <span class="prod-idx">#{{ getNarrationShotDisplayNo(sb) }}</span>
                   <span v-if="isNarrationTitleShot(sb)" class="prod-overlay-badge is-title">片头</span>
                   <span v-else-if="narrationShotNeedsOwnImage(sb) && parseNarrationImageMeta(sb).paragraph_layout === 'diptych'" class="prod-overlay-badge">两宫格</span>
+                  <span v-else-if="narrationShotNeedsOwnImage(sb) && !hasNarrationShotImage(sb)" class="prod-overlay-badge is-pending">待生成</span>
                   <span v-else-if="narrationShotInherited(sb)" class="prod-overlay-badge">复用</span>
                   <span v-else-if="!narrationShotNeedsOwnImage(sb)" class="prod-overlay-badge">沿用</span>
                 </div>
@@ -2106,26 +2196,84 @@
           </div>
           <div class="export-opening-body">
             <div class="narration-hint" style="margin-bottom:16px">
-              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每次转场叠加书本翻页音效）。上传 MP3 后按配音时长生成，并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未上传时为 2 秒片头 + 翻页音效。
+              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每次转场叠加书本翻页音效）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 2 秒片头 + 翻页音效。
             </div>
             <div class="opening-audio-panel" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px">
-              <div style="font-size:13px;font-weight:600;margin-bottom:8px">开幕配音（MP3）</div>
-              <div class="export-bar" style="margin-bottom:10px">
-                <button class="btn" :disabled="openingAudioUploading" @click="triggerOpeningAudioUpload">
-                  {{ openingAudioUploading ? '上传中…' : (openingAudioUrl ? '更换 MP3' : '上传 MP3') }}
-                </button>
-                <audio v-if="openingAudioSrc" :src="openingAudioSrc" controls style="height:32px;max-width:280px" />
-                <span v-if="openingAudioUrl" class="tag tag-success">已上传</span>
-              </div>
-              <label class="field-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:4px">字幕文案（屏幕水平垂直居中）</label>
+              <div style="font-size:13px;font-weight:600;margin-bottom:8px">开幕配音</div>
+              <label class="field-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:4px">字幕文案（屏幕水平垂直居中，亦作配音文本）</label>
               <input
                 v-model="openingSubtitleText"
                 class="input"
                 type="text"
                 placeholder="体验365个人生副本"
-                style="width:100%;max-width:480px"
+                style="width:100%;max-width:480px;margin-bottom:10px"
                 @change="saveOpeningSubtitle"
               />
+              <div class="export-bar" style="margin-bottom:10px;flex-wrap:wrap;gap:8px">
+                <BaseSelect
+                  :model-value="localTtsEngine"
+                  :options="localTtsEngineOptions"
+                  placeholder="选择引擎"
+                  style="min-width:160px"
+                  @update:model-value="localTtsEngine = $event"
+                />
+                <BaseSelect
+                  :model-value="localTtsSpeed"
+                  :options="localTtsSpeedOptions"
+                  placeholder="语速"
+                  style="min-width:120px"
+                  @update:model-value="localTtsSpeed = Number($event) || DEFAULT_TTS_SPEED"
+                />
+                <BaseSelect
+                  :model-value="localEdgeVoiceId"
+                  :options="edgeVoiceSelectOptions"
+                  :placeholder="localTtsEngine === 'voicebox' ? '选择 Voicebox 音色' : '选择本地音色'"
+                  searchable
+                  style="min-width:220px"
+                  @update:model-value="localEdgeVoiceId = $event"
+                />
+                <BaseSelect
+                  v-if="localTtsEngine === 'voicebox'"
+                  :model-value="localVoiceboxInstructPreset"
+                  :options="voiceboxInstructOptions"
+                  placeholder="风格/感情"
+                  style="min-width:140px"
+                  @update:model-value="localVoiceboxInstructPreset = $event"
+                />
+                <input
+                  v-if="localTtsEngine === 'voicebox' && localVoiceboxInstructPreset === VOICEBOX_INSTRUCT_CUSTOM"
+                  v-model="localVoiceboxInstructCustom"
+                  class="input"
+                  type="text"
+                  placeholder="如：沉稳有感情，语速适中"
+                  style="min-width:200px;max-width:280px"
+                  @change="persistLocalTtsPrefs"
+                />
+                <button
+                  class="btn btn-sm"
+                  type="button"
+                  :disabled="localTtsPreviewing || !localEdgeVoiceId || (localTtsEngine === 'voicebox' && !voiceboxAvailable) || (localTtsEngine === 'voicebox' && !selectedVoiceboxVoiceReady())"
+                  @click="previewLocalTtsVoice(openingSubtitleText)"
+                >
+                  {{ localTtsPreviewing ? '试听生成中…' : '试听' }}
+                </button>
+                <button
+                  class="btn btn-primary"
+                  :disabled="openingAudioGenerating || (localTtsEngine === 'voicebox' && !voiceboxAvailable)"
+                  @click="generateOpeningAudio"
+                >
+                  {{ openingAudioGenerating ? '生成中…' : (openingAudioUrl ? '重新生成配音' : `${localTtsEngineLabel} 生成配音`) }}
+                </button>
+                <span v-if="localTtsEngine === 'voicebox' && voiceboxAvailable" class="tag ok">Voicebox 已连接</span>
+                <span v-else-if="localTtsEngine === 'voicebox' && !voiceboxAvailable" class="tag warn">Voicebox 未运行</span>
+              </div>
+              <div class="export-bar" style="margin-bottom:0">
+                <button class="btn" :disabled="openingAudioUploading" @click="triggerOpeningAudioUpload">
+                  {{ openingAudioUploading ? '上传中…' : (openingAudioUrl ? '更换 MP3' : '或上传 MP3') }}
+                </button>
+                <audio v-if="openingAudioSrc" :src="openingAudioSrc" controls style="height:32px;max-width:280px" />
+                <span v-if="openingAudioUrl" class="tag tag-success">配音已就绪</span>
+              </div>
             </div>
             <template v-if="openingVideoProcessing">
               <div class="step-empty">
@@ -2513,6 +2661,11 @@ import {
   getNarrationShotOwnImage,
   resolveNarrationEffectiveImage,
   narrationShotsNeedingImage,
+  narrationShotsPendingImage,
+  narrationShotsWithUploadedImage,
+  getNarrationShotDisplayNo,
+  formatNarrationShotDisplayList,
+  formatNarrationPendingImageHint,
   narrationShotImageReady,
   narrationImagesReady,
   narrationTtsReady as narrationTtsAllReady,
@@ -2562,8 +2715,71 @@ const narratorVoiceId = ref('')
 const narratorVoiceDirty = ref(false)
 const DEFAULT_LOCAL_EDGE_VOICE = 'zh-CN-YunxiNeural'
 const localTtsEnabled = ref(true)
+const localTtsEngine = ref('voicebox')
 const localEdgeVoiceId = ref(DEFAULT_LOCAL_EDGE_VOICE)
 const edgeVoiceProfiles = ref([])
+const voiceboxAvailable = ref(false)
+const localTtsEngineOptions = [
+  { label: 'Voicebox（声音克隆）', value: 'voicebox' },
+  { label: 'Edge TTS（系统音色）', value: 'edge' },
+]
+const DEFAULT_TTS_SPEED = 0.75
+const localTtsSpeedOptions = [
+  { label: '0.5x', value: 0.5 },
+  { label: '0.6x', value: 0.6 },
+  { label: '0.75x（默认）', value: 0.75 },
+  { label: '0.8x', value: 0.8 },
+  { label: '0.85x', value: 0.85 },
+  { label: '1.0x', value: 1 },
+  { label: '1.25x', value: 1.25 },
+]
+const localTtsSpeed = ref(DEFAULT_TTS_SPEED)
+const VOICEBOX_INSTRUCT_CUSTOM = '__custom__'
+const voiceboxInstructOptions = [
+  { label: '默认（自然）', value: '' },
+  { label: '沉稳叙述', value: '沉稳、清晰，适合纪录片旁白' },
+  { label: '温暖亲切', value: '温暖亲切，带有微笑感' },
+  { label: '略带感慨', value: '略带感慨，语速适中，有感情' },
+  { label: '紧张悬疑', value: '紧张、悬疑，压低声音' },
+  { label: '激昂有力', value: '激昂有力，广播质感' },
+  { label: '轻声低语', value: '轻声、亲密，如同在耳边诉说' },
+  { label: '自定义…', value: VOICEBOX_INSTRUCT_CUSTOM },
+]
+const localVoiceboxInstructPreset = ref('略带感慨，语速适中，有感情')
+const localVoiceboxInstructCustom = ref('')
+const LOCAL_TTS_PREVIEW_DEFAULT = '这是一段旁白试听，用于感受当前音色、语速和感情效果。'
+const localTtsPreviewing = ref(false)
+const localTtsPreviewUrl = ref('')
+const localTtsPreviewSrc = computed(() => {
+  if (!localTtsPreviewUrl.value) return ''
+  const path = localTtsPreviewUrl.value.replace(/^\//, '')
+  return `/${path}?v=${encodeURIComponent(localTtsPreviewBump.value)}`
+})
+const localTtsPreviewBump = ref(0)
+const localTtsSpeedLabel = computed(() => {
+  const opt = localTtsSpeedOptions.find(o => o.value === localTtsSpeed.value)
+  return opt?.label || `${localTtsSpeed.value}x`
+})
+const localTtsEngineLabel = computed(() => {
+  if (!localTtsEnabled.value) return lockedAudioConfigLabel.value
+  return localTtsEngine.value === 'voicebox' ? '本地 Voicebox' : '本地 Edge TTS'
+})
+function resolveVoiceboxInstructText() {
+  if (localVoiceboxInstructPreset.value === VOICEBOX_INSTRUCT_CUSTOM) {
+    return String(localVoiceboxInstructCustom.value || '').trim()
+  }
+  return String(localVoiceboxInstructPreset.value || '').trim()
+}
+const localVoiceboxInstructLabel = computed(() => {
+  if (localTtsEngine.value !== 'voicebox') return ''
+  const instruct = resolveVoiceboxInstructText()
+  if (!instruct) return ''
+  if (localVoiceboxInstructPreset.value === VOICEBOX_INSTRUCT_CUSTOM) {
+    return instruct.length > 12 ? `${instruct.slice(0, 12)}…` : instruct
+  }
+  const opt = voiceboxInstructOptions.find(o => o.value === localVoiceboxInstructPreset.value)
+  return opt?.label || instruct
+})
 const pipelineStepTotal = computed(() => workflowStepTotal(productionMode.value))
 const panel = ref('script')
 const { running: rn, runningType: rt, run: runAgent } = useAgent()
@@ -2649,6 +2865,7 @@ function resolveOpeningSubtitleText(stored) {
 }
 const openingSubtitleText = ref(OPENING_SUBTITLE_DEFAULT)
 const openingAudioUploading = ref(false)
+const openingAudioGenerating = ref(false)
 const openingVideoProcessing = ref(false)
 let openingPollTimer = null
 const openingVideoSrc = computed(() => {
@@ -2733,12 +2950,68 @@ const voiceProfiles = ref(fallbackVoiceProfiles)
 const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({ label: `${v.label} · ${v.traits}`, value: v.id })))
 const edgeVoiceSelectOptions = computed(() => edgeVoiceProfiles.value.map(v => ({ label: v.label, value: v.id })))
 
+function buildLocalTtsPreviewPayload(textOverride) {
+  const text = String(textOverride || '').trim() || LOCAL_TTS_PREVIEW_DEFAULT
+  const payload = {
+    local_tts_engine: localTtsEngine.value === 'voicebox' ? 'voicebox' : 'edge',
+    local_voice: localEdgeVoiceId.value,
+    tts_speed: localTtsSpeed.value,
+    text,
+  }
+  if (localTtsEngine.value === 'voicebox') {
+    const instruct = resolveVoiceboxInstructText()
+    if (instruct) payload.voicebox_instruct = instruct
+  }
+  return payload
+}
+
+function selectedVoiceboxVoiceReady() {
+  if (localTtsEngine.value !== 'voicebox') return true
+  const row = edgeVoiceProfiles.value.find(p => p.id === localEdgeVoiceId.value)
+  return row?.modelReady !== false
+}
+
+async function previewLocalTtsVoice(textOverride) {
+  if (!localEdgeVoiceId.value) {
+    toast.warning(localTtsEngine.value === 'voicebox' ? '请选择 Voicebox 音色' : '请选择本地音色')
+    return
+  }
+  if (localTtsEngine.value === 'voicebox' && !voiceboxAvailable.value) {
+    toast.warning('Voicebox 未运行，请先启动 Voicebox')
+    return
+  }
+  if (!selectedVoiceboxVoiceReady()) {
+    const row = edgeVoiceProfiles.value.find(p => p.id === localEdgeVoiceId.value)
+    toast.warning(row?.modelHint || '该预设音色所需模型尚未下载完成，请先在 Voicebox → Models 中下载，或改用克隆音色「111」')
+    return
+  }
+  try {
+    localTtsPreviewing.value = true
+    const res = await voicesAPI.previewLocal(buildLocalTtsPreviewPayload(textOverride))
+    const path = res?.audio_url || res?.audioUrl
+    if (!path) throw new Error('试听生成失败')
+    localTtsPreviewUrl.value = path
+    localTtsPreviewBump.value = Date.now()
+    toast.success('试听已生成，可直接播放')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    localTtsPreviewing.value = false
+  }
+}
+
 function ttsGenerateOptions(force = false) {
   const opts = {}
   if (force) opts.force = true
   if (isNarrationMode.value && localTtsEnabled.value !== false) {
     opts.local_tts = true
+    opts.local_tts_engine = localTtsEngine.value === 'voicebox' ? 'voicebox' : 'edge'
     opts.local_voice = localEdgeVoiceId.value
+    opts.tts_speed = localTtsSpeed.value
+    if (localTtsEngine.value === 'voicebox') {
+      const instruct = resolveVoiceboxInstructText()
+      if (instruct) opts.voicebox_instruct = instruct
+    }
   } else if (!isNarrationMode.value) {
     // drama mode: never send local_tts
   } else {
@@ -2750,15 +3023,30 @@ function ttsGenerateOptions(force = false) {
 function persistLocalTtsPrefs() {
   if (typeof window === 'undefined' || !epId.value) return
   window.localStorage.setItem(`episode-${epId.value}-local-tts`, localTtsEnabled.value ? '1' : '0')
+  window.localStorage.setItem(`episode-${epId.value}-local-tts-engine`, localTtsEngine.value)
   window.localStorage.setItem(`episode-${epId.value}-local-voice`, localEdgeVoiceId.value)
+  window.localStorage.setItem(`episode-${epId.value}-local-tts-speed`, String(localTtsSpeed.value))
+  window.localStorage.setItem(`episode-${epId.value}-voicebox-instruct-preset`, localVoiceboxInstructPreset.value)
+  window.localStorage.setItem(`episode-${epId.value}-voicebox-instruct-custom`, localVoiceboxInstructCustom.value)
 }
 
 function restoreLocalTtsPrefs() {
   if (typeof window === 'undefined' || !epId.value) return
   const stored = window.localStorage.getItem(`episode-${epId.value}-local-tts`)
   localTtsEnabled.value = stored === null ? true : stored === '1'
+  const engine = window.localStorage.getItem(`episode-${epId.value}-local-tts-engine`)
+  if (engine === 'edge' || engine === 'voicebox') localTtsEngine.value = engine
   const voice = window.localStorage.getItem(`episode-${epId.value}-local-voice`)
   if (voice) localEdgeVoiceId.value = voice
+  const speed = Number(window.localStorage.getItem(`episode-${epId.value}-local-tts-speed`))
+  if (Number.isFinite(speed) && speed >= 0.5 && speed <= 2) localTtsSpeed.value = speed
+  const instructPreset = window.localStorage.getItem(`episode-${epId.value}-voicebox-instruct-preset`)
+  if (instructPreset !== null) {
+    const known = voiceboxInstructOptions.some(o => o.value === instructPreset)
+    localVoiceboxInstructPreset.value = known ? instructPreset : ''
+  }
+  const instructCustom = window.localStorage.getItem(`episode-${epId.value}-voicebox-instruct-custom`)
+  if (instructCustom) localVoiceboxInstructCustom.value = instructCustom
 }
 
 function persistExportBgmPrefs() {
@@ -3256,7 +3544,7 @@ async function saveShotEditor(remake = false) {
     }
 
     toast.info('正在重新配音…')
-    await storyboardAPI.generateTTS(sb.id, { force: true, local_tts: localTtsEnabled.value })
+    await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(true))
     toast.info('正在重新合成该镜…')
     delete failedComposeMessages.value[sb.id]
     if (!isPendingCompose(sb.id)) pendingComposeIds.value.push(sb.id)
@@ -3987,13 +4275,15 @@ const narrationNeedImageCount = computed(() => narrationShotsNeedingImage(sbs.va
 const NARRATION_PROMPT_COPY_BATCH_SIZE = 10
 const narrationCopyBatchIndex = ref(1)
 const narrationCopyBatchOptions = computed(() => {
-  const total = narrationNeedImageCount.value
+  const list = narrationShotsNeedingImage(sbs.value)
+  const total = list.length
   if (!total) return []
   const batchCount = Math.ceil(total / NARRATION_PROMPT_COPY_BATCH_SIZE)
   return Array.from({ length: batchCount }, (_, idx) => {
-    const start = idx * NARRATION_PROMPT_COPY_BATCH_SIZE + 1
-    const end = Math.min((idx + 1) * NARRATION_PROMPT_COPY_BATCH_SIZE, total)
-    return { value: idx + 1, label: `${start}-${end}` }
+    const batchItems = list.slice(idx * NARRATION_PROMPT_COPY_BATCH_SIZE, (idx + 1) * NARRATION_PROMPT_COPY_BATCH_SIZE)
+    const firstNo = getNarrationShotDisplayNo(batchItems[0])
+    const lastNo = getNarrationShotDisplayNo(batchItems[batchItems.length - 1])
+    return { value: idx + 1, label: `#${firstNo}-#${lastNo}` }
   })
 })
 watch(narrationCopyBatchOptions, (opts) => {
@@ -4013,8 +4303,13 @@ const ttsPendingCount = computed(() => {
   return sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb)).length
 })
 const narrationImagesPendingCount = computed(() =>
-  sbs.value.filter(sb => narrationShotNeedsOwnImage(sb) && !hasNarrationShotImage(sb)).length,
+  narrationShotsPendingImage(sbs.value).length,
 )
+const nextPendingNarrationShot = computed(() => narrationShotsPendingImage(sbs.value)[0] || null)
+const uploadedNarrationImageCount = computed(() => narrationShotsWithUploadedImage(sbs.value).length)
+const narrationImagesPendingShots = computed(() => narrationShotsPendingImage(sbs.value))
+const narrationImagesPendingLabel = computed(() => formatNarrationShotDisplayList(narrationImagesPendingShots.value))
+const narrationImagesPendingHint = computed(() => formatNarrationPendingImageHint(sbs.value))
 const composePendingCount = computed(() =>
   sbs.value.filter(sb => canCompose(sb) && !hasComposed(sb)).length,
 )
@@ -4031,6 +4326,13 @@ function getNarrationImagePromptText(sb, style = drama.value?.style || 'comic') 
   const stored = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
   if (stored) return stored
   return buildNarrationImagePrompt(sb, style, sbs.value)
+}
+
+function getNarrationImagePromptForCopy(sb, style = drama.value?.style || 'comic') {
+  const text = getNarrationImagePromptText(sb, style)
+  if (text) return text
+  const meta = parseNarrationImageMeta(sb)
+  return String(meta.scene_content || extractNarrationSentence(sb) || '').trim()
 }
 
 function updateNarrationImagePrompt(sb, value) {
@@ -5232,7 +5534,9 @@ async function mapWithConcurrency(items, limit, worker) {
 }
 
 function resolveTtsBatchConcurrency() {
-  if (isNarrationMode.value && localTtsEnabled.value !== false) return 6
+  if (isNarrationMode.value && localTtsEnabled.value !== false) {
+    return localTtsEngine.value === 'voicebox' ? 8 : 6
+  }
   return 2
 }
 
@@ -5322,6 +5626,7 @@ const narrationAudioUploading = ref(false)
 const narrationSrtPreviewing = ref(false)
 const uploadedEpisodeAudio = ref([])
 const narrationSrtFiles = ref([])
+const narrationSrtPanelOpen = ref(false)
 const expandedSrtIndex = ref(-1)
 const srtViewMode = ref('table')
 
@@ -5373,7 +5678,7 @@ function loadNarrationSrtFiles() {
   try {
     const raw = window.localStorage.getItem(narrationSrtStorageKey())
     narrationSrtFiles.value = raw ? JSON.parse(raw) : []
-    expandedSrtIndex.value = narrationSrtFiles.value.length ? 0 : -1
+    expandedSrtIndex.value = -1
   } catch {
     narrationSrtFiles.value = []
     expandedSrtIndex.value = -1
@@ -5388,9 +5693,6 @@ function saveNarrationSrtFiles() {
 function applyNarrationSrtFiles(files) {
   narrationSrtFiles.value = Array.isArray(files) ? files : []
   saveNarrationSrtFiles()
-  if (narrationSrtFiles.value.length && expandedSrtIndex.value < 0) {
-    expandedSrtIndex.value = 0
-  }
 }
 
 function clearNarrationSrtFiles() {
@@ -5522,6 +5824,40 @@ function triggerOpeningAudioUpload() {
   audioUploadInputRef.value?.click()
 }
 
+async function generateOpeningAudio() {
+  const text = openingSubtitleText.value.trim()
+  if (!text) {
+    toast.warning('请先填写字幕文案')
+    return
+  }
+  if (localTtsEngine.value === 'voicebox' && !voiceboxAvailable.value) {
+    toast.error('Voicebox 未运行，请先启动 Voicebox（默认端口 17493）')
+    return
+  }
+  if (!localEdgeVoiceId.value) {
+    toast.warning(localTtsEngine.value === 'voicebox' ? '请选择 Voicebox 音色' : '请选择本地音色')
+    return
+  }
+  try {
+    openingAudioGenerating.value = true
+    await episodeAPI.generateOpeningAudio(epId.value, {
+      subtitle_text: text,
+      local_tts_engine: localTtsEngine.value === 'voicebox' ? 'voicebox' : 'edge',
+      local_voice: localEdgeVoiceId.value,
+      tts_speed: localTtsSpeed.value,
+      ...(localTtsEngine.value === 'voicebox' && resolveVoiceboxInstructText()
+        ? { voicebox_instruct: resolveVoiceboxInstructText() }
+        : {}),
+    })
+    await refresh()
+    toast.success('开幕配音已生成，可点击生成开幕视频')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    openingAudioGenerating.value = false
+  }
+}
+
 async function saveOpeningSubtitle() {
   if (!epId.value || !openingAudioUrl.value) return
   try {
@@ -5630,12 +5966,11 @@ async function applyShotUploadedImage(sbId, path) {
   const updates = { composed_image: path }
   if (sb) {
     const meta = parseNarrationImageMeta(sb)
-    if (meta.narration_image_mode !== 'new') {
-      updates.reference_images = JSON.stringify({
-        narration_image_mode: 'new',
-        scene_content: resolveSceneContentForShot(sbs.value, sb),
-      })
-    }
+    updates.reference_images = JSON.stringify({
+      ...meta,
+      narration_image_mode: 'new',
+      narration_image_source: 'upload',
+    })
   }
   await storyboardAPI.update(sbId, updates)
   const row = sbs.value.find(item => item.id === sbId)
@@ -5644,6 +5979,34 @@ async function applyShotUploadedImage(sbId, path) {
     row.composedImage = path
     if (updates.reference_images) row.reference_images = updates.reference_images
   }
+}
+
+function triggerNextShotImageUpload() {
+  const next = nextPendingNarrationShot.value
+  if (!next) {
+    toast.warning('暂无待配图镜头')
+    return
+  }
+  imageUploadTarget.value = { kind: 'shot-batch', ids: [next.id] }
+  imageUploadInputRef.value?.click()
+}
+
+async function clearUploadedNarrationShotImages() {
+  const targets = narrationShotsWithUploadedImage(sbs.value)
+  if (!targets.length) {
+    toast.info('暂无已上传配图')
+    return
+  }
+  for (const sb of targets) {
+    const meta = parseNarrationImageMeta(sb)
+    const { narration_image_source: _source, ...rest } = meta
+    await storyboardAPI.update(sb.id, {
+      composed_image: null,
+      reference_images: JSON.stringify({ ...rest, narration_image_mode: 'new' }),
+    })
+  }
+  toast.success(`已清除 ${targets.length} 张上传配图`)
+  await refresh()
 }
 
 function triggerShotFolderUpload() {
@@ -5753,11 +6116,16 @@ async function onImageUploadSelected(event) {
       return
     }
     if (ok === pairs.length) {
+      const shotMsg = target.kind === 'shot-batch' && pairs.length === 1
+        ? `镜头 #${getNarrationShotDisplayNo(sbs.value.find(item => item.id === pairs[0].id) || { storyboard_number: pairs[0].id })}`
+        : ''
       toast.success(target.kind === 'character-batch'
         ? `已全部上传 ${ok} 张定妆图`
         : target.matchByFilename || pairs.some(p => parseShotImageFilename(p.file.name))
           ? `已按文件名匹配上传 ${ok} 张配图`
-          : `已全部上传 ${ok} 张配图`)
+          : shotMsg
+            ? `已上传配图到 ${shotMsg}（同段镜头自动沿用至下一需配图位置）`
+            : `已全部上传 ${ok} 张配图`)
     } else {
       toast.warning(`上传完成 ${ok}/${pairs.length}，部分失败请重试`)
     }
@@ -5804,35 +6172,33 @@ async function copyNarrationShotPromptsBatch() {
     toast.warning('当前批次无镜头')
     return
   }
+  const firstNo = getNarrationShotDisplayNo(batch[0])
+  const lastNo = getNarrationShotDisplayNo(batch[batch.length - 1])
   const blocks = batch.map((sb) => {
-    const prompt = getNarrationImagePromptText(sb)
-    const i = sbs.value.findIndex(s => s.id === sb.id)
-    const label = `#${String(i + 1).padStart(2, '0')} ${extractNarrationSentence(sb) || '镜头'}`
+    const prompt = getNarrationImagePromptForCopy(sb)
+    const label = `#${getNarrationShotDisplayNo(sb)} ${extractNarrationSentence(sb) || '镜头'}`
     return prompt ? `【${label}】\n${prompt}` : ''
   }).filter(Boolean)
   if (!blocks.length) {
-    toast.warning('当前批次暂无描述词')
+    toast.warning(`镜头 #${firstNo}-#${lastNo} 暂无描述词`)
     return
   }
   const copied = await copyTextToClipboard(blocks.join('\n\n'))
   if (!copied) return
-  const rangeStart = start + 1
-  const rangeEnd = start + batch.length
   if (blocks.length < batch.length) {
-    toast.success(`已复制 ${blocks.length}/${batch.length} 条（${rangeStart}-${rangeEnd}，${batch.length - blocks.length} 条暂无文案）`)
+    toast.success(`已复制 ${blocks.length}/${batch.length} 条（镜头 #${firstNo}-#${lastNo}，${batch.length - blocks.length} 条暂无文案）`)
     return
   }
-  toast.success(`已复制 ${blocks.length} 条描述词（${rangeStart}-${rangeEnd}）`)
+  toast.success(`已复制 ${blocks.length} 条描述词（镜头 #${firstNo}-#${lastNo}）`)
 }
 
 async function copyNarrationShotPrompt(sb) {
-  const prompt = getNarrationImagePromptText(sb)
+  const prompt = getNarrationImagePromptForCopy(sb)
   if (!prompt) {
     toast.warning('暂无配图文案')
     return
   }
-  const i = sbs.value.findIndex(s => s.id === sb.id)
-  const label = `#${String(i + 1).padStart(2, '0')}`
+  const label = `#${getNarrationShotDisplayNo(sb)}`
   const copied = await copyTextToClipboard(prompt)
   if (copied) toast.success(`已复制镜头 ${label} 配图文案`)
 }
@@ -6079,8 +6445,8 @@ async function genShotTTS(sb, force = false) {
   try {
     const res = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force))
     applyTtsResultToStoryboard(sb.id, res)
-    const provider = res?.provider || (localTtsEnabled.value ? 'edge' : 'api')
-    const mode = provider === 'edge' ? '（本地 Edge）' : '（付费 API）'
+    const provider = res?.provider || (localTtsEnabled.value ? localTtsEngine.value : 'api')
+    const mode = provider === 'edge' ? '（本地 Edge）' : provider === 'voicebox' ? '（Voicebox）' : '（付费 API）'
     toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成${mode}`)
     await refreshStoryboardsOnly()
   } catch (e) { toast.error(e.message) }
@@ -6130,7 +6496,8 @@ async function runBatchShotTTS(targets, batchMessage, force) {
     const failCount = results.length - apiCount
     if (apiCount) {
       const label = force ? '已重新生成' : '已生成'
-      toast.success(`${label} ${apiCount} 条配音${localTtsEnabled.value ? `（本地 Edge · ${concurrency} 并发）` : ''}`)
+      const engineLabel = localTtsEngine.value === 'voicebox' ? 'Voicebox' : 'Edge'
+      toast.success(`${label} ${apiCount} 条配音${localTtsEnabled.value ? `（本地 ${engineLabel} · ${concurrency} 并发）` : ''}`)
     }
     if (failCount) toast.error(`${failCount} 条镜头配音生成失败`)
     await refreshStoryboardsOnly()
@@ -6279,6 +6646,12 @@ async function genNarrationShotImage(sb) {
     toast.warning('该镜头没有旁白文案，无法生成配图')
     return
   }
+  const otherPending = narrationShotsPendingImage(sbs.value).filter(item => item.id !== sb.id)
+  if (otherPending.length) {
+    toast.info(`另有未生成：${formatNarrationShotDisplayList(otherPending)}`)
+  } else if (narrationShotNeedsOwnImage(sb) && !hasNarrationShotImage(sb)) {
+    toast.info(`正在生成最后一镜 #${getNarrationShotDisplayNo(sb)}`)
+  }
   if (!String(sb?.image_prompt || sb?.imagePrompt || '').trim()) {
     updateField(sb, 'image_prompt', basePrompt)
   }
@@ -6306,12 +6679,14 @@ async function genNarrationShotImage(sb) {
 }
 
 async function batchNarrationShotImages() {
-  const pending = sbs.value.filter(sb => narrationShotNeedsOwnImage(sb) && !hasNarrationShotImage(sb))
+  const pending = narrationShotsPendingImage(sbs.value)
   if (!pending.length) {
     toast.info('所有需配图镜头已生成')
     return
   }
-  if (!tryBeginBatch('narrationImages', `配图生成中（剩余 ${pending.length} 张）…`)) return
+  const pendingLabel = formatNarrationShotDisplayList(pending)
+  const pendingHint = formatNarrationPendingImageHint(sbs.value)
+  if (!tryBeginBatch('narrationImages', `配图生成中：${pendingHint}…`)) return
   try {
     const style = drama.value?.style || 'comic'
     pendingNarrationShotIds.value = [...new Set([...pendingNarrationShotIds.value, ...pending.map(sb => sb.id)])]
@@ -6325,8 +6700,8 @@ async function batchNarrationShotImages() {
       return imageAPI.generate(buildImagePayload(payload))
     }))
     const failCount = results.filter(r => r.status === 'rejected').length
-    if (failCount) toast.error(`${failCount} 个镜头配图提交失败`)
-    else toast.success(`已提交剩余 ${pending.length} 张配图生成`)
+    if (failCount) toast.error(`${failCount} 个镜头配图提交失败（${pendingLabel}）`)
+    else toast.success(`已提交配图生成：${pendingHint}`)
     await refresh()
     await watchAsyncResult(() => pending.every(sb => {
       const target = sbs.value.find(s => s.id === sb.id)
@@ -6793,12 +7168,72 @@ function mapVoiceProfile(v) {
 async function loadEdgeVoices() {
   try {
     const rows = await voicesAPI.list('edge')
-    edgeVoiceProfiles.value = rows?.length
+    return rows?.length
       ? rows.map(mapVoiceProfile)
       : [{ id: DEFAULT_LOCAL_EDGE_VOICE, label: '云希（男·解说）', gender: '男声', traits: '本地 Edge', suitable: '解说旁白' }]
   } catch (e) {
     console.error('Failed to load edge voices', e)
-    edgeVoiceProfiles.value = [{ id: DEFAULT_LOCAL_EDGE_VOICE, label: '云希（男·解说）', gender: '男声', traits: '本地 Edge', suitable: '解说旁白' }]
+    return [{ id: DEFAULT_LOCAL_EDGE_VOICE, label: '云希（男·解说）', gender: '男声', traits: '本地 Edge', suitable: '解说旁白' }]
+  }
+}
+
+async function loadVoiceboxVoices() {
+  try {
+    const health = await voicesAPI.voiceboxHealth()
+    voiceboxAvailable.value = !!health?.ok
+    if (!health?.ok) return []
+    const rows = await voicesAPI.list('voicebox')
+    if (!rows?.length) return []
+    const presetEngineLabel = (engine) => {
+      if (engine === 'qwen_custom_voice') return 'CustomVoice'
+      if (engine === 'kokoro') return 'Kokoro'
+      return engine || '预设'
+    }
+    return rows.map(v => {
+      const isCloned = v.voice_type === 'cloned'
+      const isPreset = v.voice_type === 'preset'
+      const engineLabel = presetEngineLabel(v.preset_engine)
+      const desc = Array.isArray(v.description) ? v.description[0] : ''
+      const notReady = v.model_ready === false
+      return {
+        id: v.voice_id,
+        label: isCloned
+          ? `${v.voice_name}（克隆）`
+          : isPreset
+            ? `${v.voice_name}（预设·${engineLabel}${notReady ? '·模型未就绪' : ''}）`
+            : v.voice_name,
+        gender: '本地',
+        traits: v.supports_instruct
+          ? '支持感情 instruct'
+          : isCloned
+            ? 'Voicebox 克隆'
+            : 'Voicebox 预设',
+        suitable: notReady
+          ? (v.model_hint || '模型未下载')
+          : (desc || `${v.language || '中文'}${isCloned ? ` · 样本 ${v.sample_count ?? 0}` : ''}`),
+        modelReady: v.model_ready !== false,
+        modelHint: v.model_hint || '',
+      }
+    })
+  } catch (e) {
+    console.error('Failed to load voicebox voices', e)
+    voiceboxAvailable.value = false
+    return []
+  }
+}
+
+async function refreshLocalVoices() {
+  if (localTtsEngine.value === 'voicebox') {
+    const profiles = await loadVoiceboxVoices()
+    edgeVoiceProfiles.value = profiles
+    if (profiles.length && !profiles.some(p => p.id === localEdgeVoiceId.value)) {
+      localEdgeVoiceId.value = profiles[0].id
+    }
+    return
+  }
+  edgeVoiceProfiles.value = await loadEdgeVoices()
+  if (!edgeVoiceProfiles.value.some(p => p.id === localEdgeVoiceId.value)) {
+    localEdgeVoiceId.value = edgeVoiceProfiles.value[0]?.id || DEFAULT_LOCAL_EDGE_VOICE
   }
 }
 
@@ -6814,7 +7249,8 @@ async function loadVoices() {
 }
 
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
-watch([localTtsEnabled, localEdgeVoiceId], persistLocalTtsPrefs)
+watch([localTtsEnabled, localTtsEngine, localEdgeVoiceId, localTtsSpeed, localVoiceboxInstructPreset, localVoiceboxInstructCustom], persistLocalTtsPrefs)
+watch(localTtsEngine, () => { refreshLocalVoices() })
 watch([exportMixBgm, exportIncludeOpening, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
 watch(exportWatermarkText, () => {
   persistExportBgmPrefs()
@@ -6830,7 +7266,16 @@ watch([prodTab, epId], ([tab, id]) => {
 watch([panel, epId], ([p, id]) => {
   if (p === 'export' && id) loadBgmLibrary({ resumePoll: false })
 })
-onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
+onMounted(async () => {
+  await refreshLocalVoices()
+  if (!voiceboxAvailable.value && localTtsEngine.value === 'voicebox' && !edgeVoiceProfiles.value.length) {
+    localTtsEngine.value = 'edge'
+    await refreshLocalVoices()
+  }
+  refresh()
+  loadConfigs()
+  loadVoices()
+})
 </script>
 
 <style scoped>
@@ -7613,6 +8058,11 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
   user-select: none;
 }
 .local-tts-toggle input { accent-color: var(--accent); }
+.local-tts-preview-player {
+  height: 32px;
+  max-width: 280px;
+  min-width: 180px;
+}
 
 .uploaded-audio-panel {
   margin-bottom: 10px;
@@ -7690,6 +8140,33 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
   align-items: center;
   gap: 8px;
   margin-bottom: 10px;
+}
+.narration-srt-panel-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(27, 41, 64, 0.12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--text-secondary, #64748b);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.narration-srt-panel-toggle:hover {
+  border-color: rgba(59, 130, 246, 0.35);
+  color: var(--text-primary, #1e293b);
+}
+.narration-srt-panel-toggle svg {
+  transition: transform 0.15s ease;
+}
+.narration-srt-head:has(+ div) {
+  margin-bottom: 10px;
+}
+.narration-srt-head:not(:has(+ div)) {
+  margin-bottom: 0;
 }
 .narration-srt-empty {
   font-size: 12px;
@@ -7793,6 +8270,7 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
 }
 
 .tag.warn { color: #b45309; border-color: rgba(180, 83, 9, 0.25); background: rgba(251, 191, 36, 0.12); }
+.tag.ok { color: #047857; border-color: rgba(4, 120, 87, 0.25); background: rgba(16, 185, 129, 0.12); }
 
 .narration-breakdown-panel {
   margin-bottom: 12px;
@@ -8071,6 +8549,9 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices(); loadEdgeVoices() })
   background: #e53935;
   left: 5px;
   right: auto;
+}
+.prod-overlay-badge.is-pending {
+  background: #f59e0b;
 }
 .tag-title {
   background: rgba(229, 57, 53, 0.15);

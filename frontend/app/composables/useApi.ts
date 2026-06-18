@@ -73,6 +73,8 @@ export const episodeAPI = {
       audio_path: audioPath,
       ...(subtitleText !== undefined ? { subtitle_text: subtitleText } : {}),
     }),
+  generateOpeningAudio: (id: number, options?: { subtitle_text?: string; local_tts_engine?: 'edge' | 'voicebox'; local_voice?: string; tts_speed?: number; voicebox_instruct?: string }) =>
+    api.post(`/episodes/${id}/generate-opening-audio`, options || {}),
   splitNarrationAudio: (id: number, audioPaths: string | string[]) =>
     api.post(`/episodes/${id}/split-narration-audio`, {
       audio_paths: Array.isArray(audioPaths) ? audioPaths : [audioPaths],
@@ -86,7 +88,7 @@ export const episodeAPI = {
 export const storyboardAPI = {
   create: (data: any) => api.post('/storyboards', data),
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
-  generateTTS: (id: number, options?: { force?: boolean; local_tts?: boolean; local_voice?: string }) =>
+  generateTTS: (id: number, options?: { force?: boolean; local_tts?: boolean; local_tts_engine?: 'edge' | 'voicebox'; local_voice?: string; tts_speed?: number; voicebox_instruct?: string }) =>
     api.post(`/storyboards/${id}/generate-tts`, options || {}),
   uploadTTS: (id: number, audioPath: string) =>
     api.post(`/storyboards/${id}/upload-tts`, { audio_path: audioPath }),
@@ -211,6 +213,14 @@ export const skillsAPI = {
 export const voicesAPI = {
   list: (provider?: string) => api.get(`/ai-voices${provider ? `?provider=${provider}` : ''}`),
   sync: () => api.post('/ai-voices/sync', {}),
+  voiceboxHealth: () => api.get('/ai-voices/voicebox/health'),
+  previewLocal: (options?: {
+    local_tts_engine?: 'edge' | 'voicebox'
+    local_voice?: string
+    tts_speed?: number
+    voicebox_instruct?: string
+    text?: string
+  }) => api.post('/ai-voices/preview', options || {}),
 }
 
 export const musicAPI = {

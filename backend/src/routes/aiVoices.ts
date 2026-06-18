@@ -8,13 +8,49 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { joinProviderUrl } from '../services/adapters/url.js'
-import { EDGE_VOICE_OPTIONS } from '../services/edge-tts-local.js'
+import { EDGE_VOICE_OPTIONS, resolveEdgeVoice } from '../services/edge-tts-local.js'
+import { checkVoiceboxHealth, listVoiceboxVoiceOptions, resolveVoiceboxProfileId } from '../services/voicebox-tts.js'
+import { generateTTS } from '../services/tts-generation.js'
+import { resolveTtsSpeed } from '../utils/tts-speed.js'
+import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
+
+const DEFAULT_LOCAL_TTS_PREVIEW_TEXT = '这是一段旁白试听，用于感受当前音色、语速和感情效果。'
 
 const app = new Hono()
 
-// GET /ai-voices?provider=minimax|edge
+// GET /ai-voices/voicebox/health
+app.get('/voicebox/health', async (c) => {
+  const health = await checkVoiceboxHealth()
+  return success(c, health)
+})
+
+// GET /ai-voices?provider=minimax|edge|voicebox
 app.get('/', async (c) => {
   const provider = c.req.query('provider') || 'minimax'
+  if (provider === 'voicebox') {
+    const health = await checkVoiceboxHealth()
+    if (!health.ok) {
+      return badRequest(c, health.error || 'Voicebox 未运行，请先启动 Voicebox（默认端口 17493）')
+    }
+    try {
+      const profiles = await listVoiceboxVoiceOptions()
+      return success(c, profiles.map(p => ({
+        voice_id: p.voice_id,
+        voice_name: p.voice_name,
+        description: p.description,
+        language: p.language,
+        provider: 'voicebox',
+        voice_type: p.voice_type,
+        sample_count: p.sample_count ?? 0,
+        preset_engine: p.preset_engine,
+        supports_instruct: p.supports_instruct,
+        model_ready: p.model_ready,
+        model_hint: p.model_hint,
+      })))
+    } catch (err: any) {
+      return badRequest(c, err.message)
+    }
+  }
   if (provider === 'edge') {
     return success(c, EDGE_VOICE_OPTIONS.map(v => ({
       voice_id: v.voice_id,
@@ -37,6 +73,52 @@ app.get('/', async (c) => {
   }))
 
   return success(c, parsed)
+})
+
+// POST /ai-voices/preview — 本地 TTS 试听（Voicebox / Edge）
+app.post('/preview', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const localTtsEngine = body?.local_tts_engine === 'voicebox' ? 'voicebox' : 'edge'
+  const text = String(body?.text || DEFAULT_LOCAL_TTS_PREVIEW_TEXT).trim()
+  if (!text) return badRequest(c, '试听文本为空')
+
+  const ttsSpeed = resolveTtsSpeed(body?.tts_speed ?? body?.ttsSpeed)
+  const localVoice = String(body?.local_voice || body?.localVoice || '').trim()
+  if (!localVoice) return badRequest(c, '请选择音色')
+
+  if (localTtsEngine === 'voicebox') {
+    const health = await checkVoiceboxHealth()
+    if (!health.ok) {
+      return badRequest(c, health.error || 'Voicebox 未运行，请先启动 Voicebox')
+    }
+  }
+
+  const voiceboxInstruct = localTtsEngine === 'voicebox'
+    ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
+    : undefined
+
+  try {
+    const voice = localTtsEngine === 'voicebox'
+      ? await resolveVoiceboxProfileId(localVoice)
+      : resolveEdgeVoice(localVoice)
+    const audioPath = await generateTTS({
+      text,
+      voice,
+      speed: ttsSpeed,
+      localTts: true,
+      localTtsEngine,
+      voiceboxInstruct,
+    })
+    return success(c, {
+      audio_url: audioPath,
+      text,
+      local_tts_engine: localTtsEngine,
+      tts_speed: ttsSpeed,
+      voicebox_instruct: voiceboxInstruct,
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
 })
 
 // POST /ai-voices/sync

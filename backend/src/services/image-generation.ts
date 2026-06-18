@@ -329,6 +329,24 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
   }
 }
 
+async function markNarrationImageGenerated(storyboardId: number, frameType?: string | null) {
+  if (frameType === 'first_frame' || frameType === 'last_frame') return
+  const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboardId)).all()
+  if (!sb?.referenceImages) return
+  try {
+    const meta = JSON.parse(sb.referenceImages)
+    if (meta && typeof meta === 'object' && meta.narration_image_mode) {
+      db.update(schema.storyboards)
+        .set({
+          referenceImages: JSON.stringify({ ...meta, narration_image_source: 'generate' }),
+          updatedAt: now(),
+        })
+        .where(eq(schema.storyboards.id, storyboardId))
+        .run()
+    }
+  } catch { /* ignore */ }
+}
+
 async function handleImageComplete(id: number, provider: string, imageUrl: string) {
   const localPath = await downloadFile(imageUrl, 'images')
   const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
@@ -347,6 +365,7 @@ async function handleImageComplete(id: number, provider: string, imageUrl: strin
     else if (record.frameType === 'last_frame') sbUpdate.lastFrameImage = localPath
     else sbUpdate.composedImage = localPath
     db.update(schema.storyboards).set(sbUpdate).where(eq(schema.storyboards.id, record.storyboardId)).run()
+    await markNarrationImageGenerated(record.storyboardId, record.frameType)
   }
   if (record?.characterId) {
     db.update(schema.characters).set({ imageUrl: localPath, updatedAt: now() }).where(eq(schema.characters.id, record.characterId)).run()
@@ -374,6 +393,7 @@ async function handleImageCompleteBase64(id: number, provider: string, base64Dat
     else if (record.frameType === 'last_frame') sbUpdate.lastFrameImage = localPath
     else sbUpdate.composedImage = localPath
     db.update(schema.storyboards).set(sbUpdate).where(eq(schema.storyboards.id, record.storyboardId)).run()
+    await markNarrationImageGenerated(record.storyboardId, record.frameType)
   }
   if (record?.characterId) {
     db.update(schema.characters).set({ imageUrl: localPath, updatedAt: now() }).where(eq(schema.characters.id, record.characterId)).run()

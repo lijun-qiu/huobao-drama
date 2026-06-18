@@ -14,10 +14,13 @@ import { eq } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { generateTTS } from './tts-generation.js'
 import { resolveEdgeVoice } from './edge-tts-local.js'
+import { resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { isNarrationStoryboard, parseNarrationImageMeta, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 import { appendWatermarkFilter, resolveWatermarkText } from './ffmpeg-watermark.js'
+import { resolveTtsSpeed } from '../utils/tts-speed.js'
+import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -82,12 +85,25 @@ function stripSubtitlePunctuation(text: string): string {
 }
 
 function formatSrtTimestamp(seconds: number) {
-  const totalMs = Math.max(500, Math.round(seconds * 1000))
+  const totalMs = Math.max(0, Math.round(seconds * 1000))
   const h = Math.floor(totalMs / 3600000)
   const m = Math.floor((totalMs % 3600000) / 60000)
   const s = Math.floor((totalMs % 60000) / 1000)
   const ms = totalMs % 1000
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`
+}
+
+/** 单条 SRT 字幕块，起止与配音片段对齐 */
+function buildNarrationSubtitleSrtBlock(
+  text: string,
+  startSec: number,
+  durationSec: number,
+  index = 1,
+) {
+  const safeDur = Math.max(durationSec, 0.05)
+  const start = formatSrtTimestamp(startSec)
+  const end = formatSrtTimestamp(startSec + safeDur)
+  return `${index}\n${start} --> ${end}\n${text}\n`
 }
 
 function probeMediaDuration(filePath: string): Promise<number> {
@@ -100,7 +116,7 @@ function probeMediaDuration(filePath: string): Promise<number> {
 }
 
 function formatAssTimestamp(seconds: number) {
-  const totalCs = Math.max(50, Math.round(seconds * 100))
+  const totalCs = Math.max(0, Math.round(seconds * 100))
   const h = Math.floor(totalCs / 360000)
   const m = Math.floor((totalCs % 360000) / 6000)
   const s = Math.floor((totalCs % 6000) / 100)
@@ -152,7 +168,7 @@ function buildTitleAssDialogueLine(text: string, startSec: number, endSec: numbe
 }
 
 function buildTitleAssContent(text: string, durationSec: number, lineIndex = 0) {
-  const endAt = Math.max(durationSec - 0.2, 0.8)
+  const endAt = Math.max(durationSec, 0.1)
   return `${buildTitleAssHeader()}${buildTitleAssDialogueLine(text, TITLE_SUBTITLE_START_DELAY_SEC, endAt, lineIndex)}\n`
 }
 
@@ -303,12 +319,26 @@ function buildGroupProgressiveZoomFilter(
   ].join(',')
 }
 
-/** 片头动态底：慢推镜 + RGB 色散 + 暗角（参照解说成片风格） */
-function buildTitleDynamicMotionFilter(baseFrames = 750) {
-  const fps = 25
+/** 片头镜在同背景组内的序号（多句片头共用 1 张图时用于连续推镜） */
+function getTitleGroupInfo(storyboardId: number, episodeStoryboards: VisualStoryboard[]) {
+  const ordered = sortStoryboardsByOrder(episodeStoryboards)
+  const titleShots = ordered.filter(sb => {
+    const meta = parseNarrationImageMeta(sb.referenceImages)
+    return meta.narration_shot_type === 'title'
+  })
+  const idx = titleShots.findIndex(sb => sb.id === storyboardId)
+  return { shotIndexInGroup: idx >= 0 ? idx : 0 }
+}
+
+/** 片头动态底：按镜头时长推镜 + RGB 色散 + 暗角；多句片头在同图内缩放连续递进 */
+function buildTitleShotMotionFilter(durationSec: number, shotIndexInGroup: number, fps = COMPOSE_FPS) {
+  const frames = durationToFrameCount(durationSec, fps)
+  const startZ = 1 + shotIndexInGroup * SAME_IMAGE_ZOOM_STEP
+  const endZ = startZ + SAME_IMAGE_ZOOM_STEP
+  const delta = endZ - startZ
   return [
     'scale=8000:-1',
-    `zoompan=z='min(1+0.00022*on,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${baseFrames}:s=1280x720:fps=${fps}`,
+    `zoompan=z='${startZ}+${delta}*on/${frames - 1}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=1280x720:fps=${fps}`,
     'rgbashift=rh=-5:gh=0:bv=5',
     'vignette=angle=PI/5',
     'format=yuv420p',
@@ -341,7 +371,9 @@ async function getSharedImageBaseVideo(imageAbsPath: string, options?: { dynamic
   const inflight = imageBaseCacheInflight.get(key)
   if (inflight) return inflight
 
-  const videoFilter = options?.dynamic ? buildTitleDynamicMotionFilter() : buildImageMotionFilter()
+  const videoFilter = options?.dynamic
+    ? buildTitleShotMotionFilter(30, 0)
+    : buildImageMotionFilter()
   const buildPromise = (async () => {
     const tmpPath = path.join(cacheDir, `${key}-base.${uuid()}.tmp.mp4`)
     try {
@@ -462,16 +494,14 @@ export async function renderSameImageGroupSegment(
     const text = stripSubtitlePunctuation(parsed.pureText)
     const startSec = isTitleShot
       ? offsetSec + TITLE_SUBTITLE_START_DELAY_SEC
-      : offsetSec + 0.5
-    const endSec = offsetSec + Math.max(durationSec - 0.2, 0.8)
+      : offsetSec
+    const endSec = offsetSec + Math.max(durationSec, 0.05)
 
     if (text) {
       if (isTitleShot) {
         assDialogues.push(buildTitleAssDialogueLine(text, startSec, endSec, i))
       } else {
-        srtBlocks.push(
-          `${i + 1}\n${formatSrtTimestamp(startSec)} --> ${formatSrtTimestamp(endSec)}\n${text}\n`,
-        )
+        srtBlocks.push(buildNarrationSubtitleSrtBlock(text, startSec, durationSec, i + 1))
       }
     }
 
@@ -604,18 +634,29 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         const pureDialogue = parsedDialogue.pureText
         if (pureDialogue) {
           const useLocalTts = isNarrationStoryboard(sb)
-          const ttsVoice = useLocalTts ? resolveEdgeVoice(voiceId) : voiceId
+          const localTtsEngine = process.env.LOCAL_TTS_ENGINE === 'voicebox' ? 'voicebox' : 'edge'
+          const ttsVoice = useLocalTts
+            ? (localTtsEngine === 'voicebox'
+              ? await resolveVoiceboxProfileId(voiceId, process.env.VOICEBOX_PROFILE_ID)
+              : resolveEdgeVoice(voiceId))
+            : voiceId
           logTaskProgress('ComposeTask', 'generate-inline-tts', {
             storyboardId,
             voiceId: ttsVoice,
             localTts: useLocalTts,
+            localTtsEngine: useLocalTts ? localTtsEngine : undefined,
             textPreview: pureDialogue.slice(0, 40),
           })
           const ttsPath = await generateTTS({
             text: pureDialogue,
             voice: ttsVoice,
+            speed: resolveTtsSpeed(process.env.TTS_DEFAULT_SPEED),
             configId: useLocalTts ? null : (ep?.audioConfigId ?? undefined),
             localTts: useLocalTts,
+            localTtsEngine: useLocalTts ? localTtsEngine : undefined,
+            voiceboxInstruct: useLocalTts && localTtsEngine === 'voicebox'
+              ? resolveVoiceboxInstruct(process.env.VOICEBOX_DEFAULT_INSTRUCT)
+              : undefined,
           })
           audioPath = toAbsPath(ttsPath)
           db.update(schema.storyboards).set({ ttsAudioUrl: ttsPath, updatedAt: now() })
@@ -656,7 +697,6 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       const subtitleFilename = `${uuid()}${isTitleShot ? '.ass' : '.srt'}`
       subtitlePath = path.join(srtDir, subtitleFilename)
 
-      const endAt = formatSrtTimestamp(Math.max(clipDuration - 0.2, 0.8))
       let titleLineIndex = 0
       if (isTitleShot) {
         const titleShots = sortStoryboardsByOrder(episodeStoryboards).filter(row => {
@@ -667,7 +707,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       }
       const subtitleContent = isTitleShot
         ? buildTitleAssContent(pureText, clipDuration, titleLineIndex)
-        : `1\n00:00:00,500 --> ${endAt}\n${pureText}\n`
+        : buildNarrationSubtitleSrtBlock(pureText, 0, clipDuration)
       fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
 
       const subtitleRelative = `static/subtitles/${subtitleFilename}`
@@ -702,20 +742,25 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         logTaskProgress('ComposeTask', 'black-frame-compose', { storyboardId, duration: clipDuration })
       } else if (visual!.type === 'image') {
         const useTitleDynamic = !!isTitleShot
-        const visualGroupInfo = useTitleDynamic ? undefined : getVisualGroupInfo(storyboardId, episodeStoryboards)
+        const titleGroupInfo = useTitleDynamic
+          ? getTitleGroupInfo(storyboardId, episodeStoryboards)
+          : undefined
+        const visualGroupInfo = useTitleDynamic
+          ? undefined
+          : getVisualGroupInfo(storyboardId, episodeStoryboards)
         if (useTitleDynamic) {
-          const baseVideo = await getSharedImageBaseVideo(visual!.path, { dynamic: true })
-          cmd = cmd.input(baseVideo)
+          filters.unshift(buildTitleShotMotionFilter(clipDuration, titleGroupInfo!.shotIndexInGroup))
         } else {
           filters.unshift(buildShotZoomMotionFilter(visualGroupInfo!, clipDuration))
-          cmd = cmd.input(visual!.path).inputOptions(['-loop', '1'])
         }
+        cmd = cmd.input(visual!.path).inputOptions(['-loop', '1'])
         logTaskProgress('ComposeTask', 'image-slideshow-compose', {
           storyboardId,
           duration: clipDuration,
           inherited: visual!.inherited || false,
-          sharedBase: useTitleDynamic,
+          sharedBase: false,
           titleDynamic: useTitleDynamic,
+          titleGroupInfo,
           visualGroupInfo,
         })
       } else {

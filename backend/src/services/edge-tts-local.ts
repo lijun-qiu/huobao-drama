@@ -4,6 +4,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { v4 as uuid } from 'uuid'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { DEFAULT_TTS_SPEED, resolveTtsSpeed, ttsSpeedToEdgeRate } from '../utils/tts-speed.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -66,16 +67,17 @@ function resolveEdgeTtsBin() {
 }
 
 /** 通过临时文件调用 edge-tts CLI，避免 Windows shell 把含空格的 --text 拆成多参数 */
-function runEdgeTtsCli(text: string, voice: string, outputPath: string): Promise<void> {
+function runEdgeTtsCli(text: string, voice: string, outputPath: string, speed = DEFAULT_TTS_SPEED): Promise<void> {
   const bin = resolveEdgeTtsBin()
   const tmpDir = path.join(STORAGE_ROOT, 'audio', '.tts-tmp')
   fs.mkdirSync(tmpDir, { recursive: true })
   const tmpFile = path.join(tmpDir, `${uuid()}.txt`)
   fs.writeFileSync(tmpFile, text, 'utf8')
+  const rate = ttsSpeedToEdgeRate(resolveTtsSpeed(speed))
 
   return new Promise((resolve, reject) => {
-    const args = ['--voice', voice, '--file', tmpFile, '--write-media', outputPath]
-    logTaskProgress('AudioTask', 'edge-tts-cli', { bin, voice, textLength: text.length, via: 'file' })
+    const args = ['--voice', voice, `--rate=${rate}`, '--file', tmpFile, '--write-media', outputPath]
+    logTaskProgress('AudioTask', 'edge-tts-cli', { bin, voice, rate, textLength: text.length, via: 'file' })
 
     const proc = spawn(bin, args, { shell: false, windowsHide: true })
 
@@ -102,13 +104,19 @@ function runEdgeTtsCli(text: string, voice: string, outputPath: string): Promise
   })
 }
 
-export async function generateEdgeTTS(text: string, voiceId?: string | null): Promise<string> {
+export async function generateEdgeTTS(
+  text: string,
+  voiceId?: string | null,
+  speed?: number | null,
+): Promise<string> {
   const trimmed = String(text || '').trim()
   if (!trimmed) throw new Error('配音文本为空')
 
   const voice = resolveEdgeVoice(voiceId)
+  const resolvedSpeed = resolveTtsSpeed(speed)
   logTaskStart('AudioTask', 'edge-tts-generate', {
     voice,
+    speed: resolvedSpeed,
     textPreview: trimmed.slice(0, 50),
     textLength: trimmed.length,
     engine: 'edge-tts-cli',
@@ -121,7 +129,7 @@ export async function generateEdgeTTS(text: string, voiceId?: string | null): Pr
 
   await acquireEdgeTtsSlot()
   try {
-    await runEdgeTtsCli(trimmed, voice, filePath)
+    await runEdgeTtsCli(trimmed, voice, filePath, resolvedSpeed)
     const relativePath = `static/audio/${filename}`
     logTaskSuccess('AudioTask', 'edge-tts-saved', {
       voice,
