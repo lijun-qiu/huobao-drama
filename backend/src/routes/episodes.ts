@@ -70,7 +70,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model', 'text_thinking', 'watermark_text']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model', 'text_thinking', 'watermark_text', 'watermark_animated']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -90,6 +90,11 @@ app.put('/:id', async (c) => {
     drizzleUpdates.textThinking = resolveEpisodeTextThinking(undefined, updates.text_thinking)
   }
   if ('watermark_text' in updates) drizzleUpdates.watermarkText = updates.watermark_text
+  if ('watermark_animated' in updates) {
+    drizzleUpdates.watermarkAnimated = updates.watermark_animated === true
+      || updates.watermark_animated === 1
+      || updates.watermark_animated === '1'
+  }
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
   return success(c)

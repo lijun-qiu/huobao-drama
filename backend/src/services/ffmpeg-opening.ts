@@ -12,7 +12,8 @@ import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { sortStoryboardsByOrder } from './narration-image.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { appendWatermarkFilter, resolveWatermarkText } from './ffmpeg-watermark.js'
+import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
+import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION } from './ffmpeg-page-transition.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -30,7 +31,7 @@ export function resolveOpeningSubtitleText(stored?: string | null): string {
   if (!trimmed || trimmed === OPENING_NARRATION_TEXT_LEGACY) return OPENING_NARRATION_TEXT
   return trimmed
 }
-const PAGE_TRANSITION_SEC = 0.45
+const PAGE_TRANSITION_SEC = PAGE_FLIP_TRANSITION_SEC
 const OPENING_FPS = 25
 const OPENING_WIDTH = 1280
 const OPENING_HEIGHT = 720
@@ -145,9 +146,8 @@ function buildVideoPageFlipFilter(segmentDurations: number[]): string {
   for (let i = 1; i < segmentDurations.length; i++) {
     const vOut = i === segmentDurations.length - 1 ? 'vout' : `v${i}`
     const offset = Math.max(0.1, cumulative - td)
-    const transition = i % 2 === 0 ? 'hlwind' : 'hrwind'
     parts.push(
-      `${vLabel}[${i}:v]xfade=transition=${transition}:duration=${td}:offset=${offset.toFixed(3)}[${vOut}]`,
+      `${vLabel}[${i}:v]xfade=transition=${PAGE_FLIP_XFADE_TRANSITION}:duration=${td}:offset=${offset.toFixed(3)}[${vOut}]`,
     )
     vLabel = `[${vOut}]`
     cumulative += segmentDurations[i] - td
@@ -382,6 +382,7 @@ async function muxOpeningVideo(
   subtitlePath: string | null,
   outputPath: string,
   watermarkText?: string | null,
+  watermarkAnimated = false,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let command = ffmpeg()
@@ -393,7 +394,7 @@ async function muxOpeningVideo(
       const escaped = subtitlePath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'")
       filters.push(`ass='${escaped}'`)
     }
-    appendWatermarkFilter(filters, watermarkText)
+    appendWatermarkFilter(filters, watermarkText, { animated: watermarkAnimated })
     if (filters.length) command = command.videoFilter(filters)
 
     command
@@ -421,10 +422,11 @@ async function muxVideoWithAudio(
   audioPath: string,
   outputPath: string,
   watermarkText?: string | null,
+  watermarkAnimated = false,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const filters: string[] = []
-    appendWatermarkFilter(filters, watermarkText)
+    appendWatermarkFilter(filters, watermarkText, { animated: watermarkAnimated })
     let command = ffmpeg()
       .input(videoPath)
       .input(audioPath)
@@ -550,6 +552,7 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
     }
 
     const watermarkText = resolveWatermarkText(ep.watermarkText)
+    const watermarkAnimated = resolveWatermarkAnimated(ep.watermarkAnimated)
 
     let totalSec = OPENING_TOTAL_SEC
     let narrationAbs: string | null = null
@@ -604,9 +607,9 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
         tempFiles.push(subtitlePath)
         fs.writeFileSync(subtitlePath, buildOpeningAssContent(subtitleText, totalSec), 'utf-8')
       }
-      await muxOpeningVideo(mergedVideoPath, mixedAudioPath, subtitlePath, outputAbs, watermarkText)
+      await muxOpeningVideo(mergedVideoPath, mixedAudioPath, subtitlePath, outputAbs, watermarkText, watermarkAnimated)
     } else {
-      await muxVideoWithAudio(mergedVideoPath, flipTrackPath, outputAbs, watermarkText)
+      await muxVideoWithAudio(mergedVideoPath, flipTrackPath, outputAbs, watermarkText, watermarkAnimated)
     }
 
     const relativePath = `static/opening/${outputFilename}`

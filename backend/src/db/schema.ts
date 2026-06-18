@@ -44,6 +44,7 @@ export const episodes = sqliteTable('episodes', {
   openingAudioUrl: text('opening_audio_url'),
   openingSubtitleText: text('opening_subtitle_text'),
   watermarkText: text('watermark_text'),
+  watermarkAnimated: integer('watermark_animated', { mode: 'boolean' }).default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),

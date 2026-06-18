@@ -18,7 +18,7 @@ import { resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { isNarrationStoryboard, parseNarrationImageMeta, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
-import { appendWatermarkFilter, resolveWatermarkText } from './ffmpeg-watermark.js'
+import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 
@@ -524,13 +524,14 @@ export async function renderSameImageGroupSegment(
     ? db.select().from(schema.episodes).where(eq(schema.episodes.id, firstSb.episodeId)).all()
     : [undefined]
   const watermarkText = resolveWatermarkText(ep?.watermarkText)
+  const watermarkAnimated = resolveWatermarkAnimated(ep?.watermarkAnimated)
 
   await new Promise<void>((resolve, reject) => {
     const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount)]
     if (supportsSubtitleFilter()) {
       filters.push(buildSubtitleFilter(subtitlePath, titleMode))
     }
-    appendWatermarkFilter(filters, watermarkText)
+    appendWatermarkFilter(filters, watermarkText, { animated: watermarkAnimated })
 
     let cmd = ffmpeg()
       .input(imageAbsPath)
@@ -593,6 +594,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
   const watermarkText = resolveWatermarkText(ep?.watermarkText)
+  const watermarkAnimated = resolveWatermarkAnimated(ep?.watermarkAnimated)
 
   let audioPath: string | null = null
   let bgmPath: string | null = null
@@ -733,7 +735,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
           subtitlePath,
         })
       }
-      appendWatermarkFilter(filters, watermarkText)
+      appendWatermarkFilter(filters, watermarkText, { animated: watermarkAnimated })
 
       let cmd = ffmpeg()
       if (useBlackFrame) {

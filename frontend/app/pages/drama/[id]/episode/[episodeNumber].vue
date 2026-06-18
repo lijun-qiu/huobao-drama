@@ -2196,7 +2196,7 @@
           </div>
           <div class="export-opening-body">
             <div class="narration-hint" style="margin-bottom:16px">
-              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每次转场叠加书本翻页音效）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 2 秒片头 + 翻页音效。
+              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每页自左上角卷曲下落转场，叠加书本翻页音效）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 2 秒片头 + 翻页音效。
             </div>
             <div class="opening-audio-panel" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px">
               <div style="font-size:13px;font-weight:600;margin-bottom:8px">开幕配音</div>
@@ -2392,8 +2392,12 @@
                 placeholder="留空则不添加水印"
                 @change="saveWatermarkText"
               />
+              <label class="export-bgm-toggle" style="margin-top:8px">
+                <input v-model="exportWatermarkAnimated" type="checkbox" />
+                <span>水印左右缓慢浮动</span>
+              </label>
               <div class="dim" style="font-size:11px;line-height:1.5">
-                默认「顺拾人间」，居中靠右、左右缓慢浮动；修改后请重新「镜头合成」与「开幕视频」。
+                默认「顺拾人间」，固定于画面右侧垂直居中；勾选浮动后左右缓慢漂移。修改后请重新「镜头合成」与「开幕视频」。
               </div>
             </div>
             <div class="export-bgm-panel">
@@ -2892,6 +2896,7 @@ const bgmPendingCount = computed(() => bgmLibrary.value.filter(m => ['pending', 
 const exportMixBgm = ref(true)
 const exportIncludeOpening = ref(true)
 const exportWatermarkText = ref('顺拾人间')
+const exportWatermarkAnimated = ref(false)
 let watermarkSaveTimer = null
 const exportBgmMusicId = ref(null)
 const exportBgmVolume = ref(22)
@@ -3054,6 +3059,7 @@ function persistExportBgmPrefs() {
   window.localStorage.setItem(`episode-${epId.value}-export-mix-bgm`, exportMixBgm.value ? '1' : '0')
   window.localStorage.setItem(`episode-${epId.value}-export-include-opening`, exportIncludeOpening.value ? '1' : '0')
   window.localStorage.setItem(`episode-${epId.value}-export-watermark`, exportWatermarkText.value)
+  window.localStorage.setItem(`episode-${epId.value}-export-watermark-animated`, exportWatermarkAnimated.value ? '1' : '0')
   window.localStorage.setItem(`episode-${epId.value}-export-bgm-id`, exportBgmMusicId.value ? String(exportBgmMusicId.value) : '')
   window.localStorage.setItem(`episode-${epId.value}-export-bgm-vol`, String(exportBgmVolume.value))
 }
@@ -3066,6 +3072,8 @@ function restoreExportBgmPrefs() {
   exportIncludeOpening.value = opening === null ? true : opening === '1'
   const wm = window.localStorage.getItem(`episode-${epId.value}-export-watermark`)
   if (wm != null) exportWatermarkText.value = wm
+  const wmAnim = window.localStorage.getItem(`episode-${epId.value}-export-watermark-animated`)
+  if (wmAnim != null) exportWatermarkAnimated.value = wmAnim === '1'
   const id = window.localStorage.getItem(`episode-${epId.value}-export-bgm-id`)
   exportBgmMusicId.value = id ? Number(id) : null
   const vol = window.localStorage.getItem(`episode-${epId.value}-export-bgm-vol`)
@@ -3077,23 +3085,28 @@ function syncExportWatermarkFromEpisode(ep) {
   const fromEp = ep.watermark_text ?? ep.watermarkText
   if (fromEp != null && fromEp !== '') {
     exportWatermarkText.value = fromEp
-    return
-  }
-  if (fromEp === '') {
+  } else if (fromEp === '') {
     exportWatermarkText.value = ''
-    return
+  } else {
+    exportWatermarkText.value = '顺拾人间'
   }
-  exportWatermarkText.value = '顺拾人间'
+  const anim = ep.watermark_animated ?? ep.watermarkAnimated
+  exportWatermarkAnimated.value = anim === true || anim === 1 || anim === '1'
 }
 
 async function saveWatermarkText() {
   if (!epId.value) return
   persistExportBgmPrefs()
   try {
-    await episodeAPI.update(epId.value, { watermark_text: exportWatermarkText.value.trim() })
+    await episodeAPI.update(epId.value, {
+      watermark_text: exportWatermarkText.value.trim(),
+      watermark_animated: exportWatermarkAnimated.value,
+    })
     if (episode.value) {
       episode.value.watermark_text = exportWatermarkText.value.trim()
       episode.value.watermarkText = exportWatermarkText.value.trim()
+      episode.value.watermark_animated = exportWatermarkAnimated.value
+      episode.value.watermarkAnimated = exportWatermarkAnimated.value
     }
   } catch (e) {
     toast.error(e.message || '水印设置保存失败')
@@ -7253,6 +7266,10 @@ watch([localTtsEnabled, localTtsEngine, localEdgeVoiceId, localTtsSpeed, localVo
 watch(localTtsEngine, () => { refreshLocalVoices() })
 watch([exportMixBgm, exportIncludeOpening, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
 watch(exportWatermarkText, () => {
+  persistExportBgmPrefs()
+  scheduleWatermarkSave()
+})
+watch(exportWatermarkAnimated, () => {
   persistExportBgmPrefs()
   scheduleWatermarkSave()
 })

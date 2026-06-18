@@ -394,6 +394,7 @@ ensureColumn('episodes', 'opening_video_error', 'TEXT')
 ensureColumn('episodes', 'opening_audio_url', 'TEXT')
 ensureColumn('episodes', 'opening_subtitle_text', 'TEXT')
 ensureColumn('episodes', 'watermark_text', 'TEXT')
+ensureColumn('episodes', 'watermark_animated', 'INTEGER DEFAULT 0')
 
 // 历史默认迁移为 GPT Image（4022 OpenAI 兼容，文生图 + edits 参考图定妆）
 try {

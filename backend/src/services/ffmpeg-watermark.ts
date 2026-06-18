@@ -1,5 +1,5 @@
 /**
- * 成片水印 — 参照 NarratoAI：垂直居中、靠右半区；此处改为左右缓慢浮动（无上下浮动）
+ * 成片水印 — 默认固定于画面右侧垂直居中；可选左右缓慢浮动
  */
 import fs from 'fs'
 
@@ -10,9 +10,21 @@ export const WATERMARK_FLOAT_AMPLITUDE_RATIO = 0.10
 
 const SUBTITLE_FONT_SIZE = 20
 
+export type WatermarkFilterOptions = {
+  animated?: boolean
+  width?: number
+  height?: number
+  fontSize?: number
+}
+
 export function resolveWatermarkText(raw?: string | null): string {
   if (raw == null || raw === undefined) return DEFAULT_WATERMARK_TEXT
   return String(raw).trim()
+}
+
+/** 默认 false：水印位置固定 */
+export function resolveWatermarkAnimated(raw?: boolean | null): boolean {
+  return raw === true
 }
 
 export function isWatermarkEnabled(raw?: string | null): boolean {
@@ -48,10 +60,10 @@ function escapeDrawtextPath(filePath: string): string {
   return filePath.replace(/\\/g, '/').replace(/:/g, '\\:')
 }
 
-/** 构建 drawtext 滤镜：居中靠右 + 左右 10% 幅度缓慢漂移 */
+/** 构建 drawtext 滤镜：默认右侧垂直居中固定；animated 时左右缓慢漂移 */
 export function buildWatermarkDrawtextFilter(
   text: string,
-  options?: { width?: number; height?: number; fontSize?: number },
+  options?: WatermarkFilterOptions,
 ): string | null {
   const trimmed = resolveWatermarkText(text)
   if (!trimmed) return null
@@ -60,14 +72,19 @@ export function buildWatermarkDrawtextFilter(
   const h = options?.height ?? 720
   const fontSize = options?.fontSize ?? Math.max(18, Math.round(SUBTITLE_FONT_SIZE * 0.55))
   const margin = Math.max(12, Math.round(Math.min(w, h) * 0.02))
-  const floatAmplitude = w * WATERMARK_FLOAT_AMPLITUDE_RATIO
-  const period = WATERMARK_FLOAT_PERIOD_SEC
+  const animated = options?.animated === true
 
   const minX = `w*0.5+${margin}`
   const maxX = `w-tw-${margin}`
   const baseX = `max(${minX},min(w*0.75-tw/2,${maxX}))`
-  const floatX = `${baseX}+${floatAmplitude}*sin(2*PI*t/${period})`
-  const clampedX = `max(${minX},min(${floatX},${maxX}))`
+  const xExpr = animated
+    ? (() => {
+      const floatAmplitude = w * WATERMARK_FLOAT_AMPLITUDE_RATIO
+      const period = WATERMARK_FLOAT_PERIOD_SEC
+      const floatX = `${baseX}+${floatAmplitude}*sin(2*PI*t/${period})`
+      return `max(${minX},min(${floatX},${maxX}))`
+    })()
+    : baseX
   const baseY = '(h-th)/2'
 
   const escapedText = escapeDrawtextText(trimmed)
@@ -84,12 +101,16 @@ export function buildWatermarkDrawtextFilter(
     'fontcolor=white@0.72:',
     'borderw=1:',
     'bordercolor=black@0.72:',
-    `x='${clampedX}':`,
+    `x='${xExpr}':`,
     `y='${baseY}'`,
   ].join('')
 }
 
-export function appendWatermarkFilter(filters: string[], watermarkText?: string | null): void {
-  const filter = buildWatermarkDrawtextFilter(resolveWatermarkText(watermarkText))
+export function appendWatermarkFilter(
+  filters: string[],
+  watermarkText?: string | null,
+  options?: Pick<WatermarkFilterOptions, 'animated' | 'width' | 'height' | 'fontSize'>,
+): void {
+  const filter = buildWatermarkDrawtextFilter(resolveWatermarkText(watermarkText), options)
   if (filter) filters.push(filter)
 }

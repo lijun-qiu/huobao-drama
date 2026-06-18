@@ -11,15 +11,16 @@ import { db, schema } from '../db/index.js'
 import { and, eq, inArray } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION } from './ffmpeg-page-transition.js'
 import { resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 
-/** 换配图时画面自下而上滑入（xfade: slideup） */
-const IMAGE_CHANGE_TRANSITION = 'slideup'
-const IMAGE_CHANGE_TRANSITION_SEC = 0.45
+/** 换配图时翻页转场：左上角卷曲下落（与开幕片头一致） */
+const IMAGE_CHANGE_TRANSITION = PAGE_FLIP_XFADE_TRANSITION
+const IMAGE_CHANGE_TRANSITION_SEC = PAGE_FLIP_TRANSITION_SEC
 const MAX_XFADE_INPUTS = 48
 
 type ComposedStoryboard = {
@@ -205,7 +206,7 @@ function fmtFilterSec(sec: number): string {
 }
 
 /**
- * 换配图段之间：画面 slideup 过渡；音频硬切 concat（不用 acrossfade，避免叠音/语速错乱）。
+ * 换配图段之间：翻页转场（hlwind）；音频硬切 concat（不用 acrossfade，避免叠音/语速错乱）。
  * 每路视频先 trim + setpts 归零，转场前 tpad 预留叠化区，避免 xfade 期间画面卡住、切换后才开始动。
  */
 function buildXfadeFilterScript(segmentDurations: number[]): string {
@@ -396,11 +397,11 @@ async function prependOpeningToMergedVideo(
   run: ActiveMergeRun,
 ): Promise<void> {
   const tempOut = `${bodyPath}.opening.mp4`
-  const clips: ClipSegment[] = [
-    { path: openingAbsPath, duration: await getVideoDuration(openingAbsPath), storyboardId: 0 },
-    { path: bodyPath, duration: await getVideoDuration(bodyPath), storyboardId: 0 },
+  const segments: MergeSegment[] = [
+    { path: openingAbsPath, duration: await getVideoDuration(openingAbsPath), temp: false },
+    { path: bodyPath, duration: await getVideoDuration(bodyPath), temp: false },
   ]
-  await concatClipsToFile(clips, tempOut, run)
+  await mergeSegmentsWithPageFlip(segments, tempOut, run)
   if (fs.existsSync(bodyPath)) fs.unlinkSync(bodyPath)
   fs.renameSync(tempOut, bodyPath)
 }
@@ -593,7 +594,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       phase: 'merging',
       percent,
       message: usePageFlip
-        ? `正在滑入过渡拼接 (${percent}%)…`
+        ? `正在翻页过渡拼接 (${percent}%)…`
         : `正在拼接 ${storyboards.length} 个镜头 (${percent}%)…`,
       updatedAt: Date.now(),
     })
@@ -605,7 +606,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         mergeId,
         phase: 'merging',
         percent: 10,
-        message: `正在分组 ${groups.length} 段画面并添加自下而上过渡…`,
+        message: `正在分组 ${groups.length} 段画面并添加翻页过渡…`,
         updatedAt: Date.now(),
       })
 
@@ -741,7 +742,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     output: mergedRelative,
     duration,
     clips: storyboards.length,
-    mergeMode: usePageFlip ? 'slideup-audio-cut' : 'concat',
+    mergeMode: usePageFlip ? 'page-flip-audio-cut' : 'concat',
     pageFlipTransitions: usePageFlip ? groups.length - 1 : 0,
     bgmMusicId: options.bgmMusicId,
     includeOpeningVideo,
