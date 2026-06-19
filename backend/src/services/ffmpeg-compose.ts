@@ -21,6 +21,7 @@ import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSourc
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
+import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -658,6 +659,9 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
             localTtsEngine: useLocalTts ? localTtsEngine : undefined,
             voiceboxInstruct: useLocalTts && localTtsEngine === 'voicebox'
               ? resolveVoiceboxInstruct(process.env.VOICEBOX_DEFAULT_INSTRUCT)
+              : undefined,
+            voiceboxModelSize: useLocalTts && localTtsEngine === 'voicebox'
+              ? resolveVoiceboxModelSize(process.env.VOICEBOX_MODEL_SIZE)
               : undefined,
           })
           audioPath = toAbsPath(ttsPath)

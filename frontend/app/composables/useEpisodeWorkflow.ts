@@ -295,7 +295,11 @@ export function hasDuplicateStoryboardNumbers(list: any[]) {
 
 export function narrationShotNeedsOwnImage(sb: any) {
   const meta = parseNarrationImageMeta(sb)
-  return meta.narration_image_mode === 'new'
+  if (meta.narration_image_mode === 'new') return true
+  if (typeof meta.paragraph_index === 'number') return true
+  const n = Number(sb?.storyboard_number ?? sb?.storyboardNumber)
+  if (meta.narration_shot_type === 'title' && n === 1) return true
+  return false
 }
 
 export function resolveNarrationParagraphLayout(sb: any): 'single' | 'diptych' {

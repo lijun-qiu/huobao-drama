@@ -279,7 +279,7 @@ async function completeSunoBgmTask(
       coverUrl: track.imageUrl,
       duration: track.duration,
     })))
-    reconcileOrphanBgmRecords(args.episodeId)
+    reconcileOrphanBgmRecords(args.dramaId ? { dramaId: args.dramaId } : args.episodeId ? { episodeId: args.episodeId } : undefined)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     logTaskError('BgmTask', 'complete-failed', { id: leadId, taskId, error: message })
@@ -609,20 +609,49 @@ export function applyBgmToEpisodeStoryboards(episodeId: number, musicGenerationI
   return storyboards.length
 }
 
+function episodeIdsForDrama(dramaId: number): Set<number> {
+  return new Set(
+    db.select({ id: schema.episodes.id })
+      .from(schema.episodes)
+      .where(eq(schema.episodes.dramaId, dramaId))
+      .all()
+      .map(r => r.id),
+  )
+}
+
+function musicBelongsToDrama(row: typeof schema.musicGenerations.$inferSelect, dramaId: number, episodeIds?: Set<number>): boolean {
+  if (row.dramaId === dramaId) return true
+  if (row.episodeId == null) return false
+  const ids = episodeIds ?? episodeIdsForDrama(dramaId)
+  return ids.has(row.episodeId)
+}
+
 export function listMusicGenerations(filters: { episodeId?: number; dramaId?: number; storyboardId?: number }) {
-  reconcileOrphanBgmRecords(filters.episodeId)
+  if (filters.dramaId) reconcileOrphanBgmRecords({ dramaId: filters.dramaId })
+  else if (filters.episodeId) reconcileOrphanBgmRecords({ episodeId: filters.episodeId })
+
   let rows = db.select().from(schema.musicGenerations).all()
     .filter(r => r.status !== 'deleted')
+
+  if (filters.dramaId) {
+    const episodeIds = episodeIdsForDrama(filters.dramaId)
+    rows = rows.filter(r => musicBelongsToDrama(r, filters.dramaId!, episodeIds))
+  }
   if (filters.episodeId) rows = rows.filter(r => r.episodeId === filters.episodeId)
-  if (filters.dramaId) rows = rows.filter(r => r.dramaId === filters.dramaId)
   if (filters.storyboardId) rows = rows.filter(r => r.storyboardId === filters.storyboardId)
   return rows.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
 }
 
 /** 清理同一 taskId 下已完成但仍显示 processing 的孤儿记录 */
-export function reconcileOrphanBgmRecords(episodeId?: number): number {
+export function reconcileOrphanBgmRecords(scope?: { episodeId?: number; dramaId?: number }): number {
   const allRows = db.select().from(schema.musicGenerations).all()
-  const scoped = episodeId ? allRows.filter(r => r.episodeId === episodeId) : allRows
+  let scoped = allRows
+  if (scope?.dramaId) {
+    const episodeIds = episodeIdsForDrama(scope.dramaId)
+    scoped = allRows.filter(r => musicBelongsToDrama(r, scope.dramaId!, episodeIds))
+  } else if (scope?.episodeId) {
+    scoped = allRows.filter(r => r.episodeId === scope.episodeId)
+  }
   const completedTaskIds = new Set(
     scoped.filter(r => r.status === 'completed' && r.taskId).map(r => String(r.taskId)),
   )
@@ -720,15 +749,22 @@ export async function syncBgmRecord(recordId: number) {
 }
 
 /** 服务启动或前端轮询时恢复因重启中断的 BGM 异步任务 */
-export function resumePendingBgmTasks(options?: { episodeId?: number }): number {
-  reconcileOrphanBgmRecords(options?.episodeId)
+export function resumePendingBgmTasks(options?: { episodeId?: number; dramaId?: number }): number {
+  if (options?.dramaId) reconcileOrphanBgmRecords({ dramaId: options.dramaId })
+  else reconcileOrphanBgmRecords(options?.episodeId ? { episodeId: options.episodeId } : undefined)
+
   const allRows = db.select().from(schema.musicGenerations).all()
   const completedTaskIds = new Set(
     allRows.filter(r => r.status === 'completed' && r.taskId).map(r => String(r.taskId)),
   )
 
   let rows = allRows.filter(r => r.status === 'processing' && r.taskId && !completedTaskIds.has(String(r.taskId)))
-  if (options?.episodeId) rows = rows.filter(r => r.episodeId === options.episodeId)
+  if (options?.dramaId) {
+    const episodeIds = episodeIdsForDrama(options.dramaId)
+    rows = rows.filter(r => musicBelongsToDrama(r, options.dramaId!, episodeIds))
+  } else if (options?.episodeId) {
+    rows = rows.filter(r => r.episodeId === options.episodeId)
+  }
 
   const leadByTask = new Map<string, MusicGenerationRow>()
   for (const row of rows) {
@@ -739,7 +775,7 @@ export function resumePendingBgmTasks(options?: { episodeId?: number }): number 
 
   if (!leadByTask.size) return 0
 
-  logTaskStart('BgmTask', 'resume-pending', { count: leadByTask.size, episodeId: options?.episodeId })
+  logTaskStart('BgmTask', 'resume-pending', { count: leadByTask.size, episodeId: options?.episodeId, dramaId: options?.dramaId })
   for (const row of leadByTask.values()) {
     resumeBgmTask(row).catch(err => {
       logTaskError('BgmTask', 'resume-failed', { id: row.id, taskId: row.taskId, error: err.message })

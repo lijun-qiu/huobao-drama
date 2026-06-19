@@ -9,7 +9,7 @@ import { v4 as uuid } from 'uuid'
 import { getAudioConfigById } from './ai.js'
 import { getTTSAdapter } from './adapters/registry.js'
 import { generateEdgeTTS } from './edge-tts-local.js'
-import { generateVoiceboxTTS, resolveVoiceboxProfileId } from './voicebox-tts.js'
+import { generateVoiceboxTTS, resolveVoiceboxProfileId, type VoiceboxModelSize } from './voicebox-tts.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, redactUrl } from '../utils/task-logger.js'
 import { applyTtsSpeedToAudioFile, resolveTtsSpeed } from '../utils/tts-speed.js'
 
@@ -26,6 +26,7 @@ interface TTSParams {
   localTts?: boolean
   localTtsEngine?: 'edge' | 'voicebox'
   voiceboxInstruct?: string | null
+  voiceboxModelSize?: VoiceboxModelSize | null
 }
 
 /**
@@ -37,7 +38,7 @@ export async function generateTTS(params: TTSParams): Promise<string> {
   if (params.localTts) {
     if (params.localTtsEngine === 'voicebox') {
       const profileId = await resolveVoiceboxProfileId(params.voice)
-      const path = await generateVoiceboxTTS(params.text, profileId, null, params.voiceboxInstruct)
+      const path = await generateVoiceboxTTS(params.text, profileId, null, params.voiceboxInstruct, params.voiceboxModelSize)
       return applyTtsSpeedToAudioFile(path, speed)
     }
     return generateEdgeTTS(params.text, params.voice, speed)

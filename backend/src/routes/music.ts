@@ -25,7 +25,7 @@ app.post('/resume-pending', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const episodeId = body.episode_id ? Number(body.episode_id) : undefined
   const dramaId = body.drama_id ? Number(body.drama_id) : undefined
-  const resumed = resumePendingBgmTasks({ episodeId })
+  const resumed = resumePendingBgmTasks({ episodeId, dramaId })
   return success(c, { resumed, episode_id: episodeId, drama_id: dramaId })
 })
 

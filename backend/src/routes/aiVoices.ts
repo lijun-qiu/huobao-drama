@@ -13,6 +13,7 @@ import { checkVoiceboxHealth, listVoiceboxVoiceOptions, resolveVoiceboxProfileId
 import { generateTTS } from '../services/tts-generation.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
+import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 
 const DEFAULT_LOCAL_TTS_PREVIEW_TEXT = '这是一段旁白试听，用于感受当前音色、语速和感情效果。'
 
@@ -32,8 +33,9 @@ app.get('/', async (c) => {
     if (!health.ok) {
       return badRequest(c, health.error || 'Voicebox 未运行，请先启动 Voicebox（默认端口 17493）')
     }
+    const modelSize = resolveVoiceboxModelSize(c.req.query('model_size') || c.req.query('modelSize'))
     try {
-      const profiles = await listVoiceboxVoiceOptions()
+      const profiles = await listVoiceboxVoiceOptions(modelSize)
       return success(c, profiles.map(p => ({
         voice_id: p.voice_id,
         voice_name: p.voice_name,
@@ -96,6 +98,9 @@ app.post('/preview', async (c) => {
   const voiceboxInstruct = localTtsEngine === 'voicebox'
     ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
     : undefined
+  const voiceboxModelSize = localTtsEngine === 'voicebox'
+    ? resolveVoiceboxModelSize(body?.voicebox_model_size ?? body?.voiceboxModelSize)
+    : undefined
 
   try {
     const voice = localTtsEngine === 'voicebox'
@@ -108,6 +113,7 @@ app.post('/preview', async (c) => {
       localTts: true,
       localTtsEngine,
       voiceboxInstruct,
+      voiceboxModelSize,
     })
     return success(c, {
       audio_url: audioPath,
@@ -115,6 +121,7 @@ app.post('/preview', async (c) => {
       local_tts_engine: localTtsEngine,
       tts_speed: ttsSpeed,
       voicebox_instruct: voiceboxInstruct,
+      voicebox_model_size: voiceboxModelSize,
     })
   } catch (err: any) {
     return badRequest(c, err.message)

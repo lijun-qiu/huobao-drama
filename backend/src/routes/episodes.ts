@@ -17,6 +17,7 @@ import { generateTTS } from '../services/tts-generation.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
+import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 import { splitNarrationAudioForEpisode, transcribeNarrationAudioFiles } from '../services/narration-audio-split.js'
 import { importNarrationImageDesc, importNarrationStoryboardDesc } from '../services/storyboard-desc-import.js'
 
@@ -448,6 +449,9 @@ app.post('/:id/generate-opening-audio', async (c) => {
   const voiceboxInstruct = localTtsEngine === 'voicebox'
     ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
     : undefined
+  const voiceboxModelSize = localTtsEngine === 'voicebox'
+    ? resolveVoiceboxModelSize(body?.voicebox_model_size ?? body?.voiceboxModelSize)
+    : undefined
   const ttsVoice = localTtsEngine === 'voicebox'
     ? await resolveVoiceboxProfileId(localVoice)
     : resolveEdgeVoice(localVoice)
@@ -468,6 +472,7 @@ app.post('/:id/generate-opening-audio', async (c) => {
       localTts: true,
       localTtsEngine,
       voiceboxInstruct,
+      voiceboxModelSize,
     })
 
     db.update(schema.episodes)
@@ -491,6 +496,7 @@ app.post('/:id/generate-opening-audio', async (c) => {
       local_tts_engine: localTtsEngine,
       tts_speed: ttsSpeed,
       voicebox_instruct: voiceboxInstruct,
+      voicebox_model_size: voiceboxModelSize,
     })
   } catch (err: any) {
     logTaskError('EpisodeAPI', 'generate-opening-audio', { episodeId, error: err.message })

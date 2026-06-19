@@ -12,6 +12,7 @@ import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
+import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 
 const app = new Hono()
 
@@ -193,6 +194,9 @@ app.post('/:id/generate-tts', async (c) => {
   const voiceboxInstruct = localTtsEngine === 'voicebox'
     ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
     : undefined
+  const voiceboxModelSize = localTtsEngine === 'voicebox'
+    ? resolveVoiceboxModelSize(body?.voicebox_model_size ?? body?.voiceboxModelSize)
+    : undefined
   const parsedDialogue = parseDialogueForTTS(sb.dialogue)
   if (parsedDialogue.ignorable) return badRequest(c, '该镜头没有可生成的对白或旁白')
   logTaskStart('StoryboardAPI', 'generate-tts', {
@@ -290,6 +294,7 @@ app.post('/:id/generate-tts', async (c) => {
       localTts,
       localTtsEngine: localTts ? localTtsEngine : undefined,
       voiceboxInstruct,
+      voiceboxModelSize,
     })
   db.update(schema.storyboards)
     .set({ ttsAudioUrl: audioPath, updatedAt: now() })
@@ -311,6 +316,7 @@ app.post('/:id/generate-tts', async (c) => {
       local_tts_engine: localTts ? localTtsEngine : undefined,
       tts_speed: ttsSpeed,
       voicebox_instruct: voiceboxInstruct,
+      voicebox_model_size: voiceboxModelSize,
       provider: localTts ? localTtsEngine : undefined,
     })
   } catch (err: any) {

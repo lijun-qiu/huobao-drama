@@ -21,7 +21,7 @@ const DATA_ROOT = path.resolve(__dirname, '../../../data')
 
 export const OPENING_IMAGE_COUNT = 8
 /** 无上传配音时的默认片头时长（秒） */
-export const OPENING_TOTAL_SEC = 2
+export const OPENING_TOTAL_SEC = 3
 export const OPENING_NARRATION_TEXT = '体验365个人生副本'
 const OPENING_NARRATION_TEXT_LEGACY = '今天要体验的人生是'
 

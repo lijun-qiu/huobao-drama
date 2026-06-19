@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url'
 import { v4 as uuid } from 'uuid'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
+import { DEFAULT_VOICEBOX_MODEL_SIZE, resolveVoiceboxModelSize, type VoiceboxModelSize } from '../utils/voicebox-model-size.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -45,17 +46,19 @@ export interface VoiceboxModelStatus {
   loaded?: boolean
 }
 
-const ENGINE_MODEL_CANDIDATES: Record<string, Array<{ modelName: string; size: '1.7B' | '0.6B' }>> = {
+const ENGINE_MODEL_CANDIDATES: Record<string, Array<{ modelName: string; size: VoiceboxModelSize }>> = {
   qwen: [
-    { modelName: 'qwen-tts-1.7B', size: '1.7B' },
     { modelName: 'qwen-tts-0.6B', size: '0.6B' },
+    { modelName: 'qwen-tts-1.7B', size: '1.7B' },
   ],
   qwen_custom_voice: [
-    { modelName: 'qwen-custom-voice-1.7B', size: '1.7B' },
     { modelName: 'qwen-custom-voice-0.6B', size: '0.6B' },
+    { modelName: 'qwen-custom-voice-1.7B', size: '1.7B' },
   ],
   kokoro: [{ modelName: 'kokoro', size: '1.7B' }],
 }
+
+export { type VoiceboxModelSize, DEFAULT_VOICEBOX_MODEL_SIZE, resolveVoiceboxModelSize }
 
 export async function fetchVoiceboxModelsStatus(): Promise<VoiceboxModelStatus[]> {
   try {
@@ -72,36 +75,34 @@ export async function fetchVoiceboxModelsStatus(): Promise<VoiceboxModelStatus[]
 function resolveEngineModel(
   engine: string | undefined,
   models: VoiceboxModelStatus[],
-): { modelSize?: '1.7B' | '0.6B'; ready: boolean; hint?: string } {
+  preferredSize: VoiceboxModelSize = DEFAULT_VOICEBOX_MODEL_SIZE,
+): { modelSize?: VoiceboxModelSize; ready: boolean; hint?: string } {
   const key = engine || 'qwen'
   const candidates = ENGINE_MODEL_CANDIDATES[key]
   if (!candidates?.length) return { ready: true }
-
-  for (const candidate of candidates) {
-    const row = models.find(m => m.model_name === candidate.modelName)
-    if (row?.downloaded || row?.loaded) {
-      return { modelSize: candidate.size, ready: true }
-    }
-  }
-
-  const downloading = candidates
-    .map(c => models.find(m => m.model_name === c.modelName))
-    .find(row => row?.downloading)
-  if (downloading) {
-    return {
-      ready: false,
-      hint: `${downloading.display_name || downloading.model_name} 正在下载中，请在 Voicebox → Models 等待完成后再试`,
-    }
-  }
 
   const labels: Record<string, string> = {
     qwen_custom_voice: 'Qwen CustomVoice',
     qwen: 'Qwen TTS',
     kokoro: 'Kokoro',
   }
+  const label = labels[key] || key
+  const target = candidates.find(c => c.size === preferredSize) || candidates[0]
+  const row = models.find(m => m.model_name === target.modelName)
+
+  if (row?.downloaded || row?.loaded) {
+    return { modelSize: target.size, ready: true }
+  }
+  if (row?.downloading) {
+    return {
+      ready: false,
+      hint: `${row.display_name || row.model_name} 正在下载中，请在 Voicebox → Models 等待完成后再试`,
+    }
+  }
+
   return {
     ready: false,
-    hint: `${labels[key] || key} 模型未下载，请在 Voicebox → Models 中下载；或先选用克隆音色`,
+    hint: `${label} ${target.size} 模型未下载，请在 Voicebox → Models 中下载；或先选用克隆音色`,
   }
 }
 
@@ -154,11 +155,13 @@ export async function checkVoiceboxHealth(): Promise<VoiceboxHealth> {
       return { ok: false, error: `HTTP ${resp.status}` }
     }
     const data = await resp.json() as Record<string, unknown>
+    const models = await fetchVoiceboxModelsStatus()
     return {
       ok: data.status === 'healthy',
       status: String(data.status || ''),
       model_loaded: Boolean(data.model_loaded),
       backend_type: data.backend_type ? String(data.backend_type) : undefined,
+      models,
     }
   } catch (err: any) {
     return { ok: false, error: err.message }
@@ -251,7 +254,8 @@ export type VoiceboxVoiceOption = {
 }
 
 /** 合并用户 profile + 内置预设目录（未建 profile 的预设也可直接选） */
-export async function listVoiceboxVoiceOptions(): Promise<VoiceboxVoiceOption[]> {
+export async function listVoiceboxVoiceOptions(modelSize?: VoiceboxModelSize): Promise<VoiceboxVoiceOption[]> {
+  const preferredSize = resolveVoiceboxModelSize(modelSize)
   const models = await fetchVoiceboxModelsStatus()
   const profiles = await listVoiceboxProfiles()
   const coveredPresets = new Set(
@@ -262,7 +266,7 @@ export async function listVoiceboxVoiceOptions(): Promise<VoiceboxVoiceOption[]>
 
   const items: VoiceboxVoiceOption[] = profiles.map(p => {
     const engine = p.preset_engine || p.default_engine || (p.voice_type === 'cloned' ? 'qwen' : undefined)
-    const modelState = resolveEngineModel(engine || undefined, models)
+    const modelState = resolveEngineModel(engine || undefined, models, preferredSize)
     return {
       voice_id: p.id,
       voice_name: p.name,
@@ -286,7 +290,7 @@ export async function listVoiceboxVoiceOptions(): Promise<VoiceboxVoiceOption[]>
         if (coveredPresets.has(key)) continue
         const engineLabel = engine === 'qwen_custom_voice' ? 'CustomVoice' : engine === 'kokoro' ? 'Kokoro' : engine
         const hint = QWEN_CUSTOM_VOICE_HINTS[v.voice_id] || ''
-        const modelState = resolveEngineModel(engine, models)
+        const modelState = resolveEngineModel(engine, models, preferredSize)
         items.push({
           voice_id: `${PRESET_REF_PREFIX}${engine}:${v.voice_id}`,
           voice_name: v.name,
@@ -333,6 +337,7 @@ export async function generateVoiceboxTTS(
   profileId: string,
   language?: string | null,
   instruct?: string | null,
+  modelSize?: VoiceboxModelSize | null,
 ): Promise<string> {
   const trimmed = String(text || '').trim()
   if (!trimmed) throw new Error('配音文本为空')
@@ -346,11 +351,12 @@ export async function generateVoiceboxTTS(
   const profileMeta = profiles.find(p => p.id === resolvedProfileId)
   const engine = profileMeta?.preset_engine || profileMeta?.default_engine
     || (profileMeta?.voice_type === 'cloned' ? 'qwen' : undefined)
-  const modelState = resolveEngineModel(engine, models)
+  const preferredSize = resolveVoiceboxModelSize(modelSize)
+  const modelState = resolveEngineModel(engine, models, preferredSize)
   if (!modelState.ready) {
     throw new Error(modelState.hint || 'Voicebox 模型未就绪')
   }
-  const modelSize = modelState.modelSize
+  const resolvedModelSize = modelState.modelSize
   if (!lang) lang = resolveProfileLanguage(resolvedProfileId, profiles)
 
   const styleInstruct = resolveVoiceboxInstruct(instruct)
@@ -360,6 +366,7 @@ export async function generateVoiceboxTTS(
     language: lang,
     instruct: styleInstruct,
     engine,
+    modelSize: resolvedModelSize,
     textPreview: trimmed.slice(0, 50),
     textLength: trimmed.length,
   })
@@ -379,7 +386,7 @@ export async function generateVoiceboxTTS(
     }
     if (styleInstruct) payload.instruct = styleInstruct
     if (engine) payload.engine = engine
-    if (modelSize) payload.model_size = modelSize
+    if (resolvedModelSize) payload.model_size = resolvedModelSize
     const resp = await fetch(voiceboxUrl('/generate/stream'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

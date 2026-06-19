@@ -1269,6 +1269,14 @@
               />
               <BaseSelect
                 v-if="localTtsEnabled && localTtsEngine === 'voicebox'"
+                :model-value="localVoiceboxModelSize"
+                :options="voiceboxModelSizeOptions"
+                placeholder="模型规格"
+                style="min-width:150px"
+                @update:model-value="localVoiceboxModelSize = $event"
+              />
+              <BaseSelect
+                v-if="localTtsEnabled && localTtsEngine === 'voicebox'"
                 :model-value="localVoiceboxInstructPreset"
                 :options="voiceboxInstructOptions"
                 placeholder="风格/感情"
@@ -1308,7 +1316,7 @@
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条旁白</span>
               <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已就绪</span>
-              <span v-if="localTtsEnabled" class="tag">{{ localTtsEngineLabel }} · {{ localTtsSpeedLabel }}{{ localVoiceboxInstructLabel ? ` · ${localVoiceboxInstructLabel}` : '' }}</span>
+              <span v-if="localTtsEnabled" class="tag">{{ localTtsEngineLabel }} · {{ localTtsSpeedLabel }}{{ localVoiceboxModelSizeLabel ? ` · ${localVoiceboxModelSizeLabel}` : '' }}{{ localVoiceboxInstructLabel ? ` · ${localVoiceboxInstructLabel}` : '' }}</span>
               <span v-else class="tag">{{ lockedAudioConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
                 <button
@@ -1371,7 +1379,7 @@
           <!-- Sub: BGM -->
           <div v-else-if="prodTab === 'bgm'" class="prod-content">
             <div class="narration-hint">
-              <strong>BGM 策略：</strong>默认 <code>suno_music_open</code>（纯器乐）；可选 <code>pixverse-sound-effect</code>（按画面生成环境音，需关联已合成镜头）。上方工具栏可切换模型；合成时自动与旁白混音（BGM 音量约 22%）。
+              <strong>BGM 策略：</strong>默认 <code>suno_music_open</code>（纯器乐）；可选 <code>pixverse-sound-effect</code>（按画面生成环境音，需关联已合成镜头）。BGM 库按<strong>项目</strong>共享，各集生成的曲目均可复用。合成时自动与旁白混音（BGM 音量约 22%）。
             </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ bgmAppliedCount }} 已配 BGM</span>
@@ -1598,7 +1606,7 @@
                   {{ narrationCopyBatchOptions.length > 1 ? `复制描述词 (${narrationCopyBatchOptions.find(o => o.value === narrationCopyBatchIndex)?.label || '#01-#10'})` : `一键复制描述词（${narrationNeedImageCount}）` }}
                 </button>
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerAllShotImageUpload">一键上传全部（{{ narrationNeedImageCount }}）</button>
-                <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerShotFolderUpload" title="选择已重命名为 #序号#镜头ID 的文件夹">文件夹上传</button>
+                <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerShotFolderUpload" title="文件夹上传：无后缀→第1镜，(1)→第2镜，(2)→第3镜…">文件夹上传</button>
                 <button
                   class="btn btn-primary btn-sm"
                   :disabled="isBatchRunning('narrationImages') || !narrationImagesPendingCount"
@@ -2196,7 +2204,7 @@
           </div>
           <div class="export-opening-body">
             <div class="narration-hint" style="margin-bottom:16px">
-              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每页自左上角卷曲下落转场，叠加书本翻页音效）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 2 秒片头 + 翻页音效。
+              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每页自左上角卷曲下落转场，叠加书本翻页音效）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 3 秒片头 + 翻页音效。
             </div>
             <div class="opening-audio-panel" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px">
               <div style="font-size:13px;font-weight:600;margin-bottom:8px">开幕配音</div>
@@ -2231,6 +2239,14 @@
                   searchable
                   style="min-width:220px"
                   @update:model-value="localEdgeVoiceId = $event"
+                />
+                <BaseSelect
+                  v-if="localTtsEngine === 'voicebox'"
+                  :model-value="localVoiceboxModelSize"
+                  :options="voiceboxModelSizeOptions"
+                  placeholder="模型规格"
+                  style="min-width:150px"
+                  @update:model-value="localVoiceboxModelSize = $event"
                 />
                 <BaseSelect
                   v-if="localTtsEngine === 'voicebox'"
@@ -2425,7 +2441,7 @@
                   @update:model-value="exportBgmMusicId = $event"
                 />
                 <div v-if="!exportBgmOptions.length" class="dim" style="font-size:11px;line-height:1.5">
-                  暂无可用 BGM，请先在「BGM 配乐」步骤生成，或
+                  暂无可用 BGM，请在本项目任意集的「BGM 配乐」步骤生成，或
                   <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px" @click="panel = 'production'; prodTab = 'bgm'">前往生成</button>
                 </div>
                 <div v-else class="export-bgm-volume">
@@ -2600,7 +2616,6 @@
     <input
       ref="shotFolderUploadInputRef"
       type="file"
-      accept="image/png,image/jpeg,image/webp,image/gif"
       multiple
       webkitdirectory
       class="sr-only-file-input"
@@ -2691,7 +2706,7 @@ import {
   narrationStoryboardStep,
 } from '~/composables/useEpisodeWorkflow'
 import { artStyleLabel } from '~/composables/useArtStyles'
-import { parseShotImageFilename } from '~/utils/shotImageFilename'
+import { buildFolderUploadSlots, isImageUploadFile, parseShotImageFilename } from '~/utils/shotImageFilename'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 definePageMeta({ layout: 'studio' })
@@ -2749,6 +2764,12 @@ const voiceboxInstructOptions = [
   { label: '轻声低语', value: '轻声、亲密，如同在耳边诉说' },
   { label: '自定义…', value: VOICEBOX_INSTRUCT_CUSTOM },
 ]
+const DEFAULT_VOICEBOX_MODEL_SIZE = '0.6B'
+const localVoiceboxModelSize = ref(DEFAULT_VOICEBOX_MODEL_SIZE)
+const voiceboxModelSizeOptions = [
+  { label: '0.6B（默认·更快）', value: '0.6B' },
+  { label: '1.7B（更高质量）', value: '1.7B' },
+]
 const localVoiceboxInstructPreset = ref('略带感慨，语速适中，有感情')
 const localVoiceboxInstructCustom = ref('')
 const LOCAL_TTS_PREVIEW_DEFAULT = '这是一段旁白试听，用于感受当前音色、语速和感情效果。'
@@ -2783,6 +2804,11 @@ const localVoiceboxInstructLabel = computed(() => {
   }
   const opt = voiceboxInstructOptions.find(o => o.value === localVoiceboxInstructPreset.value)
   return opt?.label || instruct
+})
+const localVoiceboxModelSizeLabel = computed(() => {
+  if (localTtsEngine.value !== 'voicebox') return ''
+  const opt = voiceboxModelSizeOptions.find(o => o.value === localVoiceboxModelSize.value)
+  return opt?.label || localVoiceboxModelSize.value
 })
 const pipelineStepTotal = computed(() => workflowStepTotal(productionMode.value))
 const panel = ref('script')
@@ -2918,10 +2944,13 @@ const visibleBgmLibrary = computed(() => {
 const exportBgmOptions = computed(() =>
   visibleBgmLibrary.value
     .filter(m => m.status === 'completed' && (m.local_path || m.localPath))
-    .map(m => ({
-      value: m.id,
-      label: `${m.title || 'BGM'} #${m.id}`,
-    })),
+    .map(m => {
+      const fromOtherEpisode = m.episode_id && epId.value && m.episode_id !== epId.value
+      return {
+        value: m.id,
+        label: `${m.title || 'BGM'} #${m.id}${fromOtherEpisode ? ' · 其他集' : ''}`,
+      }
+    }),
 )
 const exportBgmPreviewUrl = computed(() => {
   if (!exportBgmMusicId.value) return ''
@@ -2966,6 +2995,7 @@ function buildLocalTtsPreviewPayload(textOverride) {
   if (localTtsEngine.value === 'voicebox') {
     const instruct = resolveVoiceboxInstructText()
     if (instruct) payload.voicebox_instruct = instruct
+    payload.voicebox_model_size = localVoiceboxModelSize.value
   }
   return payload
 }
@@ -3016,6 +3046,7 @@ function ttsGenerateOptions(force = false) {
     if (localTtsEngine.value === 'voicebox') {
       const instruct = resolveVoiceboxInstructText()
       if (instruct) opts.voicebox_instruct = instruct
+      opts.voicebox_model_size = localVoiceboxModelSize.value
     }
   } else if (!isNarrationMode.value) {
     // drama mode: never send local_tts
@@ -3033,6 +3064,7 @@ function persistLocalTtsPrefs() {
   window.localStorage.setItem(`episode-${epId.value}-local-tts-speed`, String(localTtsSpeed.value))
   window.localStorage.setItem(`episode-${epId.value}-voicebox-instruct-preset`, localVoiceboxInstructPreset.value)
   window.localStorage.setItem(`episode-${epId.value}-voicebox-instruct-custom`, localVoiceboxInstructCustom.value)
+  window.localStorage.setItem(`episode-${epId.value}-voicebox-model-size`, localVoiceboxModelSize.value)
 }
 
 function restoreLocalTtsPrefs() {
@@ -3052,6 +3084,8 @@ function restoreLocalTtsPrefs() {
   }
   const instructCustom = window.localStorage.getItem(`episode-${epId.value}-voicebox-instruct-custom`)
   if (instructCustom) localVoiceboxInstructCustom.value = instructCustom
+  const modelSize = window.localStorage.getItem(`episode-${epId.value}-voicebox-model-size`)
+  if (modelSize === '0.6B' || modelSize === '1.7B') localVoiceboxModelSize.value = modelSize
 }
 
 function persistExportBgmPrefs() {
@@ -3060,8 +3094,8 @@ function persistExportBgmPrefs() {
   window.localStorage.setItem(`episode-${epId.value}-export-include-opening`, exportIncludeOpening.value ? '1' : '0')
   window.localStorage.setItem(`episode-${epId.value}-export-watermark`, exportWatermarkText.value)
   window.localStorage.setItem(`episode-${epId.value}-export-watermark-animated`, exportWatermarkAnimated.value ? '1' : '0')
-  window.localStorage.setItem(`episode-${epId.value}-export-bgm-id`, exportBgmMusicId.value ? String(exportBgmMusicId.value) : '')
-  window.localStorage.setItem(`episode-${epId.value}-export-bgm-vol`, String(exportBgmVolume.value))
+  window.localStorage.setItem(`drama-${dramaId}-export-bgm-id`, exportBgmMusicId.value ? String(exportBgmMusicId.value) : '')
+  window.localStorage.setItem(`drama-${dramaId}-export-bgm-vol`, String(exportBgmVolume.value))
 }
 
 function restoreExportBgmPrefs() {
@@ -3074,9 +3108,11 @@ function restoreExportBgmPrefs() {
   if (wm != null) exportWatermarkText.value = wm
   const wmAnim = window.localStorage.getItem(`episode-${epId.value}-export-watermark-animated`)
   if (wmAnim != null) exportWatermarkAnimated.value = wmAnim === '1'
-  const id = window.localStorage.getItem(`episode-${epId.value}-export-bgm-id`)
+  let id = window.localStorage.getItem(`drama-${dramaId}-export-bgm-id`)
+  if (id == null) id = window.localStorage.getItem(`episode-${epId.value}-export-bgm-id`)
   exportBgmMusicId.value = id ? Number(id) : null
-  const vol = window.localStorage.getItem(`episode-${epId.value}-export-bgm-vol`)
+  let vol = window.localStorage.getItem(`drama-${dramaId}-export-bgm-vol`)
+  if (vol == null) vol = window.localStorage.getItem(`episode-${epId.value}-export-bgm-vol`)
   if (vol) exportBgmVolume.value = Number(vol) || 22
 }
 
@@ -4933,11 +4969,11 @@ function stopBgmPoll() {
 }
 
 async function tickBgmPoll(options = { resume: false }) {
-  if (!epId.value) return
+  if (!dramaId) return
   try {
     const prevCompleted = bgmCompletedCount.value
     if (options.resume) {
-      try { await musicAPI.resumePending({ episode_id: epId.value }) } catch {}
+      try { await musicAPI.resumePending({ drama_id: dramaId }) } catch {}
     }
     await loadBgmLibrary({ resumePoll: false })
     const pending = bgmPendingCount.value
@@ -4963,8 +4999,8 @@ function startBgmPoll() {
 }
 
 async function loadBgmLibrary(options = { resumePoll: true }) {
-  if (!epId.value) return
-  const rows = await musicAPI.list({ episode_id: epId.value })
+  if (!dramaId) return
+  const rows = await musicAPI.list({ drama_id: dramaId })
   bgmLibrary.value = normalizeBgmLibraryRows(rows)
   if (options.resumePoll) {
     const pending = bgmLibrary.value.some(m => ['pending', 'processing'].includes(m.status))
@@ -4973,7 +5009,7 @@ async function loadBgmLibrary(options = { resumePoll: true }) {
 }
 
 async function refreshBgmLibrary() {
-  if (!epId.value) return
+  if (!dramaId) return
   const pendingLead = bgmLibrary.value
     .filter(m => m.status === 'processing')
     .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))[0]
@@ -4987,7 +5023,7 @@ async function refreshBgmLibrary() {
       console.warn('[BGM sync]', e?.message || e)
     }
   }
-  try { await musicAPI.resumePending({ episode_id: epId.value }) } catch {}
+  try { await musicAPI.resumePending({ drama_id: dramaId }) } catch {}
   await loadBgmLibrary()
 }
 
@@ -5036,6 +5072,7 @@ async function generateEpisodeBgm() {
   try {
     const sb = bgmTargetSbId.value ? sbs.value.find(s => s.id === bgmTargetSbId.value) : null
     const result = await musicAPI.generate({
+      drama_id: dramaId,
       episode_id: epId.value,
       storyboard_id: sb?.id,
       description: bgmDesc.value.trim(),
@@ -5861,6 +5898,9 @@ async function generateOpeningAudio() {
       ...(localTtsEngine.value === 'voicebox' && resolveVoiceboxInstructText()
         ? { voicebox_instruct: resolveVoiceboxInstructText() }
         : {}),
+      ...(localTtsEngine.value === 'voicebox'
+        ? { voicebox_model_size: localVoiceboxModelSize.value }
+        : {}),
     })
     await refresh()
     toast.success('开幕配音已生成，可点击生成开幕视频')
@@ -6039,10 +6079,13 @@ function resolveImageUploadPairs(files, target) {
     file,
     storyboardId: parseShotImageFilename(file.name)?.storyboardId ?? null,
   }))
-  const useFilename = target.matchByFilename
-    || (target.kind === 'shot-batch' && parsed.length > 0 && parsed.every(item => item.storyboardId != null))
+  const allShotIds = parsed.length > 0 && parsed.every(item => item.storyboardId != null)
+  const useShotId = allShotIds && (
+    target.matchByFilename
+    || target.kind === 'shot-batch'
+  )
 
-  if (useFilename) {
+  if (useShotId) {
     const validSet = new Set(ids)
     const pairs = []
     const unmatched = []
@@ -6056,7 +6099,17 @@ function resolveImageUploadPairs(files, target) {
     if (!pairs.length) {
       throw new Error('没有可匹配的图片（文件名需为 #序号#镜头ID，如 #1#127.png）')
     }
-    return { pairs, unmatched }
+    return { pairs, unmatched, matchMode: 'storyboard-id' }
+  }
+
+  if (target.matchByFilename) {
+    const { slots, error } = buildFolderUploadSlots(files, ids.length)
+    if (error) throw new Error(error)
+    return {
+      pairs: slots.map(({ file, slotIndex }) => ({ file, id: ids[slotIndex] })),
+      unmatched: [],
+      matchMode: 'order',
+    }
   }
 
   if (files.length !== ids.length) {
@@ -6065,11 +6118,13 @@ function resolveImageUploadPairs(files, target) {
   return {
     pairs: files.map((file, i) => ({ file, id: ids[i] })),
     unmatched: [],
+    matchMode: 'picker-order',
   }
 }
 
 async function processImageUploadPairs(pairs, target) {
   let ok = 0
+  const failed = []
   for (const { file, id } of pairs) {
     try {
       const path = await uploadImageFile(file)
@@ -6081,28 +6136,52 @@ async function processImageUploadPairs(pairs, target) {
       ok++
     } catch (err) {
       console.error(err)
+      const sb = sbs.value.find(item => item.id === id)
+      failed.push({
+        id,
+        label: sb ? `#${getNarrationShotDisplayNo(sb)}` : `#${id}`,
+        fileName: file.name,
+        error: err?.message || String(err),
+      })
     }
   }
   await refresh()
-  return ok
+  return { ok, failed }
+}
+
+function formatUploadFailures(failed, limit = 5) {
+  if (!failed.length) return ''
+  const head = failed.slice(0, limit).map(f => `${f.label}（${f.fileName}）`).join('、')
+  const tail = failed.length > limit ? ` 等 ${failed.length} 镜` : ''
+  return `${head}${tail}`
 }
 
 async function onShotFolderUploadSelected(event) {
-  const files = Array.from(event.target.files || []).filter(file => file.type.startsWith('image/'))
+  const files = Array.from(event.target.files || []).filter(isImageUploadFile)
   event.target.value = ''
   const target = imageUploadTarget.value
   imageUploadTarget.value = null
   if (!files.length || !target) return
 
   try {
-    const { pairs, unmatched } = resolveImageUploadPairs(files, target)
-    const ok = await processImageUploadPairs(pairs, target)
+    const { pairs, unmatched, matchMode } = resolveImageUploadPairs(files, target)
+    const { ok, failed } = await processImageUploadPairs(pairs, target)
     if (unmatched.length) {
       toast.warning(`已上传 ${ok} 张，${unmatched.length} 个文件无法匹配（需 #序号#镜头ID）`)
       return
     }
+    if (failed.length) {
+      toast.warning(`上传完成 ${ok}/${pairs.length}，失败：${formatUploadFailures(failed)}`)
+      return
+    }
     if (ok === pairs.length) {
-      toast.success(`已按文件名匹配上传 ${ok} 张配图`)
+      const firstSb = sbs.value.find(item => item.id === pairs[0]?.id)
+      const lastSb = sbs.value.find(item => item.id === pairs[pairs.length - 1]?.id)
+      const firstNo = firstSb ? getNarrationShotDisplayNo(firstSb) : '?'
+      const lastNo = lastSb ? getNarrationShotDisplayNo(lastSb) : '?'
+      toast.success(matchMode === 'order'
+        ? `已上传 ${ok} 张：无后缀→#${firstNo}，(${pairs.length - 1})→#${lastNo}`
+        : `已按文件名匹配上传 ${ok} 张配图`)
     } else {
       toast.warning(`上传完成 ${ok}/${pairs.length}，部分失败请重试`)
     }
@@ -6112,7 +6191,7 @@ async function onShotFolderUploadSelected(event) {
 }
 
 async function onImageUploadSelected(event) {
-  const files = Array.from(event.target.files || []).filter(file => file.type.startsWith('image/'))
+  const files = Array.from(event.target.files || []).filter(isImageUploadFile)
   event.target.value = ''
   const target = imageUploadTarget.value
   imageUploadTarget.value = null
@@ -6122,10 +6201,14 @@ async function onImageUploadSelected(event) {
   if (!ids.length) return
 
   try {
-    const { pairs, unmatched } = resolveImageUploadPairs(files, target)
-    const ok = await processImageUploadPairs(pairs, target)
+    const { pairs, unmatched, matchMode } = resolveImageUploadPairs(files, target)
+    const { ok, failed } = await processImageUploadPairs(pairs, target)
     if (unmatched.length) {
       toast.warning(`已上传 ${ok} 张，${unmatched.length} 个文件无法匹配`)
+      return
+    }
+    if (failed.length) {
+      toast.warning(`上传完成 ${ok}/${pairs.length}，失败：${formatUploadFailures(failed)}`)
       return
     }
     if (ok === pairs.length) {
@@ -6134,11 +6217,13 @@ async function onImageUploadSelected(event) {
         : ''
       toast.success(target.kind === 'character-batch'
         ? `已全部上传 ${ok} 张定妆图`
-        : target.matchByFilename || pairs.some(p => parseShotImageFilename(p.file.name))
-          ? `已按文件名匹配上传 ${ok} 张配图`
-          : shotMsg
-            ? `已上传配图到 ${shotMsg}（同段镜头自动沿用至下一需配图位置）`
-            : `已全部上传 ${ok} 张配图`)
+        : matchMode === 'order'
+          ? `已按文件名序号上传 ${ok} 张配图`
+          : target.matchByFilename || pairs.some(p => parseShotImageFilename(p.file.name))
+            ? `已按文件名匹配上传 ${ok} 张配图`
+            : shotMsg
+              ? `已上传配图到 ${shotMsg}（同段镜头自动沿用至下一需配图位置）`
+              : `已全部上传 ${ok} 张配图`)
     } else {
       toast.warning(`上传完成 ${ok}/${pairs.length}，部分失败请重试`)
     }
@@ -7195,7 +7280,7 @@ async function loadVoiceboxVoices() {
     const health = await voicesAPI.voiceboxHealth()
     voiceboxAvailable.value = !!health?.ok
     if (!health?.ok) return []
-    const rows = await voicesAPI.list('voicebox')
+    const rows = await voicesAPI.list('voicebox', { model_size: localVoiceboxModelSize.value })
     if (!rows?.length) return []
     const presetEngineLabel = (engine) => {
       if (engine === 'qwen_custom_voice') return 'CustomVoice'
@@ -7262,7 +7347,10 @@ async function loadVoices() {
 }
 
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
-watch([localTtsEnabled, localTtsEngine, localEdgeVoiceId, localTtsSpeed, localVoiceboxInstructPreset, localVoiceboxInstructCustom], persistLocalTtsPrefs)
+watch([localTtsEnabled, localTtsEngine, localEdgeVoiceId, localTtsSpeed, localVoiceboxInstructPreset, localVoiceboxInstructCustom, localVoiceboxModelSize], persistLocalTtsPrefs)
+watch(localVoiceboxModelSize, () => {
+  if (localTtsEngine.value === 'voicebox') refreshLocalVoices()
+})
 watch(localTtsEngine, () => { refreshLocalVoices() })
 watch([exportMixBgm, exportIncludeOpening, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
 watch(exportWatermarkText, () => {
