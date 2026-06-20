@@ -149,6 +149,8 @@ export function narrationStoryboardPrompt(style = 'comic') {
     '所有 dialogue 统一写为「旁白：单句内容」，每镜 dialogue 只能有一句旁白。',
     `image_prompt 必须是单张完整插画，描述该场景段落的「主要视觉画面」（综合同场景全部旁白，不要只写首句），画风要求：${styleHint}`,
     '严禁在 image_prompt 中出现 grid、panel、宫格、分格、多格、collage、split、strip 等词。',
+    '严禁描写斩首、尸体、血迹等暴力血腥画面；涉及刑案/处决时改写为牢狱候审、押解待审、公堂问讯等温和情节。',
+    '严禁暴力词单词替换残留（如倒地的…牢狱候审、刀架脖颈、地面血迹）；六维须整句重写为通顺温和画面。',
     '不要填写 video_prompt，duration 按该句旁白字数估算（约 4 字/秒）。',
     '完成后调用 save_storyboards 保存。',
   ].join('')

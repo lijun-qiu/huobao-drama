@@ -143,6 +143,14 @@ export const NARRATION_DIPPTYCH_SIX_PART_LLM_RULE =
 export const NARRATION_SCENE_PLOT_QUALITY_LLM_RULE =
   '【年代场景】与【核心细节动作】须在同一空间；【核心细节动作】须为可见动作，严禁照抄旁白原文；抽象句须推断成可画瞬间'
 
+/** LLM 配图：禁止暴力血腥画面，改写为温和司法/羁押情节 */
+export const NARRATION_VIOLENCE_CONTENT_LLM_RULE =
+  '【内容合规】禁止描写斩首、尸体、尸首、断颈、血腥、血迹、杀戮、凶杀、处决、砍头、人头落地、残肢、血肉模糊、恐怖虐杀等暴力画面；旁白涉及刑案/杀人/处决时，改写为牢狱候审、押解待审、公堂问讯、铁链羁押、牢房静坐、衙役押送等温和可画瞬间，只表现司法流程与人物姿态，不表现伤害过程与遗体'
+
+/** LLM 配图：禁止暴力词替换残留，六维全文须语义通顺的温和改写 */
+export const NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE =
+  '【禁止替换残留】暴力血腥禁止出现在任一维度（【画面主体】【年代场景】【核心细节动作】【光影色调】【镜头视角】【质感要求】及画风前后缀）；严禁对暴力词做单词替换后拼凑（如「尸体」改「牢狱候审」却写「倒地的…牢狱候审」「旁边有…牢狱候审」）；必须整句重写为完整、通顺、无伤亡暗示的温和司法画面，不得残留倒地不动、刀刃近颈、地面血迹、刑架处决等可视化伤亡'
+
 /** LLM 配图写法抽象示例（不含具体故事情节，模型须从输入旁白中提取内容） */
 export const NARRATION_LLM_PROMPT_PATTERN =
   'prior 已交代物件 + narration_lines 描述场所活动 →【画面主体：素体小人主人公与配角】，【年代场景：时代+地点+载体上陈列的具体物件名】，【核心细节动作：可见动作】，【光影色调：光线色调】，【镜头视角：景别机位】，【质感要求：画风与禁忌】'
@@ -167,6 +175,8 @@ export function buildNarrationParagraphImagePromptLLMSystem(
     NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE,
     NARRATION_ATMOSPHERE_LLM_RULE,
     NARRATION_SCENE_PLOT_QUALITY_LLM_RULE,
+    NARRATION_VIOLENCE_CONTENT_LLM_RULE,
+    NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE,
     NARRATION_VEHICLE_LLM_RULE,
     minimal ? NARRATION_MINIMAL_PLOT_VISIBILITY_LLM_RULE : '',
     minimal ? NARRATION_PROTAGONIST_PLOT_LLM_RULE : '',
@@ -194,6 +204,8 @@ export function buildNarrationParagraphImagePromptLLMSystem(
         ? '11) characters 的 life_stage 仅用于素体阶段体型约束，禁止写入服装发型五官'
         : '11) 无 characters 时【画面主体】仍须写黑色素体小人主人公',
       '12) 每条 prompt 只写当前配图段的一个场景；不要输出负面提示词',
+      `13) ${NARRATION_VIOLENCE_CONTENT_LLM_RULE}`,
+      `14) ${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`,
       '只输出 JSON，不要解释。',
     ].filter(Boolean).join('\n')
   }
@@ -213,6 +225,8 @@ export function buildNarrationParagraphImagePromptLLMSystem(
       ? '7) 若段落涉及已知角色，prompt 中写出其外貌特征并保持与角色设定一致'
       : '',
     '8) 【质感要求】须写明画风质感与禁止项（no text, no watermark）',
+    `9) ${NARRATION_VIOLENCE_CONTENT_LLM_RULE}`,
+    `10) ${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`,
     '只输出 JSON，不要解释。',
   ].filter(Boolean).join('\n')
 }
@@ -256,6 +270,8 @@ export function buildNarrationImageDetectLLMSystem(
     ...NARRATION_LLM_ANALYSIS_STEPS,
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
     ...detectRules,
+    NARRATION_VIOLENCE_CONTENT_LLM_RULE,
+    NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE,
     ...templateContext,
     '输出要求：只输出 JSON { "needs_image": boolean[] }，长度与 sentences 相同，不要解释。',
   ].filter(Boolean).join('\n')
@@ -273,6 +289,8 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
       `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景：具体地点与环境】，【主题氛围：与全文主线对应的叙事氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
       `3) ${NARRATION_TITLE_IMAGE_LLM_RULE}`,
       '4) 禁止写年代/年份和具体服装描述；禁止在画面中出现任何文字',
+      `5) ${NARRATION_VIOLENCE_CONTENT_LLM_RULE}`,
+      `6) ${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`,
       '只输出 JSON，不要解释。',
     ].join('\n')
   }
@@ -280,6 +298,8 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
     '你是影视解说分镜美术指导，根据整集解说全文为片头标题图写 AI 文生图用的 image_prompt。',
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
     NARRATION_TITLE_IMAGE_LLM_RULE,
+    NARRATION_VIOLENCE_CONTENT_LLM_RULE,
+    NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE,
     `画风：${artStylePrompt(style, 'title')}, 16:9 landscape, high quality, absolutely no text, no watermark`,
     '只输出 JSON，不要解释。',
   ].join('\n')
@@ -292,6 +312,7 @@ export function buildNarrationSceneSegmentsImagePromptLLMSystem(style?: string |
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
     NARRATION_PLOT_CONTINUITY_LLM_RULE,
     NARRATION_SCENE_PLOT_QUALITY_LLM_RULE,
+    NARRATION_VIOLENCE_CONTENT_LLM_RULE,
     NARRATION_FIXTURES_LLM_RULE,
     '规则：',
     '1) 先通读 full_narration，再写每段画面；综合该段全部旁白句子，提炼地点、人物、动作与氛围',
@@ -299,13 +320,15 @@ export function buildNarrationSceneSegmentsImagePromptLLMSystem(style?: string |
     `3) ${artStylePrompt(style, 'scene')}，电影感构图，无文字无水印`,
     '4) 不要出现 grid、panel、宫格、分格、collage、split、strip 等词',
     '5) 用中文描述画面内容，可夹杂少量英文风格词',
+    `6) ${NARRATION_VIOLENCE_CONTENT_LLM_RULE}`,
+    `7) ${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`,
     '只输出 JSON，不要解释。',
   ].join('\n')
 }
 
 /** 解说视频模式：负面提示词 */
 export const NARRATION_IMAGE_NEGATIVE_PROMPT =
-  '复杂五官、写实人脸、鼻子嘴巴、无眼睛、空白脸、无五官、面部皱纹、厚涂肌理、3D 建模、渐变光影、复杂纹理、半写实、人物穿衣服、人物穿鞋戴帽、服装细节、角色穿西装革履、角色穿花衬衫、角色穿喇叭裤、角色穿T恤衬衫裤子裙子、角色戴墨镜太阳镜、角色具体服装款式、有服装的素体、穿着描述、复古滤镜、像素风、杂乱背景、写实路人、不同画风角色、正常比例人体、头身比失调、长短腿、四肢粗细不一、身高参差不齐、体型不一'
+  '复杂五官、写实人脸、鼻子嘴巴、无眼睛、空白脸、无五官、面部皱纹、厚涂肌理、3D 建模、渐变光影、复杂纹理、半写实、人物穿衣服、人物穿鞋戴帽、服装细节、角色穿西装革履、角色穿花衬衫、角色穿喇叭裤、角色穿T恤衬衫裤子裙子、角色戴墨镜太阳镜、角色具体服装款式、有服装的素体、穿着描述、复古滤镜、像素风、杂乱背景、写实路人、不同画风角色、正常比例人体、头身比失调、长短腿、四肢粗细不一、身高参差不齐、体型不一、斩首、砍头、尸体、尸首、血腥、血迹、杀戮、凶杀、处决、残肢、血肉模糊、恐怖虐杀、gore、blood、bloody、corpse、decapitation'
 
 export const ART_STYLES = [
   {
@@ -579,6 +602,10 @@ type NarrationPlotHint = {
 }
 
 const NARRATION_PLOT_HINTS: NarrationPlotHint[] = [
+  { re: /斩首|砍头|杀头|铡刀|处决|人头落地|断头/, action: '黑色素体小人被几位白色素体小人押解走向牢房候审', priority: 11 },
+  { re: /尸体|尸首|遗体|死尸|尸身|惨死|横尸|验尸|解剖/, action: '黑色素体小人在牢房内端坐候审', priority: 11 },
+  { re: /血腥|血迹|鲜血|流血|血泊|血肉模糊|溅血|凶杀|杀戮|虐杀|屠杀/, action: '黑色素体小人在公堂问讯场景中站立候审', priority: 11 },
+  { re: /牢房|牢狱|监狱|大狱|公堂|衙门|押解|候审|羁押|待审/, action: '黑色素体小人在牢房或公堂内静坐候审，两侧有白色素体小人衙役站立', priority: 10 },
   { re: /摆地摊|摆摊|夜市/, action: '黑色素体小人在摊位前整理陈列货物', priority: 10, sceneTags: ['market'] },
   { re: /生意|卖光|卖完|赶时髦|出售|卖出|热卖/, action: '黑色素体小人向几位白色素体小人展示货物并交易', priority: 10, sceneTags: ['market'] },
   { re: /年轻人|顾客|客人|来买|挑选/, action: '黑色素体小人在摊位前忙碌，几位白色素体小人围在摊位前挑选货物', priority: 9, sceneTags: ['market'] },
@@ -619,6 +646,7 @@ function detectNarrationSceneTags(text: string): string[] {
   if (/供销社/.test(text)) tags.push('supply')
   if (/推.*手推车|手推车|板车/.test(text)) tags.push('cart')
   if (/推.*车|自行车|二八杠/.test(text)) tags.push('bike')
+  if (/牢|狱|公堂|衙门|押解|候审|羁押/.test(text)) tags.push('justice')
   return tags
 }
 
@@ -726,6 +754,8 @@ export function isNarrationDateOnlySentence(sentence: string): boolean {
 }
 
 const NARRATION_SCENE_KEYWORDS: Array<[RegExp, string]> = [
+  [/牢房|牢狱|监狱|大狱/, '简化牢房内景，木栏与石墙'],
+  [/公堂|衙门|大堂/, '简化公堂问讯内景'],
   [/杂货店|杂货铺|小卖部/, '老旧杂货店门口，简化店面与玻璃橱窗'],
   [/供销社/, '供销社门口或营业大厅内景'],
   [/批发市场/, '批发市场货架通道与货物堆'],
@@ -2180,7 +2210,127 @@ const SCENE_PROMPT_REPLACEMENTS: Array<[RegExp, string]> = [
   [/面容姣好|五官分明|五官轮廓|皱纹|发际线|花白头发|头发花白|小胡子|络腮胡|美人脸|写实五官|复杂五官/g, ''],
   [/gray\s+hair|white\s+hair|wrinkles?/gi, ''],
   [/slicked-back|wavy\s+hair|messy\s+short\s+hair/gi, ''],
+  [/斩首|砍头|杀头|铡刀|处决|人头落地|断头/g, ''],
+  [/尸体|尸首|遗体|死尸|尸身|惨死|横尸/g, ''],
+  [/验尸|解剖/g, ''],
+  [/血迹|血腥|鲜血|流血|血泊|血肉模糊|溅血|血染/g, ''],
+  [/杀戮|凶杀|虐杀|屠杀|捅死|刺死|砍死|勒死|枪毙|绞刑/g, ''],
+  [/残肢|断肢|断手|断腿|开膛/g, ''],
+  [/上吊|吊死/g, ''],
+  [/decapitation|beheading|execution|gore|bloody|blood\s*splatter|corpse|dead\s*body|mutilat/gi, ''],
+  [/古代刑场/g, '古代公堂门外候审区'],
+  [/刑场/g, '公堂门外'],
+  [/刽子手/g, '衙役'],
+  [/高举大刀/g, '站立押送'],
+  [/大刀/g, '木棍'],
+  [/刀已架在脖颈[^，。】]*/g, '双手被衙役反绑候审'],
+  [/刀刃|挥刀|砍向|持刀刺|刺向/g, ''],
+  [/刺入[^，。【]{0,16}身体/g, '围在身旁'],
+  [/扎进[^，。【]{0,12}脚心/g, '踩在地面'],
+  [/地面有干涸/g, '地面平整青石'],
+  [/地面有，/g, '地面平整，'],
+  [/地面斑斑/g, '地面平整'],
+  [/黑红色?血滴|血滴|流血[^，。】]*/g, ''],
+  [/地面有黑红血滴/g, '地面土路'],
+  [/沾有红色的/g, '散落的'],
+  [/持剑横于颈前/g, '手持竹简低头站立'],
+  [/一条红线表示[，,]?/g, ''],
+  [/身体后仰倒地/g, '跪坐于地'],
+  [/仰面躺在地上，一动不动/g, '端坐木凳上候审'],
+  [/躺在地上[^，。】]*/g, '跪坐于地'],
+  [/倒地的白色素体小人牢狱候审/g, '站立的白色素体小人衙役'],
+  [/倒地的[^，。【]{0,12}素体小人/g, '跪坐的素体小人'],
+  [/竹刀刺入[^，。】]*/g, '竹简散落身旁'],
+  [/几把竹刀[^，。】]*/g, '几卷散落的竹简'],
+  [/冲前伸手，似欲阻止不及/g, '伸手招呼'],
+  [/古代战场布景/g, '古代衙门外景布景'],
+  [/散落道具盾牌与长矛/g, '散落道具木箱与旗帜'],
+  [/竹刀/g, '竹简'],
+  [/持剑[^，。】]*/g, '手持竹简'],
+  [/后仰倒地/g, '跪坐于地'],
+  [/红线表示[，,]?/g, ''],
+  [/宫女持刀[^，。】]*/g, '宫女手持竹简'],
+  [/木桩刑架/g, '木栏围栏'],
+  [/人头攒动/g, '人声喧闹'],
+  [/打在主人公脸上和脖子上/g, '打在主人公脸上和肩背上'],
+  [/竹简已刺入躯体/g, '竹简散落在身旁'],
+  [/聚焦刺入的竹简/g, '聚焦散落的竹简'],
+  [/刺入/g, '贴近'],
+  [/暗红血色|血色/g, '暗沉天色'],
+  [/颈旁/g, '身旁'],
+  [/刀仍架在[^，。】]*/g, '双手仍被绑绳'],
+  [/刀已架在[^，。】]*/g, '双手被衙役反绑候审'],
+  [/刑具/g, '绳索'],
+  [/肃杀/g, '沉静'],
+  [/旁边有[^，。】]*候审/g, '旁边有站立的白色素体小人衙役'],
+  [/倒地[^，。】]*候审/g, '跪地候审'],
+  [/躺[^，。】]{0,12}地上/g, '跪坐于地'],
+  [/一动不动/g, '端坐'],
+  [/高举[^，。】]{0,8}(?:大刀|木棍)/g, '站立押送'],
+  [/押解待审台/g, '公堂门外石台'],
+  [/地面有[，,]\s*/g, '地面平整，'],
 ]
+
+/** 暴力词替换后残留的半暴力语义（须整段重写，不能只删词） */
+export const VIOLENCE_RESIDUE_DETECT_RE =
+  /倒地[^，】]{0,24}候审|候审[^，】]{0,24}倒地|旁边有倒|仰面躺|躺[^，】]{0,12}地上|一动不动|地面有[，,]|地面有干涸|高举[^，】]{0,8}(?:刀|棍)|木桩刑架|绑[^，】]{0,8}刀|刀[^，】]{0,12}颈|颈[^，】]{0,8}刀|淋漓|残肢|血肉|尸|遗体|死尸|斩|砍头|人头落地|处决|刽子手|刑场|刑架|血迹|血腥|血色|血滴|血泊|斑斑|干涸|刺入|扎入|后仰倒地|持剑|竹刀|gore|bloody|corpse|decapitation|beheading|execution|mutilat/i
+
+/** 检测配图 prompt 是否仍含暴力血腥元素 */
+export const VIOLENCE_IMAGE_DETECT_RE =
+  /斩首|砍头|杀头|铡刀|处决|人头(?!攒动)|人头落地|断头|尸体|尸首|遗体|死尸|尸身|惨死|横尸|验尸|解剖|血迹|血腥|鲜血|流血|血泊|血肉|溅血|血染|血滴|血色|杀戮|凶杀|虐杀|屠杀|残肢|断肢|开膛|上吊|吊死|枪毙|绞刑|刽子手|刑场|刑具|大刀|刀刃|挥刀|刺入|扎入|脖颈|颈上|颈前|颈旁|竹刀|持剑|后仰倒地|红线表示|一动不动|斑斑|干涸|gore|bloody|corpse|decapitation|beheading|execution|mutilat/i
+
+function bracketNeedsViolenceRewrite(text: string): boolean {
+  return VIOLENCE_IMAGE_DETECT_RE.test(text) || VIOLENCE_RESIDUE_DETECT_RE.test(text)
+}
+
+const VIOLENT_SUBJECT_FALLBACK = '青年期黑色素体小人主人公与几位白色素体小人衙役'
+const VIOLENT_ACTION_FALLBACK = '黑色素体小人在公堂或牢房内端坐候审，两侧白色素体小人衙役站立押解'
+
+function rewriteViolentImagePromptBrackets(prompt: string): string {
+  const bracketLabels = ['核心细节动作', '画面主体', '镜头视角', '年代场景', '光影色调']
+  let text = prompt
+  for (const label of bracketLabels) {
+    text = text.replace(new RegExp(`【${label}[：:]([^】]*)】`, 'g'), (_, body) => {
+      const b = String(body).trim()
+      if (!bracketNeedsViolenceRewrite(b)) return `【${label}：${b}】`
+      if (label === '年代场景') {
+        let next = b.replace(/刑场|战场|刑架|血[^，】]*/g, '').replace(/[，,]{2,}/g, '，').trim()
+        if (!next || bracketNeedsViolenceRewrite(next)) next = '古代公堂门外或牢房内景，木栏石墙'
+        return `【${label}：${next}】`
+      }
+      if (label === '核心细节动作') return `【${label}：${VIOLENT_ACTION_FALLBACK}】`
+      if (label === '画面主体') return `【${label}：${VIOLENT_SUBJECT_FALLBACK}】`
+      if (label === '光影色调') {
+        const next = b
+          .replace(/暗红血色|血色|血腥|血染/g, '暗沉天色')
+          .replace(/肃杀/g, '沉静')
+          .replace(VIOLENCE_IMAGE_DETECT_RE, '')
+          .replace(VIOLENCE_RESIDUE_DETECT_RE, '')
+          .replace(/[，,]{2,}/g, '，')
+          .trim()
+        return `【${label}：${next || '阴天灰调，尘土微扬'}】`
+      }
+      const cleaned = b
+        .replace(VIOLENCE_IMAGE_DETECT_RE, '')
+        .replace(VIOLENCE_RESIDUE_DETECT_RE, '')
+        .replace(/[，,]{2,}/g, '，')
+        .trim()
+      return `【${label}：${cleaned || '中景平视，叙事解说构图'}】`
+    })
+  }
+  return text
+}
+
+/** 清洗配图 prompt 中的暴力血腥描写，改写为牢狱候审/押解待审等温和情节 */
+export function sanitizeViolenceInImagePrompt(prompt?: string | null): string {
+  let text = String(prompt || '').trim()
+  if (!text) return ''
+  text = rewriteViolentImagePromptBrackets(text)
+  if (bracketNeedsViolenceRewrite(text)) {
+    text = rewriteViolentImagePromptBrackets(text)
+  }
+  return tidyAppearancePunctuation(text)
+}
 
 /** 清洗场景/片头配图 prompt：去掉会把模型带偏的复古/浪漫/抽象装饰词 */
 export function sanitizeSceneImagePrompt(prompt?: string | null): string {
@@ -2189,7 +2339,7 @@ export function sanitizeSceneImagePrompt(prompt?: string | null): string {
   for (const [pattern, replacement] of SCENE_PROMPT_REPLACEMENTS) {
     text = text.replace(pattern, replacement)
   }
-  return tidyAppearancePunctuation(text)
+  return sanitizeViolenceInImagePrompt(text)
 }
 
 /** 解说素体模式：按人生阶段给出仅动作/姿态的定妆提示（中文） */

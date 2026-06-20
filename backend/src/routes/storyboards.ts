@@ -12,9 +12,19 @@ import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
+import { normalizeArtStyle, resolveLLMImagePrompt } from '../constants/art-styles.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 
 const app = new Hono()
+
+function resolveStoryboardImagePrompt(episodeId: number, prompt: unknown): string {
+  const text = String(prompt || '').trim()
+  if (!text) return text
+  const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!episode) return resolveLLMImagePrompt(text, 'narration-minimal')
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, episode.dramaId)).all()
+  return resolveLLMImagePrompt(text, normalizeArtStyle(drama?.style)) || text
+}
 
 function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
   db.delete(schema.storyboardCharacters)
@@ -83,7 +93,7 @@ app.post('/', async (c) => {
     shotType: body.shot_type,
     angle: body.angle,
     movement: body.movement,
-    imagePrompt: body.image_prompt,
+    imagePrompt: body.image_prompt ? resolveStoryboardImagePrompt(body.episode_id, body.image_prompt) : body.image_prompt,
     referenceImages: body.reference_images,
     duration: body.duration || 10,
     createdAt: ts,
@@ -141,6 +151,10 @@ app.put('/:id', async (c) => {
       updates.composedVideoUrl = null
       updates.status = 'pending'
     }
+  }
+
+  if ('image_prompt' in body && body.image_prompt) {
+    updates.imagePrompt = resolveStoryboardImagePrompt(storyboard.episodeId, body.image_prompt)
   }
 
   validateStoryboardBindings(
