@@ -5,6 +5,8 @@ import {
   buildNarrationParagraphImagePromptLLMSystem,
   buildNarrationSceneSegmentsImagePromptLLMSystem,
   buildNarrationTitleImagePromptLLMSystem,
+  buildMinimalPortraitPostureHint,
+  coerceMinimalCharacterAppearance,
   resolveLLMImagePrompt,
   isNarrationDateOnlySentence,
   isNarrationMinimalStyle,
@@ -15,7 +17,7 @@ import {
   type NarrationImageBreakdownProgressCallback,
 } from './narration-image-breakdown-progress.js'
 
-/** 配图段落 prompt：每批段落数（关闭思考模式，单批不宜过大以免 JSON 截断） */
+/** 配图段落 prompt：每批最多段落数 */
 const PARAGRAPH_PROMPT_LLM_BATCH_SIZE = 10
 
 /** 配图段落 prompt：单批 LLM 超时（毫秒） */
@@ -33,11 +35,12 @@ const IMAGE_DETECT_LLM_TIMEOUT_MS = 240_000
 /** 片头标题图 prompt LLM 超时（毫秒） */
 const TITLE_IMAGE_PROMPT_LLM_TIMEOUT_MS = 180_000
 
-function chunkParagraphPromptBatch<T>(items: T[], size: number): T[][] {
+/** 配图段分批：按固定段数切批，尾批不足 BATCH_SIZE 也单独成批 */
+function chunkParagraphPromptBatch<T>(items: T[]): T[][] {
   if (!items.length) return []
   const chunks: T[][] = []
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size))
+  for (let i = 0; i < items.length; i += PARAGRAPH_PROMPT_LLM_BATCH_SIZE) {
+    chunks.push(items.slice(i, i + PARAGRAPH_PROMPT_LLM_BATCH_SIZE))
   }
   return chunks
 }
@@ -709,9 +712,8 @@ export async function generateParagraphImagePromptsWithLLM(
     const config = getTextConfig(textModel)
     if (!config.apiKey) throw new Error('未配置文本模型 API Key')
 
-    const batchCount = paragraphs.length
-      ? Math.ceil(paragraphs.length / PARAGRAPH_PROMPT_LLM_BATCH_SIZE)
-      : 0
+    const batches = chunkParagraphPromptBatch(paragraphs)
+    const batchCount = batches.length
 
     logTaskProgress('NarrationScene', 'llm-paragraph-prompt-start', {
       paragraphCount: paragraphs.length,
@@ -741,10 +743,10 @@ export async function generateParagraphImagePromptsWithLLM(
       ? characters.map(ch => ({
         name: ch.name,
         life_stage: (ch as { variantLabel?: string | null }).variantLabel || '',
-        posture_action: String(ch.appearance || '')
-          .replace(/English tags:[\s\S]*/i, '')
-          .trim()
-          .slice(0, 80),
+        posture_action: coerceMinimalCharacterAppearance(
+          (ch as { variantLabel?: string | null }).variantLabel,
+          ch.appearance,
+        ),
       }))
       : characters.map(ch => ({
         name: ch.name,
@@ -755,7 +757,6 @@ export async function generateParagraphImagePromptsWithLLM(
       '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；单图按六维输出；layout=diptych 按【左格】【右格】各写完整六维（见 system 规则）'
 
     const promptsByStartIndex = new Map<number, string>()
-    const batches = chunkParagraphPromptBatch(paragraphs, PARAGRAPH_PROMPT_LLM_BATCH_SIZE)
     const reportProgress = options?.onProgress
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {

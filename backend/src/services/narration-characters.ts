@@ -1,7 +1,26 @@
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
-import { artStylePrompt, isNarrationMinimalStyle, normalizeArtStyle, sanitizeCharacterAppearance, sanitizeAppearanceForPortrait, buildMinimalPortraitPostureHint, buildNarrationPortraitPromptContent, appendToNarrationBracket, NARRATION_MINIMAL_BODY_SIZE_SPEC, NARRATION_BODY_STAGE_SIZE_HINTS, NARRATION_USE_RAW_LLM_PROMPTS } from '../constants/art-styles.js'
+import {
+  artStylePrompt,
+  buildMinimalPortraitPostureHint,
+  buildNarrationPortraitPromptContent,
+  coerceMinimalCharacterAppearance,
+  coerceMinimalLLMImagePrompt,
+  isNarrationMinimalStyle,
+  NARRATION_MINIMAL_NO_CLOTHING_RULE,
+  normalizeArtStyle,
+  sanitizeCharacterAppearance,
+  sanitizeAppearanceForPortrait,
+  appendToNarrationBracket,
+  NARRATION_MINIMAL_BODY_SIZE_SPEC,
+  NARRATION_BODY_STAGE_SIZE_HINTS,
+  NARRATION_PROTAGONIST_BODY,
+  NARRATION_PROTAGONIST_EYES,
+  NARRATION_CROWD_BODY,
+  NARRATION_CROWD_EYES,
+  NARRATION_USE_RAW_LLM_PROMPTS,
+} from '../constants/art-styles.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { getActiveConfig, getTextConfig } from './ai.js'
 import { callTextChat } from './text-chat.js'
@@ -149,23 +168,24 @@ function variantAgeOrder(group: VariantAgeGroup): number {
 }
 
 function buildPortraitReferenceHint(targetGroup: VariantAgeGroup, refGroup: VariantAgeGroup): string {
+  const stickBase = 'plain black filled stick figure body, two small white dot eyes only, black outline, NOT detailed face, NOT realistic portrait'
   if (refGroup === targetGroup) {
-    return 'same person as reference image, keep facial structure and identity recognizable, match reference art style and line weight, follow appearance description'
+    return `same person as reference image, ${stickBase}, match reference art style and line weight, follow appearance description`
   }
   const delta = variantAgeOrder(targetGroup) - variantAgeOrder(refGroup)
   if (delta > 0) {
     if (targetGroup === 'elder') {
-      return 'same person as reference image, naturally aged to elderly, gray or white hair, visible wrinkles and aged skin, clearly older than reference, do NOT copy youth hairstyle or outfit from reference, follow appearance description for elderly look, match reference art style and line weight only'
+      return `same person as reference image, ${stickBase}, naturally aged to elderly, a few simple white hair strokes on both sides of round head, slightly stooped, do NOT add wrinkles nose mouth realistic face, match reference art style`
     }
     if (targetGroup === 'middle') {
-      return 'same person as reference image, naturally aged to middle age, subtle gray at temples, keep facial structure recognizable, match reference art style and line weight, follow appearance description over reference age'
+      return `same person as reference image, ${stickBase}, slightly wider torso (slightly chubby), match reference art style, follow appearance description over reference age`
     }
-    return 'same person as reference image, older than reference, follow target life stage in appearance description, match reference art style'
+    return `same person as reference image, older than reference, ${stickBase}, follow target life stage in appearance description, match reference art style`
   }
   if (delta < 0) {
-    return 'same person as reference image, younger than reference, follow target life stage in appearance description, match reference art style and line weight'
+    return `same person as reference image, younger than reference, ${stickBase}, follow target life stage in appearance description, match reference art style and line weight`
   }
-  return 'same person as reference image, keep identity recognizable, match reference art style, follow appearance description'
+  return `same person as reference image, ${stickBase}, keep identity recognizable, match reference art style, follow appearance description`
 }
 
 export function formatCharacterDisplayName(char: { name?: string | null; variantLabel?: string | null; variant_label?: string | null }) {
@@ -509,8 +529,9 @@ export { callTextChat } from './text-chat.js'
 function resolvePortraitFraming(style: string, _appearance: string): string {
   if (isNarrationMinimalStyle(style)) {
     return [
-      'single stick figure with two small black dot eyes on plain light gray background',
-      'simple dot eyes only, distinguish by posture and small props, NOT detailed face, NOT realistic portrait',
+      'single black filled stick figure with two small white dot eyes on plain light gray background',
+      'no clothing, no outfit, no shoes, no hat, plain stick figure body only',
+      'simple white dot eyes only on black round head, distinguish by posture and small props, NOT detailed face, NOT realistic portrait, NOT anime face',
       'NOT movie poster, NOT scenic background, NOT environmental illustration',
       'NOT pixel art, NOT retro photo filter, NOT dithered shading',
     ].join(', ')
@@ -567,14 +588,13 @@ async function generateEnglishAppearanceTags(
 /** 清洗 + 补全 English tags（缺失时自动调用 LLM）；素体模式仅保留中文动作描述 */
 export async function finalizeCharacterAppearance(
   appearance: string,
-  context?: { name?: string | null; role?: string | null; minimal?: boolean },
+  context?: { name?: string | null; role?: string | null; minimal?: boolean; variantLabel?: string | null },
 ): Promise<string> {
-  let text = sanitizeCharacterAppearance(appearance)
-  if (!text) return text
   if (context?.minimal) {
-    const { body } = extractEnglishAppearanceTags(text)
-    return sanitizeCharacterAppearance(body || text).slice(0, 200)
+    return coerceMinimalCharacterAppearance(context.variantLabel, appearance)
   }
+  let text = sanitizeCharacterAppearance(appearance)
+  if (!text) return ''
   if (hasEnglishAppearanceTags(text)) {
     const { body, tags } = extractEnglishAppearanceTags(text)
     const cleanedBody = sanitizeCharacterAppearance(body)
@@ -610,13 +630,13 @@ export function buildCharacterPortraitPrompt(
     : ''
   const minimal = isNarrationMinimalStyle(normalizedStyle)
   if (minimal) {
-    const actionPlot = appearance || buildMinimalPortraitPostureHint(char.variantLabel)
+    const actionPlot = coerceMinimalCharacterAppearance(char.variantLabel, appearance)
     const plot = [
       char.name,
       stage ? `${stage}阶段` : '',
       actionPlot,
     ].filter(Boolean).join('，')
-    const scene = '浅灰纯色背景，单人全身素体小人定妆参考图，无环境无场景元素'
+    const scene = `浅灰纯色背景，单人全身${NARRATION_PROTAGONIST_BODY}定妆参考图，无环境无场景元素`
     return buildNarrationPortraitPromptContent(scene, plot)
   }
 
@@ -706,21 +726,23 @@ export function enrichImagePromptWithCharacters(
   const relevant = characterIds?.length
     ? characters.filter(ch => characterIds.includes(ch.id))
     : characters
-  if (!relevant.length) return base
-
-  if (NARRATION_USE_RAW_LLM_PROMPTS) return base
 
   if (isNarrationMinimalStyle(style)) {
+    const coerced = coerceMinimalLLMImagePrompt(base)
+    if (!relevant.length || NARRATION_USE_RAW_LLM_PROMPTS) return coerced
     const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
-    const addition = `场景中出现素体小人：主人公${names}，同框配角须同款三头身简笔素体尺寸（圆头约占身高三分之一），仅动作姿态及人生阶段微调区分，不写服装细节`
-    if (/【左格/.test(base) && /【右格/.test(base)) {
-      return appendToNarrationBracket(appendToNarrationBracket(base, '左格', addition), '右格', addition)
+    const addition = `场景中出现素体：主人公${names}须为${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），同框配角须为${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），${NARRATION_MINIMAL_NO_CLOTHING_RULE}，同款简笔比例仅颜色与人生阶段微调区分`
+    if (/【左格/.test(coerced) && /【右格/.test(coerced)) {
+      return appendToNarrationBracket(appendToNarrationBracket(coerced, '左格', addition), '右格', addition)
     }
-    if (/【画面主体[：:]/.test(base)) {
-      return appendToNarrationBracket(base, '画面主体', addition)
+    if (/【画面主体[：:]/.test(coerced)) {
+      return appendToNarrationBracket(coerced, '画面主体', addition)
     }
-    return appendToNarrationBracket(base, '剧情', addition)
+    return appendToNarrationBracket(coerced, '剧情', addition)
   }
+
+  if (!relevant.length) return base
+  if (NARRATION_USE_RAW_LLM_PROMPTS) return base
 
   const hints = relevant.map(ch => {
     const app = ch.appearance?.trim()
@@ -760,12 +782,13 @@ export async function generateCharacterAppearance(params: {
   const system = minimal
     ? [
       '你是解说素体小人项目的角色动作标注助手。',
-      `本项目定妆图是「白色圆头素体小人，两个小黑点眼睛」，通用尺寸：${NARRATION_MINIMAL_BODY_SIZE_SPEC}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}；不写服装/发型/复杂五官/年代。`,
-      '根据剧本情节，只输出该人生阶段的「两个小黑点眼睛 + 尺寸比例 + 动作姿态 + 可选简单道具」，20-60 字中文。',
-      '示例（青年）：两个小黑点眼睛，圆头约占身高三分之一三头高，推二八杠自行车轮廓站立',
-      '示例（中年）：两个小黑点眼睛，三头高躯干略宽，坐于柜台后手持茶杯',
-      '示例（老年）：两个小黑点眼睛，约2.8头高略佝偻，简化小胡子，坐于凳上手持圆扇',
-      '禁止：花衬衫、西装、墨镜、皱纹、复杂五官、无眼睛、80年代、English tags',
+      `本项目主人公定妆是「${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}」，${NARRATION_MINIMAL_NO_CLOTHING_RULE}，通用尺寸：${NARRATION_MINIMAL_BODY_SIZE_SPEC}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}；不写发型/复杂五官/年代。`,
+      `根据剧本情节，只输出该人生阶段的「${NARRATION_PROTAGONIST_BODY} + ${NARRATION_PROTAGONIST_EYES} + 无服装 + 尺寸比例 + 动作姿态 + 可选简单道具」，20-60 字中文。`,
+      `示例（小孩）：${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}，比青年小一号约2.2头高，站立活泼姿态`,
+      `示例（青年）：${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}，圆头约占身高三分之一三头高，标准身形，站立或行走`,
+      `示例（中年）：${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}，三头高躯干略宽微胖，坐于柜台后手持茶杯轮廓`,
+      `示例（老年）：${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}，约2.8头高略佝偻，圆头两侧各几条简化白发弧线，坐于凳上手持圆扇轮廓`,
+      '禁止：花衬衫、西装、墨镜、皱纹、写实五官、美人脸、小胡子、花白全头、发际线、复杂发型、无眼睛、80年代、English tags、白色素体（群众才是白色）、任何服装鞋帽',
       '只输出正文，不要标题、markdown、JSON。',
     ].join('\n')
     : [
@@ -811,10 +834,11 @@ export async function generateCharacterAppearance(params: {
   const cleaned = raw.replace(/^["'`]+|["'`]+$/g, '').replace(/^外貌描述[:：]\s*/i, '').trim()
   if (!cleaned) throw new Error('AI 未返回有效外貌描述')
   logTaskSuccess('CharacterAppearance', 'llm-generate-done', { name: character.name, length: cleaned.length })
-  if (minimal) return sanitizeCharacterAppearance(cleaned).slice(0, 200)
+  if (minimal) return coerceMinimalCharacterAppearance(character.variantLabel, cleaned)
   return finalizeCharacterAppearance(cleaned.slice(0, 600), {
     name: character.name,
     role: character.role,
+    variantLabel: character.variantLabel,
   })
 }
 
