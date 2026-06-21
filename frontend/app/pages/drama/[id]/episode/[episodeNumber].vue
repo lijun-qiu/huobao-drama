@@ -490,7 +490,7 @@
                     <span class="tag" style="font-size:10px">{{ sb.shot_type || sb.shotType || '—' }}</span>
                     <span v-if="getStoryboardCharacterIds(sb).length" class="tag" style="font-size:10px">{{ getStoryboardCharacterIds(sb).length }} 角色</span>
                     <div class="shot-status">
-                      <div v-if="sb.imageUrl || sb.composedImage || sb.firstFrameImage" class="shot-dot has-img" title="已生成图片"></div>
+                      <div v-if="getStoryboardCover(sb)" class="shot-dot has-img" title="已生成图片"></div>
                       <div v-if="sb.videoUrl || sb.composedVideoUrl" class="shot-dot has-video" title="已生成视频"></div>
                       <div v-if="sb.dialogue" class="shot-dot has-dialogue" title="有对白"></div>
                     </div>
@@ -7232,7 +7232,7 @@ async function genNarrationShotImage(sb) {
     await imageAPI.generate(buildImagePayload(payload))
     toast.success('配图生成中')
     await refresh()
-    watchAsyncResult(() => {
+    await watchAsyncResult(() => {
       const target = sbs.value.find(s => s.id === sb.id)
       const done = hasNarrationShotImage(target)
       if (done) pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(item => item !== sb.id)
