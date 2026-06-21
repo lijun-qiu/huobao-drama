@@ -17,12 +17,15 @@ skills/    — Agent SKILL.md definitions
 ## Commands
 
 ### Backend (`backend/`)
-- `npm run dev` — Start dev server with tsx watch (port 5679)
+- `npm run dev` — Start dev server with tsx watch (port **5679**, 日常开发)
+- `npm run dev:test` — Start test server (port **5680**，**仅 Cursor Agent / 脚本** curl 验证用，勿改前端走此端口)
 - `npm start` — Start production server
 - `npm run typecheck` — TypeScript type checking
 
+端口常量见 `backend/src/constants/ports.ts`（`BACKEND_DEV_PORT` / `BACKEND_TEST_PORT`）。Agent 测 API 请连 `http://localhost:5680/api/v1`，用户界面始终走 5679。
+
 ### Frontend (`frontend/`)
-- `npm run dev` — Vite dev server (port 3013, proxies /api to 5679)
+- `npm run dev` — Vite dev server (port **3013**，`/api` → 5679)
 - `npm run build` — Production build
 
 ## Architecture

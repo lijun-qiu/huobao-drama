@@ -8,10 +8,11 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { v4 as uuid } from 'uuid'
 import { db, schema } from '../db/index.js'
-import { and, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION } from './ffmpeg-page-transition.js'
+import { BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -56,8 +57,37 @@ export type MergeProgress = {
 export type MergeOptions = {
   bgmMusicId?: number
   bgmVolume?: number
-  /** 是否在成片前拼接开幕视频，默认 true */
+  /** 是否在成片前拼接开幕视频，默认 false */
   includeOpeningVideo?: boolean
+  /** 测试导出：仅拼接前 N 个已合成镜头，不写回 episode.videoUrl */
+  clipLimit?: number
+}
+
+type MergeScenesMeta = {
+  clips?: string[]
+  bodyMergedUrl?: string
+  withOpening?: boolean
+  sourceMergeId?: number
+  test?: boolean
+  clipLimit?: number
+}
+
+export function isTestMergeRecord(record: { model?: string | null; scenes?: string | null } | null | undefined): boolean {
+  if (!record) return false
+  if (record.model === 'ffmpeg-concat-test') return true
+  return parseMergeScenes(record.scenes).test === true
+}
+
+function parseMergeScenes(raw: string | null | undefined): MergeScenesMeta {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) return { clips: parsed as string[] }
+    if (parsed && typeof parsed === 'object') return parsed as MergeScenesMeta
+  } catch {
+    // ignore
+  }
+  return {}
 }
 
 const activeMerges = new Map<number, ActiveMergeRun>()
@@ -422,7 +452,7 @@ async function mixBgmIntoMergedVideo(
       .inputOptions(['-stream_loop', '-1'])
       .outputOptions([
         '-filter_complex',
-        `[0:a]volume=1[voice];[1:a]volume=${vol}[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`,
+        `[0:a]volume=1[voice];[1:a]volume=${vol}[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]`,
         '-map', '0:v',
         '-map', '[aout]',
         '-c:v', 'copy',
@@ -447,17 +477,8 @@ async function mixBgmIntoMergedVideo(
  * 拼接一集的所有合成镜头视频
  */
 export async function mergeEpisodeVideos(episodeId: number, dramaId: number, options: MergeOptions = {}): Promise<number> {
-  const storyboards = sortStoryboardsByOrder(
-    db.select().from(schema.storyboards)
-      .where(eq(schema.storyboards.episodeId, episodeId))
-      .all()
-      .filter(sb => !sb.deletedAt),
-  )
-
-  const composedStoryboards = storyboards.filter(sb => !!sb.composedVideoUrl)
-  if (composedStoryboards.length !== storyboards.length) {
-    throw new Error(`尚有 ${storyboards.length - composedStoryboards.length} 个镜头未合成（${composedStoryboards.length}/${storyboards.length}），请先在「镜头合成」完成全部镜头后再导出`)
-  }
+  const clipLimit = options.clipLimit && options.clipLimit > 0 ? Math.floor(options.clipLimit) : undefined
+  const composedStoryboards = loadComposedStoryboards(episodeId, clipLimit)
   const videos = composedStoryboards
     .map(sb => sb.composedVideoUrl)
     .filter(Boolean) as string[]
@@ -470,12 +491,13 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number, opt
     throw new Error(`部分镜头视频文件缺失（${missing.length}/${videos.length}），请重新合成后再导出`)
   }
 
-  logTaskStart('MergeTask', 'episode-merge', {
+  logTaskStart('MergeTask', clipLimit ? 'episode-merge-test' : 'episode-merge', {
     episodeId,
     dramaId,
     clips: videos.length,
+    clipLimit,
     bgmMusicId: options.bgmMusicId,
-    includeOpeningVideo: options.includeOpeningVideo !== false,
+    includeOpeningVideo: options.includeOpeningVideo === true,
   })
 
   supersedeStaleMerges(episodeId)
@@ -485,11 +507,17 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number, opt
   const res = db.insert(schema.videoMerges).values({
     episodeId,
     dramaId,
-    title: `Episode ${episodeId} Merge`,
+    title: clipLimit
+      ? `Episode ${episodeId} Test Merge (${videos.length}/${clipLimit} clips)`
+      : `Episode ${episodeId} Merge`,
     provider: 'ffmpeg',
-    model: 'ffmpeg-concat-h264-aac',
+    model: clipLimit ? 'ffmpeg-concat-test' : 'ffmpeg-concat-h264-aac',
     status: 'processing',
-    scenes: JSON.stringify(videos),
+    scenes: JSON.stringify({
+      clips: videos,
+      test: !!clipLimit,
+      clipLimit,
+    }),
     createdAt: ts,
   }).run()
   const mergeId = Number(res.lastInsertRowid)
@@ -529,7 +557,7 @@ export function cancelEpisodeMerge(episodeId: number): boolean {
   return true
 }
 
-function loadComposedStoryboards(episodeId: number): ComposedStoryboard[] {
+function loadComposedStoryboards(episodeId: number, clipLimit?: number): ComposedStoryboard[] {
   const storyboards = sortStoryboardsByOrder(
     db.select().from(schema.storyboards)
       .where(eq(schema.storyboards.episodeId, episodeId))
@@ -537,9 +565,16 @@ function loadComposedStoryboards(episodeId: number): ComposedStoryboard[] {
       .filter(sb => !sb.deletedAt),
   )
   const composed = storyboards.filter(sb => !!sb.composedVideoUrl)
+  if (clipLimit && clipLimit > 0) {
+    if (composed.length === 0) {
+      throw new Error('没有已合成的配图镜头，请先在「镜头合成」完成至少 1 镜')
+    }
+    return composed.slice(0, clipLimit)
+  }
   if (composed.length !== storyboards.length) {
     throw new Error(`尚有 ${storyboards.length - composed.length} 个镜头未合成（${composed.length}/${storyboards.length}），请先在「镜头合成」完成全部镜头后再导出`)
   }
+  if (composed.length === 0) throw new Error('No videos to merge')
   return composed
 }
 
@@ -554,7 +589,8 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     updatedAt: Date.now(),
   })
 
-  const storyboards = loadComposedStoryboards(episodeId)
+  const clipLimit = options.clipLimit && options.clipLimit > 0 ? Math.floor(options.clipLimit) : undefined
+  const storyboards = loadComposedStoryboards(episodeId, clipLimit)
   const absPaths = storyboards.map(sb => toAbsPath(sb.composedVideoUrl!))
   const missing = absPaths.filter(p => !fs.existsSync(p))
   if (missing.length > 0) {
@@ -659,7 +695,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
 
   cleanupTempFiles(tempFiles)
 
-  const includeOpeningVideo = options.includeOpeningVideo !== false
+  const includeOpeningVideo = options.includeOpeningVideo === true
   if (includeOpeningVideo && !run.cancelled) {
     const openingAbs = resolveEpisodeOpeningVideoAbs(episodeId)
     if (openingAbs) {
@@ -692,7 +728,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         updatedAt: Date.now(),
       })
       try {
-        await mixBgmIntoMergedVideo(outputPath, bgmAbs, options.bgmVolume ?? 0.22, run)
+        await mixBgmIntoMergedVideo(outputPath, bgmAbs, options.bgmVolume ?? BGM_VOICE_MIX_VOLUME, run)
       } catch (err: any) {
         throw new Error(`BGM 混音失败: ${err.message}`)
       }
@@ -716,15 +752,34 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
 
   const mergedRelative = `static/merged/${outputFilename}`
 
+  const scenesMeta: MergeScenesMeta = {
+    clips: storyboards.map(sb => sb.composedVideoUrl).filter(Boolean) as string[],
+    withOpening: includeOpeningVideo,
+    test: !!clipLimit,
+    clipLimit,
+  }
+  if (!includeOpeningVideo) {
+    scenesMeta.bodyMergedUrl = mergedRelative
+  }
+
   // 更新 merge 记录
   db.update(schema.videoMerges)
-    .set({ status: 'completed', mergedUrl: mergedRelative, duration, completedAt: now(), errorMsg: null })
+    .set({
+      status: 'completed',
+      mergedUrl: mergedRelative,
+      duration,
+      completedAt: now(),
+      errorMsg: null,
+      scenes: JSON.stringify(scenesMeta),
+    })
     .where(eq(schema.videoMerges.id, mergeId)).run()
 
-  // 更新 episode
-  db.update(schema.episodes)
-    .set({ videoUrl: mergedRelative, updatedAt: now() })
-    .where(eq(schema.episodes.id, episodeId)).run()
+  // 测试导出不写回整集成片 URL
+  if (!clipLimit) {
+    db.update(schema.episodes)
+      .set({ videoUrl: mergedRelative, updatedAt: now() })
+      .where(eq(schema.episodes.id, episodeId)).run()
+  }
 
   setMergeProgress(episodeId, {
     mergeId,
@@ -747,4 +802,149 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     bgmMusicId: options.bgmMusicId,
     includeOpeningVideo,
   })
+}
+
+/**
+ * 将开幕视频合并进已完成的主片（翻页转场拼接在片头）
+ */
+export async function mergeOpeningIntoEpisodeVideo(episodeId: number, dramaId: number): Promise<number> {
+  if (isMergeActive(episodeId)) throw new Error('有拼接任务正在进行，请稍候')
+
+  const [sourceMerge] = db.select().from(schema.videoMerges)
+    .where(and(
+      eq(schema.videoMerges.episodeId, episodeId),
+      eq(schema.videoMerges.status, 'completed'),
+    ))
+    .orderBy(desc(schema.videoMerges.id))
+    .limit(1)
+    .all()
+
+  if (!sourceMerge?.mergedUrl) throw new Error('请先完成全集拼接')
+
+  const sourceMeta = parseMergeScenes(sourceMerge.scenes)
+  if (sourceMeta.withOpening) throw new Error('当前成片已包含开幕视频，如需重新合并请先「重新拼接」主视频')
+
+  const bodyRel = sourceMeta.bodyMergedUrl || sourceMerge.mergedUrl
+  const bodyAbs = toAbsPath(bodyRel)
+  if (!fs.existsSync(bodyAbs)) throw new Error('主片文件缺失，请重新拼接')
+
+  const openingAbs = resolveEpisodeOpeningVideoAbs(episodeId)
+  if (!openingAbs) throw new Error('请先生成开幕视频')
+
+  logTaskStart('MergeTask', 'opening-merge', { episodeId, dramaId, sourceMergeId: sourceMerge.id })
+
+  supersedeStaleMerges(episodeId)
+
+  const ts = now()
+  const res = db.insert(schema.videoMerges).values({
+    episodeId,
+    dramaId,
+    title: `Episode ${episodeId} Opening Merge`,
+    provider: 'ffmpeg',
+    model: 'ffmpeg-opening-merge',
+    status: 'processing',
+    scenes: JSON.stringify({
+      clips: sourceMeta.clips,
+      bodyMergedUrl: bodyRel,
+      withOpening: true,
+      sourceMergeId: sourceMerge.id,
+    }),
+    createdAt: ts,
+  }).run()
+  const mergeId = Number(res.lastInsertRowid)
+
+  const openingMeta: MergeScenesMeta = {
+    clips: sourceMeta.clips,
+    bodyMergedUrl: bodyRel,
+    withOpening: true,
+    sourceMergeId: sourceMerge.id,
+  }
+
+  doOpeningMerge(mergeId, episodeId, openingAbs, bodyAbs, bodyRel, openingMeta).catch(err => {
+    if (String(err?.message || '').includes('SIGKILL') || String(err?.message || '').includes('code 255')) return
+    logTaskError('MergeTask', 'opening-merge', { mergeId, episodeId, error: err.message })
+    clearMergeProgress(episodeId)
+    activeMerges.delete(episodeId)
+    db.update(schema.videoMerges)
+      .set({ status: 'failed', errorMsg: err.message })
+      .where(eq(schema.videoMerges.id, mergeId)).run()
+  })
+
+  return mergeId
+}
+
+async function doOpeningMerge(
+  mergeId: number,
+  episodeId: number,
+  openingAbs: string,
+  bodyAbs: string,
+  bodyRel: string,
+  sourceMeta: MergeScenesMeta,
+) {
+  const run: ActiveMergeRun = { mergeId, cancelled: false, command: null }
+  activeMerges.set(episodeId, run)
+  setMergeProgress(episodeId, {
+    mergeId,
+    phase: 'finalizing',
+    percent: 15,
+    message: '正在合并开幕视频…',
+    updatedAt: Date.now(),
+  })
+
+  const outputFilename = `${uuid()}.mp4`
+  const outputPath = path.join(STORAGE_ROOT, 'merged', outputFilename)
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+  fs.copyFileSync(bodyAbs, outputPath)
+
+  try {
+    if (run.cancelled) return
+    await prependOpeningToMergedVideo(openingAbs, outputPath, run)
+    if (run.cancelled) {
+      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+      return
+    }
+
+    const duration = Math.round(await getVideoDuration(outputPath))
+    const mergedRelative = `static/merged/${outputFilename}`
+
+    db.update(schema.videoMerges)
+      .set({
+        status: 'completed',
+        mergedUrl: mergedRelative,
+        duration,
+        completedAt: now(),
+        errorMsg: null,
+        scenes: JSON.stringify({
+          clips: sourceMeta.clips,
+          bodyMergedUrl: bodyRel,
+          withOpening: true,
+          sourceMergeId: sourceMeta.sourceMergeId,
+        }),
+      })
+      .where(eq(schema.videoMerges.id, mergeId)).run()
+
+    db.update(schema.episodes)
+      .set({ videoUrl: mergedRelative, updatedAt: now() })
+      .where(eq(schema.episodes.id, episodeId)).run()
+
+    setMergeProgress(episodeId, {
+      mergeId,
+      phase: 'finalizing',
+      percent: 100,
+      message: '开幕视频已合并完成',
+      updatedAt: Date.now(),
+    })
+    clearMergeProgress(episodeId)
+    activeMerges.delete(episodeId)
+
+    logTaskSuccess('MergeTask', 'opening-merge', {
+      mergeId,
+      episodeId,
+      output: mergedRelative,
+      duration,
+    })
+  } catch (err) {
+    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+    throw err
+  }
 }

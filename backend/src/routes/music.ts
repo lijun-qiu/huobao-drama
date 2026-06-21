@@ -3,7 +3,15 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, created, badRequest, now } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
-import { applyBgmToEpisodeStoryboards, applyBgmToStoryboard, generateBgm, listMusicGenerations, resumePendingBgmTasks, syncBgmRecord } from '../services/bgm-generation.js'
+import {
+  applyBgmToEpisodeStoryboards,
+  applyBgmToStoryboard,
+  generateBgm,
+  listMusicGenerations,
+  registerUploadedBgm,
+  resumePendingBgmTasks,
+  syncBgmRecord,
+} from '../services/bgm-generation.js'
 import { generateBgmDescriptionWithLLM } from '../services/bgm-prompt.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
@@ -87,6 +95,28 @@ app.post('/generate', async (c) => {
     return created(c, { ids, items: toSnakeCaseArray(rows) })
   } catch (err: any) {
     logTaskError('MusicAPI', 'generate', { error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+app.post('/upload', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const path = String(body.path || body.local_path || '').trim()
+  if (!path) return badRequest(c, 'path is required')
+
+  try {
+    const id = registerUploadedBgm({
+      dramaId: body.drama_id ? Number(body.drama_id) : undefined,
+      episodeId: body.episode_id ? Number(body.episode_id) : undefined,
+      localPath: path,
+      title: body.title,
+      description: body.description,
+    })
+    const [row] = db.select().from(schema.musicGenerations).where(eq(schema.musicGenerations.id, id)).all()
+    logTaskSuccess('MusicAPI', 'upload', { id })
+    return created(c, { id, item: row ? toSnakeCase(row) : null })
+  } catch (err: any) {
+    logTaskError('MusicAPI', 'upload', { error: err.message })
     return badRequest(c, err.message)
   }
 })

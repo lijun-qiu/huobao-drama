@@ -7,6 +7,7 @@ import { breakdownNarrationStoryboards } from '../services/narration-breakdown.j
 import { breakdownNarrationImages } from '../services/narration-image-breakdown.js'
 import { getNarrationImageBreakdownProgress } from '../services/narration-image-breakdown-progress.js'
 import { sortStoryboardsByOrder } from '../services/narration-image.js'
+import { cropEpisodeNarrationImageWatermarks, restoreEpisodeNarrationImageWatermarks } from '../services/narration-image-crop.js'
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
@@ -380,6 +381,37 @@ app.post('/:id/narration-image-breakdown', async (c) => {
         ? 'balanced'
         : 'paragraph'
     const result = await breakdownNarrationImages(episodeId, style, mode)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/crop-narration-images — 去除配图右下角水印区（宽 1/8 × 高 1/18）
+app.post('/:id/crop-narration-images', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await cropEpisodeNarrationImageWatermarks(episodeId)
+    if (!result.cropped && !result.skipped) {
+      return badRequest(c, result.errors[0] || '未能裁剪任何配图')
+    }
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/restore-narration-images — 恢复去水印前原图（同名原图或配图生成记录）
+app.post('/:id/restore-narration-images', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await restoreEpisodeNarrationImageWatermarks(episodeId)
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)

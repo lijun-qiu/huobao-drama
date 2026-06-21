@@ -1379,19 +1379,37 @@
           <!-- Sub: BGM -->
           <div v-else-if="prodTab === 'bgm'" class="prod-content">
             <div class="narration-hint">
-              <strong>BGM 策略：</strong>默认 <code>suno_music_open</code>（纯器乐）；可选 <code>pixverse-sound-effect</code>（按画面生成环境音，需关联已合成镜头）。BGM 库按<strong>项目</strong>共享，各集生成的曲目均可复用。合成时自动与旁白混音（BGM 音量约 22%）。
+              <strong>BGM 策略：</strong>默认 <code>suno_music_open</code>（纯器乐）；可选 <code>pixverse-sound-effect</code>（按画面生成环境音，需关联已合成镜头）；也可<strong>上传本地音频</strong>直接使用。BGM 库按<strong>项目</strong>共享。合成时自动与旁白混音（BGM 音量约 12%）。
             </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ bgmAppliedCount }} 已配 BGM</span>
               <span class="tag mono">{{ bgmCompletedCount }} 首可用</span>
               <span v-if="bgmPendingCount" class="tag">{{ bgmPendingCount }} 生成中</span>
               <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" :disabled="bgmUploading" @click="triggerBgmUpload">
+                  {{ bgmUploading ? '上传中…' : '上传 BGM' }}
+                </button>
                 <button class="btn btn-sm" :disabled="bgmGenerating" @click="refreshBgmLibrary">刷新库</button>
               </div>
+              <input
+                ref="bgmUploadInput"
+                type="file"
+                accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg"
+                hidden
+                @change="onBgmFileSelected"
+              />
             </div>
 
             <div class="card" style="padding:14px;margin-bottom:14px">
-              <div class="field-label" style="margin-bottom:8px">生成新 BGM</div>
+              <div class="field-label" style="margin-bottom:8px">上传本地 BGM</div>
+              <div class="dim" style="font-size:12px;margin-bottom:10px">支持 mp3 / wav / m4a / aac / ogg，上传后立即进入曲库，可应用到镜头或整集成片。</div>
+              <button class="btn btn-sm" :disabled="bgmUploading" @click="triggerBgmUpload">
+                {{ bgmUploading ? '上传中…' : '选择音频文件' }}
+              </button>
+            </div>
+
+            <div class="card" style="padding:14px;margin-bottom:14px">
+              <div class="field-label" style="margin-bottom:8px">AI 生成 BGM</div>
               <div class="flex gap-2" style="flex-wrap:wrap;margin-bottom:10px">
                 <BaseSelect
                   :model-value="bgmTargetSbId"
@@ -1420,7 +1438,7 @@
 
             <div v-if="!visibleBgmLibrary.length && !bgmPendingCount" class="step-empty" style="min-height:220px">
               <div class="empty-title">暂无 BGM 记录</div>
-              <div class="empty-desc">填写描述并点击「生成 BGM」，通常需 1–3 分钟。也可在分镜详情里填写 BGM 描述后在此生成。</div>
+              <div class="empty-desc">上传本地音频，或填写描述点击「生成 BGM」（通常需 1–3 分钟）。也可在分镜详情里填写 BGM 描述后在此生成。</div>
             </div>
 
             <div v-else-if="!visibleBgmLibrary.length && bgmPendingCount" class="step-empty" style="min-height:180px">
@@ -1437,7 +1455,7 @@
                       <span class="frame-badge">{{ item.title || 'BGM' }}</span>
                     </div>
                     <div class="dub-desc">{{ item.description || item.prompt }}</div>
-                    <div v-if="item.model" class="dim" style="font-size:11px;margin-top:4px">{{ item.model }}</div>
+                    <div v-if="item.model" class="dim" style="font-size:11px;margin-top:4px">{{ formatBgmModelLabel(item.model) }}</div>
                   </div>
                   <span class="tag" :class="item.status === 'completed' ? 'tag-success' : item.status === 'failed' ? 'tag-danger' : ''">
                     {{ item.status === 'completed' ? '就绪' : item.status === 'failed' ? '失败' : '生成中' }}
@@ -1608,6 +1626,22 @@
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerAllShotImageUpload">一键上传全部（{{ narrationNeedImageCount }}）</button>
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerShotFolderUpload" title="文件夹上传：无后缀→第1镜，(1)→第2镜，(2)→第3镜…">文件夹上传</button>
                 <button
+                  class="btn btn-sm"
+                  :disabled="!narrationCropImageCount || narrationCropWatermarkProcessing"
+                  title="去除每张配图右下角水印区（宽 1/8 × 高 1/18，用相邻像素覆盖）；已合成镜头需重新合成"
+                  @click="cropNarrationImageWatermarks"
+                >
+                  {{ narrationCropWatermarkProcessing ? '处理中…' : `去右下角水印 (${narrationCropImageCount})` }}
+                </button>
+                <button
+                  class="btn btn-sm"
+                  :disabled="!narrationWmCroppedImageCount || narrationRestoreWatermarkProcessing || narrationCropWatermarkProcessing"
+                  title="恢复为去水印前的原图（优先同名原图，其次从配图生成记录找回）"
+                  @click="restoreNarrationImageWatermarks"
+                >
+                  {{ narrationRestoreWatermarkProcessing ? '恢复中…' : `恢复原图 (${narrationWmCroppedImageCount})` }}
+                </button>
+                <button
                   class="btn btn-primary btn-sm"
                   :disabled="isBatchRunning('narrationImages') || !narrationImagesPendingCount"
                   :title="narrationImagesPendingCount ? `将生成：${narrationImagesPendingLabel}` : ''"
@@ -1623,9 +1657,9 @@
                 <div class="prod-cover">
                   <img
                     v-if="getNarrationDisplayImage(sb)"
-                    :src="'/' + getNarrationDisplayImage(sb)"
+                    :src="narrationShotImageSrc(sb)"
                     class="previewable-image"
-                    @click.stop="openImageViewer('/' + getNarrationDisplayImage(sb), `镜头 #${String(i + 1).padStart(2, '0')} 配图`)"
+                    @click.stop="openImageViewer(narrationShotImageSrc(sb), `镜头 #${String(i + 1).padStart(2, '0')} 配图`)"
                   />
                   <div v-else-if="isPendingNarrationShot(sb.id)" class="prod-cover-empty">
                     <Loader2 :size="20" class="animate-spin" style="color:var(--accent)" />
@@ -2113,13 +2147,25 @@
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ composedCount }}/{{ sbs.length }} 已合成</span>
               <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm btn-primary" :disabled="isBatchRunning('compose') || mergeProcessing || !composePendingCount" @click="batchCompose">
+                <button class="btn btn-sm btn-primary" :disabled="isBatchRunning('compose') || anyMergeProcessing || !composePendingCount" @click="batchCompose">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   生成剩余{{ composePendingCount ? ` (${composePendingCount})` : '' }}
                 </button>
-                <button class="btn btn-sm" :disabled="isBatchRunning('compose') || mergeProcessing || !composableCount" @click="regenerateAllComposeAndMerge">
+                <button class="btn btn-sm" :disabled="isBatchRunning('compose') || anyMergeProcessing || !composableCount" @click="regenerateAllComposeAndMerge">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                   重新生成全部并导出
+                </button>
+                <input
+                  v-model.number="mergeTestClipLimit"
+                  type="number"
+                  min="1"
+                  max="50"
+                  class="input input-sm"
+                  style="width:52px"
+                  title="测试导出镜头数"
+                />
+                <button class="btn btn-sm" :disabled="!canTestMerge() || anyMergeProcessing || isBatchRunning('compose')" @click="doTestMerge">
+                  测试导出
                 </button>
               </div>
             </div>
@@ -2306,7 +2352,16 @@
               <div class="export-bar">
                 <span class="tag tag-success">已生成</span>
                 <button class="btn" :disabled="!illustrationImageCount" @click="generateOpeningVideo">重新生成</button>
-                <a :href="openingVideoSrc" download class="btn btn-primary ml-auto">下载开幕视频</a>
+                <button
+                  v-if="mergeUrl && !mergeHasOpening"
+                  class="btn btn-primary"
+                  :disabled="mergeProcessing"
+                  @click="mergeOpeningIntoMain"
+                >
+                  合并进主片
+                </button>
+                <span v-else-if="mergeHasOpening" class="tag tag-success">主片已含开幕</span>
+                <a :href="openingVideoSrc" download class="btn ml-auto">下载开幕视频</a>
               </div>
             </template>
             <template v-else>
@@ -2352,19 +2407,58 @@
                 </div>
               </div>
             </template>
+            <template v-else-if="testMergeProcessing || testExportActive">
+              <div class="step-empty">
+                <Loader2 :size="32" class="animate-spin" style="color:var(--accent)" />
+                <div class="empty-title" style="margin-top:12px">{{ testExportActive && !testMergeProcessing ? '正在重新合成测试镜头' : '正在测试导出' }}</div>
+                <div class="empty-desc">{{ testExportActive && !testMergeProcessing ? `重新合成前 ${normalizedMergeTestClipLimit()} 镜…` : testMergeProgressMessage }}</div>
+                <div v-if="testMergeProcessing" class="progress-wrap" style="margin-top:16px;width:min(360px,100%);margin-left:auto;margin-right:auto">
+                  <div class="progress-head">
+                    <span class="progress-label">测试拼接</span>
+                    <span class="progress-val">{{ testMergeProgressPercent }}%</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill" :style="{ width: testMergeProgressPercent + '%' }"></div>
+                  </div>
+                </div>
+                <div class="empty-desc" style="margin-top:8px">重新合成并拼接前 {{ normalizedMergeTestClipLimit() }} 镜</div>
+                <button v-if="testMergeProcessing" class="btn btn-ghost" style="margin-top:16px" @click="cancelMerge">取消</button>
+              </div>
+            </template>
             <template v-else-if="mergeUrl">
               <video :key="mergeVideoSrc" :src="mergeVideoSrc" controls class="export-video" />
               <div class="export-bar">
                 <span class="tag tag-success">拼接完成</span>
                 <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
-                <button class="btn" :disabled="composedCount === 0 || isBatchRunning('compose') || mergeProcessing" @click="regenerateAllComposeAndMerge">
+                <button class="btn" :disabled="composedCount === 0 || isBatchRunning('compose') || anyMergeProcessing" @click="regenerateAllComposeAndMerge">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                   全部重合成并导出
                 </button>
-                <button class="btn" :disabled="composedCount === 0 || mergeProcessing" @click="regenerateMerge">
+                <button class="btn" :disabled="composedCount === 0 || anyMergeProcessing" @click="regenerateMerge">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                   重新拼接
                 </button>
+                <input
+                  v-model.number="mergeTestClipLimit"
+                  type="number"
+                  min="1"
+                  max="50"
+                  class="input input-sm"
+                  style="width:52px"
+                  title="测试导出镜头数"
+                />
+                <button class="btn" :disabled="!canTestMerge() || anyMergeProcessing || isBatchRunning('compose')" @click="doTestMerge">
+                  测试导出
+                </button>
+                <button
+                  v-if="openingVideoUrl && !mergeHasOpening"
+                  class="btn btn-primary"
+                  :disabled="mergeProcessing"
+                  @click="mergeOpeningIntoMain"
+                >
+                  合并开幕视频
+                </button>
+                <span v-else-if="mergeHasOpening" class="tag tag-success">已含开幕片头</span>
                 <a :href="mergeVideoSrc" download class="btn btn-primary ml-auto">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="12" x2="12" y2="3"/></svg>
                   下载视频
@@ -2378,8 +2472,8 @@
                 <video v-if="previousMergeUrl" :src="'/' + previousMergeUrl" controls class="export-video" style="margin-top:16px;opacity:0.72" />
                 <div v-if="previousMergeUrl" class="dim" style="font-size:12px;margin-top:8px">上方为上次成功成片（仅供参考）</div>
                 <div style="display:flex;gap:8px;margin-top:16px;justify-content:center;flex-wrap:wrap">
-                  <button class="btn btn-primary" :disabled="composedCount === 0 || isBatchRunning('compose') || mergeProcessing" @click="regenerateAllComposeAndMerge">全部重合成并导出</button>
-                  <button class="btn" :disabled="composedCount === 0 || mergeProcessing" @click="regenerateMerge">仅重新拼接</button>
+                  <button class="btn btn-primary" :disabled="composedCount === 0 || isBatchRunning('compose') || anyMergeProcessing" @click="regenerateAllComposeAndMerge">全部重合成并导出</button>
+                  <button class="btn" :disabled="composedCount === 0 || anyMergeProcessing" @click="regenerateMerge">仅重新拼接</button>
                 </div>
               </div>
             </template>
@@ -2389,16 +2483,68 @@
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
                 <div class="empty-title">生成全集视频</div>
-                <div class="empty-desc">将 {{ composedCount }}/{{ sbs.length }} 个已合成镜头拼接为完整视频{{ composedCount < sbs.length ? '（需全部镜头合成完成）' : '' }}{{ exportIncludeOpening && openingVideoUrl ? '，片头加入开幕视频' : '' }}{{ exportMixBgm && exportBgmMusicId ? '，并混入所选 BGM' : '' }}</div>
-                <button class="btn btn-primary" :disabled="composedCount === 0 || composedCount < sbs.length || mergeProcessing" @click="doMerge" style="margin-top:12px">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  开始生成
-                </button>
+                <div class="empty-desc">将 {{ composedCount }}/{{ sbs.length }} 个已合成镜头拼接为主片（不含开幕视频）{{ composedCount < sbs.length ? '（需全部镜头合成完成）' : '' }}{{ exportMixBgm && exportBgmMusicId ? '，并混入所选 BGM' : '' }}；开幕片头可在生成后单独合并。</div>
+                <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;justify-content:center;align-items:center">
+                  <button class="btn btn-primary" :disabled="composedCount === 0 || composedCount < sbs.length || anyMergeProcessing" @click="doMerge">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                    开始生成
+                  </button>
+                  <span class="dim" style="font-size:12px">或</span>
+                  <input
+                    v-model.number="mergeTestClipLimit"
+                    type="number"
+                    min="1"
+                    max="50"
+                    class="input input-sm"
+                    style="width:52px"
+                    title="测试导出镜头数"
+                  />
+                  <button class="btn" :disabled="!canTestMerge() || anyMergeProcessing || isBatchRunning('compose')" @click="doTestMerge">
+                    测试导出
+                  </button>
+                </div>
+                <div class="dim" style="font-size:11px;margin-top:8px;text-align:center">测试导出会先重新合成前 N 镜，再拼接导出（无需全部完成）</div>
               </div>
             </template>
           </div>
           <div class="export-list">
             <div class="export-list-head">导出选项</div>
+            <div v-if="testMergeUrl || testMergeProcessing || testMergeFailed" class="export-bgm-panel" style="margin-bottom:12px">
+              <div class="field-label" style="margin-bottom:6px">测试导出</div>
+              <div class="dim" style="font-size:11px;line-height:1.5;margin-bottom:8px">
+                先重新合成前 N 镜，再快速拼接测试片，不影响正式成片。
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                <input
+                  v-model.number="mergeTestClipLimit"
+                  type="number"
+                  min="1"
+                  max="50"
+                  class="input input-sm"
+                  style="width:56px"
+                  title="测试导出镜头数"
+                />
+                <span class="dim" style="font-size:11px">镜</span>
+                <button class="btn btn-sm" :disabled="!canTestMerge() || anyMergeProcessing || isBatchRunning('compose')" @click="doTestMerge">
+                  {{ testMergeProcessing ? '测试中…' : '测试导出' }}
+                </button>
+              </div>
+              <template v-if="testMergeProcessing">
+                <div class="dim" style="font-size:11px;margin-bottom:4px">{{ testMergeProgressMessage }}</div>
+                <div class="progress-track" style="height:6px">
+                  <div class="progress-fill" :style="{ width: testMergeProgressPercent + '%' }"></div>
+                </div>
+              </template>
+              <template v-else-if="testMergeUrl">
+                <video :key="testMergeVideoSrc" :src="testMergeVideoSrc" controls class="export-video" style="max-height:220px;margin-top:8px" />
+                <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+                  <span class="tag tag-success">测试完成</span>
+                  <span class="dim" style="font-size:11px">{{ testMergeClipCount }} 镜 · {{ testMergeBlock?.duration || '—' }}s</span>
+                  <a :href="testMergeVideoSrc" download class="btn btn-sm ml-auto">下载测试片</a>
+                </div>
+              </template>
+              <div v-else-if="testMergeFailed" class="prod-error" style="margin-top:6px">{{ testMergeFailedMessage }}</div>
+            </div>
             <div class="export-bgm-panel">
               <label class="field-label" style="margin-bottom:4px">成片水印</label>
               <input
@@ -2413,16 +2559,26 @@
                 <span>水印左右缓慢浮动</span>
               </label>
               <div class="dim" style="font-size:11px;line-height:1.5">
-                默认「顺拾人间」，固定于画面右侧垂直居中；勾选浮动后左右缓慢漂移。修改后请重新「镜头合成」与「开幕视频」。
+                默认「顺拾人间」，固定于画面右上角（距顶、距右各 10%）；勾选浮动后在右上区域左右缓慢漂移。修改后请重新「镜头合成」与「开幕视频」。
               </div>
             </div>
             <div class="export-bgm-panel">
-              <label class="export-bgm-toggle">
-                <input v-model="exportIncludeOpening" type="checkbox" />
-                <span>拼接时加入开幕视频</span>
-              </label>
-              <div v-if="exportIncludeOpening && !openingVideoUrl" class="dim" style="font-size:11px;line-height:1.5;margin-top:6px">
-                尚未生成开幕视频，导出时将跳过片头；请先在「开幕视频」步骤生成。
+              <div class="field-label" style="margin-bottom:4px">开幕片头</div>
+              <div class="dim" style="font-size:11px;line-height:1.5">
+                默认拼接<strong>不含</strong>开幕视频。主片生成后，在左侧预览区或「开幕视频」页点击「合并开幕视频」。
+              </div>
+              <button
+                v-if="mergeUrl && openingVideoUrl && !mergeHasOpening"
+                class="btn btn-sm"
+                style="margin-top:8px"
+                :disabled="mergeProcessing"
+                @click="mergeOpeningIntoMain"
+              >
+                合并开幕视频进主片
+              </button>
+              <div v-else-if="mergeHasOpening" class="tag tag-success" style="margin-top:8px">当前成片已含开幕片头</div>
+              <div v-else-if="!openingVideoUrl" class="dim" style="font-size:11px;margin-top:6px">
+                尚未生成开幕视频，请先在「开幕视频」步骤生成。
               </div>
             </div>
             <div class="export-list-head" style="margin-top:12px">成片 BGM</div>
@@ -2446,7 +2602,7 @@
                 </div>
                 <div v-else class="export-bgm-volume">
                   <span class="dim" style="font-size:11px">BGM 音量 {{ exportBgmVolume }}%</span>
-                  <input v-model.number="exportBgmVolume" type="range" min="5" max="50" step="1" class="export-bgm-slider" />
+                  <input v-model.number="exportBgmVolume" type="range" min="3" max="25" step="1" class="export-bgm-slider" />
                 </div>
                 <audio
                   v-if="exportBgmPreviewUrl"
@@ -2560,7 +2716,7 @@
               <span class="field-label">{{ shotEditor.isTitle ? '剧中台词（合成红字）' : '旁白台词' }}</span>
               <textarea v-model="shotEditor.dialogue" class="textarea" rows="3" :placeholder="shotEditor.isTitle ? '剧中：今天体验的人生剧本是，' : '旁白：职高读到第二年六月，'" />
               <span class="dim" style="font-size:11px;margin-top:4px;display:block">
-                {{ shotEditor.isTitle ? '片头改字后请点「保存并重新制作」：自动重新配音 + 重新合成该镜。' : '改台词后需重新配音并重新合成该镜。' }}
+                {{ shotEditor.isTitle ? '片头改字后点「保存并重新制作」：将重新配音并合成全部片头镜。' : '改台词后需重新配音并重新合成该镜。' }}
               </span>
             </label>
             <label class="field">
@@ -2845,6 +3001,29 @@ const previousMergeUrl = computed(() =>
   mergeData.value?.previous_merged_url || mergeData.value?.previousMergedUrl || null,
 )
 const mergeProcessing = computed(() => ['processing', 'pending'].includes(mergeData.value?.status))
+const mergeTestClipLimit = ref(20)
+const pendingMergeKind = ref(null)
+const testMergeBlock = computed(() => mergeData.value?.test || null)
+const testMergeUrl = computed(() => {
+  if (testMergeBlock.value?.status !== 'completed') return null
+  return testMergeBlock.value.merged_url || testMergeBlock.value.mergedUrl || null
+})
+const testMergeProcessing = computed(() => ['processing', 'pending'].includes(testMergeBlock.value?.status))
+const testMergeFailed = computed(() => testMergeBlock.value?.status === 'failed')
+const testMergeFailedMessage = computed(() =>
+  testMergeBlock.value?.error_msg || testMergeBlock.value?.errorMsg || '测试导出失败',
+)
+const testMergeProgressPercent = computed(() => {
+  const p = testMergeBlock.value?.progress_percent ?? testMergeBlock.value?.progressPercent
+  return typeof p === 'number' ? Math.min(100, Math.max(0, Math.round(p))) : 0
+})
+const testMergeProgressMessage = computed(() =>
+  testMergeBlock.value?.progress_message || testMergeBlock.value?.progressMessage || '正在测试拼接…',
+)
+const testExportActive = computed(() =>
+  pendingMergeKind.value === 'test' && (testMergeProcessing.value || batchRunning.value.has('compose')),
+)
+const anyMergeProcessing = computed(() => mergeProcessing.value || testMergeProcessing.value || testExportActive.value)
 const mergeProgressPercent = computed(() => {
   const p = mergeData.value?.progress_percent ?? mergeData.value?.progressPercent
   return typeof p === 'number' ? Math.min(100, Math.max(0, Math.round(p))) : 0
@@ -2872,6 +3051,32 @@ const mergeVideoSrc = computed(() => {
   if (!mergeUrl.value) return ''
   const v = mergeData.value?.id || mergeData.value?.completed_at || mergeData.value?.completedAt || Date.now()
   return `/${mergeUrl.value}?v=${encodeURIComponent(String(v))}`
+})
+const testMergeVideoSrc = computed(() => {
+  if (!testMergeUrl.value) return ''
+  const v = testMergeBlock.value?.id || testMergeBlock.value?.completed_at || testMergeBlock.value?.completedAt || Date.now()
+  return `/${testMergeUrl.value}?v=${encodeURIComponent(String(v))}`
+})
+const testMergeClipCount = computed(() => {
+  const raw = testMergeBlock.value?.scenes
+  if (raw && typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed?.clips)) return parsed.clips.length
+      if (Array.isArray(parsed)) return parsed.length
+    } catch {}
+  }
+  return normalizedMergeTestClipLimit()
+})
+const mergeHasOpening = computed(() => {
+  const raw = mergeData.value?.scenes
+  if (!raw || typeof raw !== 'string') return false
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (parsed.with_opening === true || parsed.withOpening === true)
+  } catch {
+    return false
+  }
 })
 
 const illustrationImageCount = computed(() => {
@@ -2909,6 +3114,10 @@ const prodTab = ref('chars')
 const exportTab = ref('merge')
 const bgmLibrary = ref([])
 const bgmGenerating = ref(false)
+const bgmUploading = ref(false)
+const bgmUploadInput = ref(null)
+const narrationCropWatermarkProcessing = ref(false)
+const narrationRestoreWatermarkProcessing = ref(false)
 const bgmDescGenerating = ref(false)
 const bgmDesc = ref('')
 const bgmTargetSbId = ref(null)
@@ -2920,12 +3129,11 @@ const bgmAppliedCount = computed(() => sbs.value.filter(s => s.bgm_audio_url || 
 const bgmCompletedCount = computed(() => bgmLibrary.value.filter(m => m.status === 'completed').length)
 const bgmPendingCount = computed(() => bgmLibrary.value.filter(m => ['pending', 'processing'].includes(m.status)).length)
 const exportMixBgm = ref(true)
-const exportIncludeOpening = ref(true)
 const exportWatermarkText = ref('顺拾人间')
 const exportWatermarkAnimated = ref(false)
 let watermarkSaveTimer = null
 const exportBgmMusicId = ref(null)
-const exportBgmVolume = ref(22)
+const exportBgmVolume = ref(12)
 const exportBgmApplying = ref(false)
 const bgmApplyingAllId = ref(null)
 const visibleBgmLibrary = computed(() => {
@@ -3091,7 +3299,6 @@ function restoreLocalTtsPrefs() {
 function persistExportBgmPrefs() {
   if (typeof window === 'undefined' || !epId.value) return
   window.localStorage.setItem(`episode-${epId.value}-export-mix-bgm`, exportMixBgm.value ? '1' : '0')
-  window.localStorage.setItem(`episode-${epId.value}-export-include-opening`, exportIncludeOpening.value ? '1' : '0')
   window.localStorage.setItem(`episode-${epId.value}-export-watermark`, exportWatermarkText.value)
   window.localStorage.setItem(`episode-${epId.value}-export-watermark-animated`, exportWatermarkAnimated.value ? '1' : '0')
   window.localStorage.setItem(`drama-${dramaId}-export-bgm-id`, exportBgmMusicId.value ? String(exportBgmMusicId.value) : '')
@@ -3102,8 +3309,6 @@ function restoreExportBgmPrefs() {
   if (typeof window === 'undefined' || !epId.value) return
   const mix = window.localStorage.getItem(`episode-${epId.value}-export-mix-bgm`)
   exportMixBgm.value = mix === null ? true : mix === '1'
-  const opening = window.localStorage.getItem(`episode-${epId.value}-export-include-opening`)
-  exportIncludeOpening.value = opening === null ? true : opening === '1'
   const wm = window.localStorage.getItem(`episode-${epId.value}-export-watermark`)
   if (wm != null) exportWatermarkText.value = wm
   const wmAnim = window.localStorage.getItem(`episode-${epId.value}-export-watermark-animated`)
@@ -3113,7 +3318,49 @@ function restoreExportBgmPrefs() {
   exportBgmMusicId.value = id ? Number(id) : null
   let vol = window.localStorage.getItem(`drama-${dramaId}-export-bgm-vol`)
   if (vol == null) vol = window.localStorage.getItem(`episode-${epId.value}-export-bgm-vol`)
-  if (vol) exportBgmVolume.value = Number(vol) || 22
+  if (vol) exportBgmVolume.value = Number(vol) || 12
+}
+
+function formatBgmModelLabel(model) {
+  if (model === 'upload') return '用户上传'
+  return bgmModelLabel(model)
+}
+
+function triggerBgmUpload() {
+  const el = bgmUploadInput.value
+  if (el) {
+    el.value = ''
+    el.click()
+  }
+}
+
+async function onBgmFileSelected(event) {
+  const file = event?.target?.files?.[0]
+  if (!file) return
+  bgmUploading.value = true
+  try {
+    const uploaded = await uploadAPI.audio(file)
+    const path = uploaded?.path || String(uploaded?.url || '').replace(/^\//, '')
+    if (!path) throw new Error('上传失败，未返回文件路径')
+    const result = await musicAPI.upload({
+      drama_id: dramaId,
+      episode_id: epId.value,
+      path,
+      title: file.name.replace(/\.[^.]+$/, '') || file.name,
+    })
+    const created = normalizeBgmLibraryRows([result?.item]).filter(Boolean)
+    if (created.length) {
+      bgmLibrary.value = mergeBgmLibraryRows(bgmLibrary.value, created)
+    } else {
+      await loadBgmLibrary({ resumePoll: false })
+    }
+    toast.success('BGM 已上传，可应用到镜头或整集成片')
+  } catch (e) {
+    toast.error(e.message || 'BGM 上传失败')
+  } finally {
+    bgmUploading.value = false
+    if (event?.target) event.target.value = ''
+  }
 }
 
 function syncExportWatermarkFromEpisode(ep) {
@@ -3154,16 +3401,30 @@ function scheduleWatermarkSave() {
   watermarkSaveTimer = setTimeout(() => { saveWatermarkText() }, 600)
 }
 
-function buildMergePayload() {
+function buildMergePayload(extra = {}) {
   const payload = {
     cancel_running: true,
-    include_opening_video: exportIncludeOpening.value,
+    include_opening_video: false,
+    ...extra,
   }
   if (exportMixBgm.value && exportBgmMusicId.value) {
     payload.bgm_music_id = exportBgmMusicId.value
-    payload.bgm_volume = Math.max(0.05, Math.min(0.5, exportBgmVolume.value / 100))
+    payload.bgm_volume = Math.max(0.03, Math.min(0.25, exportBgmVolume.value / 100))
   }
   return payload
+}
+
+function normalizedMergeTestClipLimit() {
+  return Math.max(1, Math.min(50, Number(mergeTestClipLimit.value) || 20))
+}
+
+function getTestMergeTargets(limit = normalizedMergeTestClipLimit()) {
+  return sbs.value.slice(0, limit)
+}
+
+function canTestMerge(limit = normalizedMergeTestClipLimit()) {
+  const targets = getTestMergeTargets(limit)
+  return targets.length > 0 && targets.every(sb => canCompose(sb))
 }
 
 async function applyBgmToAllShots(musicId) {
@@ -3553,7 +3814,10 @@ async function saveShotEditor(remake = false) {
   const sb = editor.sb
   if (!sb || editor.busy) return
 
-  const dialogue = normalizeNarrationDialogue(sb, editor.dialogue)
+  const dialogue = normalizeNarrationDialogue(
+    editor.isTitle ? { ...sb, reference_images: sb.reference_images || sb.referenceImages } : sb,
+    editor.dialogue,
+  )
   if (!dialogue) {
     toast.warning('请填写台词')
     return
@@ -3569,16 +3833,40 @@ async function saveShotEditor(remake = false) {
 
   editor.busy = true
   try {
-    await storyboardAPI.update(sb.id, {
+    const payload = {
       dialogue,
       description,
       title,
       duration,
-    })
+    }
+    if (editor.isTitle) {
+      const meta = parseNarrationImageMeta(sb)
+      const titleShots = sortStoryboards(sbs.value).filter(isNarrationTitleShot)
+      const isFirstTitle = titleShots[0]?.id === sb.id
+      payload.reference_images = buildNarrationMetaForShot({
+        isTitle: true,
+        inheritImage: !isFirstTitle,
+        titleFull: meta.title_full,
+        titleHook: meta.title_hook || pureText.slice(0, 20),
+        baseMeta: meta,
+      })
+    } else if (isNarrationTitleShot(sb)) {
+      payload.reference_images = buildNarrationMetaForShot({
+        isTitle: false,
+        inheritImage: false,
+        baseMeta: parseNarrationImageMeta(sb),
+      })
+    }
+
+    await storyboardAPI.update(sb.id, payload)
     sb.dialogue = dialogue
     sb.description = description
     sb.title = title
     sb.duration = duration
+    if (payload.reference_images) {
+      sb.reference_images = payload.reference_images
+      sb.referenceImages = payload.reference_images
+    }
     if (dialogueChanged) {
       sb.tts_audio_url = null
       sb.ttsAudioUrl = null
@@ -3592,14 +3880,33 @@ async function saveShotEditor(remake = false) {
       return
     }
 
-    toast.info('正在重新配音…')
-    await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(true))
-    toast.info('正在重新合成该镜…')
-    delete failedComposeMessages.value[sb.id]
-    if (!isPendingCompose(sb.id)) pendingComposeIds.value.push(sb.id)
-    await composeAPI.shot(sb.id)
-    pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
-    toast.success(`镜头 #${editor.number} 已重新制作`)
+    const titleShotsToRemake = editor.isTitle
+      ? sortStoryboards(sbs.value).filter(isNarrationTitleShot)
+      : [sb]
+
+    if (editor.isTitle && titleShotsToRemake.length > 1) {
+      toast.info(`正在重新制作全部 ${titleShotsToRemake.length} 个片头镜…`)
+    } else {
+      toast.info('正在重新配音…')
+    }
+
+    for (const shot of titleShotsToRemake) {
+      if (shot.id !== sb.id && dialogueChanged) {
+        shot.tts_audio_url = null
+        shot.ttsAudioUrl = null
+        shot.composed_video_url = null
+        shot.composedVideoUrl = null
+      }
+      await storyboardAPI.generateTTS(shot.id, ttsGenerateOptions(true))
+      delete failedComposeMessages.value[shot.id]
+      if (!isPendingCompose(shot.id)) pendingComposeIds.value.push(shot.id)
+      await composeAPI.shot(shot.id)
+      pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== shot.id)
+    }
+
+    toast.success(editor.isTitle && titleShotsToRemake.length > 1
+      ? `已重新制作 ${titleShotsToRemake.length} 个片头镜`
+      : `镜头 #${editor.number} 已重新制作`)
     closeShotEditor()
     await refresh()
   } catch (e) {
@@ -4356,6 +4663,30 @@ const narrationImagesPendingCount = computed(() =>
 )
 const nextPendingNarrationShot = computed(() => narrationShotsPendingImage(sbs.value)[0] || null)
 const uploadedNarrationImageCount = computed(() => narrationShotsWithUploadedImage(sbs.value).length)
+const narrationCropImageCount = computed(() => {
+  const paths = new Set()
+  for (const sb of sbs.value) {
+    const p = getNarrationShotOwnImage(sb)
+    if (p) paths.add(p)
+  }
+  return paths.size
+})
+const narrationWmCroppedImageCount = computed(() => {
+  const paths = new Set()
+  for (const sb of sbs.value) {
+    const p = getNarrationShotOwnImage(sb)
+    if (!p) continue
+    if (p.includes('-wm9')) {
+      paths.add(p)
+      continue
+    }
+    try {
+      const meta = JSON.parse(sb.referenceImages || '{}')
+      if (meta?.wm_crop_applied) paths.add(p)
+    } catch {}
+  }
+  return paths.size
+})
 const narrationImagesPendingShots = computed(() => narrationShotsPendingImage(sbs.value))
 const narrationImagesPendingLabel = computed(() => formatNarrationShotDisplayList(narrationImagesPendingShots.value))
 const narrationImagesPendingHint = computed(() => formatNarrationPendingImageHint(sbs.value))
@@ -5153,7 +5484,9 @@ async function refresh() {
   }
   try {
     mergeData.value = await mergeAPI.status(epId.value)
-    if (['processing', 'pending'].includes(mergeData.value?.status)) startMergePoll()
+    if (['processing', 'pending'].includes(mergeData.value?.status) || ['processing', 'pending'].includes(mergeData.value?.test?.status)) {
+      startMergePoll()
+    }
   } catch {}
   try {
     await resumeNarrationImageBreakdownPollIfNeeded()
@@ -6062,6 +6395,60 @@ async function clearUploadedNarrationShotImages() {
   await refresh()
 }
 
+async function cropNarrationImageWatermarks() {
+  const count = narrationCropImageCount.value
+  if (!count) {
+    toast.warning('暂无配图文件')
+    return
+  }
+  if (!confirm(`将处理 ${count} 张配图右下角水印区（宽 1/8 × 高 1/18，用相邻画面覆盖）；已合成的镜头视频会失效，需重新「镜头合成」。是否继续？`)) return
+  narrationCropWatermarkProcessing.value = true
+  try {
+    const res = await episodeAPI.cropNarrationImages(epId.value)
+    const cropped = res?.cropped ?? 0
+    const skipped = res?.skipped ?? 0
+    const failed = res?.failed ?? 0
+    if (failed) {
+      toast.warning(`新裁剪 ${cropped} 张，跳过 ${skipped} 张，失败 ${failed} 张`)
+    } else if (skipped && !cropped) {
+      toast.info(`配图已裁剪过（${skipped} 张），无需重复操作`)
+    } else {
+      toast.success(`已处理 ${cropped} 张右下角水印${skipped ? `，${skipped} 张此前已处理` : ''}`)
+    }
+    await refreshStoryboardsOnly()
+  } catch (e) {
+    toast.error(e.message || '裁剪失败')
+  } finally {
+    narrationCropWatermarkProcessing.value = false
+  }
+}
+
+async function restoreNarrationImageWatermarks() {
+  const count = narrationWmCroppedImageCount.value
+  if (!count) {
+    toast.warning('没有可恢复的水印裁剪配图')
+    return
+  }
+  if (!confirm(`将 ${count} 张配图恢复为去水印前的原图（同名原图或生成记录）；已合成镜头需重新「镜头合成」。是否继续？`)) return
+  narrationRestoreWatermarkProcessing.value = true
+  try {
+    const res = await episodeAPI.restoreNarrationImages(epId.value)
+    const restored = res?.restored ?? 0
+    const failed = res?.failed ?? 0
+    const fromGen = res?.from_generation ?? 0
+    if (failed) {
+      toast.warning(`已恢复 ${restored} 张${fromGen ? `（${fromGen} 张来自生成记录）` : ''}，${failed} 张失败`)
+    } else {
+      toast.success(`已恢复 ${restored} 张原图${fromGen ? `（${fromGen} 张来自生成记录）` : ''}`)
+    }
+    await refreshStoryboardsOnly()
+  } catch (e) {
+    toast.error(e.message || '恢复失败')
+  } finally {
+    narrationRestoreWatermarkProcessing.value = false
+  }
+}
+
 function triggerShotFolderUpload() {
   const list = narrationShotsNeedingImage(sbs.value)
   const ids = list.map(sb => sb.id)
@@ -6609,6 +6996,13 @@ function getLastFrame(s) { return s?.last_frame_image || s?.lastFrameImage || nu
 function getNarrationShotImage(s) { return getNarrationShotOwnImage(s) }
 function hasNarrationShotImage(s) { return !!getNarrationShotImage(s) }
 function getNarrationDisplayImage(s) { return resolveNarrationEffectiveImage(sbs.value, s).path }
+function narrationShotImageSrc(sb) {
+  const path = getNarrationDisplayImage(sb)
+  if (!path) return ''
+  const v = sb?.updated_at || sb?.updatedAt || episode.value?.updated_at || episode.value?.updatedAt || ''
+  const q = v ? `?v=${encodeURIComponent(String(v))}` : ''
+  return `/${path.replace(/^\//, '')}${q}`
+}
 function narrationShotInherited(s) {
   return hasNarrationShotImage(s) && parseNarrationImageMeta(s).narration_image_mode === 'copy'
     || (!hasNarrationShotImage(s) && !!resolveNarrationEffectiveImage(sbs.value, s).inherited)
@@ -7069,20 +7463,35 @@ function startMergePoll(onDone) {
   stopMergePoll()
   mergePollTimer = setInterval(async () => {
     try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
-    const status = mergeData.value?.status
-    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-      stopMergePoll()
-      if (status === 'completed') {
-        toast.success('视频生成完成')
+    const mainStatus = mergeData.value?.status
+    const testStatus = mergeData.value?.test?.status
+    const mainActive = ['processing', 'pending'].includes(mainStatus)
+    const testActive = ['processing', 'pending'].includes(testStatus)
+    if (mainActive || testActive) return
+
+    stopMergePoll()
+    if (pendingMergeKind.value === 'test') {
+      if (testStatus === 'completed') {
+        toast.success(`测试导出完成（前 ${testMergeClipCount.value} 镜）`)
         await refresh()
-        onDone?.(true)
-      } else if (status === 'failed') {
-        toast.error(mergeFailedMessage.value)
-        onDone?.(false)
-      } else {
-        onDone?.(false)
+      } else if (testStatus === 'failed') {
+        toast.error(testMergeFailedMessage.value)
       }
+      pendingMergeKind.value = null
+      return
     }
+
+    if (mainStatus === 'completed') {
+      toast.success('视频生成完成')
+      await refresh()
+      onDone?.(true)
+    } else if (mainStatus === 'failed') {
+      toast.error(mergeFailedMessage.value)
+      onDone?.(false)
+    } else {
+      onDone?.(false)
+    }
+    pendingMergeKind.value = null
   }, 1500)
 }
 
@@ -7096,7 +7505,14 @@ async function cancelMerge() {
   try {
     await mergeAPI.cancel(epId.value)
     stopMergePoll()
-    mergeData.value = { ...(mergeData.value || {}), status: 'cancelled' }
+    pendingMergeKind.value = null
+    mergeData.value = {
+      ...(mergeData.value || {}),
+      status: mergeData.value?.status === 'processing' || mergeData.value?.status === 'pending' ? 'cancelled' : mergeData.value?.status,
+      test: mergeData.value?.test && ['processing', 'pending'].includes(mergeData.value.test.status)
+        ? { ...mergeData.value.test, status: 'cancelled' }
+        : mergeData.value?.test,
+    }
     toast.info('已取消生成')
   } catch (e) {
     toast.error(e.message)
@@ -7144,18 +7560,103 @@ async function generateOpeningVideo() {
   }
 }
 
+async function mergeOpeningIntoMain() {
+  if (!mergeUrl.value) {
+    toast.error('请先完成全集拼接')
+    return
+  }
+  if (!openingVideoUrl.value) {
+    toast.error('请先生成开幕视频')
+    return
+  }
+  if (mergeHasOpening.value) {
+    toast.info('当前成片已包含开幕视频')
+    return
+  }
+  try {
+    await mergeAPI.mergeOpening(epId.value)
+    mergeData.value = {
+      status: 'processing',
+      merged_url: null,
+      mergedUrl: null,
+      progress_percent: 0,
+      progress_message: '正在合并开幕视频…',
+    }
+    toast.success('正在合并开幕视频…')
+    startMergePoll()
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
 async function regenerateMerge() {
   stopMergePoll()
   await doMerge()
+}
+
+async function doTestMerge() {
+  const limit = normalizedMergeTestClipLimit()
+  mergeTestClipLimit.value = limit
+  const targets = getTestMergeTargets(limit)
+  if (!targets.length) {
+    toast.error('暂无分镜')
+    return false
+  }
+  const notReady = targets.filter(sb => !canCompose(sb))
+  if (notReady.length) {
+    toast.error(`前 ${limit} 镜中有 ${notReady.length} 镜尚未就绪（需配图+配音）`)
+    return false
+  }
+  if (!tryBeginBatch('compose', `测试导出：重新合成前 ${targets.length} 镜…`)) return false
+
+  pendingMergeKind.value = 'test'
+  panel.value = 'export'
+  exportTab.value = 'merge'
+
+  try {
+    await composeAPI.all(epId.value, {
+      only_remaining: false,
+      storyboard_ids: targets.map(sb => sb.id),
+    })
+    pendingComposeIds.value = [...new Set([...pendingComposeIds.value, ...targets.map(sb => sb.id)])]
+    toast.info(`正在重新合成前 ${targets.length} 镜…`)
+
+    const ok = await pollComposeStatus({
+      expectStoryboardIds: targets.map(sb => sb.id),
+      successMessage: `前 ${targets.length} 镜合成完成，正在测试拼接…`,
+      maxAttempts: Math.max(120, targets.length * 4),
+    })
+    await refresh()
+    if (!ok) {
+      pendingMergeKind.value = null
+      return false
+    }
+
+    await mergeAPI.merge(epId.value, { ...buildMergePayload(), clip_limit: limit })
+    mergeData.value = {
+      ...(mergeData.value || {}),
+      test: {
+        status: 'processing',
+        merged_url: null,
+        mergedUrl: null,
+        progress_percent: 0,
+        progress_message: `正在拼接前 ${targets.length} 镜…`,
+      },
+    }
+    startMergePoll()
+  } catch (e) {
+    pendingMergeKind.value = null
+    toast.error(e.message)
+    return false
+  } finally {
+    endBatch('compose')
+  }
 }
 
 async function doMerge(options = {}) {
   if (composedCount.value < sbs.value.length) {
     toast.error(`尚有 ${sbs.value.length - composedCount.value} 个镜头未合成（${composedCount.value}/${sbs.value.length}），请先在「镜头合成」完成后再导出`)
     return false
-  }
-  if (exportIncludeOpening.value && !openingVideoUrl.value) {
-    toast.warning('尚未生成开幕视频，将仅拼接镜头内容')
   }
   if (exportMixBgm.value && !exportBgmMusicId.value && exportBgmOptions.value.length) {
     exportBgmMusicId.value = exportBgmOptions.value[0].value
@@ -7164,6 +7665,7 @@ async function doMerge(options = {}) {
     toast.warning('未选择 BGM，将仅拼接旁白；可在右侧选择曲目或前往「BGM 配乐」生成')
   }
   try {
+    pendingMergeKind.value = 'full'
     await mergeAPI.merge(epId.value, buildMergePayload())
     mergeData.value = {
       status: 'processing',
@@ -7176,6 +7678,7 @@ async function doMerge(options = {}) {
     if (options.wait) return waitForMergeComplete()
     startMergePoll()
   } catch (e) {
+    pendingMergeKind.value = null
     toast.error(e.message)
     return false
   }
@@ -7184,19 +7687,27 @@ async function doMerge(options = {}) {
 async function pollComposeStatus(options = {}) {
   const maxAttempts = options.maxAttempts ?? 120
   const expectTotal = options.expectTotal ?? 0
+  const expectStoryboardIds = options.expectStoryboardIds ?? null
   for (let i = 0; i < maxAttempts; i++) {
     await sleep(3000)
     try {
       const res = await composeAPI.status(epId.value)
       await refresh()
       const items = Array.isArray(res?.items) ? res.items : []
-      const processingCount = res?.processing ?? items.filter(item => item.status === 'compose_processing').length
-      const completedCount = res?.completed ?? items.filter(item => item.status === 'compose_completed').length
-      const totalCount = res?.total ?? items.length
-      const processingIds = items.filter(item => item.status === 'compose_processing').map(item => item.id)
+      const scopedItems = expectStoryboardIds?.length
+        ? items.filter(item => expectStoryboardIds.includes(item.id))
+        : items
+      const processingCount = expectStoryboardIds?.length
+        ? scopedItems.filter(item => item.status === 'compose_processing').length
+        : (res?.processing ?? items.filter(item => item.status === 'compose_processing').length)
+      const completedCount = expectStoryboardIds?.length
+        ? scopedItems.filter(item => item.status === 'compose_completed' && (item.composed_video_url || item.composedVideoUrl)).length
+        : (res?.completed ?? items.filter(item => item.status === 'compose_completed').length)
+      const totalCount = expectStoryboardIds?.length || res?.total || items.length
+      const processingIds = scopedItems.filter(item => item.status === 'compose_processing').map(item => item.id)
       pendingComposeIds.value = processingIds
 
-      const failedItems = items.filter(item => item.status === 'compose_failed')
+      const failedItems = scopedItems.filter(item => item.status === 'compose_failed')
       if (failedItems.length) {
         const next = { ...failedComposeMessages.value }
         failedItems.forEach((item) => {
@@ -7207,7 +7718,7 @@ async function pollComposeStatus(options = {}) {
 
       if (processingCount > 0) continue
 
-      const doneTotal = expectTotal > 0 ? expectTotal : totalCount
+      const doneTotal = expectStoryboardIds?.length || (expectTotal > 0 ? expectTotal : totalCount)
       if (completedCount < doneTotal) continue
 
       if (failedItems.length) toast.error(`有 ${failedItems.length} 个镜头合成失败`)
@@ -7352,7 +7863,7 @@ watch(localVoiceboxModelSize, () => {
   if (localTtsEngine.value === 'voicebox') refreshLocalVoices()
 })
 watch(localTtsEngine, () => { refreshLocalVoices() })
-watch([exportMixBgm, exportIncludeOpening, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
+watch([exportMixBgm, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
 watch(exportWatermarkText, () => {
   persistExportBgmPrefs()
   scheduleWatermarkSave()

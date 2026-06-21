@@ -30,6 +30,11 @@ import { now } from '../utils/response.js'
 import { downloadFile, getAbsolutePath } from '../utils/storage.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 
+/** 镜头合成 / 成片混音：BGM 相对旁白音量 */
+export const BGM_VOICE_MIX_VOLUME = 0.12
+/** 无旁白镜头：BGM 音量 */
+export const BGM_SOLO_VOLUME = 0.18
+
 const activeBgmTaskIds = new Set<string>()
 const activeBgmTaskStartedAt = new Map<string, number>()
 const BGM_TASK_STALE_MS = 3 * 60_000
@@ -607,6 +612,45 @@ export function applyBgmToEpisodeStoryboards(episodeId: number, musicGenerationI
   }
 
   return storyboards.length
+}
+
+/** 登记用户上传的 BGM，写入曲库（立即可用） */
+export function registerUploadedBgm(params: {
+  dramaId?: number
+  episodeId?: number
+  localPath: string
+  title?: string
+  description?: string
+}): number {
+  const normalizedPath = String(params.localPath || '').trim().replace(/^\//, '')
+  if (!normalizedPath) throw new Error('音频路径不能为空')
+
+  const abs = getAbsolutePath(normalizedPath)
+  if (!fs.existsSync(abs)) throw new Error('音频文件不存在，请重新上传')
+
+  const baseName = path.basename(normalizedPath)
+  const title = String(params.title || '').trim() || baseName
+  const description = String(params.description || '').trim() || title
+  const ts = now()
+
+  const inserted = db.insert(schema.musicGenerations).values({
+    dramaId: params.dramaId,
+    episodeId: params.episodeId,
+    provider: 'upload',
+    model: 'upload',
+    prompt: description,
+    description,
+    title,
+    localPath: normalizedPath,
+    status: 'completed',
+    createdAt: ts,
+    updatedAt: ts,
+    completedAt: ts,
+  }).run()
+
+  const id = Number(inserted.lastInsertRowid)
+  logTaskSuccess('BgmTask', 'upload-registered', { id, path: normalizedPath })
+  return id
 }
 
 function episodeIdsForDrama(dramaId: number): Set<number> {
