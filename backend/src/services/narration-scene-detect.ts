@@ -164,100 +164,26 @@ export function suppressDateOnlyImageAnchors(
   return result
 }
 
-/** 正文分镜配图占比（约 30%） */
-export const NARRATION_IMAGE_TARGET_RATIO = 0.3
-
 function finalizeImageNeeds(items: NarrationSentenceItem[], needs: boolean[]): boolean[] {
   return suppressDateOnlyImageAnchors(items, needs)
 }
 
-function resolveImagePickCount(eligibleCount: number): number {
-  if (eligibleCount <= 0) return 0
-  return Math.max(1, Math.round(eligibleCount * NARRATION_IMAGE_TARGET_RATIO))
-}
-
-function scoreStoryboardImagePriority(
-  items: NarrationSentenceItem[],
-  index: number,
-  llmWantsImage = false,
-): number {
-  const item = items[index]
-  const sentence = item.sentence
-  if (isNarrationDateOnlySentence(sentence)) return -1000
-
-  let score = 0
-  if (llmWantsImage) score += 100
-  if (index === 0) score += 40
-
-  if (index > 0 && items[index].paragraphIndex !== items[index - 1].paragraphIndex) score += 35
-  if (STRONG_SCENE_SHIFT_RE.test(sentence)) score += 32
-  if (SCENE_SHIFT_RE.test(sentence)) score += 24
-  if (BEAT_SHIFT_RE.test(sentence)) score += 18
-  if (SCENE_OPENING_RE.test(sentence)) score += 12
-  if (sentenceHasNewLocationTag(items, index)) score += 28
-
-  if (/批|卖|摊|店|万元|辞|创业|赚钱|租|开|推.*车|婚礼|串门|电视|网购|杂货|风光|落魄/.test(sentence)) score += 8
-  if (/年轻人|顾客|货物|商品|赶时髦/.test(sentence)) score += 6
-
-  return score
-}
-
-function sentenceHasNewLocationTag(items: NarrationSentenceItem[], index: number): boolean {
-  if (index <= 0) return false
-  const curTags = getImageLocationTags(items[index].sentence)
-  if (!curTags.length) return false
-  const priorText = items.slice(0, index).map(item => item.sentence).join('')
-  const priorTags = getImageLocationTags(priorText)
-  return curTags.some(tag => !priorTags.includes(tag))
-}
-
-/** 按分镜总数约 30% 合理分配配图锚点（结合 LLM 优先级与时间线分段） */
-export function allocateImageNeedsByRatio(
-  items: NarrationSentenceItem[],
-  llmFlags?: unknown[],
-  _mode: ImageDetectMode = 'paragraph',
-): boolean[] {
-  if (!items.length) return []
-
-  const eligibleIndices = items
-    .map((item, index) => index)
-    .filter(index => !isNarrationDateOnlySentence(items[index].sentence))
-
-  const eligibleCount = eligibleIndices.length
-  if (!eligibleCount) return items.map(() => false)
-
-  const targetPick = resolveImagePickCount(eligibleCount)
-
-  const needs = items.map(() => false)
-  const segmentCount = targetPick
-  for (let segment = 0; segment < segmentCount; segment++) {
-    const start = Math.floor(segment * eligibleCount / segmentCount)
-    const end = Math.floor((segment + 1) * eligibleCount / segmentCount)
-    let bestIndex = -1
-    let bestScore = -Infinity
-    for (let pos = start; pos < end; pos++) {
-      const index = eligibleIndices[pos]
-      const llmWants = llmFlags ? !!llmFlags[index] : false
-      const score = scoreStoryboardImagePriority(items, index, llmWants)
-      if (score > bestScore) {
-        bestScore = score
-        bestIndex = index
-      }
-    }
-    if (bestIndex >= 0) needs[bestIndex] = true
-  }
-
-  return finalizeImageNeeds(items, needs)
-}
-
-/** 规则兜底：按约 30% 占比分配 */
+/** 规则兜底：按段落与场景切换切分配图段 */
 export function detectImageNeedsBalanced(items: NarrationSentenceItem[]): boolean[] {
-  return allocateImageNeedsByRatio(items, undefined, 'balanced')
+  return detectImageNeedsHeuristic(items)
 }
 
-/** 省钱模式兜底：同样按约 30% 配图 */
+/** 省钱模式兜底：仅空行分段与强场景切换 */
 export function detectImageNeedsConservative(items: NarrationSentenceItem[]): boolean[] {
-  return allocateImageNeedsByRatio(items, undefined, 'conservative')
+  const raw = items.map((item, index) => {
+    if (isNarrationDateOnlySentence(item.sentence)) return false
+    if (index === 0) return true
+    const prev = items[index - 1]
+    if (item.paragraphIndex !== prev.paragraphIndex) return true
+    if (STRONG_SCENE_SHIFT_RE.test(item.sentence)) return true
+    return false
+  })
+  return finalizeImageNeeds(items, raw)
 }
 
 /** 同一场景连续超过 maxGap 句仍无新图 → 补一张，避免画面长时间不切换 */
@@ -501,13 +427,17 @@ export async function generateSceneImagePromptsWithLLM(
   }
 }
 
-/** 将 LLM 优先级映射为约 30% 配图分配 */
+/** 采纳 LLM 换镜判定（不设配图占比上限） */
 function normalizeLLMImageDetectFlags(
   items: NarrationSentenceItem[],
   flags: unknown[],
-  mode: ImageDetectMode = 'paragraph',
+  _mode: ImageDetectMode = 'paragraph',
 ): boolean[] {
-  return allocateImageNeedsByRatio(items, flags, mode)
+  return items.map((item, index) => {
+    if (isNarrationDateOnlySentence(item.sentence)) return false
+    if (index === 0) return true
+    return !!flags[index]
+  })
 }
 
 export async function detectImageNeedsWithLLM(

@@ -117,9 +117,17 @@ export const NARRATION_MINIMAL_PLOT_VISIBILITY_LLM_RULE =
 export const NARRATION_LLM_ANALYSIS_STEPS = [
   '1) 通读 full_narration，把握全文主线、人物关系、核心事件与情节走向',
   '2) 读 prior_narration（若为空则回溯 full_narration 已交代部分），提取地点、场所、物件、道具、品类（用于【年代场景】陈设）',
-  '3) 读 narration_lines，确定本张图要画的「当前瞬间」主画面',
+  '3) 读 narration_lines（本配图段全部旁白句），综合整段信息确定主画面与关键细节，覆盖段落完整情节、场景与物件变化',
   '4) 按六维写出【画面主体】【年代场景】【核心细节动作】【光影色调】【镜头视角】【质感要求】；【年代场景】有陈列载体时必须写「载体+上陈列的具体物件名」',
 ] as const
+
+/** LLM 配图换镜：按段落自由分配，不设占比上限 */
+export const NARRATION_PARAGRAPH_IMAGE_ALLOCATION_LLM_RULE =
+  '按文案空行分段（paragraph_indexes）自由判断配图点，不设配图占比上限；同一段落内若场景、地点、动作、物件或叙事节拍有明显变化可标 needs_image=true，同场景无新可视信息则 needs_image=false；每个配图段涵盖从上一配图点到本点的全部旁白句，后续配图描述须综合该段完整信息'
+
+/** LLM 配图 prompt：须涵盖配图段全部旁白信息 */
+export const NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE =
+  'narration_lines 是本配图段全部旁白句（非单句），须综合整段撰写 prompt，覆盖段落内全部关键情节、场景、物件、动作与互动，勿只描写首句瞬间'
 
 /** LLM 写配图 prompt：如何通读全文 */
 export const NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE =
@@ -170,6 +178,7 @@ export function buildNarrationParagraphImagePromptLLMSystem(
     '分析流程（每条都必须执行）：',
     ...NARRATION_LLM_ANALYSIS_STEPS,
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
+    NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE,
     NARRATION_PLOT_CONTINUITY_LLM_RULE,
     NARRATION_FIXTURES_LLM_RULE,
     NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE,
@@ -240,12 +249,12 @@ export function buildNarrationImageDetectLLMSystem(
 
   const detectRules = [
     '换镜判定（needs_image）：',
-    '1) 通读 full_narration，结合 narration_lines 判断每句是否适合作为新配图起点',
-    '2) 全集正文分镜约 30% 需要配图（系统会按你的优先级选取，请标出相对更需要画面的句子）',
-    '3) needs_image=true：场景/地点/经营阶段切换、新动作、新物件、新互动、叙事节拍转折、空行分段后的新瞬间',
+    '1) 通读 full_narration，结合 paragraph_indexes 与每句旁白判断是否需要新配图',
+    `2) ${NARRATION_PARAGRAPH_IMAGE_ALLOCATION_LLM_RULE}`,
+    '3) needs_image=true：空行分段后首句（若非纯日期句）、场景/地点/经营阶段切换、新动作、新物件、新互动、叙事节拍转折',
     '4) needs_image=false：同场景内画面可完全复用上一张、无新可视信息',
     '5) 纯日期/季节/时段句 → needs_image=false；正文首句若非纯日期句 → needs_image=true',
-    '6) needs_image=true 的句子将作为新配图段起点，后续按万能模板生成单张 16:9 场景插画',
+    '6) needs_image=true 的句子将作为新配图段起点，该段包含至下一配图点前的全部旁白，配图描述将涵盖整段信息',
   ]
 
   const templateContext = minimal

@@ -83,6 +83,8 @@ export const episodeAPI = {
     api.post(`/episodes/${id}/transcribe-narration-audio`, {
       audio_paths: Array.isArray(audioPaths) ? audioPaths : [audioPaths],
     }),
+  cropNarrationImages: (id: number) => api.post(`/episodes/${id}/crop-narration-images`, {}),
+  restoreNarrationImages: (id: number) => api.post(`/episodes/${id}/restore-narration-images`, {}),
 }
 
 export const storyboardAPI = {
@@ -170,17 +172,25 @@ export const videoAPI = {
 }
 export const composeAPI = {
   shot: (id: number) => api.post(`/compose/storyboards/${id}/compose`),
-  all: (epId: number, options?: { only_remaining?: boolean }) =>
-    api.post(`/compose/episodes/${epId}/compose-all`, { only_remaining: options?.only_remaining !== false }),
+  all: (epId: number, options?: { only_remaining?: boolean; storyboard_ids?: number[] }) =>
+    api.post(`/compose/episodes/${epId}/compose-all`, {
+      only_remaining: options?.only_remaining !== false,
+      storyboard_ids: options?.storyboard_ids,
+    }),
   status: (epId: number) => api.get(`/compose/episodes/${epId}/compose-status`),
 }
 export const mergeAPI = {
-  merge: (epId: number, options?: { cancel_running?: boolean; bgm_music_id?: number; bgm_volume?: number; include_opening_video?: boolean }) =>
+  merge: (epId: number, options?: { cancel_running?: boolean; bgm_music_id?: number; bgm_volume?: number; include_opening_video?: boolean; clip_limit?: number }) =>
     api.post(`/merge/episodes/${epId}/merge`, {
       cancel_running: options?.cancel_running !== false,
       bgm_music_id: options?.bgm_music_id,
       bgm_volume: options?.bgm_volume,
-      include_opening_video: options?.include_opening_video,
+      include_opening_video: options?.include_opening_video === true,
+      clip_limit: options?.clip_limit,
+    }),
+  mergeOpening: (epId: number, options?: { cancel_running?: boolean }) =>
+    api.post(`/merge/episodes/${epId}/merge/opening`, {
+      cancel_running: options?.cancel_running !== false,
     }),
   cancel: (epId: number) => api.post(`/merge/episodes/${epId}/merge/cancel`),
   status: (epId: number) => api.get(`/merge/episodes/${epId}/merge`),
@@ -261,5 +271,12 @@ export const musicAPI = {
   applyAll: (id: number, episodeId: number) => api.post(`/music/${id}/apply-all`, { episode_id: episodeId }),
   sync: (id: number) => api.post(`/music/${id}/sync`, {}),
   resumePending: (data?: { episode_id?: number; drama_id?: number }) => api.post('/music/resume-pending', data || {}),
+  upload: (data: {
+    drama_id?: number
+    episode_id?: number
+    path: string
+    title?: string
+    description?: string
+  }) => api.post('/music/upload', data),
   del: (id: number) => api.del(`/music/${id}`),
 }

@@ -12,11 +12,12 @@ import { v4 as uuid } from 'uuid'
 import { db, schema } from '../db/index.js'
 import { eq } from 'drizzle-orm'
 import { now } from '../utils/response.js'
+import { BGM_SOLO_VOLUME, BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { generateTTS } from './tts-generation.js'
 import { resolveEdgeVoice } from './edge-tts-local.js'
 import { resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { isNarrationStoryboard, parseNarrationImageMeta, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
+import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
@@ -160,17 +161,16 @@ const TITLE_TEXT_SLIDE_MS = 420
 /** 片头字幕相对该句音频起点的显示延迟（原 0.5s，提前 0.5s 后为 0） */
 const TITLE_SUBTITLE_START_DELAY_SEC = 0
 
-/** 片头字幕：自下往上滑入 + 首句白字/后续红字（参照解说类成片） */
-function buildTitleAssDialogueLine(text: string, startSec: number, endSec: number, lineIndex = 0) {
+/** 片头字幕：自下往上滑入 + 剧中红字 */
+function buildTitleAssDialogueLine(text: string, startSec: number, endSec: number) {
   const line = escapeAssText(text.replace(/\r/g, '').replace(/\n/g, ' ').trim())
-  const style = lineIndex === 0 ? 'TitleWhite' : 'Title'
   const tags = `{\\an5\\move(640,780,640,360,0,${TITLE_TEXT_SLIDE_MS})\\fad(180,140)}`
-  return `Dialogue: 0,${formatAssTimestamp(startSec)},${formatAssTimestamp(endSec)},${style},,0,0,0,,${tags}${line}`
+  return `Dialogue: 0,${formatAssTimestamp(startSec)},${formatAssTimestamp(endSec)},Title,,0,0,0,,${tags}${line}`
 }
 
-function buildTitleAssContent(text: string, durationSec: number, lineIndex = 0) {
+function buildTitleAssContent(text: string, durationSec: number) {
   const endAt = Math.max(durationSec, 0.1)
-  return `${buildTitleAssHeader()}${buildTitleAssDialogueLine(text, TITLE_SUBTITLE_START_DELAY_SEC, endAt, lineIndex)}\n`
+  return `${buildTitleAssHeader()}${buildTitleAssDialogueLine(text, TITLE_SUBTITLE_START_DELAY_SEC, endAt)}\n`
 }
 
 function buildSubtitleForceStyle(isTitleShot: boolean) {
@@ -185,8 +185,8 @@ function buildSubtitleFilter(subtitlePath: string, isTitleShot: boolean) {
     .replace(/\\/g, '/')
     .replace(/:/g, '\\:')
     .replace(/'/g, "\\'")
-  // 片头 ASS 用 ass 滤镜，按 Dialogue 时间轴逐段显示；正文 SRT 仍用 subtitles
-  if (isTitleShot && subtitlePath.toLowerCase().endsWith('.ass')) {
+  // 片头 ASS 用 ass 滤镜保留 \move 等动画；任意 .ass 均走 ass 滤镜
+  if (subtitlePath.toLowerCase().endsWith('.ass')) {
     return `ass='${escapedPath}'`
   }
   const forceStyle = buildSubtitleForceStyle(isTitleShot)
@@ -482,8 +482,7 @@ export async function renderSameImageGroupSegment(
   for (let i = 0; i < orderedStoryboards.length; i++) {
     const sb = orderedStoryboards[i]
     const parsed = parseDialogueForTTS(sb.dialogue)
-    const titleMeta = isNarrationStoryboard(sb) ? parseNarrationImageMeta(sb.referenceImages) : null
-    const isTitleShot = titleMeta?.narration_shot_type === 'title'
+    const isTitleShot = isStoryboardTitleShot(sb)
     if (isTitleShot) titleMode = true
 
     if (!sb.ttsAudioUrl) throw new Error(`Storyboard ${sb.id} missing narration audio`)
@@ -500,7 +499,7 @@ export async function renderSameImageGroupSegment(
 
     if (text) {
       if (isTitleShot) {
-        assDialogues.push(buildTitleAssDialogueLine(text, startSec, endSec, i))
+        assDialogues.push(buildTitleAssDialogueLine(text, startSec, endSec))
       } else {
         srtBlocks.push(buildNarrationSubtitleSrtBlock(text, startSec, durationSec, i + 1))
       }
@@ -601,16 +600,16 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
   let bgmPath: string | null = null
   let subtitlePath: string | null = null
   const parsedDialogue = parseDialogueForTTS(sb.dialogue)
-  const titleMeta = isNarrationStoryboard(sb) ? parseNarrationImageMeta(sb.referenceImages) : null
-  const isTitleShot = titleMeta?.narration_shot_type === 'title'
+  const isTitleShot = isStoryboardTitleShot(sb)
 
   // 1. 解析 TTS 音频（解说每镜独立配音，不复用）
   try {
     if (!parsedDialogue.ignorable) {
-      if (isNarrationStoryboard(sb) && sb.ttsAudioUrl) {
+      const usesOwnNarrationTts = isNarrationStoryboard(sb) || isTitleShot
+      if (usesOwnNarrationTts && sb.ttsAudioUrl) {
         const ownPath = toAbsPath(sb.ttsAudioUrl)
         if (fs.existsSync(ownPath)) audioPath = ownPath
-      } else if (!isNarrationStoryboard(sb)) {
+      } else if (!usesOwnNarrationTts) {
         const resolvedTts = resolveStoryboardTtsSource(episodeStoryboards, storyboardId)
         if (resolvedTts?.path) {
           const existingAudioPath = toAbsPath(resolvedTts.path)
@@ -636,7 +635,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
         const pureDialogue = parsedDialogue.pureText
         if (pureDialogue) {
-          const useLocalTts = isNarrationStoryboard(sb)
+          const useLocalTts = usesOwnNarrationTts
           const localTtsEngine = process.env.LOCAL_TTS_ENGINE === 'voicebox' ? 'voicebox' : 'edge'
           const ttsVoice = useLocalTts
             ? (localTtsEngine === 'voicebox'
@@ -703,16 +702,8 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       const subtitleFilename = `${uuid()}${isTitleShot ? '.ass' : '.srt'}`
       subtitlePath = path.join(srtDir, subtitleFilename)
 
-      let titleLineIndex = 0
-      if (isTitleShot) {
-        const titleShots = sortStoryboardsByOrder(episodeStoryboards).filter(row => {
-          const meta = parseNarrationImageMeta(row.referenceImages)
-          return meta.narration_shot_type === 'title'
-        })
-        titleLineIndex = Math.max(0, titleShots.findIndex(row => row.id === storyboardId))
-      }
       const subtitleContent = isTitleShot
-        ? buildTitleAssContent(pureText, clipDuration, titleLineIndex)
+        ? buildTitleAssContent(pureText, clipDuration)
         : buildNarrationSubtitleSrtBlock(pureText, 0, clipDuration)
       fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
 
@@ -728,8 +719,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
     const outputPath = path.join(outputDir, outputFilename)
 
     await new Promise<void>(async (resolve, reject) => {
-      const titleMeta = isNarrationStoryboard(sb) ? parseNarrationImageMeta(sb.referenceImages) : null
-      const isTitleShot = titleMeta?.narration_shot_type === 'title'
+      const isTitleShot = isStoryboardTitleShot(sb)
       const filters: string[] = []
       if (subtitlePath && supportsSubtitleFilter()) {
         filters.push(buildSubtitleFilter(subtitlePath, !!isTitleShot))
@@ -800,7 +790,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         const bgmInput = 2
         outputOptions.push(
           '-filter_complex',
-          `[${voiceInput}:a]volume=1[voice];[${bgmInput}:a]volume=0.22[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`,
+          `[${voiceInput}:a]volume=1[voice];[${bgmInput}:a]volume=${BGM_VOICE_MIX_VOLUME}[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]`,
           '-map', '0:v',
           '-map', '[aout]',
           '-c:a', 'aac',
@@ -819,7 +809,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         const bgmInput = 1
         outputOptions.push(
           '-filter_complex',
-          `[${bgmInput}:a]volume=0.35,atrim=0:${clipDuration}[aout]`,
+          `[${bgmInput}:a]volume=${BGM_SOLO_VOLUME},atrim=0:${clipDuration}[aout]`,
           '-map', '0:v',
           '-map', '[aout]',
           '-c:a', 'aac',

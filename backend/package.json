@@ -5,6 +5,7 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:test": "tsx watch scripts/dev-test.ts",
     "start": "tsx src/index.ts",
     "build": "tsc",
     "db:generate": "drizzle-kit generate",

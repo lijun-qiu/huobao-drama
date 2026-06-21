@@ -1,4 +1,9 @@
 import { loadEnvLocal } from './utils/load-env-local.js'
+import {
+  BACKEND_CORS_ORIGINS,
+  BACKEND_TEST_PORT,
+  resolveBackendPort,
+} from './constants/ports.js'
 
 loadEnvLocal()
 
@@ -38,7 +43,7 @@ const app = new Hono()
 
 // Middleware
 app.use('*', cors({
-  origin: ['http://localhost:3013', 'http://localhost:5679'],
+  origin: [...BACKEND_CORS_ORIGINS],
   credentials: true,
 }))
 app.use('*', requestLogger)
@@ -81,8 +86,9 @@ const distPath = path.join(projectRoot, 'frontend', 'dist')
 app.use('*', serveStatic({ root: distPath }))
 app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
 
-const port = Number(process.env.PORT || 5679)
-console.log(`🚀 Huobao Drama TS server on http://localhost:${port}`)
+const port = resolveBackendPort()
+const portLabel = port === BACKEND_TEST_PORT ? ' [test]' : ''
+console.log(`🚀 Huobao Drama TS server${portLabel} on http://localhost:${port}`)
 syncEnvAiConfig()
 resumePendingBgmTasks()
 serve({ fetch: app.fetch, port })

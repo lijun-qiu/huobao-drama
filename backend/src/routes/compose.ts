@@ -43,6 +43,10 @@ app.post('/episodes/:id/compose-all', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const body = await c.req.json().catch(() => ({}))
   const onlyRemaining = body?.only_remaining !== false
+  const rawIds = body?.storyboard_ids ?? body?.storyboardIds
+  const storyboardIds = Array.isArray(rawIds)
+    ? rawIds.map((id: unknown) => Number(id)).filter(id => Number.isFinite(id) && id > 0)
+    : []
 
   const storyboards = sortStoryboardsByOrder(
     db.select().from(schema.storyboards)
@@ -53,11 +57,15 @@ app.post('/episodes/:id/compose-all', async (c) => {
 
   if (storyboards.length === 0) return badRequest(c, 'No storyboards found')
 
-  const composable = storyboards.filter(sb => {
+  let composable = storyboards.filter(sb => {
     const visual = getStoryboardVisualSource(sb, storyboards)
     const hasDialogue = !!(sb.dialogue || '').trim()
     return !!visual || hasDialogue
   })
+  if (storyboardIds.length > 0) {
+    const idSet = new Set(storyboardIds)
+    composable = composable.filter(sb => idSet.has(sb.id))
+  }
   if (composable.length === 0) return badRequest(c, 'No storyboards have video or image yet')
 
   const targets = onlyRemaining
@@ -98,6 +106,7 @@ app.post('/episodes/:id/compose-all', async (c) => {
     episodeId,
     total: targets.length,
     onlyRemaining,
+    storyboardIds: storyboardIds.length ? storyboardIds : undefined,
     concurrency: COMPOSE_CONCURRENCY,
   })
   return success(c, {
@@ -106,6 +115,7 @@ app.post('/episodes/:id/compose-all', async (c) => {
       : `Started composing ${targets.length} storyboards`,
     total: targets.length,
     only_remaining: onlyRemaining,
+    storyboard_ids: targets.map(sb => sb.id),
     concurrency: COMPOSE_CONCURRENCY,
   })
 })

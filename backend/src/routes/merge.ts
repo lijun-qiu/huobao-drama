@@ -1,22 +1,13 @@
 import { Hono } from 'hono'
-import { and, desc, eq } from 'drizzle-orm'
+import { desc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest } from '../utils/response.js'
-import { mergeEpisodeVideos, cancelEpisodeMerge, getMergeProgress, isMergeActive } from '../services/ffmpeg-merge.js'
+import { mergeEpisodeVideos, cancelEpisodeMerge, getMergeProgress, isMergeActive, mergeOpeningIntoEpisodeVideo, isTestMergeRecord } from '../services/ffmpeg-merge.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { now } from '../utils/response.js'
 
 const app = new Hono()
-
-function getLatestMerge(episodeId: number) {
-  const [latest] = db.select().from(schema.videoMerges)
-    .where(eq(schema.videoMerges.episodeId, episodeId))
-    .orderBy(desc(schema.videoMerges.id))
-    .limit(1)
-    .all()
-  return latest ?? null
-}
 
 function reconcileStaleMerge(episodeId: number, latest: typeof schema.videoMerges.$inferSelect) {
   if (!['processing', 'pending'].includes(latest.status || '')) return latest
@@ -40,16 +31,41 @@ function reconcileStaleMerge(episodeId: number, latest: typeof schema.videoMerge
   }
 }
 
-function getLastCompletedMerge(episodeId: number) {
-  const [completed] = db.select().from(schema.videoMerges)
-    .where(and(
-      eq(schema.videoMerges.episodeId, episodeId),
-      eq(schema.videoMerges.status, 'completed'),
-    ))
+function getLastCompletedMainMerge(episodeId: number) {
+  for (const record of getLatestMergeRecords(episodeId)) {
+    if (isTestMergeRecord(record)) continue
+    if (record.status === 'completed') return record
+  }
+  return null
+}
+
+function getLatestMergeRecords(episodeId: number, limit = 30) {
+  return db.select().from(schema.videoMerges)
+    .where(eq(schema.videoMerges.episodeId, episodeId))
     .orderBy(desc(schema.videoMerges.id))
-    .limit(1)
+    .limit(limit)
     .all()
-  return completed ?? null
+}
+
+function getLatestMainMerge(episodeId: number) {
+  return getLatestMergeRecords(episodeId).find(record => !isTestMergeRecord(record)) ?? null
+}
+
+function getLatestTestMerge(episodeId: number) {
+  return getLatestMergeRecords(episodeId).find(record => isTestMergeRecord(record)) ?? null
+}
+
+function attachMergeProgress(
+  episodeId: number,
+  reconciled: typeof schema.videoMerges.$inferSelect,
+  payload: Record<string, unknown>,
+) {
+  const progress = getMergeProgress(episodeId)
+  if (progress && ['processing', 'pending'].includes(String(reconciled.status)) && progress.mergeId === reconciled.id) {
+    payload.progress_percent = progress.percent
+    payload.progress_message = progress.message
+    payload.progress_phase = progress.phase
+  }
 }
 
 function buildMergeStatusPayload(episodeId: number, latest: typeof schema.videoMerges.$inferSelect | null) {
@@ -57,25 +73,34 @@ function buildMergeStatusPayload(episodeId: number, latest: typeof schema.videoM
 
   const reconciled = reconcileStaleMerge(episodeId, latest)
   const payload = toSnakeCase(reconciled) as Record<string, unknown>
-  const progress = getMergeProgress(episodeId)
+  attachMergeProgress(episodeId, reconciled, payload)
 
-  if (progress && ['processing', 'pending'].includes(String(reconciled.status))) {
-    payload.progress_percent = progress.percent
-    payload.progress_message = progress.message
-    payload.progress_phase = progress.phase
-  }
-
-  // 失败/取消时不回填旧成片 URL，避免误以为「重新生成成功但仍是旧视频」
   if (['failed', 'cancelled'].includes(String(reconciled.status))) {
     payload.merged_url = null
     payload.duration = null
     payload.completed_at = null
-    const lastCompleted = getLastCompletedMerge(episodeId)
+    const lastCompleted = getLastCompletedMainMerge(episodeId)
     if (lastCompleted?.mergedUrl) {
       payload.previous_merged_url = lastCompleted.mergedUrl
       payload.previous_duration = lastCompleted.duration
       payload.previous_completed_at = lastCompleted.completedAt
     }
+  }
+
+  return payload
+}
+
+function buildTestMergeStatusPayload(episodeId: number, latest: typeof schema.videoMerges.$inferSelect | null) {
+  if (!latest) return null
+
+  const reconciled = reconcileStaleMerge(episodeId, latest)
+  const payload = toSnakeCase(reconciled) as Record<string, unknown>
+  attachMergeProgress(episodeId, reconciled, payload)
+
+  if (['failed', 'cancelled'].includes(String(reconciled.status))) {
+    payload.merged_url = null
+    payload.duration = null
+    payload.completed_at = null
   }
 
   return payload
@@ -94,19 +119,46 @@ app.post('/episodes/:id/merge', async (c) => {
 
   const bgmMusicId = body?.bgm_music_id ? Number(body.bgm_music_id) : undefined
   const bgmVolume = body?.bgm_volume != null ? Number(body.bgm_volume) : undefined
-  const includeOpeningVideo = body?.include_opening_video !== false
+  const includeOpeningVideo = body?.include_opening_video === true
+  const clipLimitRaw = body?.clip_limit ?? body?.clipLimit
+  const clipLimit = clipLimitRaw != null && Number.isFinite(Number(clipLimitRaw)) && Number(clipLimitRaw) > 0
+    ? Math.floor(Number(clipLimitRaw))
+    : undefined
 
   try {
-    logTaskStart('MergeAPI', 'episode-merge', { episodeId, dramaId: ep.dramaId, bgmMusicId, includeOpeningVideo })
+    logTaskStart('MergeAPI', clipLimit ? 'episode-merge-test' : 'episode-merge', { episodeId, dramaId: ep.dramaId, bgmMusicId, includeOpeningVideo, clipLimit })
     const mergeId = await mergeEpisodeVideos(episodeId, ep.dramaId, {
       bgmMusicId: bgmMusicId && Number.isFinite(bgmMusicId) ? bgmMusicId : undefined,
       bgmVolume: bgmVolume != null && Number.isFinite(bgmVolume) ? bgmVolume : undefined,
       includeOpeningVideo,
+      clipLimit,
     })
-    logTaskSuccess('MergeAPI', 'episode-merge', { episodeId, mergeId })
+    logTaskSuccess('MergeAPI', clipLimit ? 'episode-merge-test' : 'episode-merge', { episodeId, mergeId, clipLimit })
+    return success(c, { merge_id: mergeId, status: 'processing', test: !!clipLimit, clip_limit: clipLimit })
+  } catch (err: any) {
+    logTaskError('MergeAPI', clipLimit ? 'episode-merge-test' : 'episode-merge', { episodeId, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/merge/opening — 将开幕视频合并进已完成的主片
+app.post('/episodes/:id/merge/opening', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  if (body?.cancel_running !== false) {
+    cancelEpisodeMerge(episodeId)
+  }
+
+  try {
+    logTaskStart('MergeAPI', 'opening-merge', { episodeId, dramaId: ep.dramaId })
+    const mergeId = await mergeOpeningIntoEpisodeVideo(episodeId, ep.dramaId)
+    logTaskSuccess('MergeAPI', 'opening-merge', { episodeId, mergeId })
     return success(c, { merge_id: mergeId, status: 'processing' })
   } catch (err: any) {
-    logTaskError('MergeAPI', 'episode-merge', { episodeId, error: err.message })
+    logTaskError('MergeAPI', 'opening-merge', { episodeId, error: err.message })
     return badRequest(c, err.message)
   }
 })
@@ -119,11 +171,15 @@ app.post('/episodes/:id/merge/cancel', async (c) => {
   return success(c, { status: 'cancelled' })
 })
 
-// GET /episodes/:id/merge — 查询拼接状态
+// GET /episodes/:id/merge — 查询拼接状态（含测试导出）
 app.get('/episodes/:id/merge', async (c) => {
   const episodeId = Number(c.req.param('id'))
-  const latest = getLatestMerge(episodeId)
-  return success(c, buildMergeStatusPayload(episodeId, latest))
+  const mainLatest = getLatestMainMerge(episodeId)
+  const testLatest = getLatestTestMerge(episodeId)
+  const payload = buildMergeStatusPayload(episodeId, mainLatest) || {}
+  const testPayload = buildTestMergeStatusPayload(episodeId, testLatest)
+  if (testPayload) payload.test = testPayload
+  return success(c, payload)
 })
 
 export default app

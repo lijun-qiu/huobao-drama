@@ -83,8 +83,11 @@ function escapeAssText(text: string) {
   return text.replace(/\r/g, '').replace(/\n/g, ' ').trim()
 }
 
+const OPENING_TEXT_SLIDE_MS = 420
+
 function buildOpeningAssContent(text: string, durationSec: number) {
   const line = escapeAssText(text)
+  const tags = `{\\an5\\move(640,780,640,360,0,${OPENING_TEXT_SLIDE_MS})\\fad(180,140)}`
   return `[Script Info]
 ScriptType: v4.00+
 PlayResX: ${OPENING_WIDTH}
@@ -97,7 +100,7 @@ Style: Opening, Microsoft YaHei, ${OPENING_SUBTITLE_SIZE}, &H0000FF&, &HFF000000
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:00.00,${formatAssTimestamp(durationSec)},Opening,,0,0,0,,${line}
+Dialogue: 0,0:00:00.00,${formatAssTimestamp(durationSec)},Opening,,0,0,0,,${tags}${line}
 `
 }
 

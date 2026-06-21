@@ -181,6 +181,10 @@ export function isNarrationTitleShotMeta(meta: NarrationImageMeta) {
   return meta.narration_shot_type === 'title'
 }
 
+export function isStoryboardTitleShot(sb: { referenceImages?: string | null }) {
+  return isNarrationTitleShotMeta(parseNarrationImageMeta(sb.referenceImages))
+}
+
 export function storyboardNeedsOwnImage(sb: {
   referenceImages?: string | null
   storyboardNumber?: number | null
