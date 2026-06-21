@@ -22,6 +22,7 @@ export type BuildNarrationParagraphsOptions = {
   textThinking?: boolean
   style?: string
   fullNarrationLines?: string[]
+  previousEpisodeNarration?: string[]
 }
 
 function mapSegmentsToParagraphs(
@@ -65,6 +66,7 @@ export async function buildNarrationParagraphsAsync(
     textThinking: options?.textThinking,
     style: options?.style,
     fullNarrationLines: options?.fullNarrationLines ?? items.map(item => item.sentence),
+    previousEpisodeNarration: options?.previousEpisodeNarration,
   })
 
   return {

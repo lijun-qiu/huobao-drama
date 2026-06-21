@@ -1,7 +1,7 @@
 const BASE = '/api/v1'
 
-async function req<T = any>(method: string, path: string, body?: any): Promise<T> {
-  const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } }
+async function req<T = any>(method: string, path: string, body?: any, options?: { signal?: AbortSignal }): Promise<T> {
+  const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' }, signal: options?.signal }
   if (body) opts.body = JSON.stringify(body)
 
   const start = performance.now()
@@ -20,6 +20,11 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
     console.log(`%c[API] %c${method} ${path} %c${resp.status} %c${ms}ms`, 'color:#888', 'color:#66bb6a', 'color:#66bb6a;font-weight:bold', 'color:#888')
     return json.data ?? json
   } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      const ms = Math.round(performance.now() - start)
+      console.log(`%c[API] %c${method} ${path} %cABORT %c${ms}ms`, 'color:#888', 'color:#ffa726', 'color:#ffa726;font-weight:bold', 'color:#888')
+      throw new Error('请求已取消')
+    }
     if (!err.message?.match(/^\d{3}$/)) {
       const ms = Math.round(performance.now() - start)
       console.log(`%c[API] %c${method} ${path} %cERROR %c${ms}ms`, 'color:#888', 'color:#ef5350', 'color:#ef5350;font-weight:bold', 'color:#888', err.message)
@@ -29,10 +34,10 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
 }
 
 export const api = {
-  get: <T = any>(p: string) => req<T>('GET', p),
-  post: <T = any>(p: string, b?: any) => req<T>('POST', p, b),
-  put: <T = any>(p: string, b?: any) => req<T>('PUT', p, b),
-  del: <T = any>(p: string) => req<T>('DELETE', p),
+  get: <T = any>(p: string, options?: { signal?: AbortSignal }) => req<T>('GET', p, undefined, options),
+  post: <T = any>(p: string, b?: any, options?: { signal?: AbortSignal }) => req<T>('POST', p, b, options),
+  put: <T = any>(p: string, b?: any, options?: { signal?: AbortSignal }) => req<T>('PUT', p, b, options),
+  del: <T = any>(p: string, options?: { signal?: AbortSignal }) => req<T>('DELETE', p, undefined, options),
 }
 
 export const dramaAPI = {
@@ -52,8 +57,17 @@ export const episodeAPI = {
   pipelineStatus: (id: number) => api.get(`/episodes/${id}/pipeline-status`),
   narrationStoryboardBreakdown: (id: number, options?: { script?: string }) =>
     api.post(`/episodes/${id}/narration-storyboard-breakdown`, options || {}),
-  narrationImageBreakdown: (id: number, options?: { style?: string; image_detect_mode?: 'paragraph' | 'conservative' | 'balanced' }) =>
-    api.post(`/episodes/${id}/narration-image-breakdown`, options || {}),
+  narrationImageBreakdown: (
+    id: number,
+    options?: {
+      style?: string
+      image_detect_mode?: 'paragraph' | 'conservative' | 'balanced'
+      retry_missing_prompts?: boolean
+    },
+    fetchOptions?: { signal?: AbortSignal },
+  ) => api.post(`/episodes/${id}/narration-image-breakdown`, options || {}, fetchOptions),
+  cancelNarrationImageBreakdown: (id: number) =>
+    api.post(`/episodes/${id}/narration-image-breakdown/cancel`),
   narrationImageBreakdownStatus: (id: number) =>
     api.get(`/episodes/${id}/narration-image-breakdown-status`),
   importNarrationStoryboardDesc: (id: number, text: string) =>

@@ -856,6 +856,23 @@
                 >关</button>
               </div>
             </div>
+            <div v-if="showReferPreviousEpisodeToggle" class="text-thinking-toggle">
+              <span class="dim" style="font-size:12px">参照上集</span>
+              <div class="prod-tabs text-thinking-tabs">
+                <button
+                  type="button"
+                  class="prod-tab"
+                  :class="{ active: referPreviousEpisode }"
+                  @click="setReferPreviousEpisode(true)"
+                >开</button>
+                <button
+                  type="button"
+                  class="prod-tab"
+                  :class="{ active: !referPreviousEpisode }"
+                  @click="setReferPreviousEpisode(false)"
+                >关</button>
+              </div>
+            </div>
             <span class="tag">拆镜 / 配图文案 / 角色提取</span>
           </div>
 
@@ -1542,19 +1559,31 @@
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                 上传分镜描述
               </button>
-              <button
-                class="btn btn-sm btn-primary ml-auto"
-                :disabled="narrationImageBreaking || !sbs.length"
-                @click="doNarrationImageBreakdown"
-              >
-                <Loader2 v-if="narrationImageBreaking" :size="11" class="animate-spin" />
-                <template v-if="narrationImageBreaking">
-                  {{ narrationImageBreakdownProgressMessage }}
-                </template>
-                <template v-else>
-                  {{ hasNarrationImageBreakdown ? '重新配图分镜' : '配图分镜' }}
-                </template>
-              </button>
+              <div class="narration-breakdown-actions">
+                <button
+                  v-if="narrationMissingPromptCount"
+                  class="btn btn-sm btn-retry-missing-prompts"
+                  :disabled="narrationImageBreaking"
+                  title="仅对缺 AI 配图文案的镜头重新调用模型，不重新换镜检测"
+                  @click="doRetryMissingNarrationImagePrompts"
+                >
+                  <Loader2 v-if="narrationImageBreaking" :size="11" class="animate-spin" />
+                  补全缺失文案 ({{ narrationMissingPromptCount }})
+                </button>
+                <button
+                  class="btn btn-sm btn-primary"
+                  :disabled="narrationImageBreaking || !sbs.length"
+                  @click="doNarrationImageBreakdown"
+                >
+                  <Loader2 v-if="narrationImageBreaking" :size="11" class="animate-spin" />
+                  <template v-if="narrationImageBreaking">
+                    {{ narrationImageBreakdownProgressMessage }}
+                  </template>
+                  <template v-else>
+                    {{ hasNarrationImageBreakdown ? '重新配图分镜' : '配图分镜' }}
+                  </template>
+                </button>
+              </div>
             </div>
             <div
               v-if="narrationImageBreaking"
@@ -2509,6 +2538,51 @@
           </div>
           <div class="export-list">
             <div class="export-list-head">导出选项</div>
+            <div class="export-list-options">
+            <div class="export-bgm-panel export-bgm-panel-primary">
+              <div class="export-list-head" style="margin:0;padding:0 0 6px;border:none;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text-1)">成片 BGM</div>
+              <label class="export-bgm-toggle">
+                <input v-model="exportMixBgm" type="checkbox" />
+                <span>拼接时混入 BGM</span>
+              </label>
+              <div class="dim" style="font-size:11px;line-height:1.5">
+                默认使用各镜头「镜头合成」时已混入的 BGM；勾选后会在整集成片上再铺一层（与镜头 BGM 可叠加）。
+              </div>
+              <div v-if="exportMixBgm" class="export-bgm-fields">
+                <BaseSelect
+                  :model-value="exportBgmMusicId"
+                  :options="exportBgmOptions"
+                  placeholder="选择 BGM 曲目"
+                  searchable
+                  style="width:100%"
+                  @update:model-value="exportBgmMusicId = $event"
+                />
+                <div v-if="!exportBgmOptions.length" class="dim" style="font-size:11px;line-height:1.5">
+                  暂无可用 BGM，请在本项目任意集的「BGM 配乐」步骤生成，或
+                  <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px" @click="panel = 'production'; prodTab = 'bgm'">前往生成</button>
+                </div>
+                <div v-else class="export-bgm-volume">
+                  <span class="dim" style="font-size:11px">BGM 音量 {{ exportBgmVolume }}%</span>
+                  <input v-model.number="exportBgmVolume" type="range" min="3" max="25" step="1" class="export-bgm-slider" />
+                </div>
+                <audio
+                  v-if="exportBgmPreviewUrl"
+                  :src="exportBgmPreviewUrl"
+                  controls
+                  preload="none"
+                  class="dub-audio"
+                  style="width:100%;margin-top:4px"
+                />
+                <button
+                  class="btn btn-sm"
+                  style="width:100%;margin-top:4px"
+                  :disabled="!exportBgmMusicId || exportBgmApplying"
+                  @click="applyExportBgmToAllShots"
+                >
+                  {{ exportBgmApplying ? '应用中…' : '应用到全部镜头（需重合成）' }}
+                </button>
+              </div>
+            </div>
             <div v-if="testMergeUrl || testMergeProcessing || testMergeFailed" class="export-bgm-panel" style="margin-bottom:12px">
               <div class="field-label" style="margin-bottom:6px">测试导出</div>
               <div class="dim" style="font-size:11px;line-height:1.5;margin-bottom:8px">
@@ -2581,49 +2655,6 @@
                 尚未生成开幕视频，请先在「开幕视频」步骤生成。
               </div>
             </div>
-            <div class="export-list-head" style="margin-top:12px">成片 BGM</div>
-            <div class="export-bgm-panel">
-              <label class="export-bgm-toggle">
-                <input v-model="exportMixBgm" type="checkbox" />
-                <span>拼接时混入 BGM</span>
-              </label>
-              <div v-if="exportMixBgm" class="export-bgm-fields">
-                <BaseSelect
-                  :model-value="exportBgmMusicId"
-                  :options="exportBgmOptions"
-                  placeholder="选择 BGM 曲目"
-                  searchable
-                  style="width:100%"
-                  @update:model-value="exportBgmMusicId = $event"
-                />
-                <div v-if="!exportBgmOptions.length" class="dim" style="font-size:11px;line-height:1.5">
-                  暂无可用 BGM，请在本项目任意集的「BGM 配乐」步骤生成，或
-                  <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px" @click="panel = 'production'; prodTab = 'bgm'">前往生成</button>
-                </div>
-                <div v-else class="export-bgm-volume">
-                  <span class="dim" style="font-size:11px">BGM 音量 {{ exportBgmVolume }}%</span>
-                  <input v-model.number="exportBgmVolume" type="range" min="3" max="25" step="1" class="export-bgm-slider" />
-                </div>
-                <audio
-                  v-if="exportBgmPreviewUrl"
-                  :src="exportBgmPreviewUrl"
-                  controls
-                  preload="none"
-                  class="dub-audio"
-                  style="width:100%;margin-top:4px"
-                />
-                <div v-if="bgmAppliedCount > 0" class="dim" style="font-size:11px;line-height:1.5">
-                  已有 {{ bgmAppliedCount }} 镜在「镜头合成」时混入了 BGM；此处为<strong>整集成片</strong>再铺一层配乐，二者可叠加。
-                </div>
-                <button
-                  class="btn btn-sm"
-                  style="width:100%;margin-top:4px"
-                  :disabled="!exportBgmMusicId || exportBgmApplying"
-                  @click="applyExportBgmToAllShots"
-                >
-                  {{ exportBgmApplying ? '应用中…' : '应用到全部镜头（需重合成）' }}
-                </button>
-              </div>
             </div>
             <div class="export-list-head">镜头概览</div>
             <div class="export-list-body">
@@ -3128,7 +3159,7 @@ let bgmPollTick = 0
 const bgmAppliedCount = computed(() => sbs.value.filter(s => s.bgm_audio_url || s.bgmAudioUrl).length)
 const bgmCompletedCount = computed(() => bgmLibrary.value.filter(m => m.status === 'completed').length)
 const bgmPendingCount = computed(() => bgmLibrary.value.filter(m => ['pending', 'processing'].includes(m.status)).length)
-const exportMixBgm = ref(true)
+const exportMixBgm = ref(false)
 const exportWatermarkText = ref('顺拾人间')
 const exportWatermarkAnimated = ref(false)
 let watermarkSaveTimer = null
@@ -3308,7 +3339,7 @@ function persistExportBgmPrefs() {
 function restoreExportBgmPrefs() {
   if (typeof window === 'undefined' || !epId.value) return
   const mix = window.localStorage.getItem(`episode-${epId.value}-export-mix-bgm`)
-  exportMixBgm.value = mix === null ? true : mix === '1'
+  exportMixBgm.value = mix === null ? false : mix === '1'
   const wm = window.localStorage.getItem(`episode-${epId.value}-export-watermark`)
   if (wm != null) exportWatermarkText.value = wm
   const wmAnim = window.localStorage.getItem(`episode-${epId.value}-export-watermark-animated`)
@@ -4021,9 +4052,11 @@ const lockedImageConfigLabel = computed(() => configLabel(imageConfigs.value.fin
 const episodeImageModel = ref(DEFAULT_IMAGE_MODEL)
 const episodeTextModel = ref(DEFAULT_TEXT_MODEL)
 const episodeTextThinking = ref(DEFAULT_TEXT_THINKING)
+const referPreviousEpisode = ref(false)
 const imageModelOptions = computed(() => IMAGE_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
 const textModelOptions = computed(() => TEXT_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
 const episodeTextModelSupportsThinking = computed(() => textModelSupportsThinking(episodeTextModel.value))
+const showReferPreviousEpisodeToggle = computed(() => episodeNumber > 1 && showTextModelPicker.value)
 const showImageModelPicker = computed(() => ['chars', 'scenes', 'shots'].includes(prodTab.value))
 const showTextModelPicker = computed(() => ['chars', 'shots'].includes(prodTab.value))
 const showBgmModelPicker = computed(() => prodTab.value === 'bgm')
@@ -4038,6 +4071,27 @@ function syncEpisodeTextModel(ep) {
 
 function syncEpisodeTextThinking(ep) {
   episodeTextThinking.value = resolveEpisodeTextThinking(ep)
+}
+
+function syncReferPreviousEpisode(ep) {
+  referPreviousEpisode.value = !!(ep?.refer_previous_episode ?? ep?.referPreviousEpisode)
+}
+
+async function setReferPreviousEpisode(enabled) {
+  if (enabled === referPreviousEpisode.value) return
+  referPreviousEpisode.value = enabled
+  if (!epId.value) return
+  try {
+    await episodeAPI.update(epId.value, { refer_previous_episode: enabled })
+    if (episode.value) {
+      episode.value.refer_previous_episode = enabled
+      episode.value.referPreviousEpisode = enabled
+    }
+    toast.success(enabled ? `已开启参照第 ${episodeNumber - 1} 集` : '已关闭参照上集')
+  } catch (e) {
+    syncReferPreviousEpisode(episode.value)
+    toast.error(e.message)
+  }
 }
 
 async function setEpisodeTextThinking(enabled) {
@@ -4628,6 +4682,11 @@ const shotImgCount = computed(() => {
   return sbs.value.filter(s => s.first_frame_image || s.firstFrameImage || s.last_frame_image || s.lastFrameImage || s.composed_image || s.composedImage).length
 })
 const narrationNeedImageCount = computed(() => narrationShotsNeedingImage(sbs.value).length)
+const narrationMissingPromptCount = computed(() =>
+  sbs.value.filter(sb =>
+    narrationShotNeedsOwnImage(sb) && !String(sb?.image_prompt || sb?.imagePrompt || '').trim(),
+  ).length,
+)
 const NARRATION_PROMPT_COPY_BATCH_SIZE = 10
 const narrationCopyBatchIndex = ref(1)
 const narrationCopyBatchOptions = computed(() => {
@@ -5446,6 +5505,7 @@ async function refresh() {
       syncEpisodeImageModel(ep)
       syncEpisodeTextModel(ep)
       syncEpisodeTextThinking(ep)
+      syncReferPreviousEpisode(ep)
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
       try { scenes.value = await episodeAPI.scenes(ep.id) } catch { scenes.value = [] }
       sbs.value = sortStoryboards(await episodeAPI.storyboards(ep.id))
@@ -5615,11 +5675,20 @@ async function resumeNarrationImageBreakdownPollIfNeeded() {
 }
 
 function doNarrationImageBreakdown() {
+  runNarrationImageBreakdown({ retry_missing_prompts: false })
+}
+
+function doRetryMissingNarrationImagePrompts() {
+  runNarrationImageBreakdown({ retry_missing_prompts: true })
+}
+
+function runNarrationImageBreakdown(options = {}) {
+  const retryMissing = options.retry_missing_prompts === true
   narrationImageBreaking.value = true
   narrationImageBreakdownProgress.value = {
     status: 'processing',
-    phase: 'detecting',
-    message: '正在启动配图分镜…',
+    phase: retryMissing ? 'prompts' : 'detecting',
+    message: retryMissing ? '正在补全缺失配图文案…' : '正在启动配图分镜…',
     percent: 1,
   }
   startNarrationImageBreakdownPoll()
@@ -5629,14 +5698,20 @@ function doNarrationImageBreakdown() {
       const res = await episodeAPI.narrationImageBreakdown(epId.value, {
         style,
         image_detect_mode: imageDetectMode.value,
+        retry_missing_prompts: retryMissing,
       })
-      const paragraphCount = res?.paragraph_count ?? res?.paragraphCount ?? 0
-      const diptychCount = res?.diptych_count ?? res?.diptychCount ?? 0
-      const imageCount = res?.image_needed_count ?? res?.imageNeededCount ?? 0
-      const diptychHint = diptychCount ? `（含 ${diptychCount} 张两宫格）` : ''
-      const promptSource = res?.image_prompt_source ?? res?.imagePromptSource
-      const promptHint = promptSource === 'llm' ? ' · AI配图文案' : ' · 规则配图文案'
-      toast.success(`配图分镜：${paragraphCount} 段 · ${imageCount} 张配图${diptychHint}${promptHint}`)
+      if (res?.retry_missing_prompts ?? res?.retryMissingPrompts) {
+        const updated = res?.prompts_updated ?? res?.promptsUpdated ?? 0
+        toast.success(`已补全 ${updated} 条缺失配图文案`)
+      } else {
+        const paragraphCount = res?.paragraph_count ?? res?.paragraphCount ?? 0
+        const diptychCount = res?.diptych_count ?? res?.diptychCount ?? 0
+        const imageCount = res?.image_needed_count ?? res?.imageNeededCount ?? 0
+        const diptychHint = diptychCount ? `（含 ${diptychCount} 张两宫格）` : ''
+        const promptSource = res?.image_prompt_source ?? res?.imagePromptSource
+        const promptHint = promptSource === 'llm' ? ' · AI配图文案' : ' · 规则配图文案'
+        toast.success(`配图分镜：${paragraphCount} 段 · ${imageCount} 张配图${diptychHint}${promptHint}`)
+      }
       persistNarrationBreakdownSummary({
         ...res,
         image_breakdown_at: Date.now(),
@@ -5655,7 +5730,6 @@ function doNarrationImageBreakdown() {
     }
   })()
 }
-
 function triggerNarrationStoryboardDescUpload() {
   storyboardDescUploadTarget.value = 'storyboard'
   storyboardDescUploadInputRef.value?.click()
@@ -8627,6 +8701,30 @@ onMounted(async () => {
   border-bottom: 1px solid var(--border);
   background: rgba(255,255,255,0.03);
 }
+.narration-breakdown-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.btn-retry-missing-prompts {
+  background: linear-gradient(135deg, #2548a6 0%, #1e3a8a 100%);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 4px 14px rgba(30, 58, 138, 0.4);
+}
+.btn-retry-missing-prompts:hover {
+  background: linear-gradient(135deg, #2d56b8 0%, #2548a6 100%);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 6px 18px rgba(30, 58, 138, 0.48);
+  transform: translateY(-1px);
+}
+.btn-retry-missing-prompts:active {
+  filter: brightness(0.96);
+  transform: translateY(0);
+}
 .text-thinking-toggle {
   display: flex;
   align-items: center;
@@ -9620,8 +9718,10 @@ onMounted(async () => {
 .export-main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; }
 .export-video { max-width: 720px; width: 100%; border-radius: var(--radius-lg); background: #000; }
 .export-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; width: 100%; max-width: 720px; }
-.export-list { width: 280px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.export-list { width: 280px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.export-list-options { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .export-bgm-panel { padding: 10px 12px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.export-bgm-panel-primary { background: var(--bg-elevated, rgba(255,255,255,0.03)); }
 .export-opening-page { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 .export-opening-body { flex: 1; overflow: auto; padding: 16px 20px; max-width: 960px; }
 .export-opening-panel { padding: 10px 12px 12px; border-bottom: 1px solid var(--border); }
@@ -9634,7 +9734,7 @@ onMounted(async () => {
 .export-bgm-volume { display: flex; flex-direction: column; gap: 4px; }
 .export-bgm-slider { width: 100%; accent-color: var(--accent); }
 .export-list-head { padding: 11px 14px; font-size: 11px; font-weight: 700; color: var(--text-3); border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.06em; }
-.export-list-body { flex: 1; overflow-y: auto; padding: 6px; }
+.export-list-body { flex: 1 1 auto; min-height: 100px; max-height: 38vh; overflow-y: auto; padding: 6px; }
 .exp-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--radius); }
 .exp-row:hover { background: var(--bg-hover); }
 

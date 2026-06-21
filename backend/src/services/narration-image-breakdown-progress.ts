@@ -1,7 +1,7 @@
 export type NarrationImageBreakdownPhase = 'detecting' | 'prompts' | 'title' | 'saving' | 'done' | 'error'
 
 export type NarrationImageBreakdownProgress = {
-  status: 'processing' | 'completed' | 'failed'
+  status: 'processing' | 'completed' | 'failed' | 'cancelled'
   phase: NarrationImageBreakdownPhase
   message: string
   percent: number
@@ -13,7 +13,42 @@ export type NarrationImageBreakdownProgress = {
 }
 
 const progressMap = new Map<number, NarrationImageBreakdownProgress>()
+const cancelFlags = new Map<number, boolean>()
 const STALE_MS = 15 * 60 * 1000
+
+export class NarrationImageBreakdownCancelledError extends Error {
+  constructor() {
+    super('配图分镜已取消')
+    this.name = 'NarrationImageBreakdownCancelledError'
+  }
+}
+
+export function isNarrationImageBreakdownCancelled(episodeId: number): boolean {
+  return cancelFlags.get(episodeId) === true
+}
+
+export function assertNarrationImageBreakdownNotCancelled(episodeId: number) {
+  if (isNarrationImageBreakdownCancelled(episodeId)) {
+    throw new NarrationImageBreakdownCancelledError()
+  }
+}
+
+export function requestNarrationImageBreakdownCancel(episodeId: number): boolean {
+  const progress = progressMap.get(episodeId)
+  if (!progress || progress.status !== 'processing') return false
+  cancelFlags.set(episodeId, true)
+  updateNarrationImageBreakdownProgress(episodeId, {
+    status: 'cancelled',
+    phase: 'error',
+    message: '配图分镜已取消',
+    error: 'cancelled',
+  })
+  return true
+}
+
+function clearNarrationImageBreakdownCancel(episodeId: number) {
+  cancelFlags.delete(episodeId)
+}
 
 export function calcPromptBatchPercent(batchDone: number, batchCount: number): number {
   if (!batchCount) return 15
@@ -40,6 +75,7 @@ export function updateNarrationImageBreakdownProgress(
 }
 
 export function startNarrationImageBreakdownProgress(episodeId: number) {
+  clearNarrationImageBreakdownCancel(episodeId)
   updateNarrationImageBreakdownProgress(episodeId, {
     status: 'processing',
     phase: 'detecting',
@@ -65,6 +101,7 @@ export function getNarrationImageBreakdownProgress(episodeId: number): Narration
 
 export function clearNarrationImageBreakdownProgress(episodeId: number) {
   progressMap.delete(episodeId)
+  clearNarrationImageBreakdownCancel(episodeId)
 }
 
 export type NarrationImageBreakdownProgressCallback = (patch: Partial<NarrationImageBreakdownProgress>) => void

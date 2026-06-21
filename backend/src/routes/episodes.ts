@@ -72,7 +72,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model', 'text_thinking', 'watermark_text', 'watermark_animated']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model', 'text_thinking', 'watermark_text', 'watermark_animated', 'refer_previous_episode']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -96,6 +96,11 @@ app.put('/:id', async (c) => {
     drizzleUpdates.watermarkAnimated = updates.watermark_animated === true
       || updates.watermark_animated === 1
       || updates.watermark_animated === '1'
+  }
+  if ('refer_previous_episode' in updates) {
+    drizzleUpdates.referPreviousEpisode = updates.refer_previous_episode === true
+      || updates.refer_previous_episode === 1
+      || updates.refer_previous_episode === '1'
   }
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
@@ -380,7 +385,10 @@ app.post('/:id/narration-image-breakdown', async (c) => {
       : body.image_detect_mode === 'balanced'
         ? 'balanced'
         : 'paragraph'
-    const result = await breakdownNarrationImages(episodeId, style, mode)
+    const retryMissing = body.retry_missing_prompts === true
+    const result = await breakdownNarrationImages(episodeId, style, mode, {
+      retryMissingPrompts: retryMissing,
+    })
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)

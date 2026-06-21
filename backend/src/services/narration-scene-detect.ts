@@ -16,6 +16,7 @@ import {
   calcPromptBatchPercent,
   type NarrationImageBreakdownProgressCallback,
 } from './narration-image-breakdown-progress.js'
+import { buildPriorNarrationLines } from './episode-continuity.js'
 
 /** 配图段落 prompt：每批最多段落数 */
 const PARAGRAPH_PROMPT_LLM_BATCH_SIZE = 10
@@ -164,33 +165,211 @@ export function suppressDateOnlyImageAnchors(
   return result
 }
 
+/** 正文分镜配图占比（约 30%） */
+export const NARRATION_IMAGE_TARGET_RATIO = 0.3
+
+/** 每张配图平均覆盖镜数（切段目标） */
+export const NARRATION_IMAGE_AVERAGE_SHOTS_PER_SEGMENT = 4
+
+/** 单段最多镜数（超过则补锚点） */
+export const NARRATION_IMAGE_MAX_SHOTS_PER_SEGMENT = 5
+
+/** 单段最少镜数（不足则合并到上一张，避免隔一镜换图） */
+export const NARRATION_IMAGE_MIN_SHOTS_PER_SEGMENT = 3
+
 function finalizeImageNeeds(items: NarrationSentenceItem[], needs: boolean[]): boolean[] {
-  return suppressDateOnlyImageAnchors(items, needs)
+  return suppressDateOnlyImageAnchors(
+    items,
+    enforceMinShotsPerSegment(
+      enforceMaxShotsPerSegment(enforceMinShotsPerSegment(needs)),
+    ),
+  )
 }
 
-/** 规则兜底：按段落与场景切换切分配图段 */
+function resolveImagePickCount(eligibleCount: number): number {
+  if (eligibleCount <= 0) return 0
+  return Math.max(1, Math.round(eligibleCount / NARRATION_IMAGE_AVERAGE_SHOTS_PER_SEGMENT))
+}
+
+function scoreStoryboardImagePriority(
+  items: NarrationSentenceItem[],
+  index: number,
+  llmWantsImage = false,
+): number {
+  const item = items[index]
+  const sentence = item.sentence
+  if (isNarrationDateOnlySentence(sentence)) return -1000
+
+  let score = 0
+  if (llmWantsImage) score += 100
+  if (index === 0) score += 40
+
+  if (index > 0 && items[index].paragraphIndex !== items[index - 1].paragraphIndex) score += 35
+  if (STRONG_SCENE_SHIFT_RE.test(sentence)) score += 32
+  if (SCENE_SHIFT_RE.test(sentence)) score += 24
+  if (BEAT_SHIFT_RE.test(sentence)) score += 18
+  if (SCENE_OPENING_RE.test(sentence)) score += 12
+  if (sentenceHasNewLocationTag(items, index)) score += 28
+
+  if (/批|卖|摊|店|万元|辞|创业|赚钱|租|开|推.*车|婚礼|串门|电视|网购|杂货|风光|落魄/.test(sentence)) score += 8
+  if (/年轻人|顾客|货物|商品|赶时髦/.test(sentence)) score += 6
+
+  return score
+}
+
+function sentenceHasNewLocationTag(items: NarrationSentenceItem[], index: number): boolean {
+  if (index <= 0) return false
+  const curTags = getImageLocationTags(items[index].sentence)
+  if (!curTags.length) return false
+  const priorText = items.slice(0, index).map(item => item.sentence).join('')
+  const priorTags = getImageLocationTags(priorText)
+  return curTags.some(tag => !priorTags.includes(tag))
+}
+
+function pickSegmentAnchorIndex(
+  items: NarrationSentenceItem[],
+  eligibleIndices: number[],
+  windowStart: number,
+  windowEnd: number,
+  llmFlags: unknown[] | undefined,
+  lastAnchor: number,
+): number {
+  const minIndex = lastAnchor < 0 ? 0 : lastAnchor + NARRATION_IMAGE_MIN_SHOTS_PER_SEGMENT
+
+  let bestIndex = -1
+  let bestScore = -Infinity
+  for (let pos = windowStart; pos < windowEnd; pos++) {
+    const index = eligibleIndices[pos]!
+    if (lastAnchor >= 0 && index < minIndex) continue
+    const score = scoreStoryboardImagePriority(items, index, llmFlags ? !!llmFlags[index] : false)
+    if (score > bestScore) {
+      bestScore = score
+      bestIndex = index
+    }
+  }
+
+  if (bestIndex >= 0) return bestIndex
+
+  for (let pos = windowStart; pos < windowEnd; pos++) {
+    const index = eligibleIndices[pos]!
+    if (lastAnchor < 0 || index >= minIndex) return index
+  }
+
+  return eligibleIndices[windowStart]!
+}
+
+/** 按分镜总数约 30% 配图、平均约 4 镜一图分配锚点（结合 LLM 优先级与时间线分段） */
+export function allocateImageNeedsByRatio(
+  items: NarrationSentenceItem[],
+  llmFlags?: unknown[],
+  _mode: ImageDetectMode = 'paragraph',
+): boolean[] {
+  if (!items.length) return []
+
+  const eligibleIndices = items
+    .map((item, index) => index)
+    .filter(index => !isNarrationDateOnlySentence(items[index].sentence))
+
+  const eligibleCount = eligibleIndices.length
+  if (!eligibleCount) return items.map(() => false)
+
+  const targetPick = resolveImagePickCount(eligibleCount)
+
+  const needs = items.map(() => false)
+  const segmentCount = targetPick
+  let lastAnchor = -1
+  for (let segment = 0; segment < segmentCount; segment++) {
+    const start = Math.floor(segment * eligibleCount / segmentCount)
+    const end = Math.floor((segment + 1) * eligibleCount / segmentCount)
+    if (start >= end) continue
+    const anchorIndex = pickSegmentAnchorIndex(
+      items,
+      eligibleIndices,
+      start,
+      end,
+      llmFlags,
+      lastAnchor,
+    )
+    needs[anchorIndex] = true
+    lastAnchor = anchorIndex
+  }
+
+  return finalizeImageNeeds(items, needs)
+}
+
+/** 相邻锚点不足 min 镜时去掉后锚，合并到上一张 */
+function enforceMinShotsPerSegment(
+  needs: boolean[],
+  min = NARRATION_IMAGE_MIN_SHOTS_PER_SEGMENT,
+): boolean[] {
+  const result = [...needs]
+  if (!result.length) return result
+
+  let lastAnchor = -1
+  for (let i = 0; i < result.length; i++) {
+    if (!result[i]) continue
+    if (lastAnchor >= 0 && i - lastAnchor < min) {
+      result[i] = false
+      continue
+    }
+    lastAnchor = i
+  }
+
+  if (!result.some(Boolean)) result[0] = true
+  return result
+}
+
+/** 相邻锚点超过 max 镜时补锚点（均分，且每段不少于 min 镜） */
+function enforceMaxShotsPerSegment(
+  needs: boolean[],
+  max = NARRATION_IMAGE_MAX_SHOTS_PER_SEGMENT,
+  min = NARRATION_IMAGE_MIN_SHOTS_PER_SEGMENT,
+): boolean[] {
+  const result = [...needs]
+  if (!result.length) return result
+
+  let changed = true
+  while (changed) {
+    changed = false
+    const anchors = result
+      .map((flag, index) => (flag ? index : -1))
+      .filter(index => index >= 0)
+
+    for (let a = 0; a < anchors.length - 1; a++) {
+      const start = anchors[a]!
+      const end = anchors[a + 1]!
+      const gap = end - start
+      if (gap <= max) continue
+
+      const splits = Math.ceil(gap / max)
+      const chunkSize = Math.max(min, Math.ceil(gap / splits))
+      const cursor = start + chunkSize
+      if (cursor < end && end - cursor >= min) {
+        result[cursor] = true
+        changed = true
+        break
+      }
+    }
+  }
+
+  return result
+}
+
+/** 规则兜底：按约 30% 占比、平均约 4 镜一图分配 */
 export function detectImageNeedsBalanced(items: NarrationSentenceItem[]): boolean[] {
-  return detectImageNeedsHeuristic(items)
+  return allocateImageNeedsByRatio(items, undefined, 'balanced')
 }
 
-/** 省钱模式兜底：仅空行分段与强场景切换 */
+/** 省钱模式兜底：同样按约 30% 配图 */
 export function detectImageNeedsConservative(items: NarrationSentenceItem[]): boolean[] {
-  const raw = items.map((item, index) => {
-    if (isNarrationDateOnlySentence(item.sentence)) return false
-    if (index === 0) return true
-    const prev = items[index - 1]
-    if (item.paragraphIndex !== prev.paragraphIndex) return true
-    if (STRONG_SCENE_SHIFT_RE.test(item.sentence)) return true
-    return false
-  })
-  return finalizeImageNeeds(items, raw)
+  return allocateImageNeedsByRatio(items, undefined, 'conservative')
 }
 
 /** 同一场景连续超过 maxGap 句仍无新图 → 补一张，避免画面长时间不切换 */
 export function ensureMaxNarrationGap(
   items: NarrationSentenceItem[],
   needs: boolean[],
-  maxGap = 6,
+  maxGap = NARRATION_IMAGE_MAX_SHOTS_PER_SEGMENT,
 ): boolean[] {
   const result = [...needs]
   if (!items.length) return result
@@ -427,17 +606,13 @@ export async function generateSceneImagePromptsWithLLM(
   }
 }
 
-/** 采纳 LLM 换镜判定（不设配图占比上限） */
+/** 将 LLM 优先级映射为约 30% 配图分配 */
 function normalizeLLMImageDetectFlags(
   items: NarrationSentenceItem[],
   flags: unknown[],
-  _mode: ImageDetectMode = 'paragraph',
+  mode: ImageDetectMode = 'paragraph',
 ): boolean[] {
-  return items.map((item, index) => {
-    if (isNarrationDateOnlySentence(item.sentence)) return false
-    if (index === 0) return true
-    return !!flags[index]
-  })
+  return allocateImageNeedsByRatio(items, flags, mode)
 }
 
 export async function detectImageNeedsWithLLM(
@@ -447,6 +622,7 @@ export async function detectImageNeedsWithLLM(
   textThinking = true,
   style = 'comic',
   fullNarrationLines?: string[],
+  previousEpisodeNarration?: string[],
 ): Promise<boolean[] | null> {
   if (!items.length) return []
 
@@ -467,6 +643,7 @@ export async function detectImageNeedsWithLLM(
       : items.map(item => item.sentence)
 
     const user = JSON.stringify({
+      ...(previousEpisodeNarration?.length ? { previous_episode_narration: previousEpisodeNarration } : {}),
       full_narration: fullNarration,
       sentences: items.map(item => item.sentence),
       sentence_indexes: items.map((_, index) => index),
@@ -482,10 +659,7 @@ export async function detectImageNeedsWithLLM(
       return null
     }
 
-    const normalized = finalizeImageNeeds(
-      items,
-      normalizeLLMImageDetectFlags(items, flags, mode),
-    )
+    const normalized = normalizeLLMImageDetectFlags(items, flags, mode)
     const llmRawCount = flags.filter((flag: unknown, index: number) => (
       !isNarrationDateOnlySentence(items[index].sentence) && (index === 0 || !!flag)
     )).length
@@ -515,6 +689,7 @@ export async function resolveImageNeeds(
     textThinking?: boolean
     style?: string
     fullNarrationLines?: string[]
+    previousEpisodeNarration?: string[]
   },
 ): Promise<{
   needs: boolean[]
@@ -528,6 +703,7 @@ export async function resolveImageNeeds(
     options?.textThinking ?? true,
     options?.style || 'comic',
     options?.fullNarrationLines,
+    options?.previousEpisodeNarration,
   )
   if (fromLLM) return { needs: fromLLM, source: 'llm' }
 
@@ -564,6 +740,7 @@ export async function generateTitleImagePromptWithLLM(options: {
   titleHook?: string | null
   titleFull?: string | null
   bodySentences?: string[]
+  previousEpisodeNarration?: string[]
   style?: string
   textModel?: string | null
   textThinking?: boolean
@@ -586,7 +763,9 @@ export async function generateTitleImagePromptWithLLM(options: {
 
     const system = buildNarrationTitleImagePromptLLMSystem(style)
 
+    const previousEpisodeNarration = options.previousEpisodeNarration || []
     const user = JSON.stringify({
+      ...(previousEpisodeNarration.length ? { previous_episode_narration: previousEpisodeNarration } : {}),
       title: { hook: titleHook || titleFull, full: titleFull || titleHook },
       full_narration: fullNarration,
       output_format: { title_image_prompt: 'string，片头背景完整 prompt' },
@@ -626,6 +805,7 @@ export async function generateParagraphImagePromptsWithLLM(
     textThinking?: boolean
     characters?: CharacterPromptHint[]
     fullNarrationLines?: string[]
+    previousEpisodeNarration?: string[]
     onProgress?: NarrationImageBreakdownProgressCallback
   },
 ): Promise<{ titlePrompt: string | null; promptsByStartIndex: Map<number, string> } | null> {
@@ -657,6 +837,7 @@ export async function generateParagraphImagePromptsWithLLM(
       hasCharacters: characters.length > 0,
     })
     const fullBodyLines = options?.fullNarrationLines || []
+    const previousEpisodeNarration = options?.previousEpisodeNarration || []
     const protagonistHints = characters.map(ch => ({
       name: ch.name,
       variantLabel: (ch as { variantLabel?: string | null }).variantLabel,
@@ -704,13 +885,14 @@ export async function generateParagraphImagePromptsWithLLM(
       })
 
       const user = JSON.stringify({
+        ...(previousEpisodeNarration.length ? { previous_episode_narration: previousEpisodeNarration } : {}),
         full_narration: fullNarration,
         characters: characterPayload,
         paragraphs: batch.map(p => ({
           paragraph_index: p.index,
           start_index: p.startIndex,
           timeline_up_to_index: p.startIndex,
-          prior_narration: fullBodyLines.slice(0, p.startIndex),
+          prior_narration: buildPriorNarrationLines(previousEpisodeNarration, fullBodyLines, p.startIndex),
           layout: p.layout,
           narration_lines: p.sentences,
         })),
@@ -824,6 +1006,7 @@ export async function generateParagraphImagePromptsWithLLM(
         titleHook,
         titleFull,
         bodySentences: options?.fullNarrationLines,
+        previousEpisodeNarration: options?.previousEpisodeNarration,
         style,
         textModel,
         textThinking,

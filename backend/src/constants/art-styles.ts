@@ -121,13 +121,9 @@ export const NARRATION_LLM_ANALYSIS_STEPS = [
   '4) 按六维写出【画面主体】【年代场景】【核心细节动作】【光影色调】【镜头视角】【质感要求】；【年代场景】有陈列载体时必须写「载体+上陈列的具体物件名」',
 ] as const
 
-/** LLM 配图换镜：按段落自由分配，不设占比上限 */
-export const NARRATION_PARAGRAPH_IMAGE_ALLOCATION_LLM_RULE =
-  '按文案空行分段（paragraph_indexes）自由判断配图点，不设配图占比上限；同一段落内若场景、地点、动作、物件或叙事节拍有明显变化可标 needs_image=true，同场景无新可视信息则 needs_image=false；每个配图段涵盖从上一配图点到本点的全部旁白句，后续配图描述须综合该段完整信息'
-
 /** LLM 配图 prompt：须涵盖配图段全部旁白信息 */
 export const NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE =
-  'narration_lines 是本配图段全部旁白句（非单句），须综合整段撰写 prompt，覆盖段落内全部关键情节、场景、物件、动作与互动，勿只描写首句瞬间'
+  'narration_lines 是本配图段全部旁白句（从上一配图点到本点的每一镜），image_prompt 须覆盖段内全部关键情节、场景、人物、动作、物件与氛围，勿只写首句瞬间'
 
 /** LLM 写配图 prompt：如何通读全文 */
 export const NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE =
@@ -167,6 +163,10 @@ export const NARRATION_LLM_PROMPT_PATTERN =
 export const NARRATION_TITLE_IMAGE_LLM_RULE =
   '片头标题图须综合 full_narration 全文（片头 hook + 正文旁白），提炼最能概括本期核心的【片头背景场景】与【主题氛围】；不局限于 hook 字面，须体现全文主线（核心事件、身份或关系转折、关键场所或物件意象等），绝对无文字'
 
+/** LLM 多集连贯：上集旁白作为上下文，索引仍只针对本集 */
+export const NARRATION_PREVIOUS_EPISODE_LLM_RULE =
+  '若输入含 previous_episode_narration（上集正文旁白，按时间顺序），须先通读以理解人物、地点与剧情延续；full_narration 仅含本集旁白；needs_image / start_index / timeline_up_to_index 均只针对本集 sentences；prior_narration = previous_episode_narration + 本集锚点之前旁白'
+
 /** 组装「段落配图」LLM system prompt（素体 / 其他画风） */
 export function buildNarrationParagraphImagePromptLLMSystem(
   style?: string | null,
@@ -178,6 +178,7 @@ export function buildNarrationParagraphImagePromptLLMSystem(
     '分析流程（每条都必须执行）：',
     ...NARRATION_LLM_ANALYSIS_STEPS,
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
+    NARRATION_PREVIOUS_EPISODE_LLM_RULE,
     NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE,
     NARRATION_PLOT_CONTINUITY_LLM_RULE,
     NARRATION_FIXTURES_LLM_RULE,
@@ -212,7 +213,7 @@ export function buildNarrationParagraphImagePromptLLMSystem(
       options?.hasCharacters
         ? '11) characters 的 life_stage 仅用于素体阶段体型约束，禁止写入服装发型五官'
         : '11) 无 characters 时【画面主体】仍须写黑色素体小人主人公',
-      '12) 每条 prompt 只写当前配图段的一个场景；不要输出负面提示词',
+      '12) 每条 prompt 只写当前配图段的一个场景，须综合 narration_lines 段内全部旁白；不要输出负面提示词',
       `13) ${NARRATION_VIOLENCE_CONTENT_LLM_RULE}`,
       `14) ${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`,
       '只输出 JSON，不要解释。',
@@ -249,12 +250,12 @@ export function buildNarrationImageDetectLLMSystem(
 
   const detectRules = [
     '换镜判定（needs_image）：',
-    '1) 通读 full_narration，结合 paragraph_indexes 与每句旁白判断是否需要新配图',
-    `2) ${NARRATION_PARAGRAPH_IMAGE_ALLOCATION_LLM_RULE}`,
-    '3) needs_image=true：空行分段后首句（若非纯日期句）、场景/地点/经营阶段切换、新动作、新物件、新互动、叙事节拍转折',
+    '1) 通读 full_narration，结合 narration_lines 判断每句是否适合作为新配图起点',
+    '2) 全集正文分镜约 30% 需要配图；系统按时间线均分（平均约 4 镜一图）并结合你的优先级选取换镜锚点',
+    '3) needs_image=true：场景/地点/经营阶段切换、新动作、新物件、新互动、叙事节拍转折、空行分段后的新瞬间',
     '4) needs_image=false：同场景内画面可完全复用上一张、无新可视信息',
     '5) 纯日期/季节/时段句 → needs_image=false；正文首句若非纯日期句 → needs_image=true',
-    '6) needs_image=true 的句子将作为新配图段起点，该段包含至下一配图点前的全部旁白，配图描述将涵盖整段信息',
+    '6) needs_image=true 的句子将作为新配图段起点，该段包含至下一配图点前的全部旁白；相邻配图至少间隔 3 镜，平均约 4 镜一图',
   ]
 
   const templateContext = minimal
@@ -278,6 +279,8 @@ export function buildNarrationImageDetectLLMSystem(
     '分析流程（每条都必须执行）：',
     ...NARRATION_LLM_ANALYSIS_STEPS,
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
+    NARRATION_PREVIOUS_EPISODE_LLM_RULE,
+    NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE,
     ...detectRules,
     NARRATION_VIOLENCE_CONTENT_LLM_RULE,
     NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE,
@@ -292,6 +295,7 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
     return [
       '你是影视解说分镜美术指导，根据整集解说全文为片头标题图写 AI 文生图用的中文 image_prompt。',
       NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
+      NARRATION_PREVIOUS_EPISODE_LLM_RULE,
       `硬性规则：`,
       `1) 画风固定关键词（必含）：${NARRATION_IMAGE_STYLE_CORE}`,
       '2) 严格按此万能模板输出完整 prompt：',
@@ -306,6 +310,7 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
   return [
     '你是影视解说分镜美术指导，根据整集解说全文为片头标题图写 AI 文生图用的 image_prompt。',
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
+    NARRATION_PREVIOUS_EPISODE_LLM_RULE,
     NARRATION_TITLE_IMAGE_LLM_RULE,
     NARRATION_VIOLENCE_CONTENT_LLM_RULE,
     NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE,
@@ -319,6 +324,7 @@ export function buildNarrationSceneSegmentsImagePromptLLMSystem(style?: string |
   return [
     '你是影视解说分镜美术指导，根据每段旁白场景写出用于 AI 文生图的「单场景画面描述」。',
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
+    NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE,
     NARRATION_PLOT_CONTINUITY_LLM_RULE,
     NARRATION_SCENE_PLOT_QUALITY_LLM_RULE,
     NARRATION_VIOLENCE_CONTENT_LLM_RULE,
