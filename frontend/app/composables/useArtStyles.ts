@@ -69,7 +69,11 @@ export const NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE =
 /** 默认镜头视角 */
 export const NARRATION_DEFAULT_CAMERA_PROMPT = '中景平视，叙事解说构图，主体清晰'
 
-/** 素体画风质感要求 */
+/** LLM 写【质感要求】时的短补充项（不重复前缀画风） */
+export const NARRATION_MINIMAL_TEXTURE_LLM_HINT =
+  '简笔平涂，无服装，禁止写实人脸，无文字无水印'
+
+/** 素体画风质感要求（组装兜底用；LLM/coerce 落库时用短补充项） */
 export const NARRATION_MINIMAL_TEXTURE_PROMPT =
   `2D扁平简笔画，主人公${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），群众${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），黑色轮廓线，纯色平涂，${NARRATION_BODY_CONSISTENCY_CORE}，${NARRATION_MINIMAL_NO_CLOTHING_RULE}，${NARRATION_MINIMAL_STYLE_FORBIDDEN}，无文字无水印`
 
@@ -79,7 +83,7 @@ export const NARRATION_BODY_CONSISTENCY_HINT =
 
 /** 主人公须入画且画风一致 */
 export const NARRATION_PROTAGONIST_PLOT_HINT =
-  `【画面主体】主人公须为${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），同框配角为${NARRATION_CROWD_BODY}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}`
+  `【画面主体】全画面仅 1 位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_PROTAGONIST_EYES}），同框配角为${NARRATION_CROWD_BODY}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}`
 
 /** LLM 光影色调须贴合当前段 */
 export const NARRATION_ATMOSPHERE_HINT =
@@ -1853,15 +1857,41 @@ export function resolveNarrationImagePrompt(
   return raw
 }
 
+/** 将【质感要求】规范为短补充项，去掉与前缀重复的长段 */
+export function normalizeMinimalTextureBracket(body?: string | null): string {
+  const trimmed = String(body || '').replace(/[，,]+$/g, '').trim()
+  if (!trimmed) return NARRATION_MINIMAL_TEXTURE_LLM_HINT
+
+  const isLongBlob =
+    trimmed.length > 55
+    || /全片统一简笔素体比例/.test(trimmed)
+    || /2D扁平简笔画，主人公黑色素体小人/.test(trimmed)
+    || trimmed.includes(NARRATION_MINIMAL_NO_CLOTHING_RULE)
+    || trimmed === NARRATION_MINIMAL_TEXTURE_PROMPT
+
+  if (isLongBlob) return NARRATION_MINIMAL_TEXTURE_LLM_HINT
+
+  const hasEssentials = /无文字/.test(trimmed) && (/平涂|简笔/.test(trimmed) || /禁止写实/.test(trimmed))
+  if (trimmed.length <= 48 && hasEssentials) {
+    if (!/无服装|无任何服装/.test(trimmed)) {
+      return `${trimmed}，无服装`.replace(/[，,]{2,}/g, '，')
+    }
+    return trimmed
+  }
+
+  return NARRATION_MINIMAL_TEXTURE_LLM_HINT
+}
+
 /** 配图/定妆：素体 prompt 强制补全无服装约束并清洗穿着描述 */
 export function applyMinimalNoClothingGuard(prompt?: string | null): string {
   let text = sanitizeSceneImagePrompt(String(prompt || '').trim())
   if (!text) return ''
   if (!/无服装|无任何服装|全身无服装/.test(text)) {
     if (/【质感要求[：:]/.test(text)) {
+      // 【质感要求】只补短项「无服装」，勿再追加 NARRATION_MINIMAL_NO_CLOTHING_RULE 长段
       text = text.replace(
-        /【质感要求[：:]([^】]*)】/,
-        (_, body) => `【质感要求：${String(body).replace(/[，,]+$/g, '').trim()}，${NARRATION_MINIMAL_NO_CLOTHING_RULE}】`,
+        /【质感要求[：:]([^】]*)】/g,
+        (_, body) => `【质感要求：${String(body).replace(/[，,]+$/g, '').trim()}，无服装】`,
       )
     } else {
       text = `${text}，${NARRATION_MINIMAL_NO_CLOTHING_RULE}`
@@ -1897,10 +1927,7 @@ export function coerceMinimalLLMImagePrompt(prompt?: string | null): string {
 
     text = text.replace(/【([^：:【]+)[：:]([^】]*)】/g, (_, label, body) => {
       const trimmedLabel = String(label).trim()
-      let next = normalizeMinimalCrowdInPlot(String(body).trim())
-      if (trimmedLabel === '质感要求') {
-        next = NARRATION_MINIMAL_TEXTURE_PROMPT
-      }
+      const next = normalizeMinimalCrowdInPlot(String(body).trim())
       return `【${trimmedLabel}：${next}】`
     })
 
@@ -1917,6 +1944,11 @@ export function coerceMinimalLLMImagePrompt(prompt?: string | null): string {
       .replace(/全片统一素体尺寸，圆头直径约占全身高度三分之一[^，【]*总高约三个头高[，,]?/g, '')
       .replace(/2D\s*扁平化卡通/g, '2D扁平简笔画')
   }
+
+  text = text.replace(
+    /【质感要求[：:]([^】]*)】/g,
+    (_, body) => `【质感要求：${normalizeMinimalTextureBracket(body)}】`,
+  )
 
   return applyMinimalNoClothingGuard(text)
 }

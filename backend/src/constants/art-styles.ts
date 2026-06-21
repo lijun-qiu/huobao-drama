@@ -89,9 +89,21 @@ export const NARRATION_DEFAULT_CAMERA_PROMPT = '中景平视，叙事解说构�
 export const NARRATION_MINIMAL_TEXTURE_PROMPT =
   `2D扁平简笔画，主人公${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），群众${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），黑色轮廓线，纯色平涂，${NARRATION_BODY_CONSISTENCY_CORE}，${NARRATION_MINIMAL_NO_CLOTHING_RULE}，${NARRATION_MINIMAL_STYLE_FORBIDDEN}，无文字无水印`
 
+/** LLM 写【质感要求】时的短补充项（不重复前缀画风） */
+export const NARRATION_MINIMAL_TEXTURE_LLM_HINT =
+  '简笔平涂，无服装，禁止写实人脸，无文字无水印'
+
+/** LLM 配图：六维去冗余（前缀/后缀已含固定画风） */
+export const NARRATION_LLM_ANTI_REDUNDANCY_RULE =
+  '【去冗余】前缀与后缀已含固定画风与无文字无水印；六维各维只写本镜独有信息；禁止在任一维度重复前缀已有的「16:9/2D扁平简笔画/素体小人/三头身/黑白眼睛/无复杂光影/极简简笔/无服装长段」等短语；同一关键词全文最多出现一次；禁止在末尾再追加第二遍画风或无服装说明'
+
+/** LLM 配图：每张仅一位黑色素体主人公 */
+export const NARRATION_SINGLE_PROTAGONIST_LLM_RULE =
+  `【唯一主人公】每张配图（含 layout=diptych 的每一格、片头背景若有人物）全画面仅允许 1 位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_PROTAGONIST_EYES}）；禁止 2 位及以上黑色素体小人、禁止「几位/两个/多名${NARRATION_PROTAGONIST_BODY}」；旁白涉及多人时，除主人公外其余角色一律写为${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}）；【画面主体】写「一位…${NARRATION_PROTAGONIST_BODY}主人公」，【核心细节动作】主人公动作只写这 1 位`
+
 /** LLM：素体须符合通用尺寸规格，仅人生阶段微调 */
 export const NARRATION_BODY_CONSISTENCY_LLM_RULE =
-  `【通用素体尺寸】每条须在【质感要求】或【画面主体】体现：${NARRATION_MINIMAL_BODY_SIZE_SPEC}；主人公${NARRATION_PROTAGONIST_BODY}、群众${NARRATION_CROWD_BODY}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
+  `【通用素体尺寸】【画面主体】须标明人生阶段（小孩/青年/中年/老年）；三头身等通用规格由前缀承担，【质感要求】不必重复；阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
 
 /** LLM 写配图 prompt：光影色调须贴合当前段（写入【光影色调】） */
 export const NARRATION_ATMOSPHERE_LLM_RULE =
@@ -99,7 +111,7 @@ export const NARRATION_ATMOSPHERE_LLM_RULE =
 
 /** LLM：主人公须入画且画风一致（写入【画面主体】【核心细节动作】） */
 export const NARRATION_PROTAGONIST_PLOT_LLM_RULE =
-  `【画面主体】主人公须为${NARRATION_PROTAGONIST_BODY}（按 life_stage 标明小孩/青年/中年/老年阶段），同框配角为${NARRATION_CROWD_BODY}；${NARRATION_MINIMAL_STAGE_FACE_RULE}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}`
+  `【画面主体】全画面仅 1 位${NARRATION_PROTAGONIST_BODY}主人公（按 life_stage 标明小孩/青年/中年/老年阶段，${NARRATION_PROTAGONIST_EYES}），同框配角为${NARRATION_CROWD_BODY}；${NARRATION_MINIMAL_STAGE_FACE_RULE}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}`
 
 /** LLM：群众/路人须为白色素体 */
 export const NARRATION_CROWD_PLOT_LLM_RULE =
@@ -138,11 +150,11 @@ export const NARRATION_FIXTURES_CONTINUITY_LLM_RULE = NARRATION_FIXTURES_LLM_RUL
 
 /** 六维正文填表示例（硬性规则用，模型须替换为旁白真实内容） */
 export const NARRATION_UNIVERSAL_SCENE_BODY_EXAMPLE =
-  `【画面主体：青年期${NARRATION_PROTAGONIST_BODY}主人公与两位${NARRATION_CROWD_BODY}】，【年代场景：八十年代市井夜市，摊位上陈列物件甲与物件乙】，【核心细节动作：主人公${NARRATION_PROTAGONIST_BODY}伸手示意摊位陈列物】，【光影色调：暖黄夜市灯光，喧闹人气】，【镜头视角：中景平视】，【质感要求：${NARRATION_PROTAGONIST_BODY}、${NARRATION_CROWD_BODY}、简笔平涂、无文字无水印】`
+  `【画面主体：一位青年期${NARRATION_PROTAGONIST_BODY}主人公与两位${NARRATION_CROWD_BODY}】，【年代场景：八十年代市井夜市，摊位上陈列物件甲与物件乙】，【核心细节动作：主人公伸手示意摊位陈列物】，【光影色调：暖黄夜市灯光，喧闹人气】，【镜头视角：中景平视】，【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}】`
 
 /** 两宫格六维输出格式（layout=diptych） */
 export const NARRATION_DIPPTYCH_SIX_PART_LLM_RULE =
-  'layout=diptych：单张 16:9 横向两宫格；左、右格各写完整六维，格式为【左格】【画面主体：…】，【年代场景：…】，【核心细节动作：…】，【光影色调：…】，【镜头视角：…】，【质感要求：…】，【右格】【画面主体：…】…【质感要求：…】；禁止旧式【左格场景与剧情】'
+  `layout=diptych：单张 16:9 横向两宫格；左、右格各写完整六维，格式为【左格】【画面主体：…】，【年代场景：…】，【核心细节动作：…】，【光影色调：…】，【镜头视角：…】，【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}】，【右格】【画面主体：…】…【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}】；禁止旧式【左格场景与剧情】；各格【质感要求】禁止复述前缀画风；每一格全画面仅 1 位${NARRATION_PROTAGONIST_BODY}主人公`
 
 export const NARRATION_SCENE_PLOT_QUALITY_LLM_RULE =
   '【年代场景】与【核心细节动作】须在同一空间；【核心细节动作】须为可见动作，严禁照抄旁白原文；抽象句须推断成可画瞬间'
@@ -157,11 +169,11 @@ export const NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE =
 
 /** LLM 配图写法抽象示例（不含具体故事情节，模型须从输入旁白中提取内容） */
 export const NARRATION_LLM_PROMPT_PATTERN =
-  'prior 已交代物件 + narration_lines 描述场所活动 →【画面主体：素体小人主人公与配角】，【年代场景：时代+地点+载体上陈列的具体物件名】，【核心细节动作：可见动作】，【光影色调：光线色调】，【镜头视角：景别机位】，【质感要求：画风与禁忌】'
+  `prior 已交代物件 + narration_lines 描述场所活动 →【画面主体：一位${NARRATION_PROTAGONIST_BODY}主人公与配角】，【年代场景：时代+地点+载体上陈列的具体物件名】，【核心细节动作：可见动作】，【光影色调：光线色调】，【镜头视角：景别机位】，【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}，不重复前缀画风】`
 
 /** LLM 写片头标题图 prompt 时的规则（通用） */
 export const NARRATION_TITLE_IMAGE_LLM_RULE =
-  '片头标题图须综合 full_narration 全文（片头 hook + 正文旁白），提炼最能概括本期核心的【片头背景场景】与【主题氛围】；不局限于 hook 字面，须体现全文主线（核心事件、身份或关系转折、关键场所或物件意象等），绝对无文字'
+  '片头标题图须综合 full_narration 全文（片头 hook + 正文旁白），提炼最能概括本期核心的【片头背景场景】与【主题氛围】；不局限于 hook 字面，须体现全文主线（核心事件、身份或关系转折、关键场所或物件意象等），绝对无文字；背景若出现人物，全画面仅 1 位黑色素体小人主人公，其余为白色素体小人或无人'
 
 /** LLM 多集连贯：上集旁白作为上下文，索引仍只针对本集 */
 export const NARRATION_PREVIOUS_EPISODE_LLM_RULE =
@@ -199,23 +211,25 @@ export function buildNarrationParagraphImagePromptLLMSystem(
     return [
       ...shared,
       '硬性规则：',
-      `1) 画风固定关键词（每条必含）：${NARRATION_IMAGE_STYLE_CORE}`,
-      '2) 每条 prompt 以画风前缀开头，接六维正文与后缀；【】内填入从旁白推断的真实内容，勿照抄占位说明。结构示例：',
+      `1) prompt 结构：${NARRATION_UNIVERSAL_SCENE_PREFIX} + 六维正文 + ${NARRATION_UNIVERSAL_SCENE_SUFFIX}；固定画风仅在前缀与后缀各写一次，六维禁止复述`,
+      '2) 六维示例（【】内须替换为旁白真实内容，勿照抄占位）：',
       `${NARRATION_UNIVERSAL_SCENE_PREFIX}，${NARRATION_UNIVERSAL_SCENE_BODY_EXAMPLE}，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-      `3) 【质感要求】须包含：${NARRATION_IMAGE_STYLE_CORE}，并写明无文字无水印`,
-      `4) ${NARRATION_FIXTURES_LLM_RULE}`,
-      '5) layout=single：单张完整场景插画。禁止 grid/collage/multi-panel/split screen/storyboard',
-      `6) ${NARRATION_DIPPTYCH_SIX_PART_LLM_RULE}`,
-      `7) ${NARRATION_TITLE_IMAGE_LLM_RULE}`,
-      `8) ${NARRATION_MINIMAL_STAGE_FACE_RULE}`,
-      `9) ${NARRATION_MINIMAL_NO_CLOTHING_LLM_RULE}`,
-      '10) 【年代场景】可写时代氛围感（如八十年代市井），禁止写具体年份数字；禁止写实人脸',
+      `3) 【质感要求】只写短补充「${NARRATION_MINIMAL_TEXTURE_LLM_HINT}」；禁止复述前缀画风、素体规格、无服装长段`,
+      `4) ${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
+      `5) ${NARRATION_FIXTURES_LLM_RULE}`,
+      '6) layout=single：单张完整场景插画。禁止 grid/collage/multi-panel/split screen/storyboard',
+      `7) ${NARRATION_DIPPTYCH_SIX_PART_LLM_RULE}`,
+      `8) ${NARRATION_TITLE_IMAGE_LLM_RULE}`,
+      `9) ${NARRATION_MINIMAL_STAGE_FACE_RULE}`,
+      `10) ${NARRATION_SINGLE_PROTAGONIST_LLM_RULE}`,
+      `11) ${NARRATION_MINIMAL_NO_CLOTHING_LLM_RULE}`,
+      '12) 【年代场景】可写时代氛围感（如八十年代市井），禁止写具体年份数字；禁止写实人脸',
       options?.hasCharacters
-        ? '11) characters 的 life_stage 仅用于素体阶段体型约束，禁止写入服装发型五官'
-        : '11) 无 characters 时【画面主体】仍须写黑色素体小人主人公',
-      '12) 每条 prompt 只写当前配图段的一个场景，须综合 narration_lines 段内全部旁白；不要输出负面提示词',
-      `13) ${NARRATION_VIOLENCE_CONTENT_LLM_RULE}`,
-      `14) ${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`,
+        ? '13) characters 的 life_stage 仅用于素体阶段体型约束，禁止写入服装发型五官'
+        : '13) 无 characters 时【画面主体】仍须写一位黑色素体小人主人公',
+      '14) 每条 prompt 只写当前配图段的一个场景，须综合 narration_lines 段内全部旁白；不要输出负面提示词',
+      `15) ${NARRATION_VIOLENCE_CONTENT_LLM_RULE}`,
+      `16) ${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`,
       '只输出 JSON，不要解释。',
     ].filter(Boolean).join('\n')
   }
@@ -264,6 +278,7 @@ export function buildNarrationImageDetectLLMSystem(
       `${NARRATION_UNIVERSAL_SCENE_PREFIX}，${NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE}，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
       `画风固定：${NARRATION_IMAGE_STYLE_CORE}`,
       NARRATION_PROTAGONIST_PLOT_LLM_RULE,
+      NARRATION_SINGLE_PROTAGONIST_LLM_RULE,
       NARRATION_CROWD_PLOT_LLM_RULE,
       NARRATION_BODY_CONSISTENCY_LLM_RULE,
       NARRATION_FIXTURES_LLM_RULE,
@@ -297,13 +312,15 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
       NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
       NARRATION_PREVIOUS_EPISODE_LLM_RULE,
       `硬性规则：`,
-      `1) 画风固定关键词（必含）：${NARRATION_IMAGE_STYLE_CORE}`,
+      `1) prompt 结构：${NARRATION_UNIVERSAL_SCENE_PREFIX} + 【片头背景场景】+【主题氛围】+ ${NARRATION_UNIVERSAL_SCENE_SUFFIX}；固定画风仅在前缀与后缀各写一次`,
       '2) 严格按此万能模板输出完整 prompt：',
       `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景：具体地点与环境】，【主题氛围：与全文主线对应的叙事氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
       `3) ${NARRATION_TITLE_IMAGE_LLM_RULE}`,
-      '4) 禁止写年代/年份和具体服装描述；禁止在画面中出现任何文字',
-      `5) ${NARRATION_VIOLENCE_CONTENT_LLM_RULE}`,
-      `6) ${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`,
+      `4) ${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
+      `5) ${NARRATION_SINGLE_PROTAGONIST_LLM_RULE}`,
+      '5) 禁止写年代/年份和具体服装描述；禁止在画面中出现任何文字',
+      `6) ${NARRATION_VIOLENCE_CONTENT_LLM_RULE}`,
+      `7) ${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`,
       '只输出 JSON，不要解释。',
     ].join('\n')
   }
@@ -2649,15 +2666,41 @@ export function resolveNarrationImagePrompt(
   return raw
 }
 
+/** 将【质感要求】规范为短补充项，去掉与前缀重复的长段 */
+export function normalizeMinimalTextureBracket(body?: string | null): string {
+  const trimmed = String(body || '').replace(/[，,]+$/g, '').trim()
+  if (!trimmed) return NARRATION_MINIMAL_TEXTURE_LLM_HINT
+
+  const isLongBlob =
+    trimmed.length > 55
+    || /全片统一简笔素体比例/.test(trimmed)
+    || /2D扁平简笔画，主人公黑色素体小人/.test(trimmed)
+    || trimmed.includes(NARRATION_MINIMAL_NO_CLOTHING_RULE)
+    || trimmed === NARRATION_MINIMAL_TEXTURE_PROMPT
+
+  if (isLongBlob) return NARRATION_MINIMAL_TEXTURE_LLM_HINT
+
+  const hasEssentials = /无文字/.test(trimmed) && (/平涂|简笔/.test(trimmed) || /禁止写实/.test(trimmed))
+  if (trimmed.length <= 48 && hasEssentials) {
+    if (!/无服装|无任何服装/.test(trimmed)) {
+      return `${trimmed}，无服装`.replace(/[，,]{2,}/g, '，')
+    }
+    return trimmed
+  }
+
+  return NARRATION_MINIMAL_TEXTURE_LLM_HINT
+}
+
 /** 配图/定妆：素体 prompt 强制补全无服装约束并清洗穿着描述 */
 export function applyMinimalNoClothingGuard(prompt?: string | null): string {
   let text = sanitizeSceneImagePrompt(String(prompt || '').trim())
   if (!text) return ''
   if (!/无服装|无任何服装|全身无服装/.test(text)) {
     if (/【质感要求[：:]/.test(text)) {
+      // 【质感要求】只补短项「无服装」，勿再追加 NARRATION_MINIMAL_NO_CLOTHING_RULE 长段
       text = text.replace(
-        /【质感要求[：:]([^】]*)】/,
-        (_, body) => `【质感要求：${String(body).replace(/[，,]+$/g, '').trim()}，${NARRATION_MINIMAL_NO_CLOTHING_RULE}】`,
+        /【质感要求[：:]([^】]*)】/g,
+        (_, body) => `【质感要求：${String(body).replace(/[，,]+$/g, '').trim()}，无服装】`,
       )
     } else {
       text = `${text}，${NARRATION_MINIMAL_NO_CLOTHING_RULE}`
@@ -2693,10 +2736,7 @@ export function coerceMinimalLLMImagePrompt(prompt?: string | null): string {
 
     text = text.replace(/【([^：:【]+)[：:]([^】]*)】/g, (_, label, body) => {
       const trimmedLabel = String(label).trim()
-      let next = normalizeMinimalCrowdInPlot(String(body).trim())
-      if (trimmedLabel === '质感要求') {
-        next = NARRATION_MINIMAL_TEXTURE_PROMPT
-      }
+      const next = normalizeMinimalCrowdInPlot(String(body).trim())
       return `【${trimmedLabel}：${next}】`
     })
 
@@ -2713,6 +2753,11 @@ export function coerceMinimalLLMImagePrompt(prompt?: string | null): string {
       .replace(/全片统一素体尺寸，圆头直径约占全身高度三分之一[^，【]*总高约三个头高[，,]?/g, '')
       .replace(/2D\s*扁平化卡通/g, '2D扁平简笔画')
   }
+
+  text = text.replace(
+    /【质感要求[：:]([^】]*)】/g,
+    (_, body) => `【质感要求：${normalizeMinimalTextureBracket(body)}】`,
+  )
 
   return applyMinimalNoClothingGuard(text)
 }
