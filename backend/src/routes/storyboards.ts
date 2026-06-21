@@ -5,7 +5,7 @@ import { success, created, now, badRequest } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { generateTTS } from '../services/tts-generation.js'
 import { findReusableTtsByText, narrationShotNeedsOwnTts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from '../services/narration-tts.js'
-import { isNarrationStoryboard, parseNarrationImageMeta } from '../services/narration-image.js'
+import { isNarrationStoryboard, isStoryboardTitleShot } from '../services/narration-image.js'
 import { formatCharacterDisplayName, resolveStoryboardCharacterIdsForShot } from '../services/narration-characters.js'
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.js'
@@ -238,8 +238,7 @@ app.post('/:id/generate-tts', async (c) => {
 
   let voiceId = 'alloy'
   const speaker = parsedDialogue.speaker
-  const titleMeta = isNarrationStoryboard(sb) ? parseNarrationImageMeta(sb.referenceImages) : null
-  const isTitleShot = titleMeta?.narration_shot_type === 'title'
+  const isTitleShot = isStoryboardTitleShot(sb)
 
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
   if (ep) {
@@ -279,7 +278,9 @@ app.post('/:id/generate-tts', async (c) => {
     return badRequest(c, '该镜头沿用前镜配音，请先生成前序需配音的镜头')
   }
 
-  const reusablePath = !force && !isNarrationStoryboard(sb) ? findReusableTtsByText(episodeStoryboards, pureDialogue, id) : null
+  const reusablePath = !force && !isNarrationStoryboard(sb) && !isTitleShot
+    ? findReusableTtsByText(episodeStoryboards, pureDialogue, id)
+    : null
   if (reusablePath) {
     db.update(schema.storyboards)
       .set({ ttsAudioUrl: reusablePath, updatedAt: now() })

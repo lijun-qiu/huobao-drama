@@ -1,5 +1,5 @@
 /**
- * 成片水印 — 默认固定于画面右侧垂直居中；可选左右缓慢浮动
+ * 成片水印 — 默认固定于画面右上角；可选左右缓慢浮动
  */
 import fs from 'fs'
 
@@ -7,6 +7,10 @@ export const DEFAULT_WATERMARK_TEXT = '顺拾人间'
 /** NarratoAI 周期 30s，此处更慢 */
 export const WATERMARK_FLOAT_PERIOD_SEC = 50
 export const WATERMARK_FLOAT_AMPLITUDE_RATIO = 0.10
+/** 距顶边占比 */
+export const WATERMARK_MARGIN_TOP_RATIO = 0.10
+/** 距右边占比（文字右缘对齐到 w*(1-ratio)） */
+export const WATERMARK_MARGIN_RIGHT_RATIO = 0.10
 
 const SUBTITLE_FONT_SIZE = 20
 
@@ -60,7 +64,7 @@ function escapeDrawtextPath(filePath: string): string {
   return filePath.replace(/\\/g, '/').replace(/:/g, '\\:')
 }
 
-/** 构建 drawtext 滤镜：默认右侧垂直居中固定；animated 时左右缓慢漂移 */
+/** 构建 drawtext 滤镜：默认右上角固定；animated 时在右上区域左右缓慢漂移 */
 export function buildWatermarkDrawtextFilter(
   text: string,
   options?: WatermarkFilterOptions,
@@ -71,21 +75,19 @@ export function buildWatermarkDrawtextFilter(
   const w = options?.width ?? 1280
   const h = options?.height ?? 720
   const fontSize = options?.fontSize ?? Math.max(18, Math.round(SUBTITLE_FONT_SIZE * 0.55))
-  const margin = Math.max(12, Math.round(Math.min(w, h) * 0.02))
   const animated = options?.animated === true
 
-  const minX = `w*0.5+${margin}`
-  const maxX = `w-tw-${margin}`
-  const baseX = `max(${minX},min(w*0.75-tw/2,${maxX}))`
+  const rightX = `w*${1 - WATERMARK_MARGIN_RIGHT_RATIO}-tw`
+  const minX = `w*0.55`
+  const floatAmplitude = w * WATERMARK_FLOAT_AMPLITUDE_RATIO
   const xExpr = animated
     ? (() => {
-      const floatAmplitude = w * WATERMARK_FLOAT_AMPLITUDE_RATIO
       const period = WATERMARK_FLOAT_PERIOD_SEC
-      const floatX = `${baseX}+${floatAmplitude}*sin(2*PI*t/${period})`
-      return `max(${minX},min(${floatX},${maxX}))`
+      const floatX = `${rightX}-${floatAmplitude}*(1+sin(2*PI*t/${period}))/2`
+      return `max(${minX},min(${floatX},${rightX}))`
     })()
-    : baseX
-  const baseY = '(h-th)/2'
+    : rightX
+  const baseY = `h*${WATERMARK_MARGIN_TOP_RATIO}`
 
   const escapedText = escapeDrawtextText(trimmed)
   const fontPath = resolveDrawtextFontPath()
