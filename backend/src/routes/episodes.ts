@@ -12,6 +12,7 @@ import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
 import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration } from '../services/ffmpeg-opening.js'
+import { isTitleVideoProcessing, startTitleSegmentVideoGeneration } from '../services/ffmpeg-title-segment.js'
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { resolveVoiceboxProfileId } from '../services/voicebox-tts.js'
 import { generateTTS } from '../services/tts-generation.js'
@@ -574,6 +575,37 @@ app.get('/:id/opening-video', async (c) => {
     opening_video_error: ep.openingVideoError,
     opening_audio_url: ep.openingAudioUrl,
     opening_subtitle_text: resolveOpeningSubtitleText(ep.openingSubtitleText),
+  })
+})
+
+// POST /episodes/:id/generate-title-video — 片头视频（剧中红字片头镜拼接）
+app.post('/:id/generate-title-video', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  if (isTitleVideoProcessing(episodeId)) {
+    return badRequest(c, '片头视频正在生成中，请稍候')
+  }
+
+  startTitleSegmentVideoGeneration(episodeId)
+  return success(c, { status: 'processing' })
+})
+
+// GET /episodes/:id/title-video — 查询片头视频状态
+app.get('/:id/title-video', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  return success(c, {
+    status: isTitleVideoProcessing(episodeId)
+      ? 'processing'
+      : ep.titleVideoError
+        ? 'failed'
+        : ep.titleVideoUrl
+          ? 'completed'
+          : 'idle',
+    title_video_url: ep.titleVideoUrl,
+    title_video_error: ep.titleVideoError,
   })
 })
 

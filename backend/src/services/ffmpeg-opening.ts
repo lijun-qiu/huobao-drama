@@ -1,5 +1,5 @@
 /**
- * 开幕视频 — 随机 8 张配图 + 翻页片头（xfade 卷曲转场 + 翻页音效 + 可选上传配音/字幕）
+ * 开幕视频 — 随机 8 张配图 + 翻页片头（对角卷曲交替 + 翻页音效 + 可选上传配音/字幕）
  */
 import { execFileSync, spawnSync } from 'child_process'
 import ffmpeg from 'fluent-ffmpeg'
@@ -13,14 +13,15 @@ import { now } from '../utils/response.js'
 import { sortStoryboardsByOrder } from './narration-image.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
-import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION } from './ffmpeg-page-transition.js'
+import { PAGE_FLIP_TRANSITION_SEC } from './ffmpeg-page-transition.js'
+import { buildTitleSubtitleAssFilter, TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 
 export const OPENING_IMAGE_COUNT = 8
-/** 无上传配音时的默认片头时长（秒） */
+/** 开幕视频固定时长（秒）；有配音时也截断到此长度 */
 export const OPENING_TOTAL_SEC = 3
 export const OPENING_NARRATION_TEXT = '体验365个人生副本'
 const OPENING_NARRATION_TEXT_LEGACY = '今天要体验的人生是'
@@ -35,7 +36,17 @@ const PAGE_TRANSITION_SEC = PAGE_FLIP_TRANSITION_SEC
 const OPENING_FPS = 25
 const OPENING_WIDTH = 1280
 const OPENING_HEIGHT = 720
+
+/** 对角卷曲交替（不旋转，避免黑边）：奇数次 BR→TL，偶数次 TL→BR */
+const OPENING_FLIP_EXPR_BR_TO_TL = 'if(lt((1-X/W+1-Y/H)/2*0.8-(1-P)*1.2,-0.2),B,A)'
+const OPENING_FLIP_EXPR_TL_TO_BR = 'if(lt((X/W+Y/H)/2*0.8-(1-P)*1.2,-0.2),B,A)'
+
+function openingPageFlipCustomExpr(transitionIndex: number): string {
+  return transitionIndex % 2 === 1 ? OPENING_FLIP_EXPR_BR_TO_TL : OPENING_FLIP_EXPR_TL_TO_BR
+}
+
 const OPENING_SUBTITLE_SIZE = 100
+const OPENING_SUBTITLE_WHITE_SIZE = OPENING_SUBTITLE_SIZE + 10
 /** ASS Alignment 5 = 水平垂直居中 */
 const OPENING_SUBTITLE_ALIGNMENT = 5
 /** 单次书本翻页音效时长（秒），须小于转场间隔避免叠成一片 */
@@ -61,15 +72,6 @@ function supportsSubtitleFilter(): boolean {
   }
 }
 
-function probeMediaDuration(filePath: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, data) => {
-      if (err) reject(err)
-      else resolve(Math.max(0.5, Number(data.format.duration) || 1))
-    })
-  })
-}
-
 function formatAssTimestamp(seconds: number) {
   const totalCs = Math.max(50, Math.round(seconds * 100))
   const h = Math.floor(totalCs / 360000)
@@ -88,6 +90,7 @@ const OPENING_TEXT_SLIDE_MS = 420
 function buildOpeningAssContent(text: string, durationSec: number) {
   const line = escapeAssText(text)
   const tags = `{\\an5\\move(640,780,640,360,0,${OPENING_TEXT_SLIDE_MS})\\fad(180,140)}`
+  const end = formatAssTimestamp(durationSec)
   return `[Script Info]
 ScriptType: v4.00+
 PlayResX: ${OPENING_WIDTH}
@@ -96,11 +99,13 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Opening, Microsoft YaHei, ${OPENING_SUBTITLE_SIZE}, &H0000FF&, &HFF000000&, &H00000000&, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 3, 1, ${OPENING_SUBTITLE_ALIGNMENT}, 0, 0, 0, 1
+Style: OpeningWhite, ${TITLE_SUBTITLE_FONT}, ${OPENING_SUBTITLE_WHITE_SIZE}, &HFFFFFF&, &HFF000000&, &H00000000&, &H80000000, 0, 0, 0, 0, 100, 100, 0, 0, 1, 3, 1, ${OPENING_SUBTITLE_ALIGNMENT}, 0, 0, 0, 1
+Style: Opening, ${TITLE_SUBTITLE_FONT}, ${OPENING_SUBTITLE_SIZE}, &H0000FF&, &HFF000000&, &H00FFFFFF&, &H80000000, 0, 0, 0, 0, 100, 100, 0, 0, 1, 3, 1, ${OPENING_SUBTITLE_ALIGNMENT}, 0, 0, 0, 1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:00.00,${formatAssTimestamp(durationSec)},Opening,,0,0,0,,${tags}${line}
+Dialogue: 0,0:00:00.00,${end},OpeningWhite,,0,0,0,,${tags}${line}
+Dialogue: 1,0:00:00.00,${end},Opening,,0,0,0,,${tags}${line}
 `
 }
 
@@ -143,14 +148,17 @@ function collectEpisodeIllustrationPaths(episodeId: number): string[] {
 function buildVideoPageFlipFilter(segmentDurations: number[]): string {
   const td = PAGE_TRANSITION_SEC
   const parts: string[] = []
+  const clipCount = segmentDurations.length
+
   let vLabel = '[0:v]'
   let cumulative = segmentDurations[0]
 
-  for (let i = 1; i < segmentDurations.length; i++) {
-    const vOut = i === segmentDurations.length - 1 ? 'vout' : `v${i}`
+  for (let i = 1; i < clipCount; i++) {
+    const vOut = i === clipCount - 1 ? 'vout' : `v${i}`
     const offset = Math.max(0.1, cumulative - td)
+    const expr = openingPageFlipCustomExpr(i)
     parts.push(
-      `${vLabel}[${i}:v]xfade=transition=${PAGE_FLIP_XFADE_TRANSITION}:duration=${td}:offset=${offset.toFixed(3)}[${vOut}]`,
+      `${vLabel}[${i}:v]xfade=transition=custom:duration=${td}:offset=${offset.toFixed(3)}:expr='${expr}'[${vOut}]`,
     )
     vLabel = `[${vOut}]`
     cumulative += segmentDurations[i] - td
@@ -365,13 +373,16 @@ async function mixNarrationWithPageFlips(
   narrationPath: string,
   flipTrackPath: string,
   outputPath: string,
+  totalSec: number,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     ffmpeg()
       .input(narrationPath)
       .input(flipTrackPath)
-      .complexFilter('[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]')
-      .outputOptions(['-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000'])
+      .complexFilter(
+        `[0:a]atrim=0:${totalSec},asetpts=PTS-STARTPTS[n];[n][1:a]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]`,
+      )
+      .outputOptions(['-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-t', String(totalSec)])
       .output(outputPath)
       .on('end', () => resolve())
       .on('error', (err) => reject(err))
@@ -394,8 +405,7 @@ async function muxOpeningVideo(
 
     const filters: string[] = []
     if (subtitlePath && supportsSubtitleFilter()) {
-      const escaped = subtitlePath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'")
-      filters.push(`ass='${escaped}'`)
+      filters.push(buildTitleSubtitleAssFilter(subtitlePath))
     }
     appendWatermarkFilter(filters, watermarkText, { animated: watermarkAnimated })
     if (filters.length) command = command.videoFilter(filters)
@@ -557,14 +567,13 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
     const watermarkText = resolveWatermarkText(ep.watermarkText)
     const watermarkAnimated = resolveWatermarkAnimated(ep.watermarkAnimated)
 
-    let totalSec = OPENING_TOTAL_SEC
+    const totalSec = OPENING_TOTAL_SEC
     let narrationAbs: string | null = null
     if (uploadedAudioRel) {
       narrationAbs = toAbsPath(uploadedAudioRel)
       if (!fs.existsSync(narrationAbs)) {
         throw new Error('开幕配音文件不存在，请重新上传 MP3')
       }
-      totalSec = await probeMediaDuration(narrationAbs)
     }
 
     const imageCount = picked.length
@@ -602,7 +611,7 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
     if (narrationAbs) {
       const mixedAudioPath = path.join(tempDir, `${uuid()}-mixed.m4a`)
       tempFiles.push(mixedAudioPath)
-      await mixNarrationWithPageFlips(narrationAbs, flipTrackPath, mixedAudioPath)
+      await mixNarrationWithPageFlips(narrationAbs, flipTrackPath, mixedAudioPath, totalSec)
 
       let subtitlePath: string | null = null
       if (subtitleText) {

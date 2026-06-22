@@ -43,6 +43,8 @@ export const episodes = sqliteTable('episodes', {
   openingVideoError: text('opening_video_error'),
   openingAudioUrl: text('opening_audio_url'),
   openingSubtitleText: text('opening_subtitle_text'),
+  titleVideoUrl: text('title_video_url'),
+  titleVideoError: text('title_video_error'),
   watermarkText: text('watermark_text'),
   watermarkAnimated: integer('watermark_animated', { mode: 'boolean' }).default(false),
   referPreviousEpisode: integer('refer_previous_episode', { mode: 'boolean' }).default(false),

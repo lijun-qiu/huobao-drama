@@ -722,6 +722,7 @@ export interface WorkflowState {
   composedCount: number
   mergeUrl: boolean
   openingVideoUrl?: boolean
+  titleVideoUrl?: boolean
   bgmAppliedCount?: number
 }
 
@@ -783,6 +784,7 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
         label: '导出',
         items: [
           { key: 'export:opening', label: '开幕视频', desc: '翻页片头', done: !!s.openingVideoUrl },
+          { key: 'export:title', label: '片头视频', desc: '剧中红字', done: !!s.titleVideoUrl },
           { key: 'export:merge', label: '拼接导出', desc: '完整 MP4', done: s.mergeUrl },
         ],
       },
@@ -822,7 +824,11 @@ export function resolveActiveSubStepKey(
   prodTab: string,
   exportTab = 'merge',
 ) {
-  if (panel === 'export') return exportTab === 'opening' ? 'export:opening' : 'export:merge'
+  if (panel === 'export') {
+    if (exportTab === 'opening') return 'export:opening'
+    if (exportTab === 'title') return 'export:title'
+    return 'export:merge'
+  }
   if (panel === 'production') return `prod:${prodTab}`
   if (mode === 'narration') {
     if (scriptStep === 1) return 'script:storyboard'

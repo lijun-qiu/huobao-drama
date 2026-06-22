@@ -2413,6 +2413,61 @@
             </template>
           </div>
         </div>
+        <div v-else-if="exportTab === 'title'" class="export-opening-page">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">02</span>
+                <span class="step-name">片头视频</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <span class="tag dim" style="font-size:11px">{{ titleShots.length }} 个片头镜</span>
+            </div>
+          </div>
+          <div class="export-opening-body">
+            <div class="narration-hint" style="margin-bottom:16px">
+              将本集所有<strong>剧中红字片头镜</strong>按顺序合成并拼接为独立 MP4（含双层叠字字幕、自下而上滑入动画）。需各片头镜已具备<strong>配图 + 配音</strong>；生成时会自动重新合成各片头镜再拼接。
+            </div>
+            <template v-if="titleVideoProcessing">
+              <div class="step-empty">
+                <Loader2 :size="32" class="animate-spin" style="color:var(--accent)" />
+                <div class="empty-title" style="margin-top:12px">正在生成片头视频</div>
+                <div class="empty-desc">合成 {{ titleShots.length }} 个片头镜并拼接…</div>
+              </div>
+            </template>
+            <template v-else-if="titleVideoUrl">
+              <video :key="titleVideoSrc" :src="titleVideoSrc" controls class="export-video" />
+              <div v-if="titleVideoError" class="narration-hint" style="margin-top:12px;color:var(--danger)">
+                上次生成失败：{{ titleVideoError }}（下方为旧版本，请重新生成）
+              </div>
+              <div class="export-bar" style="margin-top:12px">
+                <button class="btn" :disabled="!titleShotsReady" @click="generateTitleVideo">重新生成</button>
+                <a :href="titleVideoSrc" download class="btn ml-auto">下载片头视频</a>
+              </div>
+            </template>
+            <template v-else>
+              <div class="step-empty">
+                <div class="empty-visual">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                </div>
+                <div class="empty-title">生成片头视频</div>
+                <div v-if="!titleShots.length" class="empty-desc">本集暂无片头镜，请先完成旁白分镜</div>
+                <div v-else-if="titleVideoError" class="empty-desc" style="color:var(--danger)">{{ titleVideoError }}</div>
+                <div v-else-if="!titleShotsReady" class="empty-desc">请为全部 {{ titleShots.length }} 个片头镜完成配图与配音</div>
+                <div v-else class="empty-desc">就绪：{{ titleShots.length }} 个片头镜可导出</div>
+                <button
+                  class="btn btn-primary"
+                  style="margin-top:12px"
+                  :disabled="!titleShotsReady || titleVideoProcessing"
+                  @click="generateTitleVideo"
+                >
+                  生成片头视频
+                </button>
+              </div>
+            </template>
+          </div>
+        </div>
         <div v-else class="export-split">
           <div class="export-main">
             <template v-if="mergeProcessing">
@@ -3120,6 +3175,17 @@ const illustrationImageCount = computed(() => {
 })
 const openingVideoUrl = computed(() => episode.value?.opening_video_url || episode.value?.openingVideoUrl || null)
 const openingVideoError = computed(() => episode.value?.opening_video_error || episode.value?.openingVideoError || '')
+const titleVideoUrl = computed(() => episode.value?.title_video_url || episode.value?.titleVideoUrl || null)
+const titleVideoError = computed(() => episode.value?.title_video_error || episode.value?.titleVideoError || '')
+const titleShots = computed(() => sbs.value.filter(sb => isNarrationTitleShot(sb)))
+const titleShotsReady = computed(() => {
+  if (!titleShots.value.length) return false
+  return titleShots.value.every(sb =>
+    hasDialogue(sb)
+    && hasNarrationShotOwnTts(sb)
+    && !!getStoryboardCover(sb),
+  )
+})
 const openingAudioUrl = computed(() => episode.value?.opening_audio_url || episode.value?.openingAudioUrl || '')
 const openingAudioSrc = computed(() => openingAudioUrl.value ? `/${openingAudioUrl.value.replace(/^\//, '')}` : '')
 const OPENING_SUBTITLE_DEFAULT = '体验365个人生副本'
@@ -3133,11 +3199,17 @@ const openingSubtitleText = ref(OPENING_SUBTITLE_DEFAULT)
 const openingAudioUploading = ref(false)
 const openingAudioGenerating = ref(false)
 const openingVideoProcessing = ref(false)
+const titleVideoProcessing = ref(false)
 let openingPollTimer = null
 const openingVideoSrc = computed(() => {
   if (!openingVideoUrl.value) return ''
   const v = openingVideoUrl.value.split('/').pop() || episode.value?.updated_at || episode.value?.updatedAt || Date.now()
   return `/${openingVideoUrl.value}?v=${encodeURIComponent(String(v))}`
+})
+const titleVideoSrc = computed(() => {
+  if (!titleVideoUrl.value) return ''
+  const v = titleVideoUrl.value.split('/').pop() || episode.value?.updated_at || episode.value?.updatedAt || Date.now()
+  return `/${titleVideoUrl.value}?v=${encodeURIComponent(String(v))}`
 })
 
 const scriptStep = ref(0)
@@ -3998,6 +4070,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleImageViewerKeydown)
   stopBgmPoll()
   stopOpeningPoll()
+  stopTitlePoll()
 })
 
 function isPendingSceneImage(id) {
@@ -4965,6 +5038,7 @@ const workflowState = computed(() => ({
   composedCount: composedCount.value,
   mergeUrl: !!mergeUrl.value,
   openingVideoUrl: !!openingVideoUrl.value,
+  titleVideoUrl: !!titleVideoUrl.value,
   bgmAppliedCount: bgmAppliedCount.value,
 }))
 
@@ -4978,6 +5052,7 @@ const narrationIconMap = {
   'prod:shots': ImageIcon,
   'prod:compose': Layers,
   'export:opening': Film,
+  'export:title': Clapperboard,
   'export:merge': Download,
 }
 
@@ -5022,6 +5097,7 @@ const sidebarSections = computed(() => {
       label: '导出',
       items: [
         { key: 'export:opening', label: '开幕视频', desc: '', icon: Film, done: !!openingVideoUrl.value },
+        { key: 'export:title', label: '片头视频', desc: '', icon: Clapperboard, done: !!titleVideoUrl.value },
         { key: 'export:merge', label: '拼接导出', desc: '', icon: Download, done: !!mergeUrl.value },
       ],
     },
@@ -5115,6 +5191,7 @@ const activeSubSteps = computed(() => {
     }
     return [
       { key: 'export:opening', label: '开幕视频', done: !!openingVideoUrl.value },
+      { key: 'export:title', label: '片头视频', done: !!titleVideoUrl.value },
       { key: 'export:merge', label: '拼接导出', done: !!mergeUrl.value },
     ]
   }
@@ -5144,6 +5221,7 @@ const activeSubSteps = computed(() => {
   }
   return [
     { key: 'export:opening', label: '开幕视频', done: !!openingVideoUrl.value },
+    { key: 'export:title', label: '片头视频', done: !!titleVideoUrl.value },
     { key: 'export:merge', label: '拼接导出', done: !!mergeUrl.value },
   ]
 })
@@ -5210,6 +5288,9 @@ const currentStageLabel = computed(() => {
   if (panel.value === 'production') return `制作阶段 · ${prodTabDefs.value[prodTabIdx.value]?.label || '制作'}`
   if (exportTab.value === 'opening') {
     return openingVideoUrl.value ? '导出阶段 · 开幕视频已生成' : '导出阶段 · 开幕视频'
+  }
+  if (exportTab.value === 'title') {
+    return titleVideoUrl.value ? '导出阶段 · 片头视频已生成' : '导出阶段 · 片头视频'
   }
   return mergeUrl.value ? '导出阶段 · 成片已生成' : '导出阶段 · 等待拼接'
 })
@@ -7630,6 +7711,53 @@ async function generateOpeningVideo() {
     startOpeningPoll()
   } catch (e) {
     openingVideoProcessing.value = false
+    toast.error(e.message)
+  }
+}
+
+let titlePollTimer = null
+
+function stopTitlePoll() {
+  if (titlePollTimer) {
+    clearInterval(titlePollTimer)
+    titlePollTimer = null
+  }
+}
+
+function startTitlePoll() {
+  stopTitlePoll()
+  titlePollTimer = setInterval(async () => {
+    try {
+      const status = await episodeAPI.titleVideoStatus(epId.value)
+      if (status?.status === 'processing') return
+      stopTitlePoll()
+      titleVideoProcessing.value = false
+      await refresh()
+      if (status?.status === 'completed') toast.success('片头视频已生成')
+      else if (status?.status === 'failed') toast.error(status?.title_video_error || '片头视频生成失败')
+    } catch {
+      stopTitlePoll()
+      titleVideoProcessing.value = false
+    }
+  }, 2500)
+}
+
+async function generateTitleVideo() {
+  if (!titleShots.value.length) {
+    toast.warning('本集没有片头镜')
+    return
+  }
+  if (!titleShotsReady.value) {
+    toast.warning('请为全部片头镜完成配图与配音')
+    return
+  }
+  try {
+    titleVideoProcessing.value = true
+    await episodeAPI.generateTitleVideo(epId.value)
+    toast.success('片头视频生成中…')
+    startTitlePoll()
+  } catch (e) {
+    titleVideoProcessing.value = false
     toast.error(e.message)
   }
 }

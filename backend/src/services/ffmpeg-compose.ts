@@ -18,6 +18,7 @@ import { resolveEdgeVoice } from './edge-tts-local.js'
 import { resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
+import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
@@ -127,6 +128,7 @@ function formatAssTimestamp(seconds: number) {
 }
 
 const TITLE_FONT_SIZE = 74
+const TITLE_WHITE_FONT_SIZE = TITLE_FONT_SIZE + 10
 
 function escapeAssChar(ch: string) {
   if (ch === '\n') return '\\N'
@@ -149,8 +151,8 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TitleWhite, Microsoft YaHei, ${TITLE_FONT_SIZE}, &HFFFFFF&, &HFF000000&, &H00000000&, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 5, 0, 0, 0, 1
-Style: Title, Microsoft YaHei, ${TITLE_FONT_SIZE}, &H0014F0&, &HFF000000&, &H00FFFFFF&, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 5, 0, 0, 0, 1
+Style: TitleWhite, ${TITLE_SUBTITLE_FONT}, ${TITLE_WHITE_FONT_SIZE}, &HFFFFFF&, &HFF000000&, &H00000000&, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 5, 0, 0, 0, 1
+Style: Title, ${TITLE_SUBTITLE_FONT}, ${TITLE_FONT_SIZE}, &H0014F0&, &HFF000000&, &H00FFFFFF&, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 5, 0, 0, 0, 1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -161,11 +163,15 @@ const TITLE_TEXT_SLIDE_MS = 420
 /** 片头字幕相对该句音频起点的显示延迟（原 0.5s，提前 0.5s 后为 0） */
 const TITLE_SUBTITLE_START_DELAY_SEC = 0
 
-/** 片头字幕：自下往上滑入 + 剧中红字 */
+/** 片头字幕：自下往上滑入 + 白底大字叠红字（同文案，白字大 10 号） */
 function buildTitleAssDialogueLine(text: string, startSec: number, endSec: number) {
   const line = escapeAssText(text.replace(/\r/g, '').replace(/\n/g, ' ').trim())
   const tags = `{\\an5\\move(640,780,640,360,0,${TITLE_TEXT_SLIDE_MS})\\fad(180,140)}`
-  return `Dialogue: 0,${formatAssTimestamp(startSec)},${formatAssTimestamp(endSec)},Title,,0,0,0,,${tags}${line}`
+  const start = formatAssTimestamp(startSec)
+  const end = formatAssTimestamp(endSec)
+  const white = `Dialogue: 0,${start},${end},TitleWhite,,0,0,0,,${tags}${line}`
+  const red = `Dialogue: 1,${start},${end},Title,,0,0,0,,${tags}${line}`
+  return `${white}\n${red}`
 }
 
 function buildTitleAssContent(text: string, durationSec: number) {
@@ -175,7 +181,7 @@ function buildTitleAssContent(text: string, durationSec: number) {
 
 function buildSubtitleForceStyle(isTitleShot: boolean) {
   if (isTitleShot) {
-    return `FontSize=${TITLE_FONT_SIZE}\\,PrimaryColour=&H0014F0&\\,OutlineColour=&HFFFFFF&\\,Outline=3\\,Bold=1\\,Alignment=5\\,MarginL=0\\,MarginR=0\\,MarginV=0`
+    return `FontName=${TITLE_SUBTITLE_FONT}\\,FontSize=${TITLE_FONT_SIZE}\\,PrimaryColour=&H0014F0&\\,OutlineColour=&HFFFFFF&\\,Outline=3\\,Bold=1\\,Alignment=5\\,MarginL=0\\,MarginR=0\\,MarginV=0`
   }
   return 'FontSize=20\\,PrimaryColour=&HFFFFFF&\\,OutlineColour=&H000000&\\,Outline=2\\,Alignment=2\\,MarginV=24'
 }
