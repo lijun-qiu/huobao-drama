@@ -32,6 +32,10 @@ export interface NarrationImageMeta {
   script_paragraph_index?: number
   /** 正文分镜序号（旁白分镜时写入） */
   body_sentence_index?: number
+  /** 配图文案来源：llm_raw=第二步纯LLM，optimized=第三步规则优化 */
+  image_prompt_source?: 'llm_raw' | 'optimized' | 'upload' | 'manual'
+  /** 第二步 LLM 原文备份，第三步优化前写入，用于还原 */
+  image_prompt_llm_raw?: string
 }
 
 /**
@@ -87,6 +91,15 @@ export function parseNarrationImageMeta(referenceImages?: string | null): Narrat
       paragraph_layout: parsed?.paragraph_layout === 'diptych' ? 'diptych' : parsed?.paragraph_layout === 'single' ? 'single' : undefined,
       script_paragraph_index: typeof parsed?.script_paragraph_index === 'number' ? parsed.script_paragraph_index : undefined,
       body_sentence_index: typeof parsed?.body_sentence_index === 'number' ? parsed.body_sentence_index : undefined,
+      image_prompt_source: parsed?.image_prompt_source === 'llm_raw'
+        || parsed?.image_prompt_source === 'optimized'
+        || parsed?.image_prompt_source === 'upload'
+        || parsed?.image_prompt_source === 'manual'
+        ? parsed.image_prompt_source
+        : undefined,
+      image_prompt_llm_raw: typeof parsed?.image_prompt_llm_raw === 'string' && parsed.image_prompt_llm_raw.trim()
+        ? parsed.image_prompt_llm_raw.trim()
+        : undefined,
     }
   } catch {}
   return { narration_image_mode: 'inherit' }

@@ -1,5 +1,5 @@
 /**
- * 开幕视频 — 随机 8 张配图 + 翻页片头（自上往下卷曲 + 翻页音效 + 可选上传配音/字幕）
+ * 开幕视频 — 随机 10 张配图 + 翻页片头（首尾镜固定 + 翻页音效 + 可选上传配音/字幕）
  */
 import { execFileSync, spawnSync } from 'child_process'
 import ffmpeg from 'fluent-ffmpeg'
@@ -20,7 +20,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 
-export const OPENING_IMAGE_COUNT = 8
+export const OPENING_IMAGE_COUNT = 10
 /** 开幕视频固定时长（秒）；有配音时也截断到此长度 */
 export const OPENING_TOTAL_SEC = 3
 export const OPENING_NARRATION_TEXT = '体验365个人生副本'
@@ -117,6 +117,20 @@ function shufflePick<T>(items: T[], count: number): T[] {
     picked.push(pool.splice(idx, 1)[0])
   }
   return picked
+}
+
+/** 开幕配图：第 1 张=集内首张配图，第 10 张=集内末张配图，中间随机 */
+export function pickOpeningImages(orderedIllustrations: string[], count = OPENING_IMAGE_COUNT): string[] {
+  if (!orderedIllustrations.length) return []
+  const first = orderedIllustrations[0]
+  const last = orderedIllustrations[orderedIllustrations.length - 1]
+  if (count <= 1) return [first]
+  if (orderedIllustrations.length === 1 || first === last) {
+    return Array(count).fill(first)
+  }
+  if (count === 2) return [first, last]
+  const middle = shufflePick(orderedIllustrations, count - 2)
+  return [first, ...middle, last]
 }
 
 function collectEpisodeIllustrationPaths(episodeId: number): string[] {
@@ -535,7 +549,7 @@ export function parseOpeningPickedImages(raw?: string | null): string[] {
 
 /** 将开幕视频所用配图打包为 zip，返回 zip 绝对路径（调用方负责删除所在临时目录） */
 export function buildOpeningPickedImagesZip(imageRels: string[]): { zipPath: string; tempDir: string } {
-  if (!imageRels.length) throw new Error('暂无开幕配图记录，请重新生成开幕视频')
+  if (!imageRels.length) throw new Error('暂无开幕配图记录，请先导出十张配图')
 
   const tempDir = path.join(STORAGE_ROOT, 'temp', 'opening', `zip-${uuid()}`)
   const stagingDir = path.join(tempDir, 'files')
@@ -544,7 +558,7 @@ export function buildOpeningPickedImagesZip(imageRels: string[]): { zipPath: str
   const staged: string[] = []
   for (let i = 0; i < imageRels.length; i++) {
     const abs = toAbsPath(imageRels[i])
-    if (!fs.existsSync(abs)) throw new Error(`开幕配图文件缺失（第 ${i + 1} 张），请重新生成开幕视频`)
+    if (!fs.existsSync(abs)) throw new Error(`开幕配图文件缺失（第 ${i + 1} 张），请重新导出配图`)
     const ext = path.extname(abs) || '.jpg'
     const name = `opening-${String(i + 1).padStart(2, '0')}${ext}`
     fs.copyFileSync(abs, path.join(stagingDir, name))
@@ -560,6 +574,31 @@ export function buildOpeningPickedImagesZip(imageRels: string[]): { zipPath: str
   return { zipPath, tempDir }
 }
 
+export function pickAndSaveOpeningImages(episodeId: number): string[] {
+  const illustrations = collectEpisodeIllustrationPaths(episodeId)
+  if (!illustrations.length) {
+    throw new Error('暂无可用配图，请先生成或上传镜头配图')
+  }
+  const picked = pickOpeningImages(illustrations, OPENING_IMAGE_COUNT)
+  db.update(schema.episodes)
+    .set({ openingPickedImages: JSON.stringify(picked), updatedAt: now() })
+    .where(eq(schema.episodes.id, episodeId))
+    .run()
+  return picked
+}
+
+function resolveOpeningPickedForVideo(episodeId: number, ep: typeof schema.episodes.$inferSelect): string[] {
+  const illustrations = collectEpisodeIllustrationPaths(episodeId)
+  if (!illustrations.length) {
+    throw new Error('暂无可用配图，请先生成或上传镜头配图')
+  }
+  const stored = parseOpeningPickedImages(ep.openingPickedImages)
+  const storedValid = stored.length === OPENING_IMAGE_COUNT
+    && stored.every(rel => fs.existsSync(toAbsPath(rel)))
+  if (storedValid) return stored
+  return pickOpeningImages(illustrations, OPENING_IMAGE_COUNT)
+}
+
 export async function generateOpeningVideo(episodeId: number): Promise<{
   path: string
   imageCount: number
@@ -569,19 +608,15 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error('Episode not found')
 
-  const illustrations = collectEpisodeIllustrationPaths(episodeId)
-  if (!illustrations.length) {
-    throw new Error('暂无可用配图，请先生成或上传镜头配图')
-  }
-
-  const picked = shufflePick(illustrations, OPENING_IMAGE_COUNT)
+  const picked = resolveOpeningPickedForVideo(episodeId, ep)
+  const illustrationPool = collectEpisodeIllustrationPaths(episodeId).length
   const tempDir = path.join(STORAGE_ROOT, 'temp', 'opening')
   const outputDir = path.join(STORAGE_ROOT, 'opening')
   fs.mkdirSync(tempDir, { recursive: true })
   fs.mkdirSync(outputDir, { recursive: true })
 
   const tempFiles: string[] = []
-  logTaskStart('OpeningVideo', 'generate', { episodeId, illustrationPool: illustrations.length, picked: picked.length })
+  logTaskStart('OpeningVideo', 'generate', { episodeId, illustrationPool, picked: picked.length })
 
   try {
     const uploadedAudioRel = ep.openingAudioUrl?.trim() || ''
@@ -695,7 +730,7 @@ export function startOpeningVideoGeneration(episodeId: number): void {
   if (processingEpisodes.has(episodeId)) return
   processingEpisodes.add(episodeId)
   db.update(schema.episodes)
-    .set({ openingVideoError: null, openingPickedImages: null, updatedAt: now() })
+    .set({ openingVideoError: null, updatedAt: now() })
     .where(eq(schema.episodes.id, episodeId))
     .run()
 

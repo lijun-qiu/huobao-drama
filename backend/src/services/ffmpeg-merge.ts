@@ -2,6 +2,7 @@
  * FFmpeg 多镜头拼接 — 将所有合成后的镜头视频拼接为一集
  */
 import ffmpeg from 'fluent-ffmpeg'
+import { execFileSync } from 'child_process'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -461,6 +462,56 @@ async function mergeOrderedSegmentsToOutput(
   fs.renameSync(tempOut, outputPath)
 }
 
+/** 无开幕/片头时，黑场 vdwind 翻页进入正文第一镜（与换配图切镜一致） */
+const BODY_LEAD_DURATION_SEC = IMAGE_CHANGE_TRANSITION_SEC
+
+function runFfmpegSync(args: string[]) {
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { stdio: 'pipe' })
+}
+
+async function createBlackLeadSegment(tempDir: string, _run: ActiveMergeRun): Promise<MergeSegment> {
+  fs.mkdirSync(tempDir, { recursive: true })
+  const outPath = path.join(tempDir, `lead-${uuid()}.mp4`)
+  const d = BODY_LEAD_DURATION_SEC
+  const dStr = d.toFixed(3)
+
+  runFfmpegSync([
+    '-f', 'lavfi', '-i', `color=c=black:s=1280x720:r=25:d=${dStr}`,
+    '-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${dStr}`,
+    '-c:v', 'libx264',
+    '-preset', 'medium',
+    '-crf', '23',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-ar', '48000',
+    '-b:a', '192k',
+    '-shortest',
+    '-movflags', '+faststart',
+    outPath,
+  ])
+
+  return { path: outPath, duration: d, temp: true }
+}
+
+async function prependBlackLeadPageFlip(
+  bodyVideoPath: string,
+  outputPath: string,
+  run: ActiveMergeRun,
+  tempCollector: string[],
+  onProgress?: (encodedSec: number) => void,
+): Promise<void> {
+  const tempDir = path.join(STORAGE_ROOT, 'temp')
+  const lead = await createBlackLeadSegment(tempDir, run)
+  tempCollector.push(lead.path)
+  const bodyDuration = await getVideoDuration(bodyVideoPath)
+  await mergeSegmentsWithPageFlip(
+    [lead, { path: bodyVideoPath, duration: bodyDuration, temp: false }],
+    outputPath,
+    run,
+    onProgress,
+  )
+}
+
 async function prependOpeningToMergedVideo(
   openingAbsPath: string,
   bodyPath: string,
@@ -660,12 +711,15 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
 
   const groups = buildVisualGroups(storyboards)
   const usePageFlip = groups.length > 1
+  const includeOpeningVideo = options.includeOpeningVideo === true
   let tempFiles: string[] = []
 
   const outputDir = path.join(STORAGE_ROOT, 'merged')
   fs.mkdirSync(outputDir, { recursive: true })
-  const outputFilename = `${uuid()}.mp4`
-  const outputPath = path.join(outputDir, outputFilename)
+  const bareFilename = `${uuid()}.mp4`
+  const barePath = path.join(outputDir, bareFilename)
+  let deliverFilename = bareFilename
+  let deliverPath = barePath
 
   const updateEncodeProgress = (encodedSec: number) => {
     const ratio = Math.min(1, encodedSec / totalDurationSec)
@@ -705,9 +759,9 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       if (run.cancelled) return
 
       if (segments.length <= MAX_XFADE_INPUTS) {
-        await mergeSegmentsWithPageFlip(segments, outputPath, run, updateEncodeProgress)
+        await mergeSegmentsWithPageFlip(segments, barePath, run, updateEncodeProgress)
       } else {
-        await mergeSegmentsSequential(segments, outputPath, run, updateEncodeProgress)
+        await mergeSegmentsSequential(segments, barePath, run, updateEncodeProgress)
       }
     } else {
       setMergeProgress(episodeId, {
@@ -717,14 +771,15 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         message: `正在按顺序拼接 ${storyboards.length} 个镜头…`,
         updatedAt: Date.now(),
       })
-      await concatComposedVideos(absPaths, outputPath, run, updateEncodeProgress)
+      await concatComposedVideos(absPaths, barePath, run, updateEncodeProgress)
     }
   } catch (err: any) {
     activeMerges.delete(episodeId)
     clearMergeProgress(episodeId)
     cleanupTempFiles(tempFiles)
     if (run.cancelled) {
-      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+      if (fs.existsSync(barePath)) fs.unlinkSync(barePath)
+      if (deliverPath !== barePath && fs.existsSync(deliverPath)) fs.unlinkSync(deliverPath)
       return
     }
     throw err
@@ -734,13 +789,33 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     activeMerges.delete(episodeId)
     clearMergeProgress(episodeId)
     cleanupTempFiles(tempFiles)
-    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+    if (fs.existsSync(barePath)) fs.unlinkSync(barePath)
+    if (deliverPath !== barePath && fs.existsSync(deliverPath)) fs.unlinkSync(deliverPath)
     return
   }
 
   cleanupTempFiles(tempFiles)
 
-  const includeOpeningVideo = options.includeOpeningVideo === true
+  if (!includeOpeningVideo && !run.cancelled) {
+    setMergeProgress(episodeId, {
+      mergeId,
+      phase: 'finalizing',
+      percent: 86,
+      message: '正在为首镜添加翻页入场…',
+      updatedAt: Date.now(),
+    })
+    try {
+      deliverFilename = `${uuid()}.mp4`
+      deliverPath = path.join(outputDir, deliverFilename)
+      await prependBlackLeadPageFlip(barePath, deliverPath, run, tempFiles, updateEncodeProgress)
+      totalDurationSec += BODY_LEAD_DURATION_SEC
+    } catch (err: any) {
+      throw new Error(`首镜翻页入场失败: ${err.message}`)
+    } finally {
+      cleanupTempFiles(tempFiles)
+    }
+  }
+
   if (includeOpeningVideo && !run.cancelled) {
     const openingAbs = resolveEpisodeOpeningVideoAbs(episodeId)
     if (openingAbs) {
@@ -752,7 +827,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         updatedAt: Date.now(),
       })
       try {
-        await prependOpeningToMergedVideo(openingAbs, outputPath, run)
+        await prependOpeningToMergedVideo(openingAbs, deliverPath, run)
         totalDurationSec += await getVideoDuration(openingAbs)
       } catch (err: any) {
         throw new Error(`开幕视频拼接失败: ${err.message}`)
@@ -773,7 +848,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         updatedAt: Date.now(),
       })
       try {
-        await mixBgmIntoMergedVideo(outputPath, bgmAbs, options.bgmVolume ?? BGM_VOICE_MIX_VOLUME, run)
+        await mixBgmIntoMergedVideo(deliverPath, bgmAbs, options.bgmVolume ?? BGM_VOICE_MIX_VOLUME, run)
       } catch (err: any) {
         throw new Error(`BGM 混音失败: ${err.message}`)
       }
@@ -793,13 +868,14 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
   })
 
   // 获取时长
-  const duration = Math.round(await getVideoDuration(outputPath))
+  const duration = Math.round(await getVideoDuration(deliverPath))
 
-  const mergedRelative = `static/merged/${outputFilename}`
+  const bareRelative = `static/merged/${bareFilename}`
+  const mergedRelative = `static/merged/${deliverFilename}`
 
   const scenesMeta: MergeScenesMeta = {
     clips: storyboards.map(sb => sb.composedVideoUrl).filter(Boolean) as string[],
-    bodyMergedUrl: mergedRelative,
+    bodyMergedUrl: bareRelative,
     withOpening: includeOpeningVideo,
     withTitle: false,
     test: !!clipLimit,
@@ -843,6 +919,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     clips: storyboards.length,
     mergeMode: usePageFlip ? 'page-flip-audio-cut' : 'concat',
     pageFlipTransitions: usePageFlip ? groups.length - 1 : 0,
+    bodyLeadPageFlip: !includeOpeningVideo,
     bgmMusicId: options.bgmMusicId,
     includeOpeningVideo,
   })

@@ -86,6 +86,23 @@ export function buildFolderUploadSlots<T extends { name: string; webkitRelativeP
     return { slots }
   }
 
+  // 纯数字 1..N 连续命名（prepare-shot-folder.py 重命名后）→ 第 1 镜 .. 第 N 镜
+  if (baseFiles.length === 0 && byParen.size > 0) {
+    const keys = [...byParen.keys()].sort((a, b) => a - b)
+    const consecutiveFromOne = keys[0] === 1 && keys.every((k, i) => k === i + 1)
+    if (consecutiveFromOne) {
+      if (keys.length !== slotCount) {
+        return {
+          slots: [],
+          error: `文件夹内 ${keys.length} 张（1～${keys.length}），需配图镜头 ${slotCount} 个，数量不一致`,
+        }
+      }
+      return {
+        slots: keys.map(n => ({ file: byParen.get(n)!, slotIndex: n - 1 })),
+      }
+    }
+  }
+
   if (baseFiles.length > 1) {
     return { slots: [], error: `文件夹内有多张无序号原图（${baseFiles.length} 张），请只保留 1 张无括号文件作为第 1 镜` }
   }

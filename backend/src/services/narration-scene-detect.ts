@@ -10,19 +10,45 @@ import {
   resolveLLMImagePrompt,
   isNarrationDateOnlySentence,
   isNarrationMinimalStyle,
+  NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
+  NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
+  NARRATION_IMAGE_DETECT_BATCH_THRESHOLD_DEFAULT,
+  NARRATION_IMAGE_DETECT_BATCH_SIZE_DEFAULT,
+  NARRATION_IMAGE_PROMPT_BATCH_SIZE_DEFAULT,
+  NARRATION_IMAGE_PROMPT_BATCH_SIZE_MIN,
+  NARRATION_IMAGE_PROMPT_BATCH_SIZE_MAX,
+  NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
+  NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
 } from '../constants/art-styles.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 import {
   calcPromptBatchPercent,
+  calcDetectBatchPercent,
   type NarrationImageBreakdownProgressCallback,
 } from './narration-image-breakdown-progress.js'
 import { buildPriorNarrationLines } from './episode-continuity.js'
 
-/** 配图段落 prompt：每批最多段落数 */
-const PARAGRAPH_PROMPT_LLM_BATCH_SIZE = 10
+/** 场景段配图 prompt（单次调用）超时 */
+const SCENE_SEGMENTS_PROMPT_LLM_TIMEOUT_MS = 300_000
 
-/** 配图段落 prompt：单批 LLM 超时（毫秒） */
-const PARAGRAPH_PROMPT_LLM_BATCH_TIMEOUT_MS = 300_000
+export function resolveParagraphPromptBatchSize(batchSize?: number): number {
+  if (batchSize == null || !Number.isFinite(batchSize)) {
+    return NARRATION_IMAGE_PROMPT_BATCH_SIZE_DEFAULT
+  }
+  return Math.min(
+    NARRATION_IMAGE_PROMPT_BATCH_SIZE_MAX,
+    Math.max(NARRATION_IMAGE_PROMPT_BATCH_SIZE_MIN, Math.round(batchSize)),
+  )
+}
+
+/** 配图段落 prompt：单批 LLM 超时下限（毫秒） */
+const PARAGRAPH_PROMPT_LLM_TIMEOUT_MIN_MS = 600_000
+
+/** 配图段落 prompt：单批 LLM 超时上限（毫秒） */
+const PARAGRAPH_PROMPT_LLM_TIMEOUT_MAX_MS = 1_800_000
+
+/** 每段配图估算 LLM 耗时（毫秒），用于按批内段数缩放超时 */
+const PARAGRAPH_PROMPT_LLM_TIMEOUT_PER_PARAGRAPH_MS = 45_000
 
 /** 单批失败重试次数 */
 const PARAGRAPH_PROMPT_LLM_BATCH_RETRIES = 2
@@ -30,18 +56,47 @@ const PARAGRAPH_PROMPT_LLM_BATCH_RETRIES = 2
 /** 批次之间的间隔（毫秒），减轻上游限流 */
 const PARAGRAPH_PROMPT_LLM_BATCH_GAP_MS = 2_000
 
-/** 换镜检测 LLM 超时（毫秒） */
-const IMAGE_DETECT_LLM_TIMEOUT_MS = 240_000
+function resolveParagraphPromptLLMTimeoutMs(batchParagraphCount: number, attempt = 1): number {
+  const scaled = Math.max(
+    PARAGRAPH_PROMPT_LLM_TIMEOUT_MIN_MS,
+    batchParagraphCount * PARAGRAPH_PROMPT_LLM_TIMEOUT_PER_PARAGRAPH_MS,
+  )
+  const withRetry = attempt > 1 ? Math.round(scaled * 1.25) : scaled
+  return Math.min(PARAGRAPH_PROMPT_LLM_TIMEOUT_MAX_MS, withRetry)
+}
+
+function isLLMTimeoutError(message: string): boolean {
+  return /timeout|aborted due to timeout/i.test(message)
+}
+
+/** 换镜检测 LLM 超时下限（毫秒） */
+const IMAGE_DETECT_LLM_TIMEOUT_MIN_MS = 240_000
+
+/** 换镜检测 LLM 超时上限（毫秒） */
+const IMAGE_DETECT_LLM_TIMEOUT_MAX_MS = 900_000
+
+/** 每个检测单元估算耗时（毫秒），用于按镜头数缩放超时 */
+const IMAGE_DETECT_LLM_TIMEOUT_PER_UNIT_MS = 3_500
+
+function resolveDetectLLMTimeoutMs(detectUnitCount: number, attempt = 1): number {
+  const scaled = Math.max(
+    IMAGE_DETECT_LLM_TIMEOUT_MIN_MS,
+    detectUnitCount * IMAGE_DETECT_LLM_TIMEOUT_PER_UNIT_MS,
+  )
+  const withRetry = attempt > 1 ? Math.round(scaled * 1.25) : scaled
+  return Math.min(IMAGE_DETECT_LLM_TIMEOUT_MAX_MS, withRetry)
+}
 
 /** 片头标题图 prompt LLM 超时（毫秒） */
 const TITLE_IMAGE_PROMPT_LLM_TIMEOUT_MS = 180_000
 
-/** 配图段分批：按固定段数切批，尾批不足 BATCH_SIZE 也单独成批 */
-function chunkParagraphPromptBatch<T>(items: T[]): T[][] {
+/** 配图段分批：按固定段数切批，尾批不足 batchSize 也单独成批 */
+function chunkParagraphPromptBatch<T>(items: T[], batchSize: number): T[][] {
   if (!items.length) return []
+  const size = resolveParagraphPromptBatchSize(batchSize)
   const chunks: T[][] = []
-  for (let i = 0; i < items.length; i += PARAGRAPH_PROMPT_LLM_BATCH_SIZE) {
-    chunks.push(items.slice(i, i + PARAGRAPH_PROMPT_LLM_BATCH_SIZE))
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size))
   }
   return chunks
 }
@@ -49,6 +104,30 @@ function chunkParagraphPromptBatch<T>(items: T[]): T[][] {
 export type NarrationSentenceItem = {
   sentence: string
   paragraphIndex: number
+  /** 片头标题镜（检测时连续片头句合并为一个 LLM 单元） */
+  isTitle?: boolean
+}
+
+export type NarrationDetectUnit = {
+  /** 1-based，与 LLM 输入/输出 index 一致 */
+  detectIndex: number
+  /** 对应 storyboard 在 items 数组中的下标 */
+  storyboardIndices: number[]
+  text: string
+  isTitleGroup?: boolean
+}
+
+export type NarrationDetectLLMResult = {
+  needs: boolean[]
+  segmentDescriptions: Map<number, string>
+}
+
+export type DetectImageNeedsOptions = {
+  /** 超过该镜头数时分批；0=不分批；默认 80 */
+  batchThreshold?: number
+  /** 每批覆盖的镜头数；默认 40 */
+  batchSize?: number
+  onProgress?: NarrationImageBreakdownProgressCallback
 }
 
 export type NarrationSceneSegment = {
@@ -87,21 +166,64 @@ function getImageLocationTags(text: string): string[] {
   return tags
 }
 
-/** 分镜/TTS：遇标点（含逗号、顿号、分号）即拆，一句一镜 */
-export const STORYBOARD_PUNCT_BOUNDARY_RE = /(?<=[。！？；，、,.!?;])\s*/
+/** 分镜/TTS：句末标点（。！？）必拆 */
+export const STORYBOARD_STRONG_PUNCT_BOUNDARY_RE = /(?<=[。！？!?])\s*/
+/** 分镜/TTS：逗号/顿号/分号仅当相邻片段合计超过 {@link STORYBOARD_COMMA_MERGE_MAX_CHARS} 字才拆 */
+export const STORYBOARD_WEAK_PUNCT_BOUNDARY_RE = /(?<=[，、；,;])\s*/
+/** @deprecated 使用 STORYBOARD_STRONG/WEAK_PUNCT_BOUNDARY_RE */
+export const STORYBOARD_PUNCT_BOUNDARY_RE = STORYBOARD_STRONG_PUNCT_BOUNDARY_RE
+/** 逗号/顿号/分号相邻片段合计不超过此字数则合并为一镜 */
+export const STORYBOARD_COMMA_MERGE_MAX_CHARS = 16
 /** 配图 prompt：仅在句号级标点拆，同段旁白合并写连贯【场景】【剧情】 */
 export const IMAGE_PROMPT_PUNCT_BOUNDARY_RE = /(?<=[。！？])\s*/
 
-function splitNarrationChunk(chunk: string, boundaryRe = STORYBOARD_PUNCT_BOUNDARY_RE): string[] {
+function trimNarrationPart(s: string): string {
+  return s.replace(/^[，,、；;\s]+|[，,、；;\s]+$/g, '').trim()
+}
+
+function narrationCharCount(text: string): number {
+  return text.replace(/[\s，,、；;。！？!?]/g, '').length
+}
+
+function splitByPunctBoundary(chunk: string, boundaryRe: RegExp): string[] {
+  const parts = chunk
+    .split(boundaryRe)
+    .map(trimNarrationPart)
+    .filter(Boolean)
+  return parts.length ? parts : [chunk.trim()]
+}
+
+/** 弱标点切分后，相邻片段合计 ≤ maxChars 则合并为一镜 */
+function mergeWeakPunctParts(parts: string[], maxChars = STORYBOARD_COMMA_MERGE_MAX_CHARS): string[] {
+  if (parts.length <= 1) return parts
+  const merged: string[] = []
+  let current = parts[0]
+  for (let i = 1; i < parts.length; i++) {
+    const next = parts[i]
+    if (narrationCharCount(current) + narrationCharCount(next) <= maxChars) {
+      current = `${current}，${next}`
+    } else {
+      merged.push(current)
+      current = next
+    }
+  }
+  merged.push(current)
+  return merged
+}
+
+function splitNarrationChunk(chunk: string): string[] {
   const flat = chunk.replace(/\s+/g, ' ').trim()
   if (!flat) return []
 
-  const parts = flat
-    .split(boundaryRe)
-    .map(s => s.replace(/^[，,、\s]+|[，,、\s]+$/g, '').trim())
-    .filter(Boolean)
+  const strongParts = splitByPunctBoundary(flat, STORYBOARD_STRONG_PUNCT_BOUNDARY_RE)
+  const result: string[] = []
 
-  return parts.length ? parts : [flat]
+  for (const strongPart of strongParts) {
+    const weakParts = splitByPunctBoundary(strongPart, STORYBOARD_WEAK_PUNCT_BOUNDARY_RE)
+    result.push(...(weakParts.length > 1 ? mergeWeakPunctParts(weakParts) : weakParts))
+  }
+
+  return result.length ? result : [flat]
 }
 
 /** 配图段旁白：保留分镜短句，按场景拆段后逐句生成【剧情】（不再整段合并成一大块） */
@@ -109,7 +231,7 @@ export function mergeStoryboardLinesForImagePrompt(lines: string[]): string[] {
   return lines.map(s => String(s || '').trim()).filter(Boolean)
 }
 
-/** 分镜拆句：标点（含逗号顿号）即拆，用于 TTS/时间轴 */
+/** 分镜拆句：句末标点必拆；逗号/顿号/分号仅当相邻合计超过 16 字才拆，用于 TTS/时间轴 */
 export function splitNarrationSentencesWithMeta(text: string): NarrationSentenceItem[] {
   const normalized = text.replace(/\r\n/g, '\n').trim()
   if (!normalized) return []
@@ -120,7 +242,7 @@ export function splitNarrationSentencesWithMeta(text: string): NarrationSentence
   paragraphs.forEach((paragraph, paragraphIndex) => {
     const lineChunks = paragraph.split(/\n+/).map(s => s.trim()).filter(Boolean)
     for (const chunk of lineChunks) {
-      for (const sentence of splitNarrationChunk(chunk, STORYBOARD_PUNCT_BOUNDARY_RE)) {
+      for (const sentence of splitNarrationChunk(chunk)) {
         result.push({ sentence, paragraphIndex })
       }
     }
@@ -129,7 +251,7 @@ export function splitNarrationSentencesWithMeta(text: string): NarrationSentence
   return result
 }
 
-/** 片头标题：与正文分镜相同，按标点（含逗号顿号）逐句一镜 */
+/** 片头标题：与正文分镜相同规则拆句 */
 export function splitTitleSentencesWithMeta(text: string): NarrationSentenceItem[] {
   const normalized = text.replace(/\r\n/g, '\n').trim()
   if (!normalized) return []
@@ -139,7 +261,7 @@ export function splitTitleSentencesWithMeta(text: string): NarrationSentenceItem
   paragraphs.forEach((paragraph, paragraphIndex) => {
     const lineChunks = paragraph.split(/\n+/).map(s => s.trim()).filter(Boolean)
     for (const chunk of lineChunks) {
-      for (const sentence of splitNarrationChunk(chunk, STORYBOARD_PUNCT_BOUNDARY_RE)) {
+      for (const sentence of splitNarrationChunk(chunk)) {
         result.push({ sentence, paragraphIndex })
       }
     }
@@ -194,14 +316,14 @@ function resolveImagePickCount(eligibleCount: number): number {
 function scoreStoryboardImagePriority(
   items: NarrationSentenceItem[],
   index: number,
-  llmWantsImage = false,
+  llmPriority = 0,
 ): number {
   const item = items[index]
   const sentence = item.sentence
   if (isNarrationDateOnlySentence(sentence)) return -1000
 
   let score = 0
-  if (llmWantsImage) score += 100
+  if (llmPriority > 0) score += llmPriority
   if (index === 0) score += 40
 
   if (index > 0 && items[index].paragraphIndex !== items[index - 1].paragraphIndex) score += 35
@@ -231,7 +353,7 @@ function pickSegmentAnchorIndex(
   eligibleIndices: number[],
   windowStart: number,
   windowEnd: number,
-  llmFlags: unknown[] | undefined,
+  llmPriorities: number[] | undefined,
   lastAnchor: number,
 ): number {
   const minIndex = lastAnchor < 0 ? 0 : lastAnchor + NARRATION_IMAGE_MIN_SHOTS_PER_SEGMENT
@@ -241,7 +363,7 @@ function pickSegmentAnchorIndex(
   for (let pos = windowStart; pos < windowEnd; pos++) {
     const index = eligibleIndices[pos]!
     if (lastAnchor >= 0 && index < minIndex) continue
-    const score = scoreStoryboardImagePriority(items, index, llmFlags ? !!llmFlags[index] : false)
+    const score = scoreStoryboardImagePriority(items, index, llmPriorities?.[index] ?? 0)
     if (score > bestScore) {
       bestScore = score
       bestIndex = index
@@ -261,7 +383,7 @@ function pickSegmentAnchorIndex(
 /** 按分镜总数约 30% 配图、平均约 4 镜一图分配锚点（结合 LLM 优先级与时间线分段） */
 export function allocateImageNeedsByRatio(
   items: NarrationSentenceItem[],
-  llmFlags?: unknown[],
+  llmPriorities?: number[],
   _mode: ImageDetectMode = 'paragraph',
 ): boolean[] {
   if (!items.length) return []
@@ -287,7 +409,7 @@ export function allocateImageNeedsByRatio(
       eligibleIndices,
       start,
       end,
-      llmFlags,
+      llmPriorities,
       lastAnchor,
     )
     needs[anchorIndex] = true
@@ -538,21 +660,239 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-/** 按 needs_image 切分场景段落：每段首镜配图，内容覆盖该段全部旁白（含段首前的纯日期句） */
+/** 片头连续标题句合并为一个检测单元；正文每句一单元 */
+export function buildNarrationDetectUnits(items: NarrationSentenceItem[]): NarrationDetectUnit[] {
+  const units: NarrationDetectUnit[] = []
+  let i = 0
+  while (i < items.length) {
+    if (items[i].isTitle) {
+      const indices: number[] = []
+      const parts: string[] = []
+      while (i < items.length && items[i].isTitle) {
+        indices.push(i)
+        parts.push(items[i].sentence)
+        i++
+      }
+      units.push({
+        detectIndex: units.length + 1,
+        storyboardIndices: indices,
+        text: parts.join('，'),
+        isTitleGroup: indices.length > 1,
+      })
+      continue
+    }
+    units.push({
+      detectIndex: units.length + 1,
+      storyboardIndices: [i],
+      text: items[i].sentence,
+    })
+    i++
+  }
+  return units
+}
+
+function expandDetectNeedsToStoryboards(
+  items: NarrationSentenceItem[],
+  units: NarrationDetectUnit[],
+  analysis: Array<{ index?: unknown; needs_image?: unknown }>,
+): boolean[] | null {
+  const needs = new Array(items.length).fill(false)
+  const byIndex = new Map<number, boolean>()
+  for (const row of analysis) {
+    const idx = Number(row?.index)
+    if (!Number.isFinite(idx) || idx < 1) return null
+    if (typeof row?.needs_image !== 'boolean') return null
+    byIndex.set(idx, row.needs_image)
+  }
+  if (byIndex.size !== units.length) return null
+
+  for (const unit of units) {
+    if (!byIndex.get(unit.detectIndex)) continue
+    needs[unit.storyboardIndices[0]] = true
+  }
+
+  if (!needs.some(Boolean) && units.length) {
+    needs[units[0].storyboardIndices[0]] = true
+  }
+  return needs
+}
+
+function parseDetectSegmentDescriptions(
+  units: NarrationDetectUnit[],
+  imagePrompts: unknown,
+): Map<number, string> {
+  const descriptions = new Map<number, string>()
+  if (!Array.isArray(imagePrompts)) return descriptions
+
+  for (const row of imagePrompts) {
+    const startIndex = Number((row as { start_index?: unknown })?.start_index)
+    const desc = String((row as { description?: unknown })?.description || '').trim()
+    if (!desc || !Number.isFinite(startIndex) || startIndex < 1) continue
+    const unit = units.find(u => u.detectIndex === startIndex)
+    if (!unit) continue
+    descriptions.set(unit.storyboardIndices[0], desc)
+  }
+  return descriptions
+}
+
+function listImageAnchorSegments(needs: boolean[]) {
+  const segments: Array<{ start: number; end: number }> = []
+  for (let i = 0; i < needs.length; ) {
+    if (!needs[i]) {
+      i++
+      continue
+    }
+    let end = i
+    while (end + 1 < needs.length && !needs[end + 1]) end++
+    segments.push({ start: i, end })
+    i = end + 1
+  }
+  return segments
+}
+
+/** 校正配图段长度：每段 2～4 镜（含锚点镜） */
+export function enforceImageSegmentShotBounds(
+  needs: boolean[],
+  minShots = NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
+  maxShots = NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
+): boolean[] {
+  if (!needs.length || minShots < 1 || maxShots < minShots) return needs
+
+  const result = [...needs]
+  if (!result.some(Boolean)) result[0] = true
+
+  const splitLongSegments = () => {
+    let changed = false
+    for (const seg of listImageAnchorSegments(result)) {
+      let start = seg.start
+      let end = seg.end
+      while (end - start + 1 > maxShots) {
+        const remaining = end - start + 1
+        let chunk = maxShots
+        const after = remaining - chunk
+        if (after > 0 && after < minShots) {
+          chunk = remaining - minShots
+          if (chunk < minShots) chunk = Math.ceil(remaining / 2)
+        }
+        const nextAnchor = start + chunk
+        if (nextAnchor > end) break
+        if (!result[nextAnchor]) {
+          result[nextAnchor] = true
+          changed = true
+        }
+        start = nextAnchor
+      }
+    }
+    return changed
+  }
+
+  const mergeShortSegments = () => {
+    const segments = listImageAnchorSegments(result)
+    if (segments.length <= 1) return false
+
+    for (let s = 0; s < segments.length; s++) {
+      const seg = segments[s]
+      const len = seg.end - seg.start + 1
+      if (len >= minShots) continue
+
+      if (s > 0) {
+        const prev = segments[s - 1]
+        const mergedLen = seg.end - prev.start + 1
+        if (mergedLen <= maxShots) {
+          result[seg.start] = false
+          return true
+        }
+      }
+      if (s < segments.length - 1) {
+        const next = segments[s + 1]
+        const mergedLen = next.end - seg.start + 1
+        if (mergedLen <= maxShots) {
+          result[next.start] = false
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+  while (splitLongSegments()) { /* until stable */ }
+  for (let guard = 0; guard < needs.length && mergeShortSegments(); guard++) {
+    while (splitLongSegments()) { /* rebalance after merge */ }
+  }
+
+  return result
+}
+
+/** 段长合规后锚点仍不足最低张数时，优先拆分较长段落 */
+function boostImageAnchorCountToMinimum(
+  needs: boolean[],
+  minimumTrueCount: number,
+  minShots = NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
+  maxShots = NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
+): boolean[] {
+  let result = enforceImageSegmentShotBounds(needs, minShots, maxShots)
+  for (let guard = 0; guard < needs.length && result.filter(Boolean).length < minimumTrueCount; guard++) {
+    const segments = listImageAnchorSegments(result)
+      .map(seg => ({ ...seg, len: seg.end - seg.start + 1 }))
+      .sort((a, b) => b.len - a.len)
+    const target = segments.find(seg => seg.len > minShots)
+    if (!target) break
+    const splitAt = target.start + Math.ceil(target.len / 2)
+    if (splitAt <= target.start || splitAt > target.end) break
+    result[splitAt] = true
+    result = enforceImageSegmentShotBounds(result, minShots, maxShots)
+  }
+  return result
+}
+
+/** 锚点过多时合并相邻段（仍满足每段 2～4 镜） */
+function trimImageAnchorCountToMaximum(
+  needs: boolean[],
+  maximumTrueCount: number,
+  minShots = NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
+  maxShots = NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
+): boolean[] {
+  let result = [...needs]
+  for (let guard = 0; guard < needs.length && result.filter(Boolean).length > maximumTrueCount; guard++) {
+    const segments = listImageAnchorSegments(result)
+    let merged = false
+    for (let s = 0; s < segments.length - 1; s++) {
+      const a = segments[s]
+      const b = segments[s + 1]
+      const mergedLen = b.end - a.start + 1
+      if (mergedLen >= minShots && mergedLen <= maxShots) {
+        result[b.start] = false
+        merged = true
+        break
+      }
+    }
+    if (!merged) break
+  }
+  return enforceImageSegmentShotBounds(result, minShots, maxShots)
+}
+
+function applyImageAnchorConstraints(
+  needs: boolean[],
+  minimumTrueCount: number,
+  maximumTrueCount: number,
+): boolean[] {
+  let result = enforceImageSegmentShotBounds(needs)
+  result = boostImageAnchorCountToMinimum(result, minimumTrueCount)
+  result = trimImageAnchorCountToMaximum(result, maximumTrueCount)
+  return result
+}
+
+/** 按配图锚点切分场景段落：每段首镜配图，内容覆盖该段全部旁白 */
 export function buildSceneSegments(items: NarrationSentenceItem[], needs: boolean[]): NarrationSceneSegment[] {
   const segments: NarrationSceneSegment[] = []
   for (let i = 0; i < items.length; i++) {
     if (!needs[i]) continue
     let end = i
     while (end + 1 < items.length && !needs[end + 1]) end++
-    let start = i
-    while (start > 0 && isNarrationDateOnlySentence(items[start - 1].sentence)) {
-      start--
-    }
     segments.push({
       anchorIndex: i,
       endIndex: end,
-      sentences: items.slice(start, end + 1).map(item => item.sentence),
+      sentences: items.slice(i, end + 1).map(item => item.sentence),
     })
   }
   return segments
@@ -585,7 +925,7 @@ export async function generateSceneImagePromptsWithLLM(
       output_format: { image_prompts: 'string[]，长度与 scenes 相同' },
     })
 
-    const text = await callTextChat(system, user, textModel, textThinking, PARAGRAPH_PROMPT_LLM_BATCH_TIMEOUT_MS)
+    const text = await callTextChat(system, user, textModel, textThinking, SCENE_SEGMENTS_PROMPT_LLM_TIMEOUT_MS)
     const parsed = extractJsonObject(text)
     const prompts = Array.isArray(parsed?.image_prompts) ? parsed.image_prompts : null
     if (!prompts || prompts.length !== segments.length) {
@@ -606,13 +946,219 @@ export async function generateSceneImagePromptsWithLLM(
   }
 }
 
-/** 将 LLM 优先级映射为约 30% 配图分配 */
-function normalizeLLMImageDetectFlags(
+function parseLLMNeedsImage(raw: unknown[], length: number): boolean[] | null {
+  if (raw.length !== length) return null
+  const needs: boolean[] = []
+  for (let i = 0; i < length; i++) {
+    const val = raw[i]
+    if (typeof val === 'boolean') {
+      needs.push(val)
+      continue
+    }
+    if (typeof val === 'number' || typeof val === 'string') {
+      const n = Number(val)
+      if (!Number.isFinite(n)) return null
+      needs.push(n >= 70)
+      continue
+    }
+    return null
+  }
+  return needs
+}
+
+function countTrueDetectUnits(analysis: Array<{ needs_image?: unknown }>): number {
+  return analysis.filter(row => row?.needs_image === true).length
+}
+
+function resolveMinimumDetectTrueCount(storyboardCount: number): number {
+  if (storyboardCount <= 0) return 0
+  return Math.max(1, Math.ceil(storyboardCount * NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO))
+}
+
+function resolveMaximumDetectTrueCount(storyboardCount: number): number {
+  if (storyboardCount <= 0) return 0
+  const minimum = resolveMinimumDetectTrueCount(storyboardCount)
+  const maximum = Math.floor(storyboardCount * NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO)
+  return Math.max(minimum, maximum)
+}
+
+function formatDetectRatioRange(): string {
+  const minPct = Math.round(NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO * 100)
+  const maxPct = Math.round(NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO * 100)
+  return `${minPct}%～${maxPct}%`
+}
+
+export function resolveDetectBatchThreshold(raw?: number): number {
+  if (raw === 0) return 0
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return Math.round(raw)
+  return NARRATION_IMAGE_DETECT_BATCH_THRESHOLD_DEFAULT
+}
+
+export function resolveDetectBatchSize(raw?: number): number {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 10) return Math.round(raw)
+  return NARRATION_IMAGE_DETECT_BATCH_SIZE_DEFAULT
+}
+
+function shouldUseDetectBatching(storyboardCount: number, batchThreshold?: number): boolean {
+  const threshold = resolveDetectBatchThreshold(batchThreshold)
+  return threshold > 0 && storyboardCount > threshold
+}
+
+/** 按镜头数切分检测单元，避免单批过大 */
+function chunkDetectUnitsByStoryboardSize(
+  units: NarrationDetectUnit[],
+  batchStoryboardSize: number,
+): NarrationDetectUnit[][] {
+  if (!units.length) return []
+  const batches: NarrationDetectUnit[][] = []
+  let current: NarrationDetectUnit[] = []
+  let currentShots = 0
+
+  for (const unit of units) {
+    const unitShots = unit.storyboardIndices.length
+    if (current.length > 0 && currentShots + unitShots > batchStoryboardSize) {
+      batches.push(current)
+      current = []
+      currentShots = 0
+    }
+    current.push(unit)
+    currentShots += unitShots
+  }
+  if (current.length) batches.push(current)
+  return batches
+}
+
+function resolveBatchDetectTrueCounts(
+  batchUnitCount: number,
+  totalUnitCount: number,
+  minimumTrueCount: number,
+  maximumTrueCount: number,
+): { batchMin: number; batchMax: number } {
+  if (totalUnitCount <= 0 || batchUnitCount <= 0) {
+    return { batchMin: 0, batchMax: 0 }
+  }
+  const ratio = batchUnitCount / totalUnitCount
+  const batchMin = Math.max(0, Math.round(minimumTrueCount * ratio))
+  const batchMax = Math.max(batchMin, Math.round(maximumTrueCount * ratio))
+  return { batchMin, batchMax }
+}
+
+type DetectLLMCallContext = {
+  system: string
+  fullNarration: string[]
+  storyboardCount: number
+  totalUnitCount: number
+  minimumTrueCount: number
+  maximumTrueCount: number
+  ratioRange: string
+  previousEpisodeNarration?: string[]
+  textModel?: string | null
+  textThinking: boolean
+}
+
+function buildDetectUserPayload(
+  ctx: DetectLLMCallContext,
+  batchUnits: NarrationDetectUnit[],
+  batchMeta?: { batchIndex: number; batchCount: number },
+  retryHint?: string,
+): string {
+  const { batchMin, batchMax } = resolveBatchDetectTrueCounts(
+    batchUnits.length,
+    ctx.totalUnitCount,
+    ctx.minimumTrueCount,
+    ctx.maximumTrueCount,
+  )
+  return JSON.stringify({
+    ...(ctx.previousEpisodeNarration?.length ? { previous_episode_narration: ctx.previousEpisodeNarration } : {}),
+    full_narration: ctx.fullNarration,
+    storyboard_count: ctx.storyboardCount,
+    detect_unit_count: batchUnits.length,
+    minimum_true_count: batchMeta ? batchMin : ctx.minimumTrueCount,
+    maximum_true_count: batchMeta ? batchMax : ctx.maximumTrueCount,
+    minimum_true_ratio: NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
+    maximum_true_ratio: NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
+    min_shots_per_image: NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
+    max_shots_per_image: NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
+    ...(batchMeta ? {
+      batch_index: batchMeta.batchIndex,
+      batch_count: batchMeta.batchCount,
+      batch_note: '本批为全文分段检测的一部分：仅对下列 sentences 输出 analysis，index 须与输入一致；须结合 full_narration 理解前后文后再判定。',
+    } : {}),
+    ...(retryHint ? { retry_hint: retryHint } : {}),
+    sentences: batchUnits.map(unit => ({
+      index: unit.detectIndex,
+      text: unit.text,
+    })),
+  })
+}
+
+async function finalizeDetectNeedsFromAnalysis(
   items: NarrationSentenceItem[],
-  flags: unknown[],
-  mode: ImageDetectMode = 'paragraph',
-): boolean[] {
-  return allocateImageNeedsByRatio(items, flags, mode)
+  units: NarrationDetectUnit[],
+  analysis: Array<Record<string, unknown>>,
+  minimumTrueCount: number,
+  maximumTrueCount: number,
+  ratioRange: string,
+  imagePrompts: unknown,
+): Promise<NarrationDetectLLMResult> {
+  if (analysis.length !== units.length) {
+    throw new Error(`配图换镜 AI 返回无效（期望 ${units.length} 项 analysis）`)
+  }
+
+  let needs = expandDetectNeedsToStoryboards(items, units, analysis)
+  if (!needs) {
+    throw new Error('配图换镜 AI 返回无效（analysis 与检测单元数量不匹配）')
+  }
+
+  const beforeBounds = needs.filter(Boolean).length
+  needs = applyImageAnchorConstraints(needs, minimumTrueCount, maximumTrueCount)
+  const afterBounds = needs.filter(Boolean).length
+  if (afterBounds !== beforeBounds) {
+    logTaskProgress('NarrationScene', 'segment-bounds-applied', {
+      beforeAnchors: beforeBounds,
+      afterAnchors: afterBounds,
+      minimumTrueCount,
+      maximumTrueCount,
+      minShots: NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
+      maxShots: NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
+    })
+  }
+
+  const needCount = needs.filter(Boolean).length
+  if (needCount < minimumTrueCount) {
+    throw new Error(
+      `配图检测仅 ${needCount} 张，低于最低 ${minimumTrueCount} 张（镜头数 ${items.length} 的 ${ratioRange} 下限），请重试检测`,
+    )
+  }
+  if (needCount > maximumTrueCount) {
+    throw new Error(
+      `配图检测 ${needCount} 张，超过最高 ${maximumTrueCount} 张（镜头数 ${items.length} 的 ${ratioRange} 上限），请重试检测`,
+    )
+  }
+
+  return {
+    needs,
+    segmentDescriptions: parseDetectSegmentDescriptions(units, imagePrompts),
+  }
+}
+
+async function callDetectImageNeedsLLM(
+  system: string,
+  user: string,
+  textModel?: string | null,
+  textThinking = true,
+  timeoutMs = IMAGE_DETECT_LLM_TIMEOUT_MIN_MS,
+): Promise<{
+  analysis: Array<Record<string, unknown>>
+  image_prompts: unknown
+}> {
+  const text = await callTextChat(system, user, textModel, textThinking, timeoutMs, true)
+  const parsed = extractJsonObject(text)
+  const analysis = Array.isArray(parsed?.analysis) ? parsed.analysis : null
+  if (!analysis) {
+    throw new Error('配图换镜 AI 返回无效（缺少 analysis）')
+  }
+  return { analysis, image_prompts: parsed?.image_prompts }
 }
 
 export async function detectImageNeedsWithLLM(
@@ -623,59 +1169,212 @@ export async function detectImageNeedsWithLLM(
   style = 'comic',
   fullNarrationLines?: string[],
   previousEpisodeNarration?: string[],
-): Promise<boolean[] | null> {
-  if (!items.length) return []
+  options?: DetectImageNeedsOptions,
+): Promise<NarrationDetectLLMResult> {
+  if (!items.length) return { needs: [], segmentDescriptions: new Map() }
+
+  const config = getTextConfig(textModel)
+  if (!config.apiKey) throw new Error('未配置文本模型 API Key，无法执行配图换镜检测')
+
+  const detectMode = mode === 'conservative' ? 'conservative' : 'paragraph'
+  const units = buildNarrationDetectUnits(items)
+  const minimumTrueCount = resolveMinimumDetectTrueCount(items.length)
+  const maximumTrueCount = resolveMaximumDetectTrueCount(items.length)
+  const ratioRange = formatDetectRatioRange()
+  const batchSize = resolveDetectBatchSize(options?.batchSize)
+  const useBatch = shouldUseDetectBatching(items.length, options?.batchThreshold)
+  const onProgress = options?.onProgress
+
+  logTaskProgress('NarrationScene', 'llm-detect-start', {
+    sentenceCount: items.length,
+    detectUnitCount: units.length,
+    minimumTrueCount,
+    maximumTrueCount,
+    minimumTrueRatio: NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
+    maximumTrueRatio: NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
+    timeoutMs: resolveDetectLLMTimeoutMs(units.length),
+    model: config.model,
+    detectMode,
+    batched: useBatch,
+    batchThreshold: resolveDetectBatchThreshold(options?.batchThreshold),
+    batchSize,
+  })
+
+  const system = buildNarrationImageDetectLLMSystem(style, detectMode)
+  const fullNarration = fullNarrationLines?.length
+    ? fullNarrationLines
+    : items.map(item => item.sentence)
+  const callCtx: DetectLLMCallContext = {
+    system,
+    fullNarration,
+    storyboardCount: items.length,
+    totalUnitCount: units.length,
+    minimumTrueCount,
+    maximumTrueCount,
+    ratioRange,
+    previousEpisodeNarration,
+    textModel,
+    textThinking,
+  }
 
   try {
-    const config = getTextConfig(textModel)
-    if (!config.apiKey) return null
+    if (useBatch) {
+      const batches = chunkDetectUnitsByStoryboardSize(units, batchSize)
+      logTaskProgress('NarrationScene', 'llm-detect-batched', {
+        batchCount: batches.length,
+        batchSize,
+        storyboardCount: items.length,
+      })
 
-    const detectMode = mode === 'conservative' ? 'conservative' : 'paragraph'
-    logTaskProgress('NarrationScene', 'llm-detect-start', {
-      sentenceCount: items.length,
-      model: config.model,
-      detectMode,
-    })
+      const mergedAnalysis: Array<Record<string, unknown>> = []
+      let lastImagePrompts: unknown
 
-    const system = buildNarrationImageDetectLLMSystem(style, detectMode)
-    const fullNarration = fullNarrationLines?.length
-      ? fullNarrationLines
-      : items.map(item => item.sentence)
+      for (let bi = 0; bi < batches.length; bi++) {
+        const batchUnits = batches[bi]
+        const batchShots = batchUnits.reduce((sum, unit) => sum + unit.storyboardIndices.length, 0)
+        onProgress?.({
+          phase: 'detecting',
+          batch: bi + 1,
+          batch_count: batches.length,
+          message: `正在检测换镜（第 ${bi + 1}/${batches.length} 批，约 ${batchShots} 镜）…`,
+          percent: calcDetectBatchPercent(bi, batches.length),
+        })
 
-    const user = JSON.stringify({
-      ...(previousEpisodeNarration?.length ? { previous_episode_narration: previousEpisodeNarration } : {}),
-      full_narration: fullNarration,
-      sentences: items.map(item => item.sentence),
-      sentence_indexes: items.map((_, index) => index),
-      paragraph_indexes: items.map(item => item.paragraphIndex),
-      output_format: { needs_image: 'boolean[]，长度与 sentences 相同' },
-    })
+        const llmResult = await callDetectImageNeedsLLM(
+          callCtx.system,
+          buildDetectUserPayload(callCtx, batchUnits, { batchIndex: bi + 1, batchCount: batches.length }),
+          callCtx.textModel,
+          callCtx.textThinking,
+          resolveDetectLLMTimeoutMs(batchUnits.length, 1),
+        )
+        if (llmResult.analysis.length !== batchUnits.length) {
+          logTaskWarn('NarrationScene', 'llm-detect-batch-invalid', {
+            batch: bi + 1,
+            batchCount: batches.length,
+            expected: batchUnits.length,
+            got: llmResult.analysis.length,
+          })
+          throw new Error(`配图换镜 AI 第 ${bi + 1}/${batches.length} 批返回无效（期望 ${batchUnits.length} 项 analysis）`)
+        }
+        mergedAnalysis.push(...llmResult.analysis)
+        if (llmResult.image_prompts) lastImagePrompts = llmResult.image_prompts
+      }
 
-    const text = await callTextChat(system, user, textModel, textThinking, IMAGE_DETECT_LLM_TIMEOUT_MS)
-    const parsed = extractJsonObject(text)
-    const flags = Array.isArray(parsed?.needs_image) ? parsed.needs_image : null
-    if (!flags || flags.length !== items.length) {
-      logTaskWarn('NarrationScene', 'llm-detect-invalid', { expected: items.length, got: flags?.length || 0 })
-      return null
+      onProgress?.({
+        phase: 'detecting',
+        batch: batches.length,
+        batch_count: batches.length,
+        message: '正在合并换镜检测结果…',
+        percent: calcDetectBatchPercent(batches.length, batches.length),
+      })
+
+      const result = await finalizeDetectNeedsFromAnalysis(
+        items,
+        units,
+        mergedAnalysis,
+        minimumTrueCount,
+        maximumTrueCount,
+        ratioRange,
+        lastImagePrompts,
+      )
+
+      logTaskSuccess('NarrationScene', 'llm-detect-done', {
+        sentenceCount: items.length,
+        detectUnitCount: units.length,
+        imageNeededCount: result.needs.filter(Boolean).length,
+        minimumTrueCount,
+        maximumTrueCount,
+        imageRatio: items.length ? Math.round(result.needs.filter(Boolean).length / items.length * 100) : 0,
+        segmentDescriptionCount: result.segmentDescriptions.size,
+        llmDirect: true,
+        batched: true,
+        batchCount: batches.length,
+      })
+      return result
     }
 
-    const normalized = normalizeLLMImageDetectFlags(items, flags, mode)
-    const llmRawCount = flags.filter((flag: unknown, index: number) => (
-      !isNarrationDateOnlySentence(items[index].sentence) && (index === 0 || !!flag)
-    )).length
-    const needCount = normalized.filter(Boolean).length
-    const eligible = items.filter(item => !isNarrationDateOnlySentence(item.sentence)).length
+    onProgress?.({
+      phase: 'detecting',
+      message: '正在检测换镜段落…',
+      percent: 5,
+    })
+
+    let llmResult = await callDetectImageNeedsLLM(
+      callCtx.system,
+      buildDetectUserPayload(callCtx, units),
+      callCtx.textModel,
+      callCtx.textThinking,
+      resolveDetectLLMTimeoutMs(units.length, 1),
+    )
+    if (llmResult.analysis.length !== units.length) {
+      logTaskWarn('NarrationScene', 'llm-detect-invalid', { expected: units.length, got: llmResult.analysis.length })
+      throw new Error(`配图换镜 AI 返回无效（期望 ${units.length} 项 analysis）`)
+    }
+
+    let trueUnitCount = countTrueDetectUnits(llmResult.analysis)
+    if (trueUnitCount < minimumTrueCount) {
+      logTaskWarn('NarrationScene', 'llm-detect-below-minimum', {
+        trueUnitCount,
+        minimumTrueCount,
+        storyboardCount: items.length,
+      })
+      const retryHint = [
+        `上次输出仅 ${trueUnitCount} 个 needs_image=true，低于最低要求 ${minimumTrueCount}（镜头数 ${items.length} 的 ${ratioRange} 下限）。`,
+        `配图张数目标区间：${minimumTrueCount}～${maximumTrueCount} 张（${ratioRange}）。`,
+        `每个配图段须覆盖 ${NARRATION_IMAGE_SEGMENT_MIN_SHOTS}～${NARRATION_IMAGE_SEGMENT_MAX_SHOTS} 镜（含锚点镜），禁止单镜成段或连续 5 镜以上共用一图。`,
+        '请重新通读全文：只有「上一张图可原样复用、无任何可视差异」的单元才标 false；',
+        '凡有场景/时间/动作/物件/经营阶段/视觉焦点变化的一律标 true。',
+        '输出完整 JSON，analysis 长度仍须与 sentences 相同。',
+      ].join('')
+      llmResult = await callDetectImageNeedsLLM(
+        callCtx.system,
+        buildDetectUserPayload(callCtx, units, undefined, retryHint),
+        callCtx.textModel,
+        callCtx.textThinking,
+        resolveDetectLLMTimeoutMs(units.length, 2),
+      )
+      if (llmResult.analysis.length !== units.length) {
+        throw new Error(`配图换镜 AI 重试返回无效（期望 ${units.length} 项 analysis）`)
+      }
+      trueUnitCount = countTrueDetectUnits(llmResult.analysis)
+    }
+
+    const result = await finalizeDetectNeedsFromAnalysis(
+      items,
+      units,
+      llmResult.analysis,
+      minimumTrueCount,
+      maximumTrueCount,
+      ratioRange,
+      llmResult.image_prompts,
+    )
+
     logTaskSuccess('NarrationScene', 'llm-detect-done', {
       sentenceCount: items.length,
-      eligibleSentenceCount: eligible,
-      imageNeededCount: needCount,
-      imageRatio: eligible ? Math.round(needCount / eligible * 100) : 0,
-      llmRawImageCount: llmRawCount,
+      detectUnitCount: units.length,
+      imageNeededCount: result.needs.filter(Boolean).length,
+      minimumTrueCount,
+      maximumTrueCount,
+      imageRatio: items.length ? Math.round(result.needs.filter(Boolean).length / items.length * 100) : 0,
+      segmentDescriptionCount: result.segmentDescriptions.size,
+      llmDirect: true,
+      batched: false,
     })
-    return normalized
+    return result
   } catch (err: any) {
-    logTaskError('NarrationScene', 'llm-detect-failed', { error: err.message })
-    return null
+    const message = String(err?.message || err || '')
+    const isTimeout = /timeout|aborted due to timeout/i.test(message)
+    logTaskError('NarrationScene', 'llm-detect-failed', { error: message, batched: useBatch })
+    if (isTimeout) {
+      const waitMin = Math.round(resolveDetectLLMTimeoutMs(units.length) / 60_000)
+      const batchHint = useBatch
+        ? `已启用分批检测（阈值 ${resolveDetectBatchThreshold(options?.batchThreshold)} 镜，每批 ${batchSize} 镜）。`
+        : `镜头较多时可在页面调低「检测分批」阈值或减小每批镜数。`
+      throw new Error(
+        `配图换镜检测超时（${items.length} 镜 / ${units.length} 检测单元，已等待约 ${waitMin} 分钟）。${batchHint}若仍失败可在集设置中暂时关闭「思考模式」。`,
+      )
+    }
+    throw new Error(message || '配图换镜 AI 检测失败')
   }
 }
 
@@ -690,13 +1389,17 @@ export async function resolveImageNeeds(
     style?: string
     fullNarrationLines?: string[]
     previousEpisodeNarration?: string[]
+    batchThreshold?: number
+    batchSize?: number
+    onProgress?: NarrationImageBreakdownProgressCallback
   },
 ): Promise<{
   needs: boolean[]
+  segmentDescriptions: Map<number, string>
   source: ImageDetectSource
 }> {
   const mode = options?.mode || 'paragraph'
-  const fromLLM = await detectImageNeedsWithLLM(
+  const { needs, segmentDescriptions } = await detectImageNeedsWithLLM(
     items,
     mode,
     options?.textModel,
@@ -704,13 +1407,13 @@ export async function resolveImageNeeds(
     options?.style || 'comic',
     options?.fullNarrationLines,
     options?.previousEpisodeNarration,
+    {
+      batchThreshold: options?.batchThreshold,
+      batchSize: options?.batchSize,
+      onProgress: options?.onProgress,
+    },
   )
-  if (fromLLM) return { needs: fromLLM, source: 'llm' }
-
-  if (mode === 'conservative') {
-    return { needs: detectImageNeedsConservative(items), source: 'conservative' }
-  }
-  return { needs: detectImageNeedsBalanced(items), source: 'balanced' }
+  return { needs, segmentDescriptions, source: 'llm' }
 }
 
 export type ParagraphPromptInput = {
@@ -718,6 +1421,7 @@ export type ParagraphPromptInput = {
   startIndex: number
   sentences: string[]
   layout: 'single' | 'diptych'
+  sceneDescription?: string
 }
 
 type CharacterPromptHint = {
@@ -807,6 +1511,15 @@ export async function generateParagraphImagePromptsWithLLM(
     fullNarrationLines?: string[]
     previousEpisodeNarration?: string[]
     onProgress?: NarrationImageBreakdownProgressCallback
+    /** 为 true 时原样保存 LLM 输出，不做 resolveLLMImagePrompt 清洗 */
+    pureLlm?: boolean
+    /** 每批段落数；默认 6 */
+    batchSize?: number
+    /** 每批成功后回调（用于增量落库） */
+    onBatchComplete?: (payload: {
+      batch: ParagraphPromptInput[]
+      promptsByStartIndex: Map<number, string>
+    }) => void | Promise<void>
   },
 ): Promise<{ titlePrompt: string | null; promptsByStartIndex: Map<number, string> } | null> {
   const style = options?.style || 'comic'
@@ -814,27 +1527,31 @@ export async function generateParagraphImagePromptsWithLLM(
   const textThinking = options?.textThinking ?? true
   const titleHook = options?.titleHook?.trim() || null
   const titleFull = options?.titleFull?.trim() || null
+  void titleHook
+  void titleFull
   const characters = options?.characters || []
+  const promptBatchSize = resolveParagraphPromptBatchSize(options?.batchSize)
 
-  if (!paragraphs.length && !titleHook) return { titlePrompt: null, promptsByStartIndex: new Map() }
+  if (!paragraphs.length) return { titlePrompt: null, promptsByStartIndex: new Map() }
 
   try {
     const config = getTextConfig(textModel)
     if (!config.apiKey) throw new Error('未配置文本模型 API Key')
 
-    const batches = chunkParagraphPromptBatch(paragraphs)
+    const batches = chunkParagraphPromptBatch(paragraphs, promptBatchSize)
     const batchCount = batches.length
 
     logTaskProgress('NarrationScene', 'llm-paragraph-prompt-start', {
       paragraphCount: paragraphs.length,
       batchCount,
-      batchSize: PARAGRAPH_PROMPT_LLM_BATCH_SIZE,
-      hasTitle: !!titleHook,
+      batchSize: promptBatchSize,
       model: config.model,
     })
 
+    const episodeHasDiptych = paragraphs.some(p => p.layout === 'diptych')
     const system = buildNarrationParagraphImagePromptLLMSystem(style, {
       hasCharacters: characters.length > 0,
+      hasDiptych: episodeHasDiptych,
     })
     const fullBodyLines = options?.fullNarrationLines || []
     const previousEpisodeNarration = options?.previousEpisodeNarration || []
@@ -844,11 +1561,13 @@ export async function generateParagraphImagePromptsWithLLM(
       appearance: ch.appearance,
     }))
 
-    const fullNarration = buildFullNarrationForPrompt({
-      titleHook,
-      titleFull,
-      bodySentences: options?.fullNarrationLines,
-    })
+    const fullNarration = fullBodyLines.length
+      ? fullBodyLines.map(s => String(s || '').trim()).filter(Boolean)
+      : buildFullNarrationForPrompt({
+        titleHook,
+        titleFull,
+        bodySentences: [],
+      })
 
     const characterPayload = isNarrationMinimalStyle(style)
       ? characters.map(ch => ({
@@ -864,8 +1583,9 @@ export async function generateParagraphImagePromptsWithLLM(
         appearance: ch.appearance || '',
       }))
 
-    const paragraphOutputHint =
-      '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；单图按六维输出；layout=diptych 按【左格】【右格】各写完整六维（见 system 规则）'
+    const paragraphOutputHint = episodeHasDiptych
+      ? '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；layout=single 按六维输出；layout=diptych 按【左格】【右格】各写完整六维'
+      : '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；按六维输出'
 
     const promptsByStartIndex = new Map<number, string>()
     const reportProgress = options?.onProgress
@@ -873,6 +1593,14 @@ export async function generateParagraphImagePromptsWithLLM(
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex]
       if (batchIndex > 0) await sleep(PARAGRAPH_PROMPT_LLM_BATCH_GAP_MS)
+
+      const batchHasDiptych = batch.some(p => p.layout === 'diptych')
+      const batchSystem = batchHasDiptych === episodeHasDiptych
+        ? system
+        : buildNarrationParagraphImagePromptLLMSystem(style, {
+          hasCharacters: characters.length > 0,
+          hasDiptych: batchHasDiptych,
+        })
 
       reportProgress?.({
         status: 'processing',
@@ -895,6 +1623,7 @@ export async function generateParagraphImagePromptsWithLLM(
           prior_narration: buildPriorNarrationLines(previousEpisodeNarration, fullBodyLines, p.startIndex),
           layout: p.layout,
           narration_lines: p.sentences,
+          ...(p.sceneDescription ? { detect_scene_description: p.sceneDescription } : {}),
         })),
         output_format: {
           paragraph_prompts: paragraphOutputHint,
@@ -903,6 +1632,7 @@ export async function generateParagraphImagePromptsWithLLM(
 
       let rows: Array<{ start_index?: number; image_prompt?: string }> | null = null
       let lastRaw = ''
+      let lastError = ''
 
       for (let attempt = 0; attempt <= PARAGRAPH_PROMPT_LLM_BATCH_RETRIES; attempt++) {
         if (attempt > 0) {
@@ -910,6 +1640,7 @@ export async function generateParagraphImagePromptsWithLLM(
             batch: batchIndex + 1,
             attempt,
             batchCount: batches.length,
+            lastError: lastError.slice(0, 200),
           })
           reportProgress?.({
             status: 'processing',
@@ -927,20 +1658,29 @@ export async function generateParagraphImagePromptsWithLLM(
           batchCount: batches.length,
           paragraphCount: batch.length,
           attempt: attempt + 1,
+          timeoutMs: resolveParagraphPromptLLMTimeoutMs(batch.length, attempt + 1),
           model: config.model,
         })
 
-        const text = await callTextChat(
-          system,
-          user,
-          textModel,
-          textThinking,
-          PARAGRAPH_PROMPT_LLM_BATCH_TIMEOUT_MS,
-          true,
-        )
-        lastRaw = text
-        rows = parseParagraphPromptRows(text, batch)
-        if (rows) break
+        try {
+          const text = await callTextChat(
+            batchSystem,
+            user,
+            textModel,
+            textThinking,
+            resolveParagraphPromptLLMTimeoutMs(batch.length, attempt + 1),
+            true,
+          )
+          lastRaw = text
+          rows = parseParagraphPromptRows(text, batch)
+          if (rows) break
+          lastError = 'invalid paragraph_prompts JSON'
+        } catch (err: any) {
+          lastError = String(err?.message || err || 'unknown error')
+          if (!isLLMTimeoutError(lastError) || attempt >= PARAGRAPH_PROMPT_LLM_BATCH_RETRIES) {
+            throw err
+          }
+        }
       }
 
       if (!rows) {
@@ -966,14 +1706,27 @@ export async function generateParagraphImagePromptsWithLLM(
             row: i,
             startIndex,
           })
-          return null
+          throw new Error(
+            `配图 AI 第 ${batchIndex + 1}/${batches.length} 批第 ${i + 1} 条无效（缺少 start_index 或 image_prompt）`,
+          )
         }
-        promptsByStartIndex.set(startIndex, resolveLLMImagePrompt(prompt, style, {
-          narrationLines: batch[i]?.sentences,
-          fullNarrationLines: options?.fullNarrationLines,
-          timelineUpToIndex: startIndex,
-          protagonistHints,
-        }))
+        promptsByStartIndex.set(startIndex, options?.pureLlm
+          ? prompt
+          : resolveLLMImagePrompt(prompt, style, {
+            narrationLines: batch[i]?.sentences,
+            fullNarrationLines: options?.fullNarrationLines,
+            timelineUpToIndex: startIndex,
+            protagonistHints,
+          }))
+      }
+
+      const batchPrompts = new Map<number, string>()
+      for (const item of batch) {
+        const p = promptsByStartIndex.get(item.startIndex)
+        if (p) batchPrompts.set(item.startIndex, p)
+      }
+      if (batchPrompts.size) {
+        await options?.onBatchComplete?.({ batch, promptsByStartIndex: batchPrompts })
       }
 
       reportProgress?.({
@@ -994,36 +1747,19 @@ export async function generateParagraphImagePromptsWithLLM(
       return null
     }
 
-    let titlePrompt: string | null = null
-    if (titleHook) {
-      reportProgress?.({
-        status: 'processing',
-        phase: 'title',
-        message: '正在生成片头配图文案…',
-        percent: 88,
-      })
-      titlePrompt = await generateTitleImagePromptWithLLM({
-        titleHook,
-        titleFull,
-        bodySentences: options?.fullNarrationLines,
-        previousEpisodeNarration: options?.previousEpisodeNarration,
-        style,
-        textModel,
-        textThinking,
-      })
-    }
-
     logTaskSuccess('NarrationScene', 'llm-paragraph-prompt-done', {
       paragraphCount: paragraphs.length,
       batchCount: batches.length,
-      hasTitle: !!titlePrompt,
     })
-    return { titlePrompt, promptsByStartIndex }
+    return { titlePrompt: null, promptsByStartIndex }
   } catch (err: any) {
     const message = String(err?.message || err || 'unknown error')
     logTaskError('NarrationScene', 'llm-paragraph-prompt-failed', { error: message })
-    if (/aborted due to timeout/i.test(message)) {
-      throw new Error('配图 AI 调用超时，请稍后重试或减少单集配图段数')
+    if (isLLMTimeoutError(message)) {
+      const waitMin = Math.round(resolveParagraphPromptLLMTimeoutMs(promptBatchSize) / 60_000)
+      throw new Error(
+        `配图 AI 调用超时（共 ${paragraphs.length} 段，每批最多 ${promptBatchSize} 段，单批最长约 ${waitMin} 分钟）。已成功的批次已保存，请点「补全缺失文案」继续。`,
+      )
     }
     throw err
   }

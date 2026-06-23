@@ -4,14 +4,24 @@ import { db, schema } from '../db/index.js'
 import { success, notFound, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
 import { breakdownNarrationStoryboards } from '../services/narration-breakdown.js'
-import { breakdownNarrationImages } from '../services/narration-image-breakdown.js'
-import { getNarrationImageBreakdownProgress } from '../services/narration-image-breakdown-progress.js'
+import { breakdownNarrationImages, detectNarrationImageAnchors, generateNarrationImagePromptsOnly, retryMissingNarrationImagePrompts } from '../services/narration-image-breakdown.js'
+import {
+  auditEpisodeNarrationImagePrompts,
+  optimizeEpisodeNarrationImagePrompts,
+  restoreEpisodeNarrationImagePrompts,
+} from '../services/narration-image-prompt-audit.js'
+import { getNarrationImageBreakdownProgress, acquireNarrationImageBreakdownJob, releaseNarrationImageBreakdownJob } from '../services/narration-image-breakdown-progress.js'
 import { sortStoryboardsByOrder } from '../services/narration-image.js'
 import { cropEpisodeNarrationImageWatermarks, restoreEpisodeNarrationImageWatermarks } from '../services/narration-image-crop.js'
+import {
+  clearEpisodeComposedVideos,
+  clearEpisodeNarrationImages,
+  clearEpisodeNarrationTts,
+} from '../services/episode-asset-clear.js'
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
-import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration, parseOpeningPickedImages, buildOpeningPickedImagesZip } from '../services/ffmpeg-opening.js'
+import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration, parseOpeningPickedImages, buildOpeningPickedImagesZip, pickAndSaveOpeningImages } from '../services/ffmpeg-opening.js'
 import fs from 'fs'
 import { isTitleVideoProcessing, startTitleSegmentVideoGeneration } from '../services/ffmpeg-title-segment.js'
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
@@ -368,6 +378,144 @@ app.get('/:id/narration-image-breakdown-status', async (c) => {
   return success(c, progress)
 })
 
+// POST /episodes/:id/narration-image-detect — ① LLM 检测需配图镜头
+app.post('/:id/narration-image-detect', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  let style = String(body.style || '').trim()
+  if (!style) {
+    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+    style = drama?.style || 'comic'
+  }
+
+  try {
+    const mode = body.image_detect_mode === 'conservative' ? 'conservative' : 'paragraph'
+    const batchThreshold = typeof body.detect_batch_threshold === 'number'
+      ? body.detect_batch_threshold
+      : undefined
+    const batchSize = typeof body.detect_batch_size === 'number'
+      ? body.detect_batch_size
+      : undefined
+
+    if (!acquireNarrationImageBreakdownJob(episodeId)) {
+      return badRequest(c, '配图任务进行中，请稍候')
+    }
+
+    void detectNarrationImageAnchors(episodeId, style, mode, {
+      batchThreshold,
+      batchSize,
+    }).catch(() => {}).finally(() => {
+      releaseNarrationImageBreakdownJob(episodeId)
+    })
+
+    return success(c, { started: true, step: 'detect' })
+  } catch (err: any) {
+    releaseNarrationImageBreakdownJob(episodeId)
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/narration-image-prompts — ② 纯 LLM 生成六维配图文案
+app.post('/:id/narration-image-prompts', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  let style = String(body.style || '').trim()
+  if (!style) {
+    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+    style = drama?.style || 'comic'
+  }
+
+  try {
+    const retryMissing = body.retry_missing_prompts === true
+    const promptBatchSize = typeof body.prompt_batch_size === 'number'
+      ? body.prompt_batch_size
+      : undefined
+    const promptOptions = promptBatchSize != null ? { batchSize: promptBatchSize } : undefined
+
+    if (!acquireNarrationImageBreakdownJob(episodeId)) {
+      return badRequest(c, '配图任务进行中，请稍候')
+    }
+
+    const job = retryMissing
+      ? retryMissingNarrationImagePrompts(episodeId, style, promptOptions)
+      : generateNarrationImagePromptsOnly(episodeId, style, promptOptions)
+
+    void job.catch(() => {}).finally(() => {
+      releaseNarrationImageBreakdownJob(episodeId)
+    })
+
+    return success(c, { started: true, step: 'prompts', retry_missing: retryMissing })
+  } catch (err: any) {
+    releaseNarrationImageBreakdownJob(episodeId)
+    return badRequest(c, err.message)
+  }
+})
+
+// GET /episodes/:id/narration-image-audit — ③ 扫描配图文案问题（不修改）
+app.get('/:id/narration-image-audit', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  const style = drama?.style || 'comic'
+
+  try {
+    const result = auditEpisodeNarrationImagePrompts(episodeId, style)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/narration-image-optimize — ③ 对指定镜头应用本地规则优化
+app.post('/:id/narration-image-optimize', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  const style = drama?.style || 'comic'
+  const rawIds = body?.storyboard_ids ?? body?.storyboardIds
+  const storyboardIds = Array.isArray(rawIds)
+    ? rawIds.map((id: unknown) => Number(id)).filter(id => Number.isFinite(id) && id > 0)
+    : undefined
+
+  try {
+    const result = optimizeEpisodeNarrationImagePrompts(episodeId, style, storyboardIds)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/narration-image-restore — 还原第三步优化前的 LLM 原文
+app.post('/:id/narration-image-restore', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const rawIds = body?.storyboard_ids ?? body?.storyboardIds
+  const storyboardIds = Array.isArray(rawIds)
+    ? rawIds.map((id: unknown) => Number(id)).filter(id => Number.isFinite(id) && id > 0)
+    : undefined
+
+  try {
+    const result = restoreEpisodeNarrationImagePrompts(episodeId, storyboardIds)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
 // POST /episodes/:id/narration-image-breakdown — 配图分镜（场景换图 + 配图文案）
 app.post('/:id/narration-image-breakdown', async (c) => {
   const episodeId = Number(c.req.param('id'))
@@ -422,6 +570,53 @@ app.post('/:id/restore-narration-images', async (c) => {
 
   try {
     const result = await restoreEpisodeNarrationImageWatermarks(episodeId)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/clear-narration-images — 清除本集全部配图（含 AI/上传）并删文件
+app.post('/:id/clear-narration-images', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await clearEpisodeNarrationImages(episodeId)
+    if (!result.cleared) return badRequest(c, '本集暂无配图可清除')
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/clear-narration-tts — 清除本集全部镜头配音并删文件
+app.post('/:id/clear-narration-tts', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await clearEpisodeNarrationTts(episodeId)
+    if (!result.cleared) return badRequest(c, '本集暂无配音可清除')
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/clear-composed-videos — 清除本集镜头合成视频与导出记录
+app.post('/:id/clear-composed-videos', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await clearEpisodeComposedVideos(episodeId)
+    if (!result.cleared && !result.merges_cleared) {
+      return badRequest(c, '本集暂无合成视频可清除')
+    }
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)
@@ -580,14 +775,14 @@ app.get('/:id/opening-video', async (c) => {
   })
 })
 
-// GET /episodes/:id/opening-picked-images.zip — 下载开幕视频所用随机配图
+// GET /episodes/:id/opening-picked-images.zip — 下载已选开幕配图（zip）
 app.get('/:id/opening-picked-images.zip', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c)
 
   const images = parseOpeningPickedImages(ep.openingPickedImages)
-  if (!images.length) return badRequest(c, '暂无开幕配图记录，请重新生成开幕视频')
+  if (!images.length) return badRequest(c, '暂无开幕配图记录，请先导出十张配图')
 
   let tempDir = ''
   try {
@@ -601,6 +796,32 @@ app.get('/:id/opening-picked-images.zip', async (c) => {
     })
   } catch (err: any) {
     return badRequest(c, err.message || '打包失败')
+  } finally {
+    if (tempDir) {
+      try { fs.rmSync(tempDir, { recursive: true, force: true }) } catch {}
+    }
+  }
+})
+
+// POST /episodes/:id/opening-picked-images/export — 随机选 10 张（首尾固定）并下载 zip
+app.post('/:id/opening-picked-images/export', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  let tempDir = ''
+  try {
+    const picked = pickAndSaveOpeningImages(episodeId)
+    const { zipPath, tempDir: dir } = buildOpeningPickedImagesZip(picked)
+    tempDir = dir
+    const buf = fs.readFileSync(zipPath)
+    const filename = `opening-images-ep${episodeId}.zip`
+    return c.body(buf, 200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message || '导出失败')
   } finally {
     if (tempDir) {
       try { fs.rmSync(tempDir, { recursive: true, force: true }) } catch {}

@@ -32,9 +32,12 @@ export const NARRATION_MINIMAL_NO_CLOTHING_RULE =
 export const NARRATION_MINIMAL_NO_CLOTHING_LLM_RULE =
   `【无服装】${NARRATION_MINIMAL_NO_CLOTHING_RULE}；禁止在【画面主体】【核心细节动作】写穿着/身着/身穿/戴帽/穿鞋；年代氛围只写环境，不写人物穿衣`
 
+/** 素体四肢：仅两手两脚 */
+export const NARRATION_MINIMAL_LIMBS_SPEC = '简笔四肢仅两手两脚，等粗黑线轮廓'
+
 /** 解说素体通用尺寸（全片统一简笔比例，仅人生阶段微调） */
 export const NARRATION_MINIMAL_BODY_SIZE_SPEC =
-  '圆头约占身高三分之一，简笔躯干与圆头相当，四肢等粗黑线，青年标准站姿总高约三个头高'
+  `圆头约占身高三分之一，简笔躯干与圆头相当，${NARRATION_MINIMAL_LIMBS_SPEC}，青年标准站姿总高约三个头高`
 
 export const NARRATION_BODY_CONSISTENCY_CORE =
   `全片统一简笔素体比例，${NARRATION_MINIMAL_BODY_SIZE_SPEC}`

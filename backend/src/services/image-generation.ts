@@ -6,6 +6,7 @@ import { downloadFile, readImageAsCompressedDataUrl, saveBase64Image } from '../
 import { getImageAdapter, resolveImageAdapter, resolveImageProvider } from './adapters/registry'
 import type { AIConfig, ProviderRequest } from './adapters/types'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
+import { purgeStoryboardImageBeforeRegenerate } from './storyboard-asset-replace.js'
 
 interface GenerateImageParams {
   storyboardId?: number
@@ -21,6 +22,10 @@ interface GenerateImageParams {
 }
 
 export async function generateImage(params: GenerateImageParams): Promise<number> {
+  if (params.storyboardId) {
+    purgeStoryboardImageBeforeRegenerate(params.storyboardId, params.frameType)
+  }
+
   const ts = now()
   const config = params.configId
     ? getConfigById(params.configId)

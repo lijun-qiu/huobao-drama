@@ -5,25 +5,23 @@ import { success, created, now, badRequest } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { generateTTS } from '../services/tts-generation.js'
 import { findReusableTtsByText, narrationShotNeedsOwnTts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from '../services/narration-tts.js'
-import { isNarrationStoryboard, isStoryboardTitleShot } from '../services/narration-image.js'
+import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta } from '../services/narration-image.js'
 import { formatCharacterDisplayName, resolveStoryboardCharacterIdsForShot } from '../services/narration-characters.js'
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.js'
+import {
+  purgeStoryboardTtsBeforeRegenerate,
+  replaceStoryboardAssetOnUpdate,
+} from '../services/storyboard-asset-replace.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
-import { normalizeArtStyle, resolveLLMImagePrompt } from '../constants/art-styles.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 
 const app = new Hono()
 
-function resolveStoryboardImagePrompt(episodeId: number, prompt: unknown): string {
-  const text = String(prompt || '').trim()
-  if (!text) return text
-  const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
-  if (!episode) return resolveLLMImagePrompt(text, 'narration-minimal')
-  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, episode.dramaId)).all()
-  return resolveLLMImagePrompt(text, normalizeArtStyle(drama?.style)) || text
+function normalizeStoryboardImagePrompt(prompt: unknown): string {
+  return String(prompt || '').trim()
 }
 
 function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
@@ -93,7 +91,7 @@ app.post('/', async (c) => {
     shotType: body.shot_type,
     angle: body.angle,
     movement: body.movement,
-    imagePrompt: body.image_prompt ? resolveStoryboardImagePrompt(body.episode_id, body.image_prompt) : body.image_prompt,
+    imagePrompt: body.image_prompt ? normalizeStoryboardImagePrompt(body.image_prompt) : body.image_prompt,
     referenceImages: body.reference_images,
     duration: body.duration || 10,
     createdAt: ts,
@@ -140,12 +138,18 @@ app.put('/:id', async (c) => {
 
   const updates: Record<string, any> = { updatedAt: now() }
   for (const [snakeKey, camelKey] of Object.entries(fieldMap)) {
-    if (snakeKey in body) updates[camelKey] = body[snakeKey]
+    if (snakeKey in body) {
+      if (camelKey === 'composedImage' || camelKey === 'ttsAudioUrl') {
+        replaceStoryboardAssetOnUpdate(storyboard, camelKey, body[snakeKey])
+      }
+      updates[camelKey] = body[snakeKey]
+    }
   }
 
   if ('dialogue' in body) {
     const nextDialogue = typeof body.dialogue === 'string' ? body.dialogue : String(body.dialogue ?? '')
     if (nextDialogue !== (storyboard.dialogue || '')) {
+      purgeStoryboardTtsBeforeRegenerate(id, storyboard)
       updates.ttsAudioUrl = null
       updates.subtitleUrl = null
       updates.composedVideoUrl = null
@@ -153,8 +157,20 @@ app.put('/:id', async (c) => {
     }
   }
 
-  if ('image_prompt' in body && body.image_prompt) {
-    updates.imagePrompt = resolveStoryboardImagePrompt(storyboard.episodeId, body.image_prompt)
+  if ('image_prompt' in body) {
+    updates.imagePrompt = normalizeStoryboardImagePrompt(body.image_prompt)
+    const nextPrompt = updates.imagePrompt
+    const prevPrompt = String(storyboard.imagePrompt || '').trim()
+    if (nextPrompt !== prevPrompt && nextPrompt) {
+      const meta = parseNarrationImageMeta(storyboard.referenceImages)
+      if (meta.narration_image_mode === 'new') {
+        const { narration_image_mode, ...restMeta } = meta
+        updates.referenceImages = buildNarrationImageMeta(narration_image_mode, {
+          ...restMeta,
+          image_prompt_source: 'manual',
+        })
+      }
+    }
   }
 
   validateStoryboardBindings(
@@ -296,6 +312,7 @@ app.post('/:id/generate-tts', async (c) => {
   }
 
   try {
+    purgeStoryboardTtsBeforeRegenerate(id, sb)
     const ttsVoice = localTts
       ? (localTtsEngine === 'voicebox'
         ? String(body?.local_voice || voiceId)

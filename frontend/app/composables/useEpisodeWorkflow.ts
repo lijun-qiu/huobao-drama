@@ -145,7 +145,7 @@ export function narrationStoryboardPrompt(style = 'comic') {
     : `${artStylePrompt(style, 'agent')}。`
   return [
     '这是旁白解说视频，必须按「一句旁白 = 一个镜头」拆分，严禁把多句旁白合并到同一镜头。',
-    '以句号、问号、感叹号、分号、逗号、顿号或换行作为分镜边界，每个标点（或换行）后单独一镜，严禁合并。',
+    '以句号、问号、感叹号或换行作为分镜边界；逗号/顿号/分号处仅当相邻两句合计超过 16 字才拆镜，否则合并。',
     '所有 dialogue 统一写为「旁白：单句内容」，每镜 dialogue 只能有一句旁白。',
     `image_prompt 必须是单张完整插画，描述该场景段落的「主要视觉画面」（综合同场景全部旁白，不要只写首句），画风要求：${styleHint}`,
     '严禁在 image_prompt 中出现 grid、panel、宫格、分格、多格、collage、split、strip 等词。',
@@ -185,6 +185,8 @@ export interface NarrationImageMeta {
   paragraph_layout?: 'single' | 'diptych'
   script_paragraph_index?: number
   body_sentence_index?: number
+  image_prompt_source?: 'llm_raw' | 'optimized' | 'upload' | 'manual'
+  image_prompt_llm_raw?: string
 }
 
 export function isNarrationStoryboard(sb: any) {
@@ -222,6 +224,15 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
       paragraph_layout: raw.paragraph_layout === 'diptych' ? 'diptych' : raw.paragraph_layout === 'single' ? 'single' : undefined,
       script_paragraph_index: typeof raw.script_paragraph_index === 'number' ? raw.script_paragraph_index : undefined,
       body_sentence_index: typeof raw.body_sentence_index === 'number' ? raw.body_sentence_index : undefined,
+      image_prompt_source: raw.image_prompt_source === 'llm_raw'
+        || raw.image_prompt_source === 'optimized'
+        || raw.image_prompt_source === 'upload'
+        || raw.image_prompt_source === 'manual'
+        ? raw.image_prompt_source
+        : undefined,
+      image_prompt_llm_raw: typeof raw.image_prompt_llm_raw === 'string' && raw.image_prompt_llm_raw.trim()
+        ? raw.image_prompt_llm_raw.trim()
+        : undefined,
     }
   }
   try {
@@ -247,6 +258,15 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
       paragraph_layout: parsed?.paragraph_layout === 'diptych' ? 'diptych' : parsed?.paragraph_layout === 'single' ? 'single' : undefined,
       script_paragraph_index: typeof parsed?.script_paragraph_index === 'number' ? parsed.script_paragraph_index : undefined,
       body_sentence_index: typeof parsed?.body_sentence_index === 'number' ? parsed.body_sentence_index : undefined,
+      image_prompt_source: parsed?.image_prompt_source === 'llm_raw'
+        || parsed?.image_prompt_source === 'optimized'
+        || parsed?.image_prompt_source === 'upload'
+        || parsed?.image_prompt_source === 'manual'
+        ? parsed.image_prompt_source
+        : undefined,
+      image_prompt_llm_raw: typeof parsed?.image_prompt_llm_raw === 'string' && parsed.image_prompt_llm_raw.trim()
+        ? parsed.image_prompt_llm_raw.trim()
+        : undefined,
     }
   } catch {}
   return { narration_image_mode: 'inherit' }
@@ -298,7 +318,6 @@ export function hasDuplicateStoryboardNumbers(list: any[]) {
 export function narrationShotNeedsOwnImage(sb: any) {
   const meta = parseNarrationImageMeta(sb)
   if (meta.narration_image_mode === 'new') return true
-  if (typeof meta.paragraph_index === 'number') return true
   const n = Number(sb?.storyboard_number ?? sb?.storyboardNumber)
   if (meta.narration_shot_type === 'title' && n === 1) return true
   return false
@@ -395,6 +414,9 @@ export function buildNarrationImagePrompt(sb: any, style = 'comic', allSbs?: any
   const fullNarrationLines = allSbs?.length ? collectBodyNarrationLines(allSbs) : []
   const bodyIndex = allSbs?.length ? collectBodyNarrationLineIndex(allSbs, sb) : -1
   const meta = parseNarrationImageMeta(sb)
+  if (meta.image_prompt_source === 'llm_raw' || meta.image_prompt_source === 'optimized') {
+    return storedPrompt
+  }
   const sceneContent = meta.scene_content || extractNarrationSentence(sb)
   const narrationLines = meta.image_narration_lines?.length
     ? meta.image_narration_lines

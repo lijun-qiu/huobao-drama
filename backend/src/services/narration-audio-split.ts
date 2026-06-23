@@ -8,6 +8,7 @@ import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { getAbsolutePath } from '../utils/storage.js'
 import { sortStoryboardsByOrder } from './narration-image.js'
+import { purgeStoryboardTtsBeforeRegenerate } from './storyboard-asset-replace.js'
 import { parseDialogueForTTS } from './narration-tts.js'
 import { transcribeAudioToSrt, formatSrtTimestamp } from './audio-transcribe.js'
 import {
@@ -74,6 +75,7 @@ function getEpisodeTtsTargets(episodeId: number): TtsTarget[] {
 }
 
 function assignStoryboardTtsClip(sbId: number, clipPath: string, ts: string) {
+  purgeStoryboardTtsBeforeRegenerate(sbId)
   const clipDuration = probeMediaDuration(getAbsolutePath(clipPath))
   return clipDuration.then((sec) => {
     const durationSec = Math.max(1, Math.min(120, Math.ceil(sec)))

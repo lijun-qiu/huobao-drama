@@ -728,8 +728,21 @@ export function enrichImagePromptWithCharacters(
     : characters
 
   if (isNarrationMinimalStyle(style)) {
+    if (NARRATION_USE_RAW_LLM_PROMPTS && !relevant.length) return base
     const coerced = coerceMinimalLLMImagePrompt(base)
-    if (!relevant.length || NARRATION_USE_RAW_LLM_PROMPTS) return coerced
+    if (NARRATION_USE_RAW_LLM_PROMPTS) {
+      if (!relevant.length) return base
+      const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
+      const addition = `场景中出现素体：主人公${names}须为${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），同框配角须为${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），${NARRATION_MINIMAL_NO_CLOTHING_RULE}，同款简笔比例仅颜色与人生阶段微调区分`
+      if (/【左格/.test(base) && /【右格/.test(base)) {
+        return appendToNarrationBracket(appendToNarrationBracket(base, '左格', addition), '右格', addition)
+      }
+      if (/【画面主体[：:]/.test(base)) {
+        return appendToNarrationBracket(base, '画面主体', addition)
+      }
+      return appendToNarrationBracket(base, '剧情', addition)
+    }
+    if (!relevant.length) return coerced
     const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
     const addition = `场景中出现素体：主人公${names}须为${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），同框配角须为${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），${NARRATION_MINIMAL_NO_CLOTHING_RULE}，同款简笔比例仅颜色与人生阶段微调区分`
     if (/【左格/.test(coerced) && /【右格/.test(coerced)) {

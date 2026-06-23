@@ -18,6 +18,7 @@ import { resolveEdgeVoice } from './edge-tts-local.js'
 import { resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
+import { deleteEpisodeAssetFileIfUnreferenced } from './storyboard-asset-replace.js'
 import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
@@ -587,6 +588,14 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
   let visual = getStoryboardVisualSource(sb, episodeStoryboards)
   const useBlackFrame = !visual
+  if (sb.composedVideoUrl) {
+    deleteEpisodeAssetFileIfUnreferenced(
+      sb.composedVideoUrl,
+      sb.episodeId,
+      'composedVideoUrl',
+      storyboardId,
+    )
+  }
   db.update(schema.storyboards)
     .set({ status: 'compose_processing', composedVideoUrl: null, updatedAt: now() })
     .where(eq(schema.storyboards.id, storyboardId))

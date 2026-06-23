@@ -121,7 +121,7 @@ export function estimateNarrationDuration(sentence: string, isTitle = false) {
   return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
 }
 
-/** 旁白分镜：按标点拆 TTS 镜头，不处理配图段落与配图文案 */
+/** 旁白分镜：按句末标点拆 TTS 镜头（逗号处 ≤16 字合并），不处理配图段落与配图文案 */
 export async function breakdownNarrationStoryboards(
   episodeId: number,
   scriptOverride?: string,

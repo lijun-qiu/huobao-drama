@@ -14,13 +14,31 @@ export type NarrationImageBreakdownProgress = {
 
 const progressMap = new Map<number, NarrationImageBreakdownProgress>()
 const cancelFlags = new Map<number, boolean>()
-const STALE_MS = 15 * 60 * 1000
+const runningJobs = new Set<number>()
+const STALE_MS = 60 * 60 * 1000
 
 export class NarrationImageBreakdownCancelledError extends Error {
   constructor() {
     super('配图分镜已取消')
     this.name = 'NarrationImageBreakdownCancelledError'
   }
+}
+
+export function isNarrationImageBreakdownRunning(episodeId: number): boolean {
+  const progress = progressMap.get(episodeId)
+  return progress?.status === 'processing' || runningJobs.has(episodeId)
+}
+
+export function acquireNarrationImageBreakdownJob(episodeId: number): boolean {
+  if (runningJobs.has(episodeId)) return false
+  const progress = progressMap.get(episodeId)
+  if (progress?.status === 'processing') return false
+  runningJobs.add(episodeId)
+  return true
+}
+
+export function releaseNarrationImageBreakdownJob(episodeId: number) {
+  runningJobs.delete(episodeId)
 }
 
 export function isNarrationImageBreakdownCancelled(episodeId: number): boolean {
@@ -53,6 +71,12 @@ function clearNarrationImageBreakdownCancel(episodeId: number) {
 export function calcPromptBatchPercent(batchDone: number, batchCount: number): number {
   if (!batchCount) return 15
   return Math.round(15 + (batchDone / batchCount) * 70)
+}
+
+/** 换镜检测分批进度：detecting 阶段约占 3%～85% */
+export function calcDetectBatchPercent(batchDone: number, batchCount: number): number {
+  if (!batchCount) return 5
+  return Math.round(3 + (batchDone / batchCount) * 82)
 }
 
 export function updateNarrationImageBreakdownProgress(

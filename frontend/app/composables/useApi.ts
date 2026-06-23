@@ -70,6 +70,22 @@ export const episodeAPI = {
     api.post(`/episodes/${id}/narration-image-breakdown/cancel`),
   narrationImageBreakdownStatus: (id: number) =>
     api.get(`/episodes/${id}/narration-image-breakdown-status`),
+  narrationImageDetect: (
+    id: number,
+    options?: {
+      style?: string
+      image_detect_mode?: 'paragraph' | 'conservative'
+      detect_batch_threshold?: number
+      detect_batch_size?: number
+    },
+  ) => api.post(`/episodes/${id}/narration-image-detect`, options || {}),
+  narrationImagePrompts: (id: number, options?: { style?: string; retry_missing_prompts?: boolean; prompt_batch_size?: number }) =>
+    api.post(`/episodes/${id}/narration-image-prompts`, options || {}),
+  narrationImageAudit: (id: number) => api.get(`/episodes/${id}/narration-image-audit`),
+  narrationImageOptimize: (id: number, options?: { storyboard_ids?: number[] }) =>
+    api.post(`/episodes/${id}/narration-image-optimize`, options || {}),
+  narrationImageRestore: (id: number, options?: { storyboard_ids?: number[] }) =>
+    api.post(`/episodes/${id}/narration-image-restore`, options || {}),
   importNarrationStoryboardDesc: (id: number, text: string) =>
     api.post(`/episodes/${id}/import-narration-storyboard-desc`, { text }),
   importNarrationImageDesc: (id: number, text: string) =>
@@ -83,6 +99,18 @@ export const episodeAPI = {
   generateOpeningVideo: (id: number) => api.post(`/episodes/${id}/generate-opening-video`, {}),
   openingVideoStatus: (id: number) => api.get(`/episodes/${id}/opening-video`),
   openingPickedImagesZipUrl: (id: number) => `/api/v1/episodes/${id}/opening-picked-images.zip`,
+  exportOpeningPickedImages: async (id: number) => {
+    const resp = await fetch(`/api/v1/episodes/${id}/opening-picked-images/export`, { method: 'POST' })
+    const contentType = resp.headers.get('content-type') || ''
+    if (!resp.ok) {
+      if (contentType.includes('json')) {
+        const json = await resp.json()
+        throw new Error(json?.message || `${resp.status}`)
+      }
+      throw new Error(`${resp.status}`)
+    }
+    return resp.blob()
+  },
   generateTitleVideo: (id: number) => api.post(`/episodes/${id}/generate-title-video`, {}),
   titleVideoStatus: (id: number) => api.get(`/episodes/${id}/title-video`),
   uploadOpeningAudio: (id: number, audioPath: string, subtitleText?: string) =>
@@ -102,6 +130,9 @@ export const episodeAPI = {
     }),
   cropNarrationImages: (id: number) => api.post(`/episodes/${id}/crop-narration-images`, {}),
   restoreNarrationImages: (id: number) => api.post(`/episodes/${id}/restore-narration-images`, {}),
+  clearNarrationImages: (id: number) => api.post(`/episodes/${id}/clear-narration-images`, {}),
+  clearNarrationTts: (id: number) => api.post(`/episodes/${id}/clear-narration-tts`, {}),
+  clearComposedVideos: (id: number) => api.post(`/episodes/${id}/clear-composed-videos`, {}),
 }
 
 export const storyboardAPI = {

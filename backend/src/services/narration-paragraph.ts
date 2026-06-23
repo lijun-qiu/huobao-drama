@@ -1,4 +1,9 @@
-import type { ImageDetectSource, NarrationSentenceItem, ImageDetectMode } from './narration-scene-detect.js'
+import type {
+  ImageDetectSource,
+  NarrationSentenceItem,
+  ImageDetectMode,
+  DetectImageNeedsOptions,
+} from './narration-scene-detect.js'
 import {
   buildSceneSegments,
   detectImageNeedsBalanced,
@@ -14,6 +19,8 @@ export type NarrationParagraph = {
   endIndex: number
   sentences: string[]
   layout: ParagraphLayout
+  /** 第一步 LLM 检测输出的综合画面描述 */
+  sceneDescription?: string
 }
 
 export type BuildNarrationParagraphsOptions = {
@@ -23,11 +30,15 @@ export type BuildNarrationParagraphsOptions = {
   style?: string
   fullNarrationLines?: string[]
   previousEpisodeNarration?: string[]
+  detectBatchThreshold?: number
+  detectBatchSize?: number
+  onDetectProgress?: DetectImageNeedsOptions['onProgress']
 }
 
 function mapSegmentsToParagraphs(
   items: NarrationSentenceItem[],
   needs: boolean[],
+  segmentDescriptions?: Map<number, string>,
 ): NarrationParagraph[] {
   const segments = buildSceneSegments(items, needs)
   return segments.map((seg, index) => ({
@@ -36,6 +47,7 @@ function mapSegmentsToParagraphs(
     endIndex: seg.endIndex,
     sentences: seg.sentences,
     layout: decideParagraphLayout(seg.sentences),
+    sceneDescription: segmentDescriptions?.get(seg.anchorIndex),
   }))
 }
 
@@ -52,12 +64,12 @@ export function buildNarrationParagraphs(
   return mapSegmentsToParagraphs(items, needs)
 }
 
-/** 优先 LLM 判定换镜点（万能模板语境），失败则回退规则 */
+/** LLM 直接判定 needs_image，失败则抛错 */
 export async function buildNarrationParagraphsAsync(
   items: NarrationSentenceItem[],
   options?: BuildNarrationParagraphsOptions,
 ): Promise<{ paragraphs: NarrationParagraph[]; detectSource: ImageDetectSource }> {
-  if (!items.length) return { paragraphs: [], detectSource: 'balanced' }
+  if (!items.length) return { paragraphs: [], detectSource: 'llm' }
 
   const mode = options?.imageDetectMode || 'paragraph'
   const resolved = await resolveImageNeeds(items, {
@@ -67,10 +79,13 @@ export async function buildNarrationParagraphsAsync(
     style: options?.style,
     fullNarrationLines: options?.fullNarrationLines ?? items.map(item => item.sentence),
     previousEpisodeNarration: options?.previousEpisodeNarration,
+    batchThreshold: options?.detectBatchThreshold,
+    batchSize: options?.detectBatchSize,
+    onProgress: options?.onDetectProgress,
   })
 
   return {
-    paragraphs: mapSegmentsToParagraphs(items, resolved.needs),
+    paragraphs: mapSegmentsToParagraphs(items, resolved.needs, resolved.segmentDescriptions),
     detectSource: resolved.source,
   }
 }

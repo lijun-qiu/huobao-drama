@@ -18,7 +18,12 @@ export default defineNuxtConfig({
   vite: {
     server: {
       proxy: {
-        '/api': { target: 'http://localhost:5679', changeOrigin: true },
+        '/api': {
+          target: 'http://localhost:5679',
+          changeOrigin: true,
+          timeout: 3_600_000,
+          proxyTimeout: 3_600_000,
+        },
         '/static': { target: 'http://localhost:5679', changeOrigin: true },
       },
     },

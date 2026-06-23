@@ -463,7 +463,7 @@
             <div class="narration-breakdown-steps">
               <strong>下一步：</strong>
               ① 制作阶段完成「定妆参考」
-              → ② 生成配音 → ③ <strong>配图分镜</strong> → ④ 生成配图 → ⑤ 镜头合成 → ⑥ 导出
+              → ② 生成配音 → ③ <strong>检测配图 → 生成文案 → 优化文案</strong> → ④ 生成配图 → ⑤ 镜头合成 → ⑥ 导出
             </div>
           </div>
 
@@ -770,10 +770,10 @@
               </svg>
             </div>
             <div class="empty-title">{{ isNarrationMode ? '将解说文案拆解为旁白镜头' : '将剧本拆解为分镜序列' }}</div>
-            <div class="empty-desc">{{ isNarrationMode ? '按标点拆分旁白（。，、；等）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
+            <div class="empty-desc">{{ isNarrationMode ? '按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
             <div v-if="!isNarrationMode" class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
             <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
-              <strong>旁白分镜：</strong>按标点拆分旁白，一句一镜（TTS 粒度）。配图段落与配图文案请在制作阶段单独执行「配图分镜」。
+              <strong>旁白分镜：</strong>按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并），一句一镜（TTS 粒度）。配图段落与配图文案请在制作阶段单独执行「配图分镜」。
             </div>
             <div v-if="isNarrationMode" style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
               <span class="tag">旁白 TTS 分镜</span>
@@ -1385,11 +1385,20 @@
                 </button>
                 <button class="btn btn-sm btn-primary" :disabled="isBatchRunning('tts') || !ttsPendingCount" @click="batchShotTTS">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
-                  生成剩余{{ ttsPendingCount ? ` (${ttsPendingCount})` : '' }}
+                  {{ isBatchRunning('tts') ? '生成中…' : '生成剩余' }}{{ ttsPendingCount ? ` (${ttsPendingCount})` : '' }}
                 </button>
                 <button class="btn btn-sm" :disabled="isBatchRunning('tts') || !ttsEligibleCount" @click="batchShotTTSAll">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                   全部生成
+                </button>
+                <button
+                  v-if="ttsAssignedCount"
+                  class="btn btn-sm"
+                  title="清除本集全部镜头配音，删除文件并重置数据库"
+                  :disabled="narrationAssetClearing || isBatchRunning('tts')"
+                  @click="clearAllNarrationTts"
+                >
+                  {{ narrationAssetClearing ? '清除中…' : `清除已有配音 (${ttsAssignedCount})` }}
                 </button>
               </div>
             </div>
@@ -1559,7 +1568,51 @@
           <!-- Sub: Shots (Narration) -->
           <div v-else-if="prodTab === 'shots' && isNarrationMode" class="prod-content">
             <div class="narration-hint">
-              <strong>配图策略：</strong>先点「配图分镜」按场景换图并生成配图文案，再批量生成配图。同场景可沿用；默认完整单图，可手动切两宫格。上传配图用「上传下一张」，同段 inherit 镜头自动沿用，<strong>不会跨到下一个需配图镜头</strong>。
+              <strong>配图策略：</strong>① 检测配图 → ② 生成纯 LLM 六维文案 → ③ 检查/优化配图文案 → 批量生成配图。卡片可「复用上一镜 / 下一镜」；同段 inherit 镜头合成时自动沿用。
+            </div>
+            <div class="prod-image-model-bar detect-batch-config" style="margin-bottom:12px">
+              <span class="dim" style="font-size:12px">检测分批</span>
+              <label class="detect-batch-field">
+                超过
+                <input
+                  v-model.number="imageDetectBatchThreshold"
+                  type="number"
+                  min="0"
+                  max="500"
+                  step="1"
+                  class="detect-batch-input"
+                  title="镜头数超过该值时分批检测；0 表示始终单次调用"
+                />
+                镜
+              </label>
+              <label class="detect-batch-field">
+                每批
+                <input
+                  v-model.number="imageDetectBatchSize"
+                  type="number"
+                  min="10"
+                  max="200"
+                  step="1"
+                  class="detect-batch-input"
+                  title="分批时每批最多覆盖的镜头数"
+                />
+                镜
+              </label>
+              <span class="dim" style="font-size:11px">0=不分批</span>
+              <span class="dim" style="font-size:12px;margin-left:12px">文案分批</span>
+              <label class="detect-batch-field">
+                每批
+                <input
+                  v-model.number="imagePromptBatchSize"
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="1"
+                  class="detect-batch-input"
+                  title="生成配图文案时每批最多段落数"
+                />
+                段
+              </label>
             </div>
             <div class="prod-image-model-bar" style="margin-bottom:12px">
               <span class="dim" style="font-size:12px">文本模型</span>
@@ -1588,7 +1641,36 @@
                   >关</button>
                 </div>
               </div>
-              <span class="tag">配图分镜 / AI 配图文案</span>
+              <span class="tag">配图分镜（三步）</span>
+              <button
+                class="btn btn-sm"
+                :disabled="narrationImageBreaking || !sbs.length"
+                title="LLM 判定哪些镜头需要配图及张数"
+                @click="doNarrationImageDetect"
+              >
+                <Loader2 v-if="narrationImageBreaking && narrationImageStep === 'detect'" :size="11" class="animate-spin" />
+                ① 检测配图
+                <span v-if="narrationDetectDisplayCount" class="btn-step-count">{{ narrationDetectDisplayCount }}</span>
+              </button>
+              <button
+                class="btn btn-sm"
+                :disabled="narrationImageBreaking || !sbs.length || !narrationDetectDisplayCount"
+                title="根据检测结果生成纯 LLM 六维配图文案（无清洗）"
+                @click="doNarrationImagePrompts"
+              >
+                <Loader2 v-if="narrationImageBreaking && narrationImageStep === 'prompts'" :size="11" class="animate-spin" />
+                ② 生成配图文案
+                <span v-if="narrationDetectDisplayCount" class="btn-step-count">{{ narrationPromptDisplayCount }}/{{ narrationDetectDisplayCount }}</span>
+              </button>
+              <button
+                class="btn btn-sm"
+                :disabled="narrationImageAuditing || !narrationNeedImageCount"
+                title="本地规则扫描血腥/服装/格式等问题，不修改"
+                @click="doNarrationImageAudit"
+              >
+                <Loader2 v-if="narrationImageAuditing" :size="11" class="animate-spin" />
+                ③ 检查文案
+              </button>
               <button
                 class="btn btn-sm"
                 :disabled="narrationImageDescUploading || !sbs.length"
@@ -1604,24 +1686,11 @@
                   v-if="narrationMissingPromptCount"
                   class="btn btn-sm btn-retry-missing-prompts"
                   :disabled="narrationImageBreaking"
-                  title="仅对缺 AI 配图文案的镜头重新调用模型，不重新换镜检测"
+                  title="仅对缺配图文案的锚点镜头重新调用 LLM（不重新检测）"
                   @click="doRetryMissingNarrationImagePrompts"
                 >
                   <Loader2 v-if="narrationImageBreaking" :size="11" class="animate-spin" />
                   补全缺失文案 ({{ narrationMissingPromptCount }})
-                </button>
-                <button
-                  class="btn btn-sm btn-primary"
-                  :disabled="narrationImageBreaking || !sbs.length"
-                  @click="doNarrationImageBreakdown"
-                >
-                  <Loader2 v-if="narrationImageBreaking" :size="11" class="animate-spin" />
-                  <template v-if="narrationImageBreaking">
-                    {{ narrationImageBreakdownProgressMessage }}
-                  </template>
-                  <template v-else>
-                    {{ hasNarrationImageBreakdown ? '重新配图分镜' : '配图分镜' }}
-                  </template>
                 </button>
               </div>
             </div>
@@ -1638,20 +1707,83 @@
                 <div class="progress-fill" :style="{ width: narrationImageBreakdownProgressPercent + '%' }"></div>
               </div>
             </div>
+            <div v-if="narrationImageAuditPanel" class="narration-breakdown-panel" style="margin-bottom:12px">
+              <div class="narration-breakdown-head">
+                <div>
+                  <strong>配图文案检查</strong>
+                  <span class="dim" style="font-size:11px;margin-left:8px">
+                    {{ narrationImageAuditPanel.shotsWithIssues }}/{{ narrationImageAuditPanel.total }} 镜有问题 · 共 {{ narrationImageAuditPanel.issueCount }} 项
+                  </span>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <button
+                    class="btn btn-sm"
+                    :disabled="narrationImageOptimizing || !narrationImageAuditPanel.shotsWithIssues"
+                    @click="doNarrationImageOptimizeAll"
+                  >
+                    {{ narrationImageOptimizing ? '优化中…' : '全部应用优化' }}
+                  </button>
+                  <button
+                    class="btn btn-sm"
+                    :disabled="narrationImageRestoring || !narrationImageAuditRestorableCount"
+                    @click="doNarrationImageRestoreAll"
+                    title="还原为第二步 LLM 原文"
+                  >
+                    {{ narrationImageRestoring ? '还原中…' : '全部还原 LLM 原文' }}
+                  </button>
+                </div>
+              </div>
+              <div class="narration-audit-list" style="max-height:240px;overflow:auto;margin-top:8px">
+                <div
+                  v-for="item in narrationImageAuditPanel.items.filter(i => i.issues?.length)"
+                  :key="item.storyboard_id"
+                  class="narration-audit-item"
+                  style="padding:8px 0;border-bottom:1px solid var(--border-subtle, #333)"
+                >
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <strong class="mono">#{{ String(item.storyboard_number).padStart(2, '0') }}</strong>
+                    <span v-for="issue in item.issues" :key="issue.code" class="tag" :class="issue.severity === 'error' ? 'tag-danger' : ''">{{ issue.label }}</span>
+                    <button
+                      v-if="item.can_restore"
+                      class="btn btn-sm"
+                      :disabled="narrationImageRestoring"
+                      @click="doNarrationImageRestoreOne(item.storyboard_id)"
+                    >
+                      还原 LLM 原文
+                    </button>
+                    <button
+                      class="btn btn-sm ml-auto"
+                      :disabled="narrationImageOptimizing"
+                      @click="doNarrationImageOptimizeOne(item.storyboard_id)"
+                    >
+                      应用优化
+                    </button>
+                  </div>
+                </div>
+                <p v-if="!narrationImageAuditPanel.shotsWithIssues" class="dim" style="font-size:12px;margin:8px 0">未发现明显问题</p>
+              </div>
+            </div>
             <div v-if="narrationImageBreakdownPanel" class="narration-breakdown-panel" style="margin-bottom:12px">
               <div class="narration-breakdown-head">
                 <div>
-                  <strong>配图分镜结果</strong>
-                  <span v-if="narrationImageBreakdownPanel.generatedAt" class="dim" style="font-size:11px;margin-left:8px">{{ formatBreakdownTime(narrationImageBreakdownPanel.generatedAt) }}</span>
+                  <strong>配图分镜进度</strong>
                 </div>
                 <span v-if="narrationImageBreakdownPanel.detectLabel" class="tag">{{ narrationImageBreakdownPanel.detectLabel }}</span>
               </div>
               <div class="narration-breakdown-stats">
-                <span v-if="narrationImageBreakdownPanel.paragraphCount != null" class="tag mono">{{ narrationImageBreakdownPanel.paragraphCount }} 段配图</span>
-                <span class="tag">{{ narrationImageBreakdownPanel.imageNeeded }} 张需生成</span>
+                <span class="tag mono">
+                  ① 检测分镜
+                  <strong>{{ narrationImageBreakdownPanel.detectCount }}</strong> 张
+                  <span v-if="narrationImageBreakdownPanel.detectAt" class="dim">· {{ formatBreakdownTime(narrationImageBreakdownPanel.detectAt) }}</span>
+                </span>
+                <span class="tag mono">
+                  ② 六维文案
+                  <strong>{{ narrationImageBreakdownPanel.promptCount }}</strong><template v-if="narrationImageBreakdownPanel.detectCount">/{{ narrationImageBreakdownPanel.detectCount }}</template> 条
+                  <span v-if="narrationImageBreakdownPanel.promptAt" class="dim">· {{ formatBreakdownTime(narrationImageBreakdownPanel.promptAt) }}</span>
+                </span>
                 <span v-if="narrationImageBreakdownPanel.diptychCount" class="tag">含 {{ narrationImageBreakdownPanel.diptychCount }} 张两宫格</span>
                 <span v-if="narrationImageBreakdownPanel.promptLabel" class="tag">{{ narrationImageBreakdownPanel.promptLabel }}</span>
-                <span v-if="narrationImageBreakdownPanel.imageNeeded" class="tag dim">约 ¥{{ narrationImageBreakdownPanel.estImageCost }}（{{ narrationImageBreakdownPanel.priceLabel }}）</span>
+                <span v-if="narrationImageBreakdownPanel.detectCount" class="tag dim">约 ¥{{ narrationImageBreakdownPanel.estImageCost }}（{{ narrationImageBreakdownPanel.priceLabel }}）</span>
               </div>
               <div class="narration-breakdown-steps">
                 <strong>下一步：</strong>
@@ -1669,7 +1801,8 @@
               >
                 待生成 {{ narrationImagesPendingHint }}
               </span>
-              <div class="ml-auto flex gap-1 items-center">
+              <div class="ml-auto flex gap-1 items-center flex-wrap">
+                <span class="dim shot-folder-tool-hint" title="按修改时间重命名为 1.png、2.png… 后可直接文件夹上传">本地重命名：backend/scripts/准备配图文件夹.bat</span>
                 <BaseSelect
                   v-if="narrationCopyBatchOptions.length > 1"
                   :options="narrationCopyBatchOptions"
@@ -1682,18 +1815,19 @@
                   上传下一张{{ nextPendingNarrationShot ? ` (#${getNarrationShotDisplayNo(nextPendingNarrationShot)})` : '' }}
                 </button>
                 <button
-                  v-if="uploadedNarrationImageCount"
+                  v-if="narrationOwnImageCount"
                   class="btn btn-sm"
-                  title="清除所有手动上传的配图（不影响 AI 生成）"
-                  @click="clearUploadedNarrationShotImages"
+                  title="清除本集全部配图（含 AI 生成与上传），删除文件并重置数据库"
+                  :disabled="narrationAssetClearing"
+                  @click="clearAllNarrationImages"
                 >
-                  清除已上传配图 ({{ uploadedNarrationImageCount }})
+                  {{ narrationAssetClearing ? '清除中…' : `清除已有配图 (${narrationOwnImageCount})` }}
                 </button>
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="copyNarrationShotPromptsBatch">
                   {{ narrationCopyBatchOptions.length > 1 ? `复制描述词 (${narrationCopyBatchOptions.find(o => o.value === narrationCopyBatchIndex)?.label || '#01-#10'})` : `一键复制描述词（${narrationNeedImageCount}）` }}
                 </button>
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerAllShotImageUpload">一键上传全部（{{ narrationNeedImageCount }}）</button>
-                <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerShotFolderUpload" title="文件夹上传：无后缀→第1镜，(1)→第2镜，(2)→第3镜…">文件夹上传</button>
+                <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerShotFolderUpload" title="文件夹上传：1.png→第1镜、2.png→第2镜…（可用 backend/scripts/准备配图文件夹.bat 按修改时间重命名）">文件夹上传</button>
                 <button
                   class="btn btn-sm"
                   :disabled="!narrationCropImageCount || narrationCropWatermarkProcessing"
@@ -1808,15 +1942,23 @@
                     上传图片
                   </button>
                   <button
-                    v-if="!hasNarrationShotImage(sb)"
                     class="btn btn-sm"
                     :disabled="!findPrevNarrationShotWithImage(sb)"
+                    title="复制上一镜的配图到本镜"
                     @click="reuseNarrationShotImage(sb)"
                   >
                     复用上一镜
                   </button>
                   <button
-                    v-if="hasNarrationShotImage(sb) && !narrationShotNeedsOwnImage(sb)"
+                    class="btn btn-sm"
+                    :disabled="!findNextNarrationShotWithImage(sb)"
+                    title="复制下一镜的配图到本镜"
+                    @click="reuseNextNarrationShotImage(sb)"
+                  >
+                    复用下一镜
+                  </button>
+                  <button
+                    v-if="narrationShotExplicitCopy(sb)"
                     class="btn btn-sm"
                     @click="clearNarrationShotImage(sb)"
                   >
@@ -2224,6 +2366,15 @@
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                   重新生成全部并导出
                 </button>
+                <button
+                  v-if="composedCount || mergeUrl"
+                  class="btn btn-sm"
+                  title="清除本集全部镜头合成视频与导出成片，删除文件并重置数据库"
+                  :disabled="narrationAssetClearing || isBatchRunning('compose') || anyMergeProcessing"
+                  @click="clearAllComposedVideos"
+                >
+                  {{ narrationAssetClearing ? '清除中…' : `清除已有合成 (${composedCount})` }}
+                </button>
                 <input
                   v-model.number="mergeTestClipLimit"
                   type="number"
@@ -2319,7 +2470,7 @@
           </div>
           <div class="export-opening-body">
             <div class="narration-hint" style="margin-bottom:16px">
-              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每页自上往下卷曲翻页转场，叠加书本翻页音效）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 3 秒片头 + 翻页音效。
+              从本集已生成/上传的配图中<strong>随机选 10 张</strong>合成翻页片头（<strong>第 1 张=集内首张、第 10 张=集内末张</strong>，中间随机；可先导出 zip 再生成视频）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 3 秒片头 + 翻页音效。
             </div>
             <div class="opening-audio-panel" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px">
               <div style="font-size:13px;font-weight:600;margin-bottom:8px">开幕配音</div>
@@ -2405,6 +2556,25 @@
                 <audio v-if="openingAudioSrc" :src="openingAudioSrc" controls style="height:32px;max-width:280px" />
                 <span v-if="openingAudioUrl" class="tag tag-success">配音已就绪</span>
               </div>
+              <div class="export-bar" style="margin-top:12px;margin-bottom:0">
+                <button
+                  class="btn"
+                  :disabled="!illustrationImageCount || openingPickedImagesExporting"
+                  title="随机选 10 张（首尾镜固定）打包下载，无需先生成开幕视频"
+                  @click="exportOpeningPickedImages"
+                >
+                  {{ openingPickedImagesExporting ? '导出中…' : '导出十张配图' }}
+                </button>
+                <a
+                  v-if="canDownloadOpeningImages"
+                  :href="openingPickedImagesZipSrc"
+                  download
+                  class="btn"
+                  :title="`下载已选 ${openingPickedImages.length} 张配图`"
+                >
+                  下载十张
+                </a>
+              </div>
             </div>
             <template v-if="openingVideoProcessing">
               <div class="step-empty">
@@ -2421,22 +2591,31 @@
               <div class="export-bar">
                 <span class="tag tag-success">已生成</span>
                 <button class="btn" :disabled="!illustrationImageCount" @click="generateOpeningVideo">重新生成</button>
+                <button
+                  class="btn"
+                  :disabled="!illustrationImageCount || openingPickedImagesExporting"
+                  title="重新随机选 10 张（首尾镜固定）"
+                  @click="exportOpeningPickedImages"
+                >
+                  {{ openingPickedImagesExporting ? '导出中…' : '重新导出十张' }}
+                </button>
                 <a
                   v-if="canDownloadOpeningImages"
                   :href="openingPickedImagesZipSrc"
                   download
                   class="btn"
-                  :title="`下载本次随机选取的 ${openingPickedImages.length} 张配图`"
+                  :title="`下载已选 ${openingPickedImages.length} 张配图`"
                 >
-                  下载八张
+                  下载十张
                 </a>
                 <button
                   v-else
                   class="btn"
-                  disabled
-                  title="请重新生成开幕视频以记录配图"
+                  :disabled="!illustrationImageCount || openingPickedImagesExporting"
+                  title="随机选 10 张（首尾镜固定）打包下载"
+                  @click="exportOpeningPickedImages"
                 >
-                  下载八张
+                  导出十张
                 </button>
                 <button
                   v-if="mergeUrl && !mergeHasOpening"
@@ -2457,10 +2636,29 @@
                 </div>
                 <div class="empty-title">生成开幕视频</div>
                 <div v-if="openingVideoError" class="empty-desc" style="color:var(--danger)">{{ openingVideoError }}</div>
-                <div v-else class="empty-desc">需要至少 1 张镜头配图；建议完成「生成配图」后再生成</div>
+                <div v-else class="empty-desc">需要至少 1 张镜头配图；可先「导出十张配图」，再生成开幕视频</div>
+                <button
+                  v-if="illustrationImageCount"
+                  class="btn"
+                  style="margin-top:12px"
+                  :disabled="openingPickedImagesExporting"
+                  title="随机选 10 张（首尾镜固定）打包下载"
+                  @click="exportOpeningPickedImages"
+                >
+                  {{ openingPickedImagesExporting ? '导出中…' : '导出十张配图' }}
+                </button>
+                <a
+                  v-if="canDownloadOpeningImages"
+                  :href="openingPickedImagesZipSrc"
+                  download
+                  class="btn"
+                  style="margin-top:12px;margin-left:8px"
+                >
+                  下载十张
+                </a>
                 <button
                   class="btn btn-primary"
-                  style="margin-top:12px"
+                  :style="{ marginTop: '12px', marginLeft: canDownloadOpeningImages ? '8px' : '0' }"
                   :disabled="!illustrationImageCount || openingVideoProcessing"
                   @click="generateOpeningVideo"
                 >
@@ -3011,7 +3209,6 @@ import {
   resolveNarrationEffectiveImage,
   narrationShotsNeedingImage,
   narrationShotsPendingImage,
-  narrationShotsWithUploadedImage,
   getNarrationShotDisplayNo,
   formatNarrationShotDisplayList,
   formatNarrationPendingImageHint,
@@ -3165,6 +3362,11 @@ const panel = ref('script')
 const { running: rn, runningType: rt, run: runAgent } = useAgent()
 const narrationBreaking = ref(false)
 const narrationImageBreaking = ref(false)
+const narrationImageStep = ref(null)
+const narrationImageAuditing = ref(false)
+const narrationImageOptimizing = ref(false)
+const narrationImageRestoring = ref(false)
+const narrationImageAuditPanel = ref(null)
 const narrationImageBreakdownProgress = ref(null)
 const narrationStoryboardDescUploading = ref(false)
 const narrationImageDescUploading = ref(false)
@@ -3173,6 +3375,9 @@ const storyboardDescUploadInputRef = ref(null)
 const narrationExtracting = ref(false)
 const narrationBreakdownSummary = ref(null)
 const imageDetectMode = ref('paragraph')
+const imageDetectBatchThreshold = ref(100)
+const imageDetectBatchSize = ref(50)
+const imagePromptBatchSize = ref(6)
 
 const localRaw = ref(''), localScript = ref('')
 const rawContent = computed(() => episode.value?.content || '')
@@ -3237,8 +3442,12 @@ const narrationImageBreakdownProgressMessage = computed(() => {
   if (!progress) return '正在启动配图分镜…'
   const batch = progress.batch ?? progress.batchCount
   const batchCount = progress.batch_count ?? progress.batchCount
-  if (batch && batchCount && progress.phase === 'prompts') {
-    return progress.message || `正在生成配图文案（第 ${batch}/${batchCount} 批）…`
+  if (batch && batchCount && (progress.phase === 'prompts' || progress.phase === 'detecting')) {
+    return progress.message || (
+      progress.phase === 'detecting'
+        ? `正在检测换镜（第 ${batch}/${batchCount} 批）…`
+        : `正在生成配图文案（第 ${batch}/${batchCount} 批）…`
+    )
   }
   return progress.message || '配图分镜进行中…'
 })
@@ -3339,6 +3548,7 @@ const openingSubtitleText = ref(OPENING_SUBTITLE_DEFAULT)
 const openingAudioUploading = ref(false)
 const openingAudioGenerating = ref(false)
 const openingVideoProcessing = ref(false)
+const openingPickedImagesExporting = ref(false)
 const titleVideoProcessing = ref(false)
 let openingPollTimer = null
 const openingVideoSrc = computed(() => {
@@ -3359,6 +3569,7 @@ const bgmLibrary = ref([])
 const bgmGenerating = ref(false)
 const bgmUploading = ref(false)
 const bgmUploadInput = ref(null)
+const narrationAssetClearing = ref(false)
 const narrationCropWatermarkProcessing = ref(false)
 const narrationRestoreWatermarkProcessing = ref(false)
 const bgmDescGenerating = ref(false)
@@ -3810,8 +4021,52 @@ const narrationEditDuration = ref(10)
 const narrationEditAsTitle = ref(false)
 const narrationEditBusy = ref(false)
 
-/** 分镜/TTS：遇标点（含逗号顿号）即拆 */
-const STORYBOARD_PUNCT_BOUNDARY_RE = /(?<=[。！？；，、,.!?;])\s*/
+/** 分镜/TTS：句末标点必拆；逗号/顿号/分号仅当相邻合计超过 16 字才拆 */
+const STORYBOARD_STRONG_PUNCT_BOUNDARY_RE = /(?<=[。！？!?])\s*/
+const STORYBOARD_WEAK_PUNCT_BOUNDARY_RE = /(?<=[，、；,;])\s*/
+const STORYBOARD_COMMA_MERGE_MAX_CHARS = 16
+
+function trimNarrationPart(s) {
+  return s.replace(/^[，,、；;\s]+|[，,、；;\s]+$/g, '').trim()
+}
+
+function narrationCharCount(text) {
+  return text.replace(/[\s，,、；;。！？!?]/g, '').length
+}
+
+function splitByPunctBoundary(chunk, boundaryRe) {
+  const parts = chunk.split(boundaryRe).map(trimNarrationPart).filter(Boolean)
+  return parts.length ? parts : [chunk.trim()]
+}
+
+function mergeWeakPunctParts(parts, maxChars = STORYBOARD_COMMA_MERGE_MAX_CHARS) {
+  if (parts.length <= 1) return parts
+  const merged = []
+  let current = parts[0]
+  for (let i = 1; i < parts.length; i++) {
+    const next = parts[i]
+    if (narrationCharCount(current) + narrationCharCount(next) <= maxChars) {
+      current = `${current}，${next}`
+    } else {
+      merged.push(current)
+      current = next
+    }
+  }
+  merged.push(current)
+  return merged
+}
+
+function splitNarrationChunkLocal(chunk) {
+  const flat = chunk.replace(/\s+/g, ' ').trim()
+  if (!flat) return []
+  const strongParts = splitByPunctBoundary(flat, STORYBOARD_STRONG_PUNCT_BOUNDARY_RE)
+  const result = []
+  for (const strongPart of strongParts) {
+    const weakParts = splitByPunctBoundary(strongPart, STORYBOARD_WEAK_PUNCT_BOUNDARY_RE)
+    result.push(...(weakParts.length > 1 ? mergeWeakPunctParts(weakParts) : weakParts))
+  }
+  return result.length ? result : [flat]
+}
 
 function splitNarrationLines(text) {
   const normalized = String(text || '').replace(/\r\n/g, '\n').trim()
@@ -3820,8 +4075,7 @@ function splitNarrationLines(text) {
   for (const block of normalized.split(/\n+/)) {
     const flat = block.replace(/\s+/g, ' ').trim()
     if (!flat) continue
-    const parts = flat.split(STORYBOARD_PUNCT_BOUNDARY_RE).map(s => s.replace(/^[，,、\s]+|[，,、\s]+$/g, '').trim()).filter(Boolean)
-    lines.push(...(parts.length ? parts : [flat]))
+    lines.push(...splitNarrationChunkLocal(flat))
   }
   return lines
 }
@@ -3975,7 +4229,7 @@ async function splitShotByPunctuation(sb) {
   const text = ctx.dialogue || stripNarrationDialoguePrefix(sb.dialogue) || extractNarrationSentence(sb)
   const lines = splitNarrationLines(text)
   if (lines.length <= 1) {
-    toast.warning('至少要有 2 句才能拆分。用逗号、顿号或换行分隔多句后再试。')
+    toast.warning('至少要有 2 句才能拆分。用句末标点或较长逗号分段后再试。')
     return
   }
 
@@ -4952,6 +5206,32 @@ const shotImgCount = computed(() => {
   return sbs.value.filter(s => s.first_frame_image || s.firstFrameImage || s.last_frame_image || s.lastFrameImage || s.composed_image || s.composedImage).length
 })
 const narrationNeedImageCount = computed(() => narrationShotsNeedingImage(sbs.value).length)
+const narrationPromptLiveCount = computed(() =>
+  sbs.value.filter(sb =>
+    narrationShotNeedsOwnImage(sb) && String(sb?.image_prompt || sb?.imagePrompt || '').trim(),
+  ).length,
+)
+const narrationDetectDisplayCount = computed(() => {
+  const live = narrationNeedImageCount.value
+  const s = narrationBreakdownSummary.value
+  const cached = s?.paragraph_count ?? s?.paragraphCount ?? s?.image_needed_count ?? s?.imageNeededCount
+  const hasDetect = !!(s?.image_detect_at ?? s?.imageDetectAt)
+  if (live > 0) return live
+  if (hasDetect && cached != null) return cached
+  return 0
+})
+const narrationPromptDisplayCount = computed(() => {
+  const live = narrationPromptLiveCount.value
+  const s = narrationBreakdownSummary.value
+  const cached = s?.prompts_generated ?? s?.promptsGenerated
+  const hasPrompt = !!(s?.image_prompt_at ?? s?.imagePromptAt)
+  if (live > 0) return live
+  if (hasPrompt && cached != null) return cached
+  return 0
+})
+const narrationImageAuditRestorableCount = computed(() =>
+  narrationImageAuditPanel.value?.items?.filter(item => item.can_restore)?.length ?? 0,
+)
 const narrationMissingPromptCount = computed(() =>
   sbs.value.filter(sb =>
     narrationShotNeedsOwnImage(sb) && !String(sb?.image_prompt || sb?.imagePrompt || '').trim(),
@@ -4991,7 +5271,17 @@ const narrationImagesPendingCount = computed(() =>
   narrationShotsPendingImage(sbs.value).length,
 )
 const nextPendingNarrationShot = computed(() => narrationShotsPendingImage(sbs.value)[0] || null)
-const uploadedNarrationImageCount = computed(() => narrationShotsWithUploadedImage(sbs.value).length)
+const narrationOwnImageCount = computed(() => {
+  const paths = new Set()
+  for (const sb of sbs.value) {
+    const p = getNarrationShotOwnImage(sb)
+    if (p) paths.add(p)
+  }
+  return paths.size
+})
+const ttsAssignedCount = computed(() =>
+  sbs.value.filter(sb => getNarrationShotOwnTts(sb) || sb.tts_audio_url || sb.ttsAudioUrl).length,
+)
 const narrationCropImageCount = computed(() => {
   const paths = new Set()
   for (const sb of sbs.value) {
@@ -5070,6 +5360,8 @@ function buildNarrationImageDetectLabel(detectSource, detectMode) {
 }
 
 function buildNarrationImagePromptLabel(promptSource) {
+  if (promptSource === 'llm_raw') return '纯 LLM 文案'
+  if (promptSource === 'optimized') return '已规则优化'
   if (promptSource === 'llm') return 'AI 配图文案'
   if (promptSource === 'template' || promptSource === 'rule' || promptSource === 'heuristic') return '规则配图文案'
   return null
@@ -5077,11 +5369,16 @@ function buildNarrationImagePromptLabel(promptSource) {
 
 const hasNarrationImageBreakdown = computed(() => {
   const s = narrationBreakdownSummary.value
+  if (narrationDetectDisplayCount.value > 0) return true
+  if (narrationPromptDisplayCount.value > 0) return true
   if (!s) return false
   if (s.image_breakdown_at ?? s.imageBreakdownAt) return true
+  if (s.image_detect_at ?? s.imageDetectAt) return true
+  if (s.image_prompt_at ?? s.imagePromptAt) return true
   const detectSource = s.image_detect_source ?? s.imageDetectSource
   const paragraphCount = s.paragraph_count ?? s.paragraphCount
-  return !!(detectSource || (paragraphCount != null && paragraphCount > 0))
+  const promptsGenerated = s.prompts_generated ?? s.promptsGenerated
+  return !!(detectSource || paragraphCount != null || promptsGenerated != null)
 })
 
 const narrationStoryboardBreakdownPanel = computed(() => {
@@ -5108,33 +5405,42 @@ const narrationStoryboardBreakdownPanel = computed(() => {
 const narrationImageBreakdownPanel = computed(() => {
   if (!isNarrationMode.value || !sbs.value.length || !hasNarrationImageBreakdown.value) return null
   const s = narrationBreakdownSummary.value
-  const paragraphCount = s?.paragraph_count ?? s?.paragraphCount ?? null
+  const detectCount = narrationDetectDisplayCount.value
+  const promptCount = narrationPromptDisplayCount.value
   const diptychCount = s?.diptych_count ?? s?.diptychCount ?? 0
-  const imageNeeded = narrationNeedImageCount.value
   const unitPrice = imageModelUnitPrice(episodeImageModel.value)
-  const estImageCost = Math.round(imageNeeded * unitPrice * 100) / 100
+  const estImageCost = Math.round(detectCount * unitPrice * 100) / 100
   const priceLabel = imageModelPriceLabel(episodeImageModel.value)
   const detectSource = s?.image_detect_source ?? s?.imageDetectSource
   const detectMode = s?.image_detect_mode ?? s?.imageDetectMode ?? imageDetectMode.value
   const promptSource = s?.image_prompt_source ?? s?.imagePromptSource
   return {
-    paragraphCount,
+    detectCount,
+    promptCount,
     diptychCount,
-    imageNeeded,
     estImageCost,
     priceLabel,
     detectLabel: buildNarrationImageDetectLabel(detectSource, detectMode),
     promptLabel: buildNarrationImagePromptLabel(promptSource),
-    generatedAt: s?.image_breakdown_at ?? s?.imageBreakdownAt ?? null,
+    detectAt: s?.image_detect_at ?? s?.imageDetectAt ?? null,
+    promptAt: s?.image_prompt_at ?? s?.imagePromptAt ?? null,
   }
 })
 
 function syncNarrationBreakdownImageCount() {
   if (!epId.value || !isNarrationMode.value || !narrationBreakdownSummary.value || !sbs.value.length) return
-  const live = narrationNeedImageCount.value
-  const cached = narrationBreakdownSummary.value.image_needed_count ?? narrationBreakdownSummary.value.imageNeededCount ?? 0
-  if (live === cached) return
-  persistNarrationBreakdownSummary({ ...narrationBreakdownSummary.value, image_needed_count: live })
+  const liveDetect = narrationNeedImageCount.value
+  const livePrompts = narrationPromptLiveCount.value
+  const prev = narrationBreakdownSummary.value
+  const cachedDetect = prev.image_needed_count ?? prev.imageNeededCount ?? prev.paragraph_count ?? prev.paragraphCount ?? 0
+  const cachedPrompts = prev.prompts_generated ?? prev.promptsGenerated ?? 0
+  if (liveDetect === cachedDetect && livePrompts === cachedPrompts) return
+  persistNarrationBreakdownSummary({
+    ...prev,
+    image_needed_count: liveDetect || cachedDetect,
+    paragraph_count: liveDetect || prev.paragraph_count || prev.paragraphCount || 0,
+    prompts_generated: livePrompts || cachedPrompts,
+  })
 }
 
 function persistNarrationBreakdownSummary(res) {
@@ -5143,6 +5449,7 @@ function persistNarrationBreakdownSummary(res) {
   const liveImageNeeded = sbs.value.length ? narrationNeedImageCount.value : null
   const storyboardAt = res?.storyboard_breakdown_at ?? res?.storyboardBreakdownAt ?? res?.generatedAt ?? prev.storyboard_breakdown_at ?? prev.storyboardBreakdownAt ?? prev.generated_at ?? prev.generatedAt ?? null
   const imageAt = res?.image_breakdown_at ?? res?.imageBreakdownAt ?? prev.image_breakdown_at ?? prev.imageBreakdownAt ?? null
+  const storyboardReset = !!(res?.storyboard_breakdown_at ?? res?.storyboardBreakdownAt)
   const payload = {
     ...prev,
     count: res?.count ?? prev.count ?? 0,
@@ -5150,15 +5457,18 @@ function persistNarrationBreakdownSummary(res) {
     title_count: res?.title_count ?? res?.titleCount ?? prev.title_count ?? prev.titleCount ?? 0,
     title_image_count: res?.title_image_count ?? res?.titleImageCount ?? prev.title_image_count ?? prev.titleImageCount ?? 0,
     title_hook: res?.title_hook ?? res?.titleHook ?? prev.title_hook ?? prev.titleHook ?? null,
-    image_needed_count: liveImageNeeded ?? res?.image_needed_count ?? res?.imageNeededCount ?? prev.image_needed_count ?? prev.imageNeededCount ?? 0,
-    paragraph_count: res?.paragraph_count ?? res?.paragraphCount ?? prev.paragraph_count ?? prev.paragraphCount ?? 0,
-    diptych_count: res?.diptych_count ?? res?.diptychCount ?? prev.diptych_count ?? prev.diptychCount ?? 0,
-    image_detect_source: res?.image_detect_source ?? res?.imageDetectSource ?? prev.image_detect_source ?? prev.imageDetectSource ?? null,
-    image_prompt_source: res?.image_prompt_source ?? res?.imagePromptSource ?? prev.image_prompt_source ?? prev.imagePromptSource ?? null,
+    image_needed_count: storyboardReset ? 0 : (liveImageNeeded ?? res?.image_needed_count ?? res?.imageNeededCount ?? prev.image_needed_count ?? prev.imageNeededCount ?? 0),
+    paragraph_count: storyboardReset ? 0 : (res?.paragraph_count ?? res?.paragraphCount ?? prev.paragraph_count ?? prev.paragraphCount ?? 0),
+    prompts_generated: storyboardReset ? null : (res?.prompts_generated ?? res?.promptsGenerated ?? prev.prompts_generated ?? prev.promptsGenerated ?? null),
+    diptych_count: storyboardReset ? 0 : (res?.diptych_count ?? res?.diptychCount ?? prev.diptych_count ?? prev.diptychCount ?? 0),
+    image_detect_source: storyboardReset ? null : (res?.image_detect_source ?? res?.imageDetectSource ?? prev.image_detect_source ?? prev.imageDetectSource ?? null),
+    image_prompt_source: storyboardReset ? null : (res?.image_prompt_source ?? res?.imagePromptSource ?? prev.image_prompt_source ?? prev.imagePromptSource ?? null),
     image_detect_mode: res?.image_detect_mode ?? res?.imageDetectMode ?? prev.image_detect_mode ?? prev.imageDetectMode ?? imageDetectMode.value,
+    image_detect_at: storyboardReset ? null : (res?.image_detect_at ?? res?.imageDetectAt ?? prev.image_detect_at ?? prev.imageDetectAt ?? null),
+    image_prompt_at: storyboardReset ? null : (res?.image_prompt_at ?? res?.imagePromptAt ?? prev.image_prompt_at ?? prev.imagePromptAt ?? null),
     total_duration: res?.total_duration ?? res?.totalDuration ?? prev.total_duration ?? prev.totalDuration ?? 0,
     storyboard_breakdown_at: storyboardAt,
-    image_breakdown_at: imageAt,
+    image_breakdown_at: storyboardReset ? null : imageAt,
     generated_at: storyboardAt,
   }
   narrationBreakdownSummary.value = payload
@@ -5888,6 +6198,32 @@ function restoreImageDetectModePrefs() {
   if (mode === 'paragraph' || mode === 'balanced' || mode === 'conservative') imageDetectMode.value = 'paragraph'
 }
 
+function restoreImageDetectBatchPrefs() {
+  if (typeof window === 'undefined') return
+  const th = window.localStorage.getItem('huobao-narration-detect-batch-threshold')
+  const sz = window.localStorage.getItem('huobao-narration-detect-batch-size')
+  const psz = window.localStorage.getItem('huobao-narration-prompt-batch-size')
+  if (th !== null) {
+    const n = Number(th)
+    if (Number.isFinite(n) && n >= 0) imageDetectBatchThreshold.value = Math.round(n)
+  }
+  if (sz !== null) {
+    const n = Number(sz)
+    if (Number.isFinite(n) && n >= 10) imageDetectBatchSize.value = Math.round(n)
+  }
+  if (psz !== null) {
+    const n = Number(psz)
+    if (Number.isFinite(n) && n >= 1 && n <= 20) imagePromptBatchSize.value = Math.round(n)
+  }
+}
+
+function persistImageDetectBatchPrefs() {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem('huobao-narration-detect-batch-threshold', String(imageDetectBatchThreshold.value))
+  window.localStorage.setItem('huobao-narration-detect-batch-size', String(imageDetectBatchSize.value))
+  window.localStorage.setItem('huobao-narration-prompt-batch-size', String(imagePromptBatchSize.value))
+}
+
 function doNarrationBreakdown() {
   narrationBreaking.value = true
   void (async () => {
@@ -5926,6 +6262,17 @@ async function pollNarrationImageBreakdownProgress() {
   if (!epId.value) return
   try {
     const progress = await episodeAPI.narrationImageBreakdownStatus(epId.value)
+    const localStepActive = !!narrationImageStep.value
+
+    if (progress?.status === 'processing') {
+      narrationImageBreakdownProgress.value = progress
+      narrationImageBreaking.value = true
+      return
+    }
+
+    // 本地步骤进行中时，忽略上一轮残留的 completed/idle，避免进度条被误关
+    if (localStepActive) return
+
     narrationImageBreakdownProgress.value = progress
     if (progress?.status === 'completed' || progress?.status === 'failed' || progress?.status === 'idle') {
       stopNarrationImageBreakdownPoll()
@@ -5952,61 +6299,205 @@ async function resumeNarrationImageBreakdownPollIfNeeded() {
   }
 }
 
-function doNarrationImageBreakdown() {
-  runNarrationImageBreakdown({ retry_missing_prompts: false })
+function doNarrationImageDetect() {
+  persistImageDetectBatchPrefs()
+  runNarrationImageStep('detect', () => episodeAPI.narrationImageDetect(epId.value, {
+    style: drama.value?.style || 'comic',
+    image_detect_mode: imageDetectMode.value === 'conservative' ? 'conservative' : 'paragraph',
+    detect_batch_threshold: imageDetectBatchThreshold.value,
+    detect_batch_size: imageDetectBatchSize.value,
+  }), {
+    onSuccess: () => {
+      const count = narrationDetectDisplayCount.value
+      toast.success(`检测完成：${count} 张需配图`)
+      persistNarrationBreakdownSummary({
+        ...narrationBreakdownSummary.value,
+        image_needed_count: count,
+        paragraph_count: count,
+        image_detect_at: Date.now(),
+        image_detect_source: 'llm',
+      })
+    },
+    startMessage: '正在 LLM 检测需配图镜头…',
+  })
+}
+
+function doNarrationImagePrompts() {
+  runNarrationImageStep('prompts', () => episodeAPI.narrationImagePrompts(epId.value, {
+    style: drama.value?.style || 'comic',
+    prompt_batch_size: imagePromptBatchSize.value,
+  }), {
+    onSuccess: () => {
+      const count = narrationPromptDisplayCount.value
+      const missing = narrationMissingPromptCount.value
+      if (missing > 0) {
+        toast.warning(`仍有 ${missing} 段文案未生成，请点「补全缺失文案」`)
+      } else {
+        toast.success(`配图文案已就绪（${count} 条）`)
+      }
+      persistNarrationBreakdownSummary({
+        ...narrationBreakdownSummary.value,
+        prompts_generated: count,
+        image_prompt_at: Date.now(),
+        image_prompt_source: 'llm_raw',
+      })
+    },
+    startMessage: narrationMissingPromptCount.value && narrationPromptDisplayCount.value
+      ? `正在补全 ${narrationMissingPromptCount.value} 段缺失配图文案…`
+      : '正在生成纯 LLM 配图文案…',
+  })
 }
 
 function doRetryMissingNarrationImagePrompts() {
-  runNarrationImageBreakdown({ retry_missing_prompts: true })
+  runNarrationImageStep('prompts', () => episodeAPI.narrationImagePrompts(epId.value, {
+    style: drama.value?.style || 'comic',
+    retry_missing_prompts: true,
+    prompt_batch_size: imagePromptBatchSize.value,
+  }), {
+    onSuccess: async () => {
+      await refresh()
+      syncNarrationBreakdownImageCount()
+      const count = narrationPromptDisplayCount.value
+      toast.success(`已补全缺失配图文案（当前 ${count} 条）`)
+    },
+    startMessage: '正在补全缺失配图文案…',
+  })
 }
 
-function runNarrationImageBreakdown(options = {}) {
-  const retryMissing = options.retry_missing_prompts === true
+async function waitForNarrationImageBreakdownDone() {
+  for (;;) {
+    const progress = await episodeAPI.narrationImageBreakdownStatus(epId.value)
+    narrationImageBreakdownProgress.value = progress
+    if (progress?.status === 'completed') return progress
+    if (progress?.status === 'failed' || progress?.status === 'cancelled') {
+      throw new Error(progress?.message || progress?.error || '配图任务失败')
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500))
+  }
+}
+
+function runNarrationImageStep(step, apiCall, { onSuccess, startMessage }) {
+  narrationImageStep.value = step
   narrationImageBreaking.value = true
   narrationImageBreakdownProgress.value = {
     status: 'processing',
-    phase: retryMissing ? 'prompts' : 'detecting',
-    message: retryMissing ? '正在补全缺失配图文案…' : '正在启动配图分镜…',
+    phase: step === 'detect' ? 'detecting' : 'prompts',
+    message: startMessage,
     percent: 1,
   }
   startNarrationImageBreakdownPoll()
-  const style = drama.value?.style || 'comic'
   void (async () => {
+    let jobStarted = false
     try {
-      const res = await episodeAPI.narrationImageBreakdown(epId.value, {
-        style,
-        image_detect_mode: imageDetectMode.value,
-        retry_missing_prompts: retryMissing,
-      })
-      if (res?.retry_missing_prompts ?? res?.retryMissingPrompts) {
-        const updated = res?.prompts_updated ?? res?.promptsUpdated ?? 0
-        toast.success(`已补全 ${updated} 条缺失配图文案`)
-      } else {
-        const paragraphCount = res?.paragraph_count ?? res?.paragraphCount ?? 0
-        const diptychCount = res?.diptych_count ?? res?.diptychCount ?? 0
-        const imageCount = res?.image_needed_count ?? res?.imageNeededCount ?? 0
-        const diptychHint = diptychCount ? `（含 ${diptychCount} 张两宫格）` : ''
-        const promptSource = res?.image_prompt_source ?? res?.imagePromptSource
-        const promptHint = promptSource === 'llm' ? ' · AI配图文案' : ' · 规则配图文案'
-        toast.success(`配图分镜：${paragraphCount} 段 · ${imageCount} 张配图${diptychHint}${promptHint}`)
-      }
-      persistNarrationBreakdownSummary({
-        ...res,
-        image_breakdown_at: Date.now(),
-      })
+      await apiCall()
+      jobStarted = true
+      await waitForNarrationImageBreakdownDone()
       await refresh()
+      syncNarrationBreakdownImageCount()
+      onSuccess?.()
     } catch (e) {
       toast.error(e.message)
     } finally {
       stopNarrationImageBreakdownPoll()
       narrationImageBreaking.value = false
+      narrationImageStep.value = null
       try {
         narrationImageBreakdownProgress.value = await episodeAPI.narrationImageBreakdownStatus(epId.value)
       } catch {
-        narrationImageBreakdownProgress.value = null
+        narrationImageBreakdownProgress.value = jobStarted ? narrationImageBreakdownProgress.value : null
       }
     }
   })()
+}
+
+async function doNarrationImageAudit() {
+  if (!epId.value) return
+  narrationImageAuditing.value = true
+  try {
+    const res = await episodeAPI.narrationImageAudit(epId.value)
+    const total = res?.total ?? 0
+    const shotsWithIssues = res?.shots_with_issues ?? res?.shotsWithIssues ?? 0
+    const issueCount = res?.issue_count ?? res?.issueCount ?? 0
+    narrationImageAuditPanel.value = {
+      total,
+      shotsWithIssues,
+      issueCount,
+      items: res?.items || [],
+    }
+    toast.info(shotsWithIssues
+      ? `发现 ${shotsWithIssues}/${total} 镜共 ${issueCount} 项问题，可逐条或全部应用优化`
+      : `已检查 ${total} 镜，未发现明显问题`)
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationImageAuditing.value = false
+  }
+}
+
+async function doNarrationImageOptimizeOne(storyboardId) {
+  await doNarrationImageOptimize([storyboardId])
+}
+
+async function doNarrationImageOptimizeAll() {
+  const ids = narrationImageAuditPanel.value?.items
+    ?.filter(item => item.issues?.length)
+    ?.map(item => item.storyboard_id) || []
+  await doNarrationImageOptimize(ids)
+}
+
+async function doNarrationImageOptimize(storyboardIds) {
+  if (!epId.value || !storyboardIds?.length) return
+  narrationImageOptimizing.value = true
+  try {
+    const res = await episodeAPI.narrationImageOptimize(epId.value, { storyboard_ids: storyboardIds })
+    const optimized = res?.optimized ?? 0
+    toast.success(`已优化 ${optimized} 条配图文案`)
+    await refresh()
+    await doNarrationImageAudit()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationImageOptimizing.value = false
+  }
+}
+
+async function doNarrationImageRestoreOne(storyboardId) {
+  await doNarrationImageRestore([storyboardId])
+}
+
+async function doNarrationImageRestoreAll() {
+  const ids = narrationImageAuditPanel.value?.items
+    ?.filter(item => item.can_restore)
+    ?.map(item => item.storyboard_id) || []
+  await doNarrationImageRestore(ids)
+}
+
+async function doNarrationImageRestore(storyboardIds) {
+  if (!epId.value || !storyboardIds?.length) return
+  narrationImageRestoring.value = true
+  try {
+    const res = await episodeAPI.narrationImageRestore(epId.value, { storyboard_ids: storyboardIds })
+    const restored = res?.restored ?? 0
+    toast.success(`已还原 ${restored} 条 LLM 原文`)
+    await refresh()
+    await doNarrationImageAudit()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    narrationImageRestoring.value = false
+  }
+}
+
+function doNarrationImageBreakdown() {
+  doNarrationImageDetect()
+}
+
+function runNarrationImageBreakdown(options = {}) {
+  if (options.retry_missing_prompts) {
+    doRetryMissingNarrationImagePrompts()
+    return
+  }
+  doNarrationImageDetect()
 }
 function triggerNarrationStoryboardDescUpload() {
   storyboardDescUploadTarget.value = 'storyboard'
@@ -6269,10 +6760,7 @@ async function mapWithConcurrency(items, limit, worker) {
 }
 
 function resolveTtsBatchConcurrency() {
-  if (isNarrationMode.value && localTtsEnabled.value !== false) {
-    return localTtsEngine.value === 'voicebox' ? 4 : 6
-  }
-  return 2
+  return 3
 }
 
 function getTtsBatchTargets(force = false) {
@@ -6736,22 +7224,62 @@ function triggerNextShotImageUpload() {
   imageUploadInputRef.value?.click()
 }
 
-async function clearUploadedNarrationShotImages() {
-  const targets = narrationShotsWithUploadedImage(sbs.value)
-  if (!targets.length) {
-    toast.info('暂无已上传配图')
+async function clearAllNarrationImages() {
+  const count = narrationOwnImageCount.value
+  if (!count) {
+    toast.info('暂无配图可清除')
     return
   }
-  for (const sb of targets) {
-    const meta = parseNarrationImageMeta(sb)
-    const { narration_image_source: _source, ...rest } = meta
-    await storyboardAPI.update(sb.id, {
-      composed_image: null,
-      reference_images: JSON.stringify({ ...rest, narration_image_mode: 'new' }),
-    })
+  if (!confirm(`将清除本集 ${count} 张配图（含 AI 生成与上传），删除文件并重置数据库；已合成的镜头需重新合成。是否继续？`)) return
+  narrationAssetClearing.value = true
+  try {
+    const res = await episodeAPI.clearNarrationImages(epId.value)
+    toast.success(`已清除 ${res?.cleared ?? count} 张配图`)
+    await refresh()
+  } catch (e) {
+    toast.error(e.message || '清除配图失败')
+  } finally {
+    narrationAssetClearing.value = false
   }
-  toast.success(`已清除 ${targets.length} 张上传配图`)
-  await refresh()
+}
+
+async function clearAllNarrationTts() {
+  const count = ttsAssignedCount.value
+  if (!count) {
+    toast.info('暂无配音可清除')
+    return
+  }
+  if (!confirm(`将清除本集 ${count} 条镜头配音，删除音频文件并重置数据库；已合成的镜头需重新合成。是否继续？`)) return
+  narrationAssetClearing.value = true
+  try {
+    const res = await episodeAPI.clearNarrationTts(epId.value)
+    toast.success(`已清除 ${res?.cleared ?? count} 条配音`)
+    await refresh()
+  } catch (e) {
+    toast.error(e.message || '清除配音失败')
+  } finally {
+    narrationAssetClearing.value = false
+  }
+}
+
+async function clearAllComposedVideos() {
+  const count = composedCount.value
+  if (!count && !mergeUrl.value) {
+    toast.info('暂无合成视频可清除')
+    return
+  }
+  if (!confirm(`将清除本集 ${count} 个镜头合成视频${mergeUrl.value ? '及导出成片' : ''}，删除文件并重置数据库。是否继续？`)) return
+  narrationAssetClearing.value = true
+  try {
+    const res = await episodeAPI.clearComposedVideos(epId.value)
+    mergeData.value = null
+    toast.success(`已清除 ${res?.cleared ?? count} 个合成视频${res?.merges_cleared ? `，作废 ${res.merges_cleared} 条导出记录` : ''}`)
+    await refresh()
+  } catch (e) {
+    toast.error(e.message || '清除合成视频失败')
+  } finally {
+    narrationAssetClearing.value = false
+  }
 }
 
 async function cropNarrationImageWatermarks() {
@@ -7260,10 +7788,10 @@ function getTTSUrl(sb) { return sb?.tts_audio_url || sb?.ttsAudioUrl || '' }
 function applyTtsResultToStoryboard(storyboardId, result) {
   const path = result?.tts_audio_url || result?.ttsAudioUrl
   if (!path) return
-  const sb = sbs.value.find(item => item.id === storyboardId)
-  if (!sb) return
-  sb.tts_audio_url = path
-  sb.ttsAudioUrl = path
+  sbs.value = sbs.value.map(sb => {
+    if (sb.id !== storyboardId) return sb
+    return { ...sb, tts_audio_url: path, ttsAudioUrl: path }
+  })
 }
 function hasNarrationShotOwnTts(sb) { return !!getNarrationShotOwnTts(sb) }
 function hasEffectiveTTS(sb) {
@@ -7328,20 +7856,18 @@ async function runBatchShotTTS(batchMessage, force) {
       const pending = getTtsBatchTargets(force)
       if (!pending.length) break
 
-      const results = await mapWithConcurrency(
+      let roundSuccess = 0
+      await mapWithConcurrency(
         pending,
         concurrency,
-        sb => storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force)),
-      )
-      let roundSuccess = 0
-      results.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          applyTtsResultToStoryboard(pending[index].id, result.value)
+        async (sb) => {
+          const result = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force))
+          applyTtsResultToStoryboard(sb.id, result)
           roundSuccess++
-        }
-      })
-      totalSuccess += roundSuccess
-      await refreshStoryboardsOnly()
+          totalSuccess++
+          return result
+        },
+      )
 
       // 「全部重新生成」只跑一轮，避免对已完成的镜头反复 force 重生成
       if (force) break
@@ -7352,6 +7878,8 @@ async function runBatchShotTTS(batchMessage, force) {
       else stallRounds = 0
       if (remaining > 0) await sleep(2000)
     }
+
+    await refreshStoryboardsOnly()
 
     const remaining = getTtsBatchTargets(force).length
     if (force) {
@@ -7410,7 +7938,7 @@ function narrationShotImageLabel(s) {
       ? `${paraHint}${layoutHint} · 已生成配图${sceneHint}`
       : `${paraHint}${layoutHint} · 待生成配图${sceneHint}`
   }
-  if (hasNarrationShotImage(s) && meta.narration_image_mode === 'copy') return '已复用上一镜配图'
+  if (hasNarrationShotImage(s) && meta.narration_image_mode === 'copy') return '已复用邻镜配图'
   if (!narrationShotNeedsOwnImage(s)) return '沿用上一张'
   if (resolveNarrationEffectiveImage(sbs.value, s).inherited) return '同段 · 合成沿用前图'
   return '同段 · 沿用上一张'
@@ -7422,6 +7950,17 @@ function findPrevNarrationShotWithImage(sb) {
     if (hasNarrationShotImage(sbs.value[i])) return sbs.value[i]
   }
   return null
+}
+function findNextNarrationShotWithImage(sb) {
+  const idx = sbs.value.findIndex(item => item.id === sb.id)
+  if (idx < 0 || idx >= sbs.value.length - 1) return null
+  for (let i = idx + 1; i < sbs.value.length; i++) {
+    if (hasNarrationShotImage(sbs.value[i])) return sbs.value[i]
+  }
+  return null
+}
+function narrationShotExplicitCopy(sb) {
+  return hasNarrationShotImage(sb) && parseNarrationImageMeta(sb).narration_image_mode === 'copy'
 }
 function narrationImageMetaJson(mode) {
   return JSON.stringify({ narration_image_mode: mode })
@@ -7437,6 +7976,19 @@ async function reuseNarrationShotImage(sb) {
     reference_images: narrationImageMetaJson('copy'),
   })
   toast.success('已复用上一镜配图')
+  await refresh()
+}
+async function reuseNextNarrationShotImage(sb) {
+  const next = findNextNarrationShotWithImage(sb)
+  if (!next) {
+    toast.warning('后面没有可复用的配图')
+    return
+  }
+  await storyboardAPI.update(sb.id, {
+    composed_image: getNarrationShotImage(next),
+    reference_images: narrationImageMetaJson('copy'),
+  })
+  toast.success('已复用下一镜配图')
   await refresh()
 }
 async function clearNarrationShotImage(sb) {
@@ -7925,6 +8477,29 @@ function startOpeningPoll() {
   }, 2500)
 }
 
+async function exportOpeningPickedImages() {
+  if (!epId.value || !illustrationImageCount.value) {
+    toast.warning('暂无可用配图，请先生成或上传镜头配图')
+    return
+  }
+  openingPickedImagesExporting.value = true
+  try {
+    const blob = await episodeAPI.exportOpeningPickedImages(epId.value)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `opening-images-ep${epId.value}.zip`
+    a.click()
+    URL.revokeObjectURL(url)
+    await refresh()
+    toast.success('已导出 10 张配图（第 1 张=集内首张，第 10 张=集内末张）')
+  } catch (e) {
+    toast.error(e.message || '导出失败')
+  } finally {
+    openingPickedImagesExporting.value = false
+  }
+}
+
 async function generateOpeningVideo() {
   if (!illustrationImageCount.value) {
     toast.warning('暂无可用配图，请先生成或上传镜头配图')
@@ -8337,7 +8912,8 @@ watch(narratorChar, (c) => {
   const voice = c?.voice_style || c?.voiceStyle
   if (voice) customTtsVoiceId.value = voice
 }, { immediate: true })
-watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs() }, { immediate: true })
+watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs(); restoreImageDetectBatchPrefs() }, { immediate: true })
+watch([imageDetectBatchThreshold, imageDetectBatchSize, imagePromptBatchSize], () => { persistImageDetectBatchPrefs() })
 watch([prodTab, epId], ([tab, id]) => {
   if (tab === 'bgm' && id) loadBgmLibrary()
 })
@@ -9093,12 +9669,36 @@ onMounted(async () => {
   border-bottom: 1px solid var(--border);
   background: rgba(255,255,255,0.03);
 }
+.detect-batch-config .detect-batch-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.detect-batch-input {
+  width: 56px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text-1);
+  font-size: 12px;
+  text-align: center;
+}
 .narration-breakdown-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-left: auto;
   flex-shrink: 0;
+}
+.shot-folder-tool-hint {
+  font-size: 11px;
+  max-width: 220px;
+  line-height: 1.3;
+  text-align: right;
 }
 .btn-retry-missing-prompts {
   background: linear-gradient(135deg, #2548a6 0%, #1e3a8a 100%);
@@ -9411,6 +10011,17 @@ onMounted(async () => {
 
 .tag.warn { color: #b45309; border-color: rgba(180, 83, 9, 0.25); background: rgba(251, 191, 36, 0.12); }
 .tag.ok { color: #047857; border-color: rgba(4, 120, 87, 0.25); background: rgba(16, 185, 129, 0.12); }
+
+.btn-step-count {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: rgba(59, 130, 246, 0.14);
+  color: var(--accent);
+}
 
 .narration-breakdown-panel {
   margin-bottom: 12px;
