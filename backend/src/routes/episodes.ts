@@ -11,7 +11,8 @@ import { cropEpisodeNarrationImageWatermarks, restoreEpisodeNarrationImageWaterm
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
-import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration } from '../services/ffmpeg-opening.js'
+import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration, parseOpeningPickedImages, buildOpeningPickedImagesZip } from '../services/ffmpeg-opening.js'
+import fs from 'fs'
 import { isTitleVideoProcessing, startTitleSegmentVideoGeneration } from '../services/ffmpeg-title-segment.js'
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { resolveVoiceboxProfileId } from '../services/voicebox-tts.js'
@@ -575,7 +576,36 @@ app.get('/:id/opening-video', async (c) => {
     opening_video_error: ep.openingVideoError,
     opening_audio_url: ep.openingAudioUrl,
     opening_subtitle_text: resolveOpeningSubtitleText(ep.openingSubtitleText),
+    opening_picked_images: parseOpeningPickedImages(ep.openingPickedImages),
   })
+})
+
+// GET /episodes/:id/opening-picked-images.zip — 下载开幕视频所用随机配图
+app.get('/:id/opening-picked-images.zip', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const images = parseOpeningPickedImages(ep.openingPickedImages)
+  if (!images.length) return badRequest(c, '暂无开幕配图记录，请重新生成开幕视频')
+
+  let tempDir = ''
+  try {
+    const { zipPath, tempDir: dir } = buildOpeningPickedImagesZip(images)
+    tempDir = dir
+    const buf = fs.readFileSync(zipPath)
+    const filename = `opening-images-ep${episodeId}.zip`
+    return c.body(buf, 200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message || '打包失败')
+  } finally {
+    if (tempDir) {
+      try { fs.rmSync(tempDir, { recursive: true, force: true }) } catch {}
+    }
+  }
 })
 
 // POST /episodes/:id/generate-title-video — 片头视频（剧中红字片头镜拼接）

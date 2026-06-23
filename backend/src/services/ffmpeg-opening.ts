@@ -1,5 +1,5 @@
 /**
- * 开幕视频 — 随机 8 张配图 + 翻页片头（对角卷曲交替 + 翻页音效 + 可选上传配音/字幕）
+ * 开幕视频 — 随机 8 张配图 + 翻页片头（自上往下卷曲 + 翻页音效 + 可选上传配音/字幕）
  */
 import { execFileSync, spawnSync } from 'child_process'
 import ffmpeg from 'fluent-ffmpeg'
@@ -13,7 +13,7 @@ import { now } from '../utils/response.js'
 import { sortStoryboardsByOrder } from './narration-image.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
-import { PAGE_FLIP_TRANSITION_SEC } from './ffmpeg-page-transition.js'
+import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION } from './ffmpeg-page-transition.js'
 import { buildTitleSubtitleAssFilter, TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -36,14 +36,6 @@ const PAGE_TRANSITION_SEC = PAGE_FLIP_TRANSITION_SEC
 const OPENING_FPS = 25
 const OPENING_WIDTH = 1280
 const OPENING_HEIGHT = 720
-
-/** 对角卷曲交替（不旋转，避免黑边）：奇数次 BR→TL，偶数次 TL→BR */
-const OPENING_FLIP_EXPR_BR_TO_TL = 'if(lt((1-X/W+1-Y/H)/2*0.8-(1-P)*1.2,-0.2),B,A)'
-const OPENING_FLIP_EXPR_TL_TO_BR = 'if(lt((X/W+Y/H)/2*0.8-(1-P)*1.2,-0.2),B,A)'
-
-function openingPageFlipCustomExpr(transitionIndex: number): string {
-  return transitionIndex % 2 === 1 ? OPENING_FLIP_EXPR_BR_TO_TL : OPENING_FLIP_EXPR_TL_TO_BR
-}
 
 const OPENING_SUBTITLE_SIZE = 100
 const OPENING_SUBTITLE_WHITE_SIZE = OPENING_SUBTITLE_SIZE + 10
@@ -156,9 +148,8 @@ function buildVideoPageFlipFilter(segmentDurations: number[]): string {
   for (let i = 1; i < clipCount; i++) {
     const vOut = i === clipCount - 1 ? 'vout' : `v${i}`
     const offset = Math.max(0.1, cumulative - td)
-    const expr = openingPageFlipCustomExpr(i)
     parts.push(
-      `${vLabel}[${i}:v]xfade=transition=custom:duration=${td}:offset=${offset.toFixed(3)}:expr='${expr}'[${vOut}]`,
+      `${vLabel}[${i}:v]xfade=transition=${PAGE_FLIP_XFADE_TRANSITION}:duration=${td}:offset=${offset.toFixed(3)}[${vOut}]`,
     )
     vLabel = `[${vOut}]`
     cumulative += segmentDurations[i] - td
@@ -531,6 +522,44 @@ export function isOpeningVideoProcessing(episodeId: number): boolean {
   return processingEpisodes.has(episodeId)
 }
 
+export function parseOpeningPickedImages(raw?: string | null): string[] {
+  if (!raw?.trim()) return []
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+  } catch {
+    return []
+  }
+}
+
+/** 将开幕视频所用配图打包为 zip，返回 zip 绝对路径（调用方负责删除所在临时目录） */
+export function buildOpeningPickedImagesZip(imageRels: string[]): { zipPath: string; tempDir: string } {
+  if (!imageRels.length) throw new Error('暂无开幕配图记录，请重新生成开幕视频')
+
+  const tempDir = path.join(STORAGE_ROOT, 'temp', 'opening', `zip-${uuid()}`)
+  const stagingDir = path.join(tempDir, 'files')
+  fs.mkdirSync(stagingDir, { recursive: true })
+
+  const staged: string[] = []
+  for (let i = 0; i < imageRels.length; i++) {
+    const abs = toAbsPath(imageRels[i])
+    if (!fs.existsSync(abs)) throw new Error(`开幕配图文件缺失（第 ${i + 1} 张），请重新生成开幕视频`)
+    const ext = path.extname(abs) || '.jpg'
+    const name = `opening-${String(i + 1).padStart(2, '0')}${ext}`
+    fs.copyFileSync(abs, path.join(stagingDir, name))
+    staged.push(name)
+  }
+
+  const zipPath = path.join(tempDir, 'opening-images.zip')
+  const result = spawnSync('tar', ['-a', '-c', '-f', zipPath, ...staged], { cwd: stagingDir })
+  if (result.status !== 0 || !fs.existsSync(zipPath)) {
+    throw new Error(result.stderr?.toString().trim() || '打包 zip 失败')
+  }
+
+  return { zipPath, tempDir }
+}
+
 export async function generateOpeningVideo(episodeId: number): Promise<{
   path: string
   imageCount: number
@@ -629,6 +658,7 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
       .set({
         openingVideoUrl: relativePath,
         openingVideoError: null,
+        openingPickedImages: JSON.stringify(picked),
         updatedAt: now(),
       })
       .where(eq(schema.episodes.id, episodeId))
@@ -665,7 +695,7 @@ export function startOpeningVideoGeneration(episodeId: number): void {
   if (processingEpisodes.has(episodeId)) return
   processingEpisodes.add(episodeId)
   db.update(schema.episodes)
-    .set({ openingVideoError: null, updatedAt: now() })
+    .set({ openingVideoError: null, openingPickedImages: null, updatedAt: now() })
     .where(eq(schema.episodes.id, episodeId))
     .run()
 

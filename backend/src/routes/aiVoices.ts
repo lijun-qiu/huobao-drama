@@ -77,48 +77,76 @@ app.get('/', async (c) => {
   return success(c, parsed)
 })
 
-// POST /ai-voices/preview — 本地 TTS 试听（Voicebox / Edge）
+function resolvePreviewUsesLocalTts(body: Record<string, unknown>): boolean {
+  if (body?.local_tts === false || body?.localTts === false) return false
+  if (body?.local_tts === true || body?.localTts === true) return true
+  if (body?.local_tts_engine != null || body?.localTtsEngine != null) return true
+  if (body?.local_voice != null || body?.localVoice != null) return true
+  if (body?.voice_id != null || body?.voiceId != null) return false
+  return true
+}
+
+// POST /ai-voices/preview — 本地 / API TTS 试听与文案试配
 app.post('/preview', async (c) => {
-  const body = await c.req.json().catch(() => ({}))
-  const localTtsEngine = body?.local_tts_engine === 'voicebox' ? 'voicebox' : 'edge'
+  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>
   const text = String(body?.text || DEFAULT_LOCAL_TTS_PREVIEW_TEXT).trim()
-  if (!text) return badRequest(c, '试听文本为空')
+  if (!text) return badRequest(c, '配音文本为空')
 
   const ttsSpeed = resolveTtsSpeed(body?.tts_speed ?? body?.ttsSpeed)
-  const localVoice = String(body?.local_voice || body?.localVoice || '').trim()
-  if (!localVoice) return badRequest(c, '请选择音色')
+  const isLocal = resolvePreviewUsesLocalTts(body)
 
-  if (localTtsEngine === 'voicebox') {
-    const health = await checkVoiceboxHealth()
-    if (!health.ok) {
-      return badRequest(c, health.error || 'Voicebox 未运行，请先启动 Voicebox')
+  let voice = ''
+  let localTtsEngine: 'edge' | 'voicebox' = 'edge'
+  let voiceboxInstruct: string | undefined
+  let voiceboxModelSize: ReturnType<typeof resolveVoiceboxModelSize> | undefined
+
+  if (isLocal) {
+    localTtsEngine = body?.local_tts_engine === 'voicebox' || body?.localTtsEngine === 'voicebox' ? 'voicebox' : 'edge'
+    const localVoice = String(body?.local_voice || body?.localVoice || '').trim()
+    if (!localVoice) return badRequest(c, '请选择音色')
+
+    if (localTtsEngine === 'voicebox') {
+      const health = await checkVoiceboxHealth()
+      if (!health.ok) {
+        return badRequest(c, health.error || 'Voicebox 未运行，请先启动 Voicebox')
+      }
     }
-  }
 
-  const voiceboxInstruct = localTtsEngine === 'voicebox'
-    ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
-    : undefined
-  const voiceboxModelSize = localTtsEngine === 'voicebox'
-    ? resolveVoiceboxModelSize(body?.voicebox_model_size ?? body?.voiceboxModelSize)
-    : undefined
+    voiceboxInstruct = localTtsEngine === 'voicebox'
+      ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
+      : undefined
+    voiceboxModelSize = localTtsEngine === 'voicebox'
+      ? resolveVoiceboxModelSize(body?.voicebox_model_size ?? body?.voiceboxModelSize)
+      : undefined
 
-  try {
-    const voice = localTtsEngine === 'voicebox'
+    voice = localTtsEngine === 'voicebox'
       ? await resolveVoiceboxProfileId(localVoice)
       : resolveEdgeVoice(localVoice)
+  } else {
+    voice = String(body?.voice_id || body?.voiceId || 'alloy').trim()
+    if (!voice) return badRequest(c, '请选择音色')
+  }
+
+  const configIdRaw = body?.config_id ?? body?.configId
+  const configId = configIdRaw != null && Number.isFinite(Number(configIdRaw)) ? Number(configIdRaw) : null
+
+  try {
     const audioPath = await generateTTS({
       text,
       voice,
       speed: ttsSpeed,
-      localTts: true,
-      localTtsEngine,
+      configId,
+      localTts: isLocal,
+      localTtsEngine: isLocal ? localTtsEngine : undefined,
       voiceboxInstruct,
       voiceboxModelSize,
     })
     return success(c, {
       audio_url: audioPath,
       text,
-      local_tts_engine: localTtsEngine,
+      local_tts: isLocal,
+      local_tts_engine: isLocal ? localTtsEngine : undefined,
+      voice_id: voice,
       tts_speed: ttsSpeed,
       voicebox_instruct: voiceboxInstruct,
       voicebox_model_size: voiceboxModelSize,

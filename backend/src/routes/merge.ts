@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { desc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest } from '../utils/response.js'
-import { mergeEpisodeVideos, cancelEpisodeMerge, getMergeProgress, isMergeActive, mergeOpeningIntoEpisodeVideo, isTestMergeRecord } from '../services/ffmpeg-merge.js'
+import { mergeEpisodeVideos, cancelEpisodeMerge, getMergeProgress, isMergeActive, mergeOpeningIntoEpisodeVideo, mergeTitleIntoEpisodeVideo, isTestMergeRecord } from '../services/ffmpeg-merge.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { now } from '../utils/response.js'
@@ -159,6 +159,28 @@ app.post('/episodes/:id/merge/opening', async (c) => {
     return success(c, { merge_id: mergeId, status: 'processing' })
   } catch (err: any) {
     logTaskError('MergeAPI', 'opening-merge', { episodeId, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/merge/title — 将片头视频合并进已完成的主片
+app.post('/episodes/:id/merge/title', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  if (body?.cancel_running !== false) {
+    cancelEpisodeMerge(episodeId)
+  }
+
+  try {
+    logTaskStart('MergeAPI', 'title-merge', { episodeId, dramaId: ep.dramaId })
+    const mergeId = await mergeTitleIntoEpisodeVideo(episodeId, ep.dramaId)
+    logTaskSuccess('MergeAPI', 'title-merge', { episodeId, mergeId })
+    return success(c, { merge_id: mergeId, status: 'processing' })
+  } catch (err: any) {
+    logTaskError('MergeAPI', 'title-merge', { episodeId, error: err.message })
     return badRequest(c, err.message)
   }
 })

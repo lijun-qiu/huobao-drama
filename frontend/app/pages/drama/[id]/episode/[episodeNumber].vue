@@ -1330,6 +1330,46 @@
               <span v-else-if="localTtsEnabled && localTtsEngine === 'voicebox' && !voiceboxAvailable" class="tag warn">Voicebox 未运行</span>
               <span v-else-if="!localTtsEnabled" class="tag warn">将使用付费 API：{{ lockedAudioConfigLabel }}</span>
             </div>
+            <div class="custom-tts-panel">
+              <div class="custom-tts-head">
+                <span style="font-size:13px;font-weight:600">文案试配</span>
+                <span class="dim" style="font-size:11px">
+                  {{ customTtsUsesLocal ? '使用上方本地音色与语速' : '使用付费 API，可选音色' }}
+                </span>
+              </div>
+              <textarea
+                v-model="customTtsText"
+                class="textarea"
+                rows="3"
+                placeholder="输入要合成的旁白或台词，例如：体验365个人生副本"
+              />
+              <div v-if="!customTtsUsesLocal" class="custom-tts-actions">
+                <BaseSelect
+                  :model-value="customTtsVoiceId"
+                  :options="voiceSelectOptions"
+                  placeholder="选择音色"
+                  searchable
+                  style="min-width:220px"
+                  @update:model-value="customTtsVoiceId = $event"
+                />
+              </div>
+              <div class="custom-tts-actions">
+                <button
+                  class="btn btn-sm btn-primary"
+                  type="button"
+                  :disabled="customTtsGenerating || !customTtsText.trim()"
+                  @click="generateCustomTts"
+                >
+                  {{ customTtsGenerating ? '生成中…' : '生成配音' }}
+                </button>
+                <span v-if="customTtsUsesLocal" class="tag">{{ localTtsEngineLabel }} · {{ localTtsSpeedLabel }}</span>
+                <span v-else class="tag">{{ lockedAudioConfigLabel }}</span>
+              </div>
+              <div v-if="customTtsAudioUrl" class="custom-tts-result">
+                <audio :key="customTtsPreviewSrc" :src="customTtsPreviewSrc" controls preload="metadata" class="dub-audio" />
+                <a :href="customTtsDownloadSrc" :download="customTtsDownloadName" class="btn btn-sm">下载音频</a>
+              </div>
+            </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条旁白</span>
               <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已就绪</span>
@@ -2279,7 +2319,7 @@
           </div>
           <div class="export-opening-body">
             <div class="narration-hint" style="margin-bottom:16px">
-              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每页自左上角卷曲下落转场，叠加书本翻页音效）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 3 秒片头 + 翻页音效。
+              从本集已生成/上传的配图中<strong>随机选 8 张</strong>合成翻页片头（每页自上往下卷曲翻页转场，叠加书本翻页音效）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 3 秒片头 + 翻页音效。
             </div>
             <div class="opening-audio-panel" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px">
               <div style="font-size:13px;font-weight:600;margin-bottom:8px">开幕配音</div>
@@ -2381,6 +2421,23 @@
               <div class="export-bar">
                 <span class="tag tag-success">已生成</span>
                 <button class="btn" :disabled="!illustrationImageCount" @click="generateOpeningVideo">重新生成</button>
+                <a
+                  v-if="canDownloadOpeningImages"
+                  :href="openingPickedImagesZipSrc"
+                  download
+                  class="btn"
+                  :title="`下载本次随机选取的 ${openingPickedImages.length} 张配图`"
+                >
+                  下载八张
+                </a>
+                <button
+                  v-else
+                  class="btn"
+                  disabled
+                  title="请重新生成开幕视频以记录配图"
+                >
+                  下载八张
+                </button>
                 <button
                   v-if="mergeUrl && !mergeHasOpening"
                   class="btn btn-primary"
@@ -2427,7 +2484,7 @@
           </div>
           <div class="export-opening-body">
             <div class="narration-hint" style="margin-bottom:16px">
-              将本集所有<strong>剧中红字片头镜</strong>按顺序合成并拼接为独立 MP4（含双层叠字字幕、自下而上滑入动画）。需各片头镜已具备<strong>配图 + 配音</strong>；生成时会自动重新合成各片头镜再拼接。
+              将本集所有<strong>剧中红字片头镜</strong>按顺序合成并拼接为独立 MP4（含双层叠字字幕、自下而上滑入动画）。需各片头镜已具备<strong>配图 + 配音</strong>；生成后可预览下载，并单独「合并进主片」（默认全集拼接不含片头）。
             </div>
             <template v-if="titleVideoProcessing">
               <div class="step-empty">
@@ -2443,6 +2500,15 @@
               </div>
               <div class="export-bar" style="margin-top:12px">
                 <button class="btn" :disabled="!titleShotsReady" @click="generateTitleVideo">重新生成</button>
+                <button
+                  v-if="mergeUrl && !mergeHasTitle"
+                  class="btn btn-primary"
+                  :disabled="mergeProcessing"
+                  @click="mergeTitleIntoMain"
+                >
+                  合并进主片
+                </button>
+                <span v-else-if="mergeHasTitle" class="tag tag-success">主片已含片头</span>
                 <a :href="titleVideoSrc" download class="btn ml-auto">下载片头视频</a>
               </div>
             </template>
@@ -2484,7 +2550,7 @@
                     <div class="progress-fill" :style="{ width: mergeProgressPercent + '%' }"></div>
                   </div>
                 </div>
-                <div class="empty-desc" style="margin-top:8px">将 {{ composedCount }} 个已合成镜头拼接为完整视频</div>
+                <div class="empty-desc" style="margin-top:8px">将 {{ bodyComposedCount }} 个正文镜头拼接为完整视频（不含开幕/片头）</div>
                 <div style="display:flex;gap:8px;margin-top:16px;justify-content:center">
                   <button class="btn btn-ghost" @click="cancelMerge">取消</button>
                   <button class="btn btn-primary" @click="regenerateMerge">重新生成</button>
@@ -2535,6 +2601,15 @@
                   测试导出
                 </button>
                 <button
+                  v-if="titleVideoUrl && !mergeHasTitle"
+                  class="btn btn-primary"
+                  :disabled="mergeProcessing"
+                  @click="mergeTitleIntoMain"
+                >
+                  合并片头视频
+                </button>
+                <span v-else-if="mergeHasTitle" class="tag tag-success">已含片头</span>
+                <button
                   v-if="openingVideoUrl && !mergeHasOpening"
                   class="btn btn-primary"
                   :disabled="mergeProcessing"
@@ -2542,7 +2617,7 @@
                 >
                   合并开幕视频
                 </button>
-                <span v-else-if="mergeHasOpening" class="tag tag-success">已含开幕片头</span>
+                <span v-else-if="mergeHasOpening" class="tag tag-success">已含开幕</span>
                 <a :href="mergeVideoSrc" download class="btn btn-primary ml-auto">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="12" x2="12" y2="3"/></svg>
                   下载视频
@@ -2567,9 +2642,9 @@
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
                 <div class="empty-title">生成全集视频</div>
-                <div class="empty-desc">将 {{ composedCount }}/{{ sbs.length }} 个已合成镜头拼接为主片（不含开幕视频）{{ composedCount < sbs.length ? '（需全部镜头合成完成）' : '' }}{{ exportMixBgm && exportBgmMusicId ? '，并混入所选 BGM' : '' }}；开幕片头可在生成后单独合并。</div>
+                <div class="empty-desc">将 {{ bodyComposedCount }}/{{ bodyShots.length }} 个正文镜头拼接为主片（不含开幕/片头）{{ !canMergeBody ? '（需全部正文镜头合成完成）' : '' }}{{ exportMixBgm && exportBgmMusicId ? '，并混入所选 BGM' : '' }}；开幕与片头可在生成后单独合并。</div>
                 <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;justify-content:center;align-items:center">
-                  <button class="btn btn-primary" :disabled="composedCount === 0 || composedCount < sbs.length || anyMergeProcessing" @click="doMerge">
+                  <button class="btn btn-primary" :disabled="!canMergeBody || anyMergeProcessing" @click="doMerge">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                     开始生成
                   </button>
@@ -2692,9 +2767,22 @@
               </div>
             </div>
             <div class="export-bgm-panel">
-              <div class="field-label" style="margin-bottom:4px">开幕片头</div>
+              <div class="field-label" style="margin-bottom:4px">开幕与片头</div>
               <div class="dim" style="font-size:11px;line-height:1.5">
-                默认拼接<strong>不含</strong>开幕视频。主片生成后，在左侧预览区或「开幕视频」页点击「合并开幕视频」。
+                默认拼接<strong>不含</strong>开幕视频与片头视频。主片生成后，在预览区或对应步骤页点击「合并进主片」；顺序为开幕 → 片头 → 正文。
+              </div>
+              <button
+                v-if="mergeUrl && titleVideoUrl && !mergeHasTitle"
+                class="btn btn-sm"
+                style="margin-top:8px;margin-right:8px"
+                :disabled="mergeProcessing"
+                @click="mergeTitleIntoMain"
+              >
+                合并片头视频进主片
+              </button>
+              <div v-else-if="mergeHasTitle" class="tag tag-success" style="margin-top:8px;display:inline-block">当前成片已含片头</div>
+              <div v-else-if="titleShots.length && !titleVideoUrl" class="dim" style="font-size:11px;margin-top:6px">
+                尚未生成片头视频，请先在「片头视频」步骤生成。
               </div>
               <button
                 v-if="mergeUrl && openingVideoUrl && !mergeHasOpening"
@@ -2705,7 +2793,7 @@
               >
                 合并开幕视频进主片
               </button>
-              <div v-else-if="mergeHasOpening" class="tag tag-success" style="margin-top:8px">当前成片已含开幕片头</div>
+              <div v-else-if="mergeHasOpening" class="tag tag-success" style="margin-top:8px">当前成片已含开幕</div>
               <div v-else-if="!openingVideoUrl" class="dim" style="font-size:11px;margin-top:6px">
                 尚未生成开幕视频，请先在「开幕视频」步骤生成。
               </div>
@@ -3023,6 +3111,26 @@ const localTtsPreviewSrc = computed(() => {
   return `/${path}?v=${encodeURIComponent(localTtsPreviewBump.value)}`
 })
 const localTtsPreviewBump = ref(0)
+const customTtsText = ref('')
+const customTtsVoiceId = ref('alloy')
+const customTtsAudioUrl = ref('')
+const customTtsGenerating = ref(false)
+const customTtsPreviewBump = ref(0)
+const customTtsUsesLocal = computed(() => isNarrationMode.value && localTtsEnabled.value !== false)
+const customTtsPreviewSrc = computed(() => {
+  if (!customTtsAudioUrl.value) return ''
+  const path = customTtsAudioUrl.value.replace(/^\//, '')
+  return `/${path}?v=${encodeURIComponent(String(customTtsPreviewBump.value))}`
+})
+const customTtsDownloadSrc = computed(() => {
+  if (!customTtsAudioUrl.value) return ''
+  return `/${customTtsAudioUrl.value.replace(/^\//, '')}`
+})
+const customTtsDownloadName = computed(() => {
+  const snippet = customTtsText.value.trim().replace(/[^\u4e00-\u9fa5\w]+/g, '_').slice(0, 24) || 'custom-tts'
+  const ext = customTtsAudioUrl.value.match(/\.(mp3|wav|m4a)$/i)?.[0] || '.mp3'
+  return `${snippet}${ext}`
+})
 const localTtsSpeedLabel = computed(() => {
   const opt = localTtsSpeedOptions.find(o => o.value === localTtsSpeed.value)
   return opt?.label || `${localTtsSpeed.value}x`
@@ -3075,6 +3183,9 @@ const scriptLen = computed(() => localScript.value.replace(/\s/g, '').length || 
 const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.voiceStyle).length)
 const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
 const composedCount = computed(() => sbs.value.filter(s => s.composed_video_url || s.composedVideoUrl).length)
+const bodyShots = computed(() => sbs.value.filter(sb => !isNarrationTitleShot(sb)))
+const bodyComposedCount = computed(() => bodyShots.value.filter(s => s.composed_video_url || s.composedVideoUrl).length)
+const canMergeBody = computed(() => bodyShots.value.length > 0 && bodyComposedCount.value === bodyShots.value.length)
 const mergeUrl = computed(() => {
   if (mergeData.value?.status !== 'completed') return null
   return mergeData.value?.merged_url || mergeData.value?.mergedUrl || null
@@ -3164,6 +3275,16 @@ const mergeHasOpening = computed(() => {
     return false
   }
 })
+const mergeHasTitle = computed(() => {
+  const raw = mergeData.value?.scenes
+  if (!raw || typeof raw !== 'string') return false
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (parsed.with_title === true || parsed.withTitle === true)
+  } catch {
+    return false
+  }
+})
 
 const illustrationImageCount = computed(() => {
   const urls = new Set()
@@ -3175,6 +3296,25 @@ const illustrationImageCount = computed(() => {
 })
 const openingVideoUrl = computed(() => episode.value?.opening_video_url || episode.value?.openingVideoUrl || null)
 const openingVideoError = computed(() => episode.value?.opening_video_error || episode.value?.openingVideoError || '')
+const openingPickedImages = computed(() => {
+  const raw = episode.value?.opening_picked_images ?? episode.value?.openingPickedImages
+  if (Array.isArray(raw)) return raw.filter(Boolean)
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed.filter(Boolean) : []
+    } catch {
+      return []
+    }
+  }
+  return []
+})
+const canDownloadOpeningImages = computed(() => openingPickedImages.value.length > 0)
+const openingPickedImagesZipSrc = computed(() =>
+  epId.value && canDownloadOpeningImages.value
+    ? episodeAPI.openingPickedImagesZipUrl(epId.value)
+    : '',
+)
 const titleVideoUrl = computed(() => episode.value?.title_video_url || episode.value?.titleVideoUrl || null)
 const titleVideoError = computed(() => episode.value?.title_video_error || episode.value?.titleVideoError || '')
 const titleShots = computed(() => sbs.value.filter(sb => isNarrationTitleShot(sb)))
@@ -3343,6 +3483,63 @@ async function previewLocalTtsVoice(textOverride) {
     toast.error(e.message)
   } finally {
     localTtsPreviewing.value = false
+  }
+}
+
+function buildCustomTtsPayload(text) {
+  const trimmed = String(text || '').trim()
+  if (customTtsUsesLocal.value) {
+    return buildLocalTtsPreviewPayload(trimmed)
+  }
+  return {
+    local_tts: false,
+    text: trimmed,
+    voice_id: customTtsVoiceId.value || narratorChar.value?.voice_style || narratorChar.value?.voiceStyle || 'alloy',
+    config_id: lockedAudioConfigId.value,
+    tts_speed: localTtsSpeed.value,
+  }
+}
+
+async function generateCustomTts() {
+  const text = customTtsText.value.trim()
+  if (!text) {
+    toast.warning('请先输入文案')
+    return
+  }
+  if (customTtsUsesLocal.value) {
+    if (!localEdgeVoiceId.value) {
+      toast.warning(localTtsEngine.value === 'voicebox' ? '请选择 Voicebox 音色' : '请选择本地音色')
+      return
+    }
+    if (localTtsEngine.value === 'voicebox' && !voiceboxAvailable.value) {
+      toast.warning('Voicebox 未运行，请先启动 Voicebox')
+      return
+    }
+    if (!selectedVoiceboxVoiceReady()) {
+      const row = edgeVoiceProfiles.value.find(p => p.id === localEdgeVoiceId.value)
+      toast.warning(row?.modelHint || '该预设音色所需模型尚未下载完成')
+      return
+    }
+  } else if (!lockedAudioConfigId.value) {
+    toast.warning('请先在设置中配置音频 API')
+    return
+  } else if (!customTtsVoiceId.value) {
+    toast.warning('请选择音色')
+    return
+  }
+
+  try {
+    customTtsGenerating.value = true
+    const res = await voicesAPI.previewTts(buildCustomTtsPayload(text))
+    const path = res?.audio_url || res?.audioUrl
+    if (!path) throw new Error('配音生成失败')
+    customTtsAudioUrl.value = path
+    customTtsPreviewBump.value = Date.now()
+    toast.success('配音已生成，可播放或下载')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    customTtsGenerating.value = false
   }
 }
 
@@ -3522,7 +3719,7 @@ function normalizedMergeTestClipLimit() {
 }
 
 function getTestMergeTargets(limit = normalizedMergeTestClipLimit()) {
-  return sbs.value.slice(0, limit)
+  return bodyShots.value.slice(0, limit)
 }
 
 function canTestMerge(limit = normalizedMergeTestClipLimit()) {
@@ -6073,9 +6270,16 @@ async function mapWithConcurrency(items, limit, worker) {
 
 function resolveTtsBatchConcurrency() {
   if (isNarrationMode.value && localTtsEnabled.value !== false) {
-    return localTtsEngine.value === 'voicebox' ? 8 : 6
+    return localTtsEngine.value === 'voicebox' ? 4 : 6
   }
   return 2
+}
+
+function getTtsBatchTargets(force = false) {
+  return sbs.value
+    .filter(sb => hasDialogue(sb))
+    .filter(sb => force || (isNarrationMode.value ? !hasNarrationShotOwnTts(sb) : !hasTTS(sb)))
+    .sort((a, b) => (a.storyboard_number || a.storyboardNumber || 0) - (b.storyboard_number || b.storyboardNumber || 0))
 }
 
 function sleep(ms) {
@@ -7092,55 +7296,77 @@ async function genShotTTS(sb, force = false) {
   } catch (e) { toast.error(e.message) }
 }
 async function batchShotTTS() {
-  const pending = (isNarrationMode.value
-    ? sbs.value.filter(sb => hasDialogue(sb) && !hasNarrationShotOwnTts(sb))
-    : sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb)))
-    .sort((a, b) => (a.storyboard_number || a.storyboardNumber || 0) - (b.storyboard_number || b.storyboardNumber || 0))
+  const pending = getTtsBatchTargets(false)
   if (!pending.length) {
     toast.info(ttsEligibleCount.value ? '所有镜头配音已就绪' : '当前没有可生成的对白或旁白')
     return
   }
-  await runBatchShotTTS(pending, `配音生成中（剩余 ${pending.length} 条${localTtsEnabled.value ? ' · 并发' : ''}）…`, false)
+  await runBatchShotTTS(`配音生成中（剩余 ${pending.length} 条${localTtsEnabled.value ? ' · 并发' : ''}）…`, false)
 }
 
 async function batchShotTTSAll() {
-  const targets = sbs.value
-    .filter(sb => hasDialogue(sb))
-    .sort((a, b) => (a.storyboard_number || a.storyboardNumber || 0) - (b.storyboard_number || b.storyboardNumber || 0))
+  const targets = getTtsBatchTargets(true)
   if (!targets.length) {
     toast.info('当前没有可生成的对白或旁白')
     return
   }
   await runBatchShotTTS(
-    targets,
     `正在重新生成全部 ${targets.length} 条配音${localTtsEnabled.value ? ' · 并发' : ''}…`,
     true,
   )
 }
 
-async function runBatchShotTTS(targets, batchMessage, force) {
+async function runBatchShotTTS(batchMessage, force) {
   if (!tryBeginBatch('tts', batchMessage)) return
+  const concurrency = resolveTtsBatchConcurrency()
+  const engineLabel = localTtsEngine.value === 'voicebox' ? 'Voicebox' : 'Edge'
+  let totalSuccess = 0
+  let stallRounds = 0
+
   try {
-    const concurrency = resolveTtsBatchConcurrency()
-    const results = await mapWithConcurrency(
-      targets,
-      concurrency,
-      sb => storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force)),
-    )
-    results.forEach((result, index) => {
-      if (result.status === 'fulfilled') {
-        applyTtsResultToStoryboard(targets[index].id, result.value)
-      }
-    })
-    const apiCount = results.filter(r => r.status === 'fulfilled').length
-    const failCount = results.length - apiCount
-    if (apiCount) {
-      const label = force ? '已重新生成' : '已生成'
-      const engineLabel = localTtsEngine.value === 'voicebox' ? 'Voicebox' : 'Edge'
-      toast.success(`${label} ${apiCount} 条配音${localTtsEnabled.value ? `（本地 ${engineLabel} · ${concurrency} 并发）` : ''}`)
+    while (stallRounds < 3) {
+      const pending = getTtsBatchTargets(force)
+      if (!pending.length) break
+
+      const results = await mapWithConcurrency(
+        pending,
+        concurrency,
+        sb => storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force)),
+      )
+      let roundSuccess = 0
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          applyTtsResultToStoryboard(pending[index].id, result.value)
+          roundSuccess++
+        }
+      })
+      totalSuccess += roundSuccess
+      await refreshStoryboardsOnly()
+
+      // 「全部重新生成」只跑一轮，避免对已完成的镜头反复 force 重生成
+      if (force) break
+
+      const remaining = getTtsBatchTargets(false).length
+      if (remaining === 0) break
+      if (roundSuccess === 0) stallRounds++
+      else stallRounds = 0
+      if (remaining > 0) await sleep(2000)
     }
-    if (failCount) toast.error(`${failCount} 条镜头配音生成失败`)
-    await refreshStoryboardsOnly()
+
+    const remaining = getTtsBatchTargets(force).length
+    if (force) {
+      if (totalSuccess > 0) {
+        toast.success(`已重新生成 ${totalSuccess} 条配音${localTtsEnabled.value ? `（本地 ${engineLabel} · ${concurrency} 并发）` : ''}`)
+      }
+    } else if (remaining > 0) {
+      if (totalSuccess > 0) {
+        toast.warning(`已生成 ${totalSuccess} 条，仍有 ${remaining} 条未完成，请再点「生成剩余」`)
+      } else {
+        toast.error(`仍有 ${remaining} 条配音未完成，请再点「生成剩余」`)
+      }
+    } else if (totalSuccess > 0) {
+      toast.success(`剩余配音已全部生成${localTtsEnabled.value ? `（本地 ${engineLabel} · ${concurrency} 并发）` : ''}`)
+    }
   } finally {
     endBatch('tts')
   }
@@ -7791,6 +8017,35 @@ async function mergeOpeningIntoMain() {
   }
 }
 
+async function mergeTitleIntoMain() {
+  if (!mergeUrl.value) {
+    toast.error('请先完成全集拼接')
+    return
+  }
+  if (!titleVideoUrl.value) {
+    toast.error('请先生成片头视频')
+    return
+  }
+  if (mergeHasTitle.value) {
+    toast.info('当前成片已包含片头视频')
+    return
+  }
+  try {
+    await mergeAPI.mergeTitle(epId.value)
+    mergeData.value = {
+      status: 'processing',
+      merged_url: null,
+      mergedUrl: null,
+      progress_percent: 0,
+      progress_message: '正在合并片头视频…',
+    }
+    toast.success('正在合并片头视频…')
+    startMergePoll()
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
 async function regenerateMerge() {
   stopMergePoll()
   await doMerge()
@@ -7856,8 +8111,9 @@ async function doTestMerge() {
 }
 
 async function doMerge(options = {}) {
-  if (composedCount.value < sbs.value.length) {
-    toast.error(`尚有 ${sbs.value.length - composedCount.value} 个镜头未合成（${composedCount.value}/${sbs.value.length}），请先在「镜头合成」完成后再导出`)
+  if (!canMergeBody.value) {
+    const missing = bodyShots.value.length - bodyComposedCount.value
+    toast.error(`尚有 ${missing} 个正文镜头未合成（${bodyComposedCount.value}/${bodyShots.value.length}），请先在「镜头合成」完成正文镜头后再导出`)
     return false
   }
   if (exportMixBgm.value && !exportBgmMusicId.value && exportBgmOptions.value.length) {
@@ -8077,6 +8333,10 @@ watch(exportWatermarkAnimated, () => {
 watch(exportBgmOptions, (opts) => {
   if (!exportBgmMusicId.value && opts.length) exportBgmMusicId.value = opts[0].value
 })
+watch(narratorChar, (c) => {
+  const voice = c?.voice_style || c?.voiceStyle
+  if (voice) customTtsVoiceId.value = voice
+}, { immediate: true })
 watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs() }, { immediate: true })
 watch([prodTab, epId], ([tab, id]) => {
   if (tab === 'bgm' && id) loadBgmLibrary()
@@ -8090,9 +8350,13 @@ onMounted(async () => {
     localTtsEngine.value = 'edge'
     await refreshLocalVoices()
   }
-  refresh()
+  await refresh()
   loadConfigs()
   loadVoices()
+  // 清除旧版自动续跑标记，避免刷新后反复触发批量配音
+  if (epId.value) {
+    sessionStorage.removeItem(`huobao:tts-batch:${epId.value}`)
+  }
 })
 </script>
 
@@ -8904,6 +9168,40 @@ onMounted(async () => {
   height: 32px;
   max-width: 280px;
   min-width: 180px;
+}
+
+.custom-tts-panel {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.custom-tts-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.custom-tts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.custom-tts-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.custom-tts-result .dub-audio {
+  flex: 1;
+  min-width: 200px;
+  max-width: 100%;
 }
 
 .uploaded-audio-panel {

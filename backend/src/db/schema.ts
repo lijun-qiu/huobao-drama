@@ -43,6 +43,7 @@ export const episodes = sqliteTable('episodes', {
   openingVideoError: text('opening_video_error'),
   openingAudioUrl: text('opening_audio_url'),
   openingSubtitleText: text('opening_subtitle_text'),
+  openingPickedImages: text('opening_picked_images'),
   titleVideoUrl: text('title_video_url'),
   titleVideoError: text('title_video_error'),
   watermarkText: text('watermark_text'),

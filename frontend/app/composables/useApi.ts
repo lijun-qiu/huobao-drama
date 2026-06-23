@@ -82,6 +82,7 @@ export const episodeAPI = {
   linkNarrationCharacters: (id: number) => api.post(`/episodes/${id}/link-narration-characters`),
   generateOpeningVideo: (id: number) => api.post(`/episodes/${id}/generate-opening-video`, {}),
   openingVideoStatus: (id: number) => api.get(`/episodes/${id}/opening-video`),
+  openingPickedImagesZipUrl: (id: number) => `/api/v1/episodes/${id}/opening-picked-images.zip`,
   generateTitleVideo: (id: number) => api.post(`/episodes/${id}/generate-title-video`, {}),
   titleVideoStatus: (id: number) => api.get(`/episodes/${id}/title-video`),
   uploadOpeningAudio: (id: number, audioPath: string, subtitleText?: string) =>
@@ -208,6 +209,10 @@ export const mergeAPI = {
     api.post(`/merge/episodes/${epId}/merge/opening`, {
       cancel_running: options?.cancel_running !== false,
     }),
+  mergeTitle: (epId: number, options?: { cancel_running?: boolean }) =>
+    api.post(`/merge/episodes/${epId}/merge/title`, {
+      cancel_running: options?.cancel_running !== false,
+    }),
   cancel: (epId: number) => api.post(`/merge/episodes/${epId}/merge/cancel`),
   status: (epId: number) => api.get(`/merge/episodes/${epId}/merge`),
 }
@@ -253,6 +258,17 @@ export const voicesAPI = {
     voicebox_instruct?: string
     voicebox_model_size?: '0.6B' | '1.7B'
     text?: string
+  }) => api.post('/ai-voices/preview', options || {}),
+  previewTts: (options?: {
+    text?: string
+    local_tts?: boolean
+    local_tts_engine?: 'edge' | 'voicebox'
+    local_voice?: string
+    voice_id?: string
+    config_id?: number | null
+    tts_speed?: number
+    voicebox_instruct?: string
+    voicebox_model_size?: '0.6B' | '1.7B'
   }) => api.post('/ai-voices/preview', options || {}),
 }
 

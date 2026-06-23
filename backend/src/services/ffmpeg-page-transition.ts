@@ -1,5 +1,5 @@
 /**
- * 翻页转场 — 新画面自左上角卷曲下落（xfade hlwind，用于主片换配图等；开幕片头用 diagbr）
+ * 翻页转场 — 新画面自上往下卷曲翻页（xfade vdwind，用于主片换配图、开幕片头等）
  */
-export const PAGE_FLIP_XFADE_TRANSITION = 'hlwind'
+export const PAGE_FLIP_XFADE_TRANSITION = 'vdwind'
 export const PAGE_FLIP_TRANSITION_SEC = 0.45
