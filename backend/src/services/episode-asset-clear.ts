@@ -2,7 +2,7 @@ import { eq, inArray } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { sortStoryboardsByOrder } from './narration-image.js'
+import { sortStoryboardsByOrder, parseNarrationImageMeta, buildNarrationImageMeta } from './narration-image.js'
 import {
   deleteUniqueStaticFiles,
   imagePathsToDelete,
@@ -104,6 +104,42 @@ export async function clearEpisodeNarrationImages(episodeId: number) {
     files_deleted: filesDeleted,
     generations_deleted: generationsDeleted,
   }
+}
+
+/** 清除本集全部配图锚点的 AI/上传配图文案（保留检测分段 meta，不删配图文件） */
+export async function clearEpisodeNarrationImagePrompts(episodeId: number) {
+  const storyboards = collectEpisodeStoryboards(episodeId)
+  const ts = now()
+  let cleared = 0
+
+  logTaskStart('EpisodeAssetClear', 'narration-image-prompts', { episodeId })
+
+  for (const sb of storyboards) {
+    const meta = parseNarrationImageMeta(sb.referenceImages)
+    if (meta.narration_image_mode !== 'new') continue
+    const hasPrompt = String(sb.imagePrompt || '').trim()
+      || meta.image_prompt_source
+      || meta.image_prompt_llm_raw
+    if (!hasPrompt) continue
+
+    const { image_prompt_source, image_prompt_llm_raw, ...rest } = meta
+    db.update(schema.storyboards)
+      .set({
+        imagePrompt: null,
+        referenceImages: buildNarrationImageMeta('new', rest),
+        updatedAt: ts,
+      })
+      .where(eq(schema.storyboards.id, sb.id))
+      .run()
+    cleared++
+  }
+
+  if (!cleared) {
+    return { cleared: 0 }
+  }
+
+  logTaskSuccess('EpisodeAssetClear', 'narration-image-prompts', { episodeId, cleared })
+  return { cleared }
 }
 
 /** 清除本集所有镜头配音，删除音频/字幕文件并清空数据库字段 */

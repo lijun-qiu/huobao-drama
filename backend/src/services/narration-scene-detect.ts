@@ -1570,14 +1570,16 @@ export async function generateParagraphImagePromptsWithLLM(
       })
 
     const characterPayload = isNarrationMinimalStyle(style)
-      ? characters.map(ch => ({
-        name: ch.name,
-        life_stage: (ch as { variantLabel?: string | null }).variantLabel || '',
-        posture_action: coerceMinimalCharacterAppearance(
-          (ch as { variantLabel?: string | null }).variantLabel,
-          ch.appearance,
-        ),
-      }))
+      ? characters.map(ch => {
+        const variantLabel = (ch as { variantLabel?: string | null }).variantLabel || ''
+        const coerced = coerceMinimalCharacterAppearance(variantLabel, ch.appearance)
+        return {
+          name: ch.name,
+          life_stage: variantLabel,
+          posture_action: coerced,
+          simplified_outfit: coerced,
+        }
+      })
       : characters.map(ch => ({
         name: ch.name,
         appearance: ch.appearance || '',

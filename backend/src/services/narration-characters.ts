@@ -8,7 +8,9 @@ import {
   coerceMinimalCharacterAppearance,
   coerceMinimalLLMImagePrompt,
   isNarrationMinimalStyle,
-  NARRATION_MINIMAL_NO_CLOTHING_RULE,
+  NARRATION_MINIMAL_CLOTHING_LLM_RULE,
+  NARRATION_MINIMAL_EXPRESSION_LLM_RULE,
+  NARRATION_PROTAGONIST_DISTINCT_LLM_RULE,
   normalizeArtStyle,
   sanitizeCharacterAppearance,
   sanitizeAppearanceForPortrait,
@@ -16,9 +18,9 @@ import {
   NARRATION_MINIMAL_BODY_SIZE_SPEC,
   NARRATION_BODY_STAGE_SIZE_HINTS,
   NARRATION_PROTAGONIST_BODY,
-  NARRATION_PROTAGONIST_EYES,
+  NARRATION_PROTAGONIST_FACE,
   NARRATION_CROWD_BODY,
-  NARRATION_CROWD_EYES,
+  NARRATION_CROWD_FACE,
   NARRATION_USE_RAW_LLM_PROMPTS,
 } from '../constants/art-styles.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
@@ -733,7 +735,7 @@ export function enrichImagePromptWithCharacters(
     if (NARRATION_USE_RAW_LLM_PROMPTS) {
       if (!relevant.length) return base
       const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
-      const addition = `场景中出现素体：主人公${names}须为${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），同框配角须为${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），${NARRATION_MINIMAL_NO_CLOTHING_RULE}，同款简笔比例仅颜色与人生阶段微调区分`
+      const addition = `场景中出现素体：主人公${names}须为画面中心前景的一位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_PROTAGONIST_FACE}，服装鲜明），同框配角须为几位${NARRATION_CROWD_BODY}在两侧或背景（${NARRATION_CROWD_FACE}，低饱和简化便装），${NARRATION_MINIMAL_CLOTHING_LLM_RULE}，${NARRATION_MINIMAL_EXPRESSION_LLM_RULE}，${NARRATION_PROTAGONIST_DISTINCT_LLM_RULE}`
       if (/【左格/.test(base) && /【右格/.test(base)) {
         return appendToNarrationBracket(appendToNarrationBracket(base, '左格', addition), '右格', addition)
       }
@@ -744,7 +746,7 @@ export function enrichImagePromptWithCharacters(
     }
     if (!relevant.length) return coerced
     const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
-    const addition = `场景中出现素体：主人公${names}须为${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），同框配角须为${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），${NARRATION_MINIMAL_NO_CLOTHING_RULE}，同款简笔比例仅颜色与人生阶段微调区分`
+    const addition = `场景中出现素体：主人公${names}须为画面中心前景的一位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_PROTAGONIST_FACE}，服装鲜明），同框配角须为几位${NARRATION_CROWD_BODY}在两侧或背景（${NARRATION_CROWD_FACE}，低饱和简化便装），${NARRATION_MINIMAL_CLOTHING_LLM_RULE}，${NARRATION_MINIMAL_EXPRESSION_LLM_RULE}，${NARRATION_PROTAGONIST_DISTINCT_LLM_RULE}`
     if (/【左格/.test(coerced) && /【右格/.test(coerced)) {
       return appendToNarrationBracket(appendToNarrationBracket(coerced, '左格', addition), '右格', addition)
     }
@@ -795,13 +797,13 @@ export async function generateCharacterAppearance(params: {
   const system = minimal
     ? [
       '你是解说素体小人项目的角色动作标注助手。',
-      `本项目主人公定妆是「${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}」，${NARRATION_MINIMAL_NO_CLOTHING_RULE}，通用尺寸：${NARRATION_MINIMAL_BODY_SIZE_SPEC}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}；不写发型/复杂五官/年代。`,
-      `根据剧本情节，只输出该人生阶段的「${NARRATION_PROTAGONIST_BODY} + ${NARRATION_PROTAGONIST_EYES} + 无服装 + 尺寸比例 + 动作姿态 + 可选简单道具」，20-60 字中文。`,
-      `示例（小孩）：${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}，比青年小一号约2.2头高，站立活泼姿态`,
-      `示例（青年）：${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}，圆头约占身高三分之一三头高，标准身形，站立或行走`,
-      `示例（中年）：${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}，三头高躯干略宽微胖，坐于柜台后手持茶杯轮廓`,
-      `示例（老年）：${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_EYES}，约2.8头高略佝偻，圆头两侧各几条简化白发弧线，坐于凳上手持圆扇轮廓`,
-      '禁止：花衬衫、西装、墨镜、皱纹、写实五官、美人脸、小胡子、花白全头、发际线、复杂发型、无眼睛、80年代、English tags、白色素体（群众才是白色）、任何服装鞋帽',
+      `本项目主人公定妆是「${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_FACE}」，${NARRATION_MINIMAL_CLOTHING_LLM_RULE}，${NARRATION_MINIMAL_EXPRESSION_LLM_RULE}，通用尺寸：${NARRATION_MINIMAL_BODY_SIZE_SPEC}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}。`,
+      `根据剧本情节，只输出该人生阶段的「${NARRATION_PROTAGONIST_BODY} + 正常卡通脸表情 + 简化年代服装轮廓 + 尺寸比例 + 动作姿态 + 可选简单道具」，20-60 字中文。`,
+      `示例（小孩）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸开心微笑，比青年小一号约2.2头高，站立活泼姿态`,
+      `示例（青年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸自信微笑，简化花衬衫与喇叭裤轮廓，圆头约占身高三分之一三头高，标准身形，站立或行走`,
+      `示例（中年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸沉稳表情，简化围裙或便装轮廓，三头高躯干略宽微胖，坐于柜台后手持茶杯轮廓`,
+      `示例（老年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸慈祥微笑，简化老年便装轮廓，约2.8头高略佝偻，圆头两侧各几条简化白发弧线，坐于凳上手持圆扇轮廓`,
+      '禁止：厚涂写实真人面相、复杂印花、English tags',
       '只输出正文，不要标题、markdown、JSON。',
     ].join('\n')
     : [

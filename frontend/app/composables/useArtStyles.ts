@@ -5,32 +5,50 @@ export const DEFAULT_ART_STYLE = 'short-drama'
 /** 解说素体极简叙事画风（项目级视觉风格 value） */
 export const NARRATION_MINIMAL_STYLE = 'narration-minimal'
 
-/** 解说素体小人：主人公眼睛（黑头上用白点） */
-export const NARRATION_PROTAGONIST_EYES = '两个白色小圆点眼睛'
+/** 主人公面部：素体头上的正常卡通脸（参考温馨叙事插画） */
+export const NARRATION_PROTAGONIST_FACE =
+  '头部正常卡通脸，圆眼或弯眼带高光，眉毛嘴巴清晰，可有腮红，表情生动'
 
-/** 解说素体小人：群众眼睛（白头上用黑点） */
-export const NARRATION_CROWD_EYES = '两个黑色小圆点眼睛'
+/** 群众面部：与主人公同款正常卡通脸画风 */
+export const NARRATION_CROWD_FACE =
+  '头部正常卡通脸，圆眼或弯眼带高光，眉毛嘴巴清晰，可有腮红，表情生动'
 
-/** @deprecated 群众/旧 prompt 兼容；主人公请用 NARRATION_PROTAGONIST_EYES */
-export const NARRATION_MINIMAL_EYES = NARRATION_CROWD_EYES
+/** @deprecated 使用 NARRATION_PROTAGONIST_FACE */
+export const NARRATION_PROTAGONIST_EYES = NARRATION_PROTAGONIST_FACE
 
-/** 主人公形体：纯黑填充简笔素体 */
-export const NARRATION_PROTAGONIST_BODY = '黑色素体小人'
+/** @deprecated 使用 NARRATION_CROWD_FACE */
+export const NARRATION_CROWD_EYES = NARRATION_CROWD_FACE
 
-/** 群众/路人/顾客形体：纯白填充简笔素体 */
+/** @deprecated 使用 NARRATION_CROWD_FACE */
+export const NARRATION_MINIMAL_EYES = NARRATION_CROWD_FACE
+
+/** 主人公形体：白色简笔素体（与配角统一） */
+export const NARRATION_PROTAGONIST_BODY = '白色素体小人'
+
+/** 群众/路人/顾客形体：白色简笔素体 */
 export const NARRATION_CROWD_BODY = '白色素体小人'
 
 /** 禁止偏离简笔素体的画风 */
 export const NARRATION_MINIMAL_STYLE_FORBIDDEN =
-  '禁止写实人脸、动漫脸、五官细节、鼻子嘴巴、发型、赛璐璐、日式动画脸、表情包、条漫、像素风、渐变阴影、3D渲染'
+  '禁止厚涂肌理、赛璐璐、日式精细动画脸、条漫、像素风、渐变阴影、3D渲染、真人照片质感'
 
-/** 素体人物一律无服装（主人公与群众均适用） */
-export const NARRATION_MINIMAL_NO_CLOTHING_RULE =
-  '所有人物均为纯素体，全身无任何服装鞋帽围巾围裙工装制服外套裙装裤装，仅黑白填充简笔身体+眼睛+老年可选两侧简化白发弧线'
+/** 素体正常卡通脸表情 */
+export const NARRATION_MINIMAL_EXPRESSION_LLM_RULE =
+  '【面部表情】主人公与同框配角均须写正常卡通脸表情（微笑、惊喜、皱眉、沮丧、温柔、兴奋等），圆眼或弯眼带高光、眉毛嘴巴清晰、可有腮红，与 narration_lines 情绪一致；写入【画面主体】或【核心细节动作】'
 
-/** 写入【质感要求】与 LLM 硬性规则的无服装表述 */
-export const NARRATION_MINIMAL_NO_CLOTHING_LLM_RULE =
-  `【无服装】${NARRATION_MINIMAL_NO_CLOTHING_RULE}；禁止在【画面主体】【核心细节动作】写穿着/身着/身穿/戴帽/穿鞋；年代氛围只写环境，不写人物穿衣`
+/** 主人公与配角视觉区分（同白色素体，靠构图/服装/焦点区分） */
+export const NARRATION_PROTAGONIST_DISTINCT_LLM_RULE =
+  '【主人公鲜明】全画面仅 1 位主人公须是视觉焦点：写清「一位X期主人公位于画面中心或前景」，服装款式与主色须具体鲜明；配角写「几位配角在两侧/背景/后方」，低饱和简化便装，禁止与主人公服装主色相同'
+
+/** 素体人物须穿与年代剧情一致的简化服装轮廓（简笔色块，非写实） */
+export const NARRATION_MINIMAL_CLOTHING_LLM_RULE =
+  '【服装】主人公须写具体鲜明的简化服装款式与主色；配角写笼统低饱和便装轮廓，与主人公形成对比；均须与年代、职业、场景匹配，禁止写实布料褶皱与复杂印花；服装写入【画面主体】'
+
+/** @deprecated 使用 NARRATION_MINIMAL_CLOTHING_LLM_RULE */
+export const NARRATION_MINIMAL_NO_CLOTHING_RULE = NARRATION_MINIMAL_CLOTHING_LLM_RULE
+
+/** 写入 LLM 硬性规则的服装与六维分工 */
+export const NARRATION_MINIMAL_NO_CLOTHING_LLM_RULE = NARRATION_MINIMAL_CLOTHING_LLM_RULE
 
 /** 素体四肢：仅两手两脚 */
 export const NARRATION_MINIMAL_LIMBS_SPEC = '简笔四肢仅两手两脚，等粗黑线轮廓'
@@ -47,38 +65,38 @@ export const NARRATION_BODY_STAGE_SIZE_HINTS =
 
 /** 解说配图万能模板：固定前缀 */
 export const NARRATION_UNIVERSAL_SCENE_PREFIX =
-  `16:9 横屏，2D 扁平简笔画，纯色平涂无复杂光影，主人公${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），群众${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），黑色轮廓线，${NARRATION_BODY_CONSISTENCY_CORE}`
+  `16:9 横屏，2D 扁平插画，全员${NARRATION_CROWD_BODY}简笔身形纯色平涂无复杂光影（${NARRATION_CROWD_FACE}），黑色轮廓线，${NARRATION_BODY_CONSISTENCY_CORE}`
 
 /** 解说配图万能模板：固定后缀 */
 export const NARRATION_UNIVERSAL_SCENE_SUFFIX =
-  '日常低饱和配色，极简简笔叙事风格，干净整洁的画面，无文字无水印'
+  '柔和平涂，温馨叙事插画感，干净整洁的画面，无文字无水印'
 
 /** 解说视频模式：核心画风固定关键词（LLM 参考用） */
 export const NARRATION_IMAGE_STYLE_CORE =
-  `主人公${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}）、群众${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}）、黑色轮廓线、纯色平涂、${NARRATION_BODY_CONSISTENCY_CORE}、极简简笔叙事风格、${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
+  `全员${NARRATION_CROWD_BODY}（${NARRATION_CROWD_FACE}）、黑色轮廓线、纯色平涂、${NARRATION_BODY_CONSISTENCY_CORE}、温馨叙事插画风格、${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
 
-/** 群众/路人/顾客：白色素体，与主人公黑白区分 */
+/** 群众/路人/顾客：配角在两侧或背景，不得抢主人公焦点 */
 export const NARRATION_CROWD_STYLE_HINT =
-  `顾客、路人、群众、年轻人等配角一律写成「几位${NARRATION_CROWD_BODY}」（${NARRATION_CROWD_EYES}），与主人公${NARRATION_PROTAGONIST_BODY}同款简笔比例，仅颜色与姿态区分；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
+  `顾客、路人、群众等配角一律写成「几位${NARRATION_CROWD_BODY}配角」置于两侧或背景，简化低饱和便装，不得与主人公抢焦点；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
 
 /** 解说配图六维结构 */
 export const NARRATION_IMAGE_PROMPT_SIX_PART_HINT =
-  '每条 image_prompt 按六维顺序：【画面主体】→【年代场景】→【核心细节动作】→【光影色调】→【镜头视角】→【质感要求】'
+  '每条 image_prompt 按六维顺序：【画面主体】→【年代场景】→【核心细节动作】→【光影色调】→【镜头视角】→【质感要求】；须综合 narration_lines 本段全部旁白句，覆盖服装、年代、陈设、动作、表情、情绪等可视要素'
 
 /** 解说配图万能模板：六维正文 */
 export const NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE =
-  '【画面主体：入画主角与同框配角，素体须标明阶段与数量位置】，【年代场景：时代年代感、具体地点环境与关键陈设物件】，【核心细节动作：本瞬间可见动作与互动细节】，【光影色调：光线明暗、时段、冷暖与情绪色调】，【镜头视角：景别与机位，如中景平视、略俯全景】，【质感要求：画风线条涂色与画面禁忌】'
+  '【画面主体：一位主人公位于画面中心或前景（人生阶段+鲜明简化服装+正常卡通脸表情），几位配角在两侧或背景（低饱和简化便装）】，【年代场景：时代氛围、具体地点环境与关键陈设物件】，【核心细节动作：主人公关键动作与表情清晰，配角陪衬互动】，【光影色调：光线明暗、时段、冷暖与剧情情绪氛围】，【镜头视角：景别与机位，镜头朝向主人公】，【质感要求：画风线条涂色与画面禁忌】'
 
 /** 默认镜头视角 */
 export const NARRATION_DEFAULT_CAMERA_PROMPT = '中景平视，叙事解说构图，主体清晰'
 
 /** LLM 写【质感要求】时的短补充项（不重复前缀画风） */
 export const NARRATION_MINIMAL_TEXTURE_LLM_HINT =
-  '简笔平涂，无服装，禁止写实人脸，无文字无水印'
+  '柔和平涂，简化服装轮廓，正常卡通脸表情，无文字无水印'
 
 /** 素体画风质感要求（组装兜底用；LLM/coerce 落库时用短补充项） */
 export const NARRATION_MINIMAL_TEXTURE_PROMPT =
-  `2D扁平简笔画，主人公${NARRATION_PROTAGONIST_BODY}（${NARRATION_PROTAGONIST_EYES}），群众${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），黑色轮廓线，纯色平涂，${NARRATION_BODY_CONSISTENCY_CORE}，${NARRATION_MINIMAL_NO_CLOTHING_RULE}，${NARRATION_MINIMAL_STYLE_FORBIDDEN}，无文字无水印`
+  `2D扁平插画，全员${NARRATION_CROWD_BODY}（${NARRATION_CROWD_FACE}），黑色轮廓线，纯色平涂，${NARRATION_BODY_CONSISTENCY_CORE}，${NARRATION_MINIMAL_CLOTHING_LLM_RULE}，${NARRATION_MINIMAL_STYLE_FORBIDDEN}，无文字无水印`
 
 /** LLM：通用素体尺寸 */
 export const NARRATION_BODY_CONSISTENCY_HINT =
@@ -86,7 +104,7 @@ export const NARRATION_BODY_CONSISTENCY_HINT =
 
 /** 主人公须入画且画风一致 */
 export const NARRATION_PROTAGONIST_PLOT_HINT =
-  `【画面主体】全画面仅 1 位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_PROTAGONIST_EYES}），同框配角为${NARRATION_CROWD_BODY}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}`
+  `【画面主体】全画面仅 1 位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_PROTAGONIST_FACE}），同框配角为几位${NARRATION_CROWD_BODY}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}`
 
 /** LLM 光影色调须贴合当前段 */
 export const NARRATION_ATMOSPHERE_HINT =
@@ -103,11 +121,11 @@ export const NARRATION_FIXTURES_FORMAT_HINT = NARRATION_FIXTURES_HINT
 export const NARRATION_FIXTURES_DISPLAY_HINT = NARRATION_FIXTURES_HINT
 
 export const NARRATION_CROWD_PLOT_HINT =
-  `同框配角须为${NARRATION_CROWD_BODY}（${NARRATION_CROWD_EYES}），与主人公同款简笔比例，仅颜色与姿态不同`
+  `同框配角须为几位${NARRATION_CROWD_BODY}配角在两侧或背景（${NARRATION_CROWD_FACE}），低饱和简化便装，不得抢主人公焦点`
 
 /** LLM 素体剧情只写可见动作 */
 export const NARRATION_MINIMAL_PLOT_VISIBILITY_HINT =
-  '【核心细节动作】只写素体小人（含主人公与群众）的可见动作与姿态，禁止内心活动与抽象情绪'
+  '【核心细节动作】主人公动作与表情须清晰具体，配角只做陪衬；禁止内心独白与抽象说理'
 
 /** LLM 写配图 prompt：如何通读全文 */
 export const NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE =
@@ -134,7 +152,7 @@ export const NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE =
 
 /** 解说视频模式：负面提示词 */
 export const NARRATION_IMAGE_NEGATIVE_PROMPT =
-  '复杂五官、写实人脸、鼻子嘴巴、无眼睛、空白脸、无五官、面部皱纹、厚涂肌理、3D 建模、渐变光影、复杂纹理、半写实、人物穿衣服、人物穿鞋戴帽、服装细节、角色穿西装革履、角色穿花衬衫、角色穿喇叭裤、角色穿T恤衬衫裤子裙子、角色戴墨镜太阳镜、角色具体服装款式、有服装的素体、穿着描述、复古滤镜、像素风、杂乱背景、写实路人、不同画风角色、正常比例人体、头身比失调、长短腿、四肢粗细不一、身高参差不齐、体型不一、斩首、砍头、尸体、尸首、血腥、血迹、杀戮、凶杀、处决、残肢、血肉模糊、恐怖虐杀、gore、blood、bloody、corpse、decapitation'
+  '厚涂肌理、3D 建模、渐变光影、复杂纹理、半写实、真人照片质感、写实布料褶皱、复杂印花、复古滤镜、像素风、杂乱背景、写实路人、不同画风角色、正常比例人体、头身比失调、长短腿、四肢粗细不一、身高参差不齐、体型不一、斩首、砍头、尸体、尸首、血腥、血迹、杀戮、凶杀、处决、残肢、血肉模糊、恐怖虐杀、gore、blood、bloody、corpse、decapitation'
 
 export const ART_STYLES = [
   {
@@ -145,7 +163,7 @@ export const ART_STYLES = [
   {
     value: NARRATION_MINIMAL_STYLE,
     label: '解说素体（极简叙事）',
-    description: '主人公黑色素体、群众白色素体，简笔三头身，黑白区分，低饱和平涂',
+    description: '全员白色素体简笔三头身，正常卡通脸表情，柔和平涂温馨叙事插画感',
   },
   {
     value: 'webtoon',
@@ -279,8 +297,9 @@ export const SCENE_STYLE_GUARD = [
 
 const NARRATION_PROMPT_BOILERPLATE_PARTS = [
   '16:9 横屏', '16:9横屏', '2D 扁平简笔画', '2D 扁平化卡通', '2D 扁平化卡通动画', '2D扁平化卡通动画',
-  NARRATION_PROTAGONIST_BODY, NARRATION_CROWD_BODY, '白色圆头素体小人', '白色圆头无脸素体小人',
-  NARRATION_PROTAGONIST_EYES, NARRATION_CROWD_EYES, NARRATION_MINIMAL_EYES, '两个小黑点眼睛', '两个白色小圆点眼睛',
+  NARRATION_PROTAGONIST_BODY, NARRATION_CROWD_BODY, '白色圆头素体小人', '白色圆头无脸素体小人', '黑色素体小人',
+  NARRATION_PROTAGONIST_FACE, NARRATION_CROWD_FACE, NARRATION_PROTAGONIST_EYES, NARRATION_CROWD_EYES, NARRATION_MINIMAL_EYES,
+  '两个小黑点眼睛', '两个白色小圆点眼睛', '两个黑色小圆点眼睛', '正常卡通脸',
   '黑色细轮廓线', '黑色简洁轮廓线',
   '纯色平涂无纹理渐变', '纯色平涂无复杂光影', '纯色平涂',
   '日常低饱和配色', '低饱和写实配色', '极简叙事动画风格', '极简叙事画风',
@@ -312,7 +331,7 @@ export function normalizeBracketContent(text?: string | null): string {
 function isRawNarrationText(text: string): boolean {
   const t = String(text || '').trim()
   if (!t) return false
-  if (/素体小人|黑色素体小人|白色素体小人|两个小黑点|两个白色小圆点/.test(t)) return false
+  if (/素体小人|白色素体小人主人公|白色素体小人|两个小黑点|两个白色小圆点|正常卡通脸/.test(t)) return false
   return /[我你他她]|(?:了|的|吗|呢|吧)[，,、]?$|辞掉|摆地摊|万元户|供销社|批发市场/.test(t)
 }
 
@@ -336,27 +355,27 @@ type NarrationPlotHint = {
 }
 
 const NARRATION_PLOT_HINTS: NarrationPlotHint[] = [
-  { re: /斩首|砍头|杀头|铡刀|处决|人头落地|断头/, action: '黑色素体小人被几位白色素体小人押解走向牢房候审', priority: 11 },
-  { re: /尸体|尸首|遗体|死尸|尸身|惨死|横尸|验尸|解剖/, action: '黑色素体小人在牢房内端坐候审', priority: 11 },
-  { re: /血腥|血迹|鲜血|流血|血泊|血肉模糊|溅血|凶杀|杀戮|虐杀|屠杀/, action: '黑色素体小人在公堂问讯场景中站立候审', priority: 11 },
-  { re: /牢房|牢狱|监狱|大狱|公堂|衙门|押解|候审|羁押|待审/, action: '黑色素体小人在牢房或公堂内静坐候审，两侧有白色素体小人衙役站立', priority: 10 },
-  { re: /摆地摊|摆摊|夜市/, action: '黑色素体小人在摊位前整理陈列货物', priority: 10, sceneTags: ['market'] },
-  { re: /生意|卖光|卖完|赶时髦|出售|卖出|热卖/, action: '黑色素体小人向几位白色素体小人展示货物并交易', priority: 10, sceneTags: ['market'] },
-  { re: /年轻人|顾客|客人|来买|挑选/, action: '黑色素体小人在摊位前忙碌，几位白色素体小人围在摊位前挑选货物', priority: 9, sceneTags: ['market'] },
-  { re: /批发|进货|批了/, action: '黑色素体小人在市场通道搬运整理成箱货物', priority: 9, sceneTags: ['market', 'wholesale'] },
-  { re: /固定摊位|越干越有劲/, action: '黑色素体小人整理固定摊位上的陈列货物', priority: 9, sceneTags: ['market'] },
-  { re: /门面|服装店|开店/, action: '黑色素体小人站在店铺门口招呼几位白色素体小人进店', priority: 9, sceneTags: ['shop'] },
-  { re: /辞|离开/, action: '黑色素体小人离开供销社门口', priority: 10, sceneTags: ['supply'] },
-  { re: /供销社/, action: '黑色素体小人在供销社门口或营业大厅内站立行走', priority: 7, sceneTags: ['supply'] },
-  { re: /手推车|板车|独轮车/, action: '黑色素体小人推着手推车运送货物', priority: 9, sceneTags: ['cart'] },
-  { re: /二八杠|自行车/, action: '黑色素体小人推着二八杠自行车轮廓前行', priority: 9, sceneTags: ['bike'] },
-  { re: /推.*车/, action: '黑色素体小人推着二八杠自行车轮廓前行', priority: 6, sceneTags: ['bike'] },
-  { re: /扇.*扇|蒲扇|乘凉|小凳/, action: '黑色素体小人坐在门口小凳上扇蒲扇', priority: 9 },
-  { re: /疯|议论|说我/, action: '黑色素体小人在摊位前独自忙碌，周围几位白色素体小人围观交谈', priority: 7, sceneTags: ['market'] },
-  { re: /万元户/, action: '黑色素体小人站在店铺前，周围简化钱币意象', priority: 8, sceneTags: ['shop'] },
-  { re: /赚钱|收入|越多|利润/, action: '黑色素体小人手持简化账本查看收入', priority: 7, sceneTags: ['market', 'shop'] },
-  { re: /铁饭碗|个体户|投机/, action: '黑色素体小人独自经营小摊忙碌', priority: 6, sceneTags: ['market'] },
-  { re: /心里有数|敢闯|改革|踏实/, action: '黑色素体小人在摊前从容应对，继续向围观的白色素体小人招揽', priority: 3, sceneTags: ['market'], fallback: true },
+  { re: /斩首|砍头|杀头|铡刀|处决|人头落地|断头/, action: '白色素体小人主人公被几位白色素体小人押解走向牢房候审', priority: 11 },
+  { re: /尸体|尸首|遗体|死尸|尸身|惨死|横尸|验尸|解剖/, action: '白色素体小人主人公在牢房内端坐候审', priority: 11 },
+  { re: /血腥|血迹|鲜血|流血|血泊|血肉模糊|溅血|凶杀|杀戮|虐杀|屠杀/, action: '白色素体小人主人公在公堂问讯场景中站立候审', priority: 11 },
+  { re: /牢房|牢狱|监狱|大狱|公堂|衙门|押解|候审|羁押|待审/, action: '白色素体小人主人公在牢房或公堂内静坐候审，两侧有白色素体小人衙役站立', priority: 10 },
+  { re: /摆地摊|摆摊|夜市/, action: '白色素体小人主人公在摊位前整理陈列货物', priority: 10, sceneTags: ['market'] },
+  { re: /生意|卖光|卖完|赶时髦|出售|卖出|热卖/, action: '白色素体小人主人公向几位白色素体小人展示货物并交易', priority: 10, sceneTags: ['market'] },
+  { re: /年轻人|顾客|客人|来买|挑选/, action: '白色素体小人主人公在摊位前忙碌，几位白色素体小人围在摊位前挑选货物', priority: 9, sceneTags: ['market'] },
+  { re: /批发|进货|批了/, action: '白色素体小人主人公在市场通道搬运整理成箱货物', priority: 9, sceneTags: ['market', 'wholesale'] },
+  { re: /固定摊位|越干越有劲/, action: '白色素体小人主人公整理固定摊位上的陈列货物', priority: 9, sceneTags: ['market'] },
+  { re: /门面|服装店|开店/, action: '白色素体小人主人公站在店铺门口招呼几位白色素体小人进店', priority: 9, sceneTags: ['shop'] },
+  { re: /辞|离开/, action: '白色素体小人主人公离开供销社门口', priority: 10, sceneTags: ['supply'] },
+  { re: /供销社/, action: '白色素体小人主人公在供销社门口或营业大厅内站立行走', priority: 7, sceneTags: ['supply'] },
+  { re: /手推车|板车|独轮车/, action: '白色素体小人主人公推着手推车运送货物', priority: 9, sceneTags: ['cart'] },
+  { re: /二八杠|自行车/, action: '白色素体小人主人公推着二八杠自行车轮廓前行', priority: 9, sceneTags: ['bike'] },
+  { re: /推.*车/, action: '白色素体小人主人公推着二八杠自行车轮廓前行', priority: 6, sceneTags: ['bike'] },
+  { re: /扇.*扇|蒲扇|乘凉|小凳/, action: '白色素体小人主人公坐在门口小凳上扇蒲扇', priority: 9 },
+  { re: /疯|议论|说我/, action: '白色素体小人主人公在摊位前独自忙碌，周围几位白色素体小人围观交谈', priority: 7, sceneTags: ['market'] },
+  { re: /万元户/, action: '白色素体小人主人公站在店铺前，周围简化钱币意象', priority: 8, sceneTags: ['shop'] },
+  { re: /赚钱|收入|越多|利润/, action: '白色素体小人主人公手持简化账本查看收入', priority: 7, sceneTags: ['market', 'shop'] },
+  { re: /铁饭碗|个体户|投机/, action: '白色素体小人主人公独自经营小摊忙碌', priority: 6, sceneTags: ['market'] },
+  { re: /心里有数|敢闯|改革|踏实/, action: '白色素体小人主人公在摊前从容应对，继续向围观的白色素体小人招揽', priority: 3, sceneTags: ['market'], fallback: true },
 ]
 
 function detectNarrationSceneTags(text: string): string[] {
@@ -590,58 +609,56 @@ function pickProtagonistAppearance(
   return String(hints[0]?.appearance || '').trim()
 }
 
-/** 将剧情中的群众/路人描述统一为白色素体小人，主人公保持黑色素体 */
+/** 将剧情中的群众/路人统一为几位白色素体配角，主人公保留「主人公」标记 */
 export function normalizeMinimalCrowdInPlot(plot?: string | null): string {
   let text = String(plot || '').trim()
   if (!text) return ''
-  const prot = NARRATION_PROTAGONIST_BODY
-  const crowd = NARRATION_CROWD_BODY
+  const body = NARRATION_CROWD_BODY
   const PROT = '\uE000P'
 
   text = text
-    .replace(/(小孩|青年|中年|老年)期?黑色素体小人/g, `$1期${PROT}`)
-    .replace(/黑色素体小人/g, PROT)
-    .replace(/(小孩|青年|中年|老年)期素体小人/g, `$1期${PROT}`)
+    .replace(/黑色素体小人/g, body)
+    .replace(/(小孩|青年|中年|老年)期?白色素体小人主人公/g, `$1期${PROT}主人公`)
+    .replace(/白色素体小人主人公/g, `${PROT}主人公`)
+    .replace(/(小孩|青年|中年|老年)期?素体小人主人公/g, `$1期${PROT}主人公`)
 
   const crowdReplacements: Array<[RegExp, string]> = [
-    [/几位白色素体小人/g, `几位${crowd}`],
-    [/几位素体小人/g, `几位${crowd}`],
-    [/围观的白色素体小人/g, `围观的${crowd}`],
-    [/围观的素体小人/g, `围观的${crowd}`],
-    [/周围几位白色素体小人/g, `周围几位${crowd}`],
-    [/周围几位素体小人/g, `周围几位${crowd}`],
-    [/与几位白色素体小人/g, `与几位${crowd}`],
-    [/与几位素体小人/g, `与几位${crowd}`],
-    [/向几位白色素体小人/g, `向几位${crowd}`],
-    [/向几位素体小人/g, `向几位${crowd}`],
-    [/几位年轻人/g, `几位${crowd}`],
-    [/年轻人围/g, `几位${crowd}围`],
-    [/与年轻人/g, `与几位${crowd}`],
-    [/向顾客/g, `向几位${crowd}`],
-    [/几位顾客/g, `几位${crowd}`],
-    [/顾客围/g, `几位${crowd}围`],
-    [/周围多人/g, `周围几位${crowd}`],
-    [/路人匆匆/g, `几位${crowd}匆匆`],
-    [/行人匆匆/g, `几位${crowd}匆匆路过`],
-    [/围观群众/g, `围观的几位${crowd}`],
-    [/围观者/g, `围观的${crowd}`],
-    [/路人/g, `${crowd}路人`],
-    [/招揽顾客/g, `向围观的${crowd}招揽`],
-    [/进店客人/g, `几位${crowd}进店`],
-    [/店员/g, `${crowd}店员`],
+    [/几位白色素体小人/g, `几位${body}`],
+    [/几位素体小人/g, `几位${body}`],
+    [/围观的白色素体小人/g, `围观的${body}`],
+    [/围观的素体小人/g, `围观的${body}`],
+    [/周围几位白色素体小人/g, `周围几位${body}`],
+    [/周围几位素体小人/g, `周围几位${body}`],
+    [/与几位白色素体小人/g, `与几位${body}`],
+    [/与几位素体小人/g, `与几位${body}`],
+    [/向几位白色素体小人/g, `向几位${body}`],
+    [/向几位素体小人/g, `向几位${body}`],
+    [/几位年轻人/g, `几位${body}`],
+    [/年轻人围/g, `几位${body}围`],
+    [/与年轻人/g, `与几位${body}`],
+    [/向顾客/g, `向几位${body}`],
+    [/几位顾客/g, `几位${body}`],
+    [/顾客围/g, `几位${body}围`],
+    [/周围多人/g, `周围几位${body}`],
+    [/路人匆匆/g, `几位${body}匆匆`],
+    [/行人匆匆/g, `几位${body}匆匆路过`],
+    [/围观群众/g, `围观的几位${body}`],
+    [/围观者/g, `围观的${body}`],
+    [/路人/g, `${body}路人`],
+    [/招揽顾客/g, `向围观的${body}招揽`],
+    [/进店客人/g, `几位${body}进店`],
+    [/店员/g, `${body}店员`],
   ]
   for (const [pattern, replacement] of crowdReplacements) {
     text = text.replace(pattern, replacement)
   }
 
   text = text
-    .replace(/素体小人主人公/g, `${prot}主人公`)
-    .replace(/(?<!黑色素体)(?<!白色)素体小人/g, prot)
-    .replace(new RegExp(PROT, 'g'), prot)
+    .replace(/素体小人主人公/g, `${PROT}主人公`)
+    .replace(/(?<!白色)素体小人/g, body)
+    .replace(new RegExp(PROT, 'g'), body)
 
-  return text
-    .replace(new RegExp(`${crowd}${crowd}`, 'g'), crowd)
-    .replace(new RegExp(`${prot}${prot}`, 'g'), prot)
+  return text.replace(new RegExp(`${body}${body}`, 'g'), body)
 }
 
 function formatMinimalProtagonistPlot(
@@ -653,7 +670,7 @@ function formatMinimalProtagonistPlot(
 ): string {
   const plotPart = formatNarrationPlotForPrompt(plot)
   if (!plotPart) return ''
-  if (/素体小人|黑色素体小人|白色素体小人|白色圆头/.test(plotPart)) return normalizeMinimalCrowdInPlot(plotPart)
+  if (/素体小人|白色素体小人主人公|白色素体小人|白色圆头/.test(plotPart)) return normalizeMinimalCrowdInPlot(plotPart)
 
   const narrationText = String(options?.narrationText || plotPart)
   const stage = inferProtagonistStageLabel(narrationText, options?.protagonistHints)
@@ -1407,7 +1424,7 @@ function inferMinimalSubjectFromPlot(plot: string): string {
   if (!text) return `${NARRATION_PROTAGONIST_BODY}主人公`
   const stageMatch = text.match(/(小孩|青年|中年|老年)期?(?:黑色素体|白色素体)?小人/)
   if (stageMatch) return `${stageMatch[0]}与同框${NARRATION_CROWD_BODY}`
-  if (/黑色素体小人|白色素体小人|素体小人/.test(text)) {
+  if (/白色素体小人主人公|白色素体小人|素体小人/.test(text)) {
     const m = text.match(/(?:黑色素体|白色素体|素体)小人[^，,。]{0,24}/)
     if (m) return m[0]
   }
@@ -1514,6 +1531,8 @@ export function buildNarrationDiptychImagePromptContent(
 }
 
 const SCENE_PROMPT_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/黑色素体小人/g, '白色素体小人主人公'],
+  [/黑色黑色素体小人/g, '白色素体小人主人公'],
   [/\b1980s?\s*retro\b/gi, ''],
   [/\b80s?\s*retro\b/gi, ''],
   [/\b90s?\s*retro\b/gi, ''],
@@ -1528,12 +1547,6 @@ const SCENE_PROMPT_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\b\d{2,4}年代\b/g, ''],
   [/\bera-appropriate\b/gi, ''],
   [/\bconcrete era\b/gi, ''],
-  [/\bwearing\s+[^,，;；]+/gi, ''],
-  [/\bin\s+[a-z\s]+(?:dress|shirt|pants|suit|uniform|outfit|clothing|coat|jacket)\b/gi, ''],
-  [/\boutfit\b/gi, ''],
-  [/\b(?:same|matching)\s+(?:face|outfit)\b/gi, ''],
-  [/\b(?:detailed|specific)\s+(?:clothing|costume|apparel)\b/gi, ''],
-  [/[，,]?[^，,；;]*(?:穿着|身着|衣着|穿搭)[^，,；;]*/g, ''],
   [/\bretro\s+(street|market|background|filter|style|look|aesthetic)\b/gi, '$1'],
   [/\bwarm\s+nostalgic\s+lighting\b/gi, 'warm natural lighting'],
   [/\bnostalg(?:ic|ia)\b/gi, ''],
@@ -1554,8 +1567,6 @@ const SCENE_PROMPT_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\d{2,4}\s*年(?:的)?(?:春|夏|秋|冬)?天?/g, ''],
   [/批了一车[^，,；;]*/g, '批了一车货物'],
   [/时髦的[^，,；;]*/g, ''],
-  [/floral\s+shirt|bell-bottom|leather\s+shoes?|business\s+suit|wedding\s+dress/gi, ''],
-  [/西装|革履|皮鞋|灰布衣服|中山装|唐装|婚纱|喜字|横幅|霓虹/g, ''],
   [/满载[^，,；;]*/g, ''],
   [/戴[，,、\s]*(?=推|站|坐|走|$)/g, ''],
   [/脸上有[，,、\s]*/g, ''],
@@ -1567,16 +1578,6 @@ const SCENE_PROMPT_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\d{2,4}年代|八十年代|九十年代/g, ''],
   [/2000年代|二十世纪/g, ''],
   [/男性角色|女性角色|年轻顾客|老年男性|老年女性|顾客|店员/g, NARRATION_CROWD_BODY],
-  [/表情[^，,；;]*/g, ''],
-  [/[，,]?[^，,。【]{0,12}(?:穿着|身着|身穿|穿戴|戴着)[^，,。【]{0,24}/g, ''],
-  [/(?:主人公|素体小人|黑色素体小人|白色素体小人)[^，,。]{0,8}(?:穿|戴)(?:着)?[^，,。]{0,20}/g, ''],
-  [/[，,]?[^，,。【]*(?:一件|套|身)[^，,。【]{0,8}(?:T恤|衬衫|衣|裤|裙|外套|鞋|帽|制服|工装)/g, ''],
-  [/[，,]?[^，,。【]*(?:T恤|花衬衫|喇叭裤|西装革履|中山装|唐装|旗袍|汉服|围裙|背心|短裤|牛仔裤|运动服|校服|护士服|羽绒服|夹克|皮鞋|球鞋|围巾|帽子)/g, ''],
-  [/微笑|皱纹|头发花白|无脸|无五官/g, ''],
-  [/beautiful\s+face|wrinkled\s+face|receding\s+hairline|detailed\s+face|realistic\s+face/gi, ''],
-  [/面容姣好|五官分明|五官轮廓|皱纹|发际线|花白头发|头发花白|小胡子|络腮胡|美人脸|写实五官|复杂五官/g, ''],
-  [/gray\s+hair|white\s+hair|wrinkles?/gi, ''],
-  [/slicked-back|wavy\s+hair|messy\s+short\s+hair/gi, ''],
   [/斩首|砍头|杀头|铡刀|处决|人头落地|断头/g, '押解待审'],
   [/尸体|尸首|遗体|死尸|尸身|惨死|横尸/g, '牢狱候审'],
   [/验尸|解剖/g, '公堂问讯'],
@@ -1636,15 +1637,15 @@ export function sanitizeSceneImagePrompt(prompt?: string | null): string {
 }
 
 export function buildMinimalPortraitPostureHint(variantLabel?: string | null): string {
-  const eyes = NARRATION_PROTAGONIST_EYES
+  const face = NARRATION_PROTAGONIST_FACE
   const body = NARRATION_PROTAGONIST_BODY
   const size = NARRATION_MINIMAL_BODY_SIZE_SPEC
   const label = String(variantLabel || '').trim()
-  if (/童年|幼年|孩童|儿时|幼|小孩/.test(label)) return `${body}，${eyes}，无服装，比青年小一号约2.2头高，站立，简单活泼姿态`
-  if (/青年|少年|年轻/.test(label)) return `${body}，${eyes}，无服装，${size}，三头高标准身形，站立或行走，可持简单道具轮廓`
-  if (/中年/.test(label)) return `${body}，${eyes}，无服装，三头高躯干略宽微胖，坐或站放松姿态，可手持茶杯轮廓`
-  if (/老年|晚年|垂暮|苍老|年迈/.test(label)) return `${body}，${eyes}，无服装，总高约2.8头高略佝偻，圆头两侧各几条简化白发弧线，坐于凳上，可手持圆扇轮廓`
-  return `${body}，${eyes}，无服装，${size}，中性站立姿态`
+  if (/童年|幼年|孩童|儿时|幼|小孩/.test(label)) return `${body}主人公，${face}，开心微笑，简化童装轮廓，比青年小一号约2.2头高，站立，简单活泼姿态`
+  if (/青年|少年|年轻/.test(label)) return `${body}主人公，${face}，自信微笑，简化年代服装轮廓，${size}，三头高标准身形，站立或行走，可持简单道具轮廓`
+  if (/中年/.test(label)) return `${body}主人公，${face}，沉稳表情，简化中年便装轮廓，三头高躯干略宽微胖，坐或站放松姿态，可手持茶杯轮廓`
+  if (/老年|晚年|垂暮|苍老|年迈/.test(label)) return `${body}主人公，${face}，慈祥微笑，简化老年便装轮廓，总高约2.8头高略佝偻，圆头两侧各几条简化白发弧线，坐于凳上，可手持圆扇轮廓`
+  return `${body}主人公，${face}，中性表情，简化服装轮廓，${size}，中性站立姿态`
 }
 
 export function buildNarrationPortraitPromptContent(scene: string, plot: string): string {
@@ -1868,7 +1869,7 @@ export function normalizeMinimalTextureBracket(body?: string | null): string {
   const isLongBlob =
     trimmed.length > 55
     || /全片统一简笔素体比例/.test(trimmed)
-    || /2D扁平简笔画，主人公黑色素体小人/.test(trimmed)
+    || /2D扁平(?:简笔画|插画)，.*?白色素体小人/.test(trimmed)
     || trimmed.includes(NARRATION_MINIMAL_NO_CLOTHING_RULE)
     || trimmed === NARRATION_MINIMAL_TEXTURE_PROMPT
 
@@ -1876,46 +1877,33 @@ export function normalizeMinimalTextureBracket(body?: string | null): string {
 
   const hasEssentials = /无文字/.test(trimmed) && (/平涂|简笔/.test(trimmed) || /禁止写实/.test(trimmed))
   if (trimmed.length <= 48 && hasEssentials) {
-    if (!/无服装|无任何服装/.test(trimmed)) {
-      return `${trimmed}，无服装`.replace(/[，,]{2,}/g, '，')
-    }
     return trimmed
   }
 
   return NARRATION_MINIMAL_TEXTURE_LLM_HINT
 }
 
-/** 配图/定妆：素体 prompt 强制补全无服装约束并清洗穿着描述 */
+/** 配图 prompt 保留服装描述，仅做基础清洗 */
 export function applyMinimalNoClothingGuard(prompt?: string | null): string {
-  let text = sanitizeSceneImagePrompt(String(prompt || '').trim())
-  if (!text) return ''
-  if (!/无服装|无任何服装|全身无服装/.test(text)) {
-    if (/【质感要求[：:]/.test(text)) {
-      // 【质感要求】只补短项「无服装」，勿再追加 NARRATION_MINIMAL_NO_CLOTHING_RULE 长段
-      text = text.replace(
-        /【质感要求[：:]([^】]*)】/g,
-        (_, body) => `【质感要求：${String(body).replace(/[，,]+$/g, '').trim()}，无服装】`,
-      )
-    } else {
-      text = `${text}，${NARRATION_MINIMAL_NO_CLOTHING_RULE}`
-    }
-  }
-  return tidyScenePrompt(text)
+  return tidyScenePrompt(sanitizeSceneImagePrompt(String(prompt || '').trim()))
 }
 
-/** 将 LLM/旧库中的素体配图 prompt 强制对齐黑白主人公约束（与 backend 同步） */
+/** 将 LLM/旧库中的素体配图 prompt 对齐万能模板（与 backend 同步） */
 export function coerceMinimalLLMImagePrompt(prompt?: string | null): string {
   let text = String(prompt || '').trim()
   if (!text) return ''
 
-  const alreadyCoerced = /黑色素体小人/.test(text)
-    && !/白色圆头素体小人|白色黑色素体|黑色黑色素体|期素体小人|素体小人主人公/.test(text)
+  const alreadyCoerced = /白色素体小人/.test(text)
+    && !/黑色素体|白色圆头素体小人|黑色黑色素体|白色白色素体/.test(text)
 
   if (!alreadyCoerced) {
     text = text
-      .replace(/几位白色黑色素体小人白色黑色素体小人/g, `几位${NARRATION_CROWD_BODY}`)
+      .replace(/黑色素体小人/g, `${NARRATION_CROWD_BODY}主人公`)
+      .replace(/黑色白色素体小人主人公/g, `${NARRATION_CROWD_BODY}主人公`)
+      .replace(/白色白色素体小人主人公/g, NARRATION_CROWD_BODY)
+      .replace(/几位白色白色素体小人主人公+/g, `几位${NARRATION_CROWD_BODY}`)
       .replace(/白色黑色素体小人/g, NARRATION_CROWD_BODY)
-      .replace(/黑色黑色素体小人/g, NARRATION_PROTAGONIST_BODY)
+      .replace(/黑色黑色素体小人/g, `${NARRATION_CROWD_BODY}主人公`)
 
     const bracketStart = text.search(/【(?:画面主体|年代场景|片头|左格|主题氛围)/)
     if (bracketStart > 0) {
@@ -1937,7 +1925,9 @@ export function coerceMinimalLLMImagePrompt(prompt?: string | null): string {
     if (!/【/.test(text)) {
       text = text
         .replace(/白色圆头素体小人/g, NARRATION_PROTAGONIST_BODY)
-        .replace(/两个小黑点眼睛/g, NARRATION_PROTAGONIST_EYES)
+        .replace(/两个白色小圆点眼睛/g, NARRATION_PROTAGONIST_FACE)
+        .replace(/两个黑色小圆点眼睛/g, NARRATION_CROWD_FACE)
+        .replace(/两个小黑点眼睛/g, NARRATION_PROTAGONIST_FACE)
       text = normalizeMinimalCrowdInPlot(text)
     }
 

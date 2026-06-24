@@ -1,5 +1,5 @@
 /**
- * 开幕视频 — 随机 10 张配图 + 翻页片头（首尾镜固定 + 翻页音效 + 可选上传配音/字幕）
+ * 开幕视频 — 随机 N 张配图 + 翻页片头（首尾镜固定 + 翻页音效 + 可选上传配音/字幕）
  */
 import { execFileSync, spawnSync } from 'child_process'
 import ffmpeg from 'fluent-ffmpeg'
@@ -20,7 +20,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 
-export const OPENING_IMAGE_COUNT = 10
+export const DEFAULT_OPENING_IMAGE_COUNT = 20
+/** @deprecated 使用 DEFAULT_OPENING_IMAGE_COUNT */
+export const OPENING_IMAGE_COUNT = DEFAULT_OPENING_IMAGE_COUNT
+
+export function resolveOpeningImageCount(value?: unknown): number {
+  if (value == null || value === '') return DEFAULT_OPENING_IMAGE_COUNT
+  const n = Number(value)
+  if (!Number.isFinite(n)) return DEFAULT_OPENING_IMAGE_COUNT
+  return Math.min(100, Math.max(2, Math.round(n)))
+}
 /** 开幕视频固定时长（秒）；有配音时也截断到此长度 */
 export const OPENING_TOTAL_SEC = 3
 export const OPENING_NARRATION_TEXT = '体验365个人生副本'
@@ -119,8 +128,8 @@ function shufflePick<T>(items: T[], count: number): T[] {
   return picked
 }
 
-/** 开幕配图：第 1 张=集内首张配图，第 10 张=集内末张配图，中间随机 */
-export function pickOpeningImages(orderedIllustrations: string[], count = OPENING_IMAGE_COUNT): string[] {
+/** 开幕配图：第 1 张=集内首张，最后 1 张=集内末张，中间随机 */
+export function pickOpeningImages(orderedIllustrations: string[], count = DEFAULT_OPENING_IMAGE_COUNT): string[] {
   if (!orderedIllustrations.length) return []
   const first = orderedIllustrations[0]
   const last = orderedIllustrations[orderedIllustrations.length - 1]
@@ -549,7 +558,7 @@ export function parseOpeningPickedImages(raw?: string | null): string[] {
 
 /** 将开幕视频所用配图打包为 zip，返回 zip 绝对路径（调用方负责删除所在临时目录） */
 export function buildOpeningPickedImagesZip(imageRels: string[]): { zipPath: string; tempDir: string } {
-  if (!imageRels.length) throw new Error('暂无开幕配图记录，请先导出十张配图')
+  if (!imageRels.length) throw new Error('暂无开幕配图记录，请先导出配图')
 
   const tempDir = path.join(STORAGE_ROOT, 'temp', 'opening', `zip-${uuid()}`)
   const stagingDir = path.join(tempDir, 'files')
@@ -574,12 +583,13 @@ export function buildOpeningPickedImagesZip(imageRels: string[]): { zipPath: str
   return { zipPath, tempDir }
 }
 
-export function pickAndSaveOpeningImages(episodeId: number): string[] {
+export function pickAndSaveOpeningImages(episodeId: number, count?: number): string[] {
   const illustrations = collectEpisodeIllustrationPaths(episodeId)
   if (!illustrations.length) {
     throw new Error('暂无可用配图，请先生成或上传镜头配图')
   }
-  const picked = pickOpeningImages(illustrations, OPENING_IMAGE_COUNT)
+  const resolvedCount = resolveOpeningImageCount(count)
+  const picked = pickOpeningImages(illustrations, resolvedCount)
   db.update(schema.episodes)
     .set({ openingPickedImages: JSON.stringify(picked), updatedAt: now() })
     .where(eq(schema.episodes.id, episodeId))
@@ -587,19 +597,23 @@ export function pickAndSaveOpeningImages(episodeId: number): string[] {
   return picked
 }
 
-function resolveOpeningPickedForVideo(episodeId: number, ep: typeof schema.episodes.$inferSelect): string[] {
+function resolveOpeningPickedForVideo(
+  episodeId: number,
+  ep: typeof schema.episodes.$inferSelect,
+  count?: number,
+): string[] {
   const illustrations = collectEpisodeIllustrationPaths(episodeId)
   if (!illustrations.length) {
     throw new Error('暂无可用配图，请先生成或上传镜头配图')
   }
   const stored = parseOpeningPickedImages(ep.openingPickedImages)
-  const storedValid = stored.length === OPENING_IMAGE_COUNT
+  const storedValid = stored.length >= 2
     && stored.every(rel => fs.existsSync(toAbsPath(rel)))
   if (storedValid) return stored
-  return pickOpeningImages(illustrations, OPENING_IMAGE_COUNT)
+  return pickOpeningImages(illustrations, resolveOpeningImageCount(count))
 }
 
-export async function generateOpeningVideo(episodeId: number): Promise<{
+export async function generateOpeningVideo(episodeId: number, count?: number): Promise<{
   path: string
   imageCount: number
   pickedImages: string[]
@@ -608,7 +622,7 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error('Episode not found')
 
-  const picked = resolveOpeningPickedForVideo(episodeId, ep)
+  const picked = resolveOpeningPickedForVideo(episodeId, ep, count)
   const illustrationPool = collectEpisodeIllustrationPaths(episodeId).length
   const tempDir = path.join(STORAGE_ROOT, 'temp', 'opening')
   const outputDir = path.join(STORAGE_ROOT, 'opening')
@@ -726,7 +740,7 @@ export async function generateOpeningVideo(episodeId: number): Promise<{
   }
 }
 
-export function startOpeningVideoGeneration(episodeId: number): void {
+export function startOpeningVideoGeneration(episodeId: number, count?: number): void {
   if (processingEpisodes.has(episodeId)) return
   processingEpisodes.add(episodeId)
   db.update(schema.episodes)
@@ -734,7 +748,7 @@ export function startOpeningVideoGeneration(episodeId: number): void {
     .where(eq(schema.episodes.id, episodeId))
     .run()
 
-  generateOpeningVideo(episodeId)
+  generateOpeningVideo(episodeId, count)
     .catch(() => {})
     .finally(() => {
       processingEpisodes.delete(episodeId)

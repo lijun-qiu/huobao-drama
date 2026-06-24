@@ -11,7 +11,7 @@ import { v4 as uuid } from 'uuid'
 import { db, schema } from '../db/index.js'
 import { and, desc, eq, inArray } from 'drizzle-orm'
 import { now } from '../utils/response.js'
-import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION } from './ffmpeg-page-transition.js'
 import { BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { isStoryboardTitleShot, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
@@ -35,6 +35,7 @@ type ComposedStoryboard = {
   composedImage?: string | null
   firstFrameImage?: string | null
   composedVideoUrl?: string | null
+  bgmAudioUrl?: string | null
 }
 
 type ClipSegment = { path: string; duration: number; storyboardId: number }
@@ -68,6 +69,7 @@ type MergeScenesMeta = {
   clips?: string[]
   bodyMergedUrl?: string
   withOpening?: boolean
+  bgmSkippedEmbedded?: boolean
   withTitle?: boolean
   sourceMergeId?: number
   test?: boolean
@@ -563,6 +565,11 @@ async function mixBgmIntoMergedVideo(
   fs.renameSync(tempOut, videoPath)
 }
 
+/** 镜头合成阶段已混入 BGM 时，成片级再混会叠两层 */
+function storyboardsHaveEmbeddedBgm(storyboards: Array<{ bgmAudioUrl?: string | null }>): boolean {
+  return storyboards.some(sb => !!String(sb.bgmAudioUrl || '').trim())
+}
+
 /**
  * 拼接一集的所有合成镜头视频
  */
@@ -837,23 +844,34 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
 
   if (run.cancelled) return
 
+  let bgmSkippedEmbedded = false
   if (options.bgmMusicId && !run.cancelled) {
-    const bgmAbs = resolveMergeBgmPath(options.bgmMusicId)
-    if (bgmAbs) {
-      setMergeProgress(episodeId, {
+    if (storyboardsHaveEmbeddedBgm(storyboards)) {
+      bgmSkippedEmbedded = true
+      logTaskProgress('MergeTask', 'bgm-skipped-embedded', {
         mergeId,
-        phase: 'finalizing',
-        percent: 92,
-        message: '正在混入 BGM…',
-        updatedAt: Date.now(),
+        episodeId,
+        bgmMusicId: options.bgmMusicId,
+        reason: 'shots-already-have-bgm',
       })
-      try {
-        await mixBgmIntoMergedVideo(deliverPath, bgmAbs, options.bgmVolume ?? BGM_VOICE_MIX_VOLUME, run)
-      } catch (err: any) {
-        throw new Error(`BGM 混音失败: ${err.message}`)
-      }
     } else {
-      logTaskError('MergeTask', 'bgm-missing', { mergeId, episodeId, bgmMusicId: options.bgmMusicId })
+      const bgmAbs = resolveMergeBgmPath(options.bgmMusicId)
+      if (bgmAbs) {
+        setMergeProgress(episodeId, {
+          mergeId,
+          phase: 'finalizing',
+          percent: 92,
+          message: '正在混入 BGM…',
+          updatedAt: Date.now(),
+        })
+        try {
+          await mixBgmIntoMergedVideo(deliverPath, bgmAbs, options.bgmVolume ?? BGM_VOICE_MIX_VOLUME, run)
+        } catch (err: any) {
+          throw new Error(`BGM 混音失败: ${err.message}`)
+        }
+      } else {
+        logTaskError('MergeTask', 'bgm-missing', { mergeId, episodeId, bgmMusicId: options.bgmMusicId })
+      }
     }
   }
 
@@ -880,6 +898,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     withTitle: false,
     test: !!clipLimit,
     clipLimit,
+    bgmSkippedEmbedded: bgmSkippedEmbedded || undefined,
   }
 
   // 更新 merge 记录

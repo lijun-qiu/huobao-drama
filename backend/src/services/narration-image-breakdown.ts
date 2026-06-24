@@ -122,6 +122,14 @@ function buildPromptAnchorMap(
 
 export type NarrationImagePromptOptions = {
   batchSize?: number
+  /** 测试：仅生成指定段批（从 1 起，按全量配图段落 + batchSize 划分） */
+  testBatchIndex?: number
+}
+
+function sliceParagraphBatchByIndex<T>(items: T[], batchSize: number, batchIndex: number): T[] {
+  const idx = Math.max(1, Math.floor(Number(batchIndex)) || 1)
+  const start = (idx - 1) * batchSize
+  return items.slice(start, start + batchSize)
 }
 
 async function runNarrationImagePromptGeneration(
@@ -145,7 +153,7 @@ async function runNarrationImagePromptGeneration(
         `镜头 #${missingWithoutMeta.join('、#')} 缺少配图段落信息，请重新执行「① 检测配图」`,
       )
     }
-    if (!pendingParagraphs.length) {
+    if (!pendingParagraphs.length && options?.testBatchIndex == null) {
       reportProgress({
         status: 'completed',
         phase: 'done',
@@ -166,19 +174,37 @@ async function runNarrationImagePromptGeneration(
       }
     }
 
-    const batchCount = Math.max(1, Math.ceil(pendingParagraphs.length / promptBatchSize))
+    const testBatchIndex = options?.testBatchIndex
+    let targetParagraphs = pendingParagraphs
+    if (testBatchIndex != null) {
+      const batchSlice = sliceParagraphBatchByIndex(allParagraphs, promptBatchSize, testBatchIndex)
+      const totalBatches = Math.max(1, Math.ceil(allParagraphs.length / promptBatchSize))
+      if (!batchSlice.length) {
+        throw new Error(`段批 ${testBatchIndex} 不存在（共 ${totalBatches} 批）`)
+      }
+      // 测试：始终生成该段批全部段落（含已有文案，便于试跑/覆盖）
+      targetParagraphs = batchSlice
+    }
+
+    const batchCount = testBatchIndex != null
+      ? 1
+      : Math.max(1, Math.ceil(pendingParagraphs.length / promptBatchSize))
     const alreadyDone = allParagraphs.length - pendingParagraphs.length
     reportProgress({
       phase: 'prompts',
-      message: alreadyDone > 0
-        ? `补全 ${pendingParagraphs.length} 段缺失配图文案（已完成 ${alreadyDone}/${allParagraphs.length}，约 ${batchCount} 批）…`
-        : `正在生成 ${pendingParagraphs.length} 段纯 LLM 配图文案（约 ${batchCount} 批）…`,
+      message: testBatchIndex != null
+        ? `测试生成段批 ${testBatchIndex}：${targetParagraphs.length} 段配图文案…`
+        : alreadyDone > 0
+          ? `补全 ${pendingParagraphs.length} 段缺失配图文案（已完成 ${alreadyDone}/${allParagraphs.length}，约 ${batchCount} 批）…`
+          : `正在生成 ${pendingParagraphs.length} 段纯 LLM 配图文案（约 ${batchCount} 批）…`,
       percent: 12,
-      paragraph_count: pendingParagraphs.length,
+      paragraph_count: targetParagraphs.length,
+      batch: testBatchIndex ?? undefined,
+      batch_count: batchCount,
     })
 
     const llmPrompts = await generateParagraphImagePromptsWithLLM(
-      pendingParagraphs.map(para => ({
+      targetParagraphs.map(para => ({
         index: para.index,
         startIndex: para.startIndex,
         sentences: mergeStoryboardLinesForImagePrompt(para.sentences),
@@ -194,10 +220,10 @@ async function runNarrationImagePromptGeneration(
         previousEpisodeNarration: ctx.continuity.previousEpisodeNarration,
         onProgress: reportProgress,
         pureLlm: true,
-        batchSize: promptBatchSize,
+        batchSize: testBatchIndex != null ? targetParagraphs.length : promptBatchSize,
         onBatchComplete: async ({ batch, promptsByStartIndex }) => {
           const anchorMap = buildPromptAnchorMap(
-            pendingParagraphs.filter(p => batch.some(item => item.startIndex === p.startIndex)),
+            targetParagraphs.filter(p => batch.some(item => item.startIndex === p.startIndex)),
             promptsByStartIndex,
           )
           savePromptAnchorsOnly(ctx, allParagraphs, anchorMap)
@@ -207,19 +233,24 @@ async function runNarrationImagePromptGeneration(
 
     if (!llmPrompts) throw new Error('配图 AI 文案生成失败')
 
-    const stillMissing = pendingParagraphs.filter(
+    const stillMissing = targetParagraphs.filter(
       para => !String(llmPrompts.promptsByStartIndex.get(para.startIndex) || '').trim(),
     )
     if (stillMissing.length) {
-      throw new Error(`配图 AI 未返回 ${stillMissing.length} 段的 image_prompt，请点「补全缺失文案」继续`)
+      const hint = testBatchIndex != null
+        ? `测试段批 ${testBatchIndex} 仍有 ${stillMissing.length} 段未返回 prompt`
+        : `配图 AI 未返回 ${stillMissing.length} 段的 image_prompt，请点「补全缺失文案」继续`
+      throw new Error(hint)
     }
 
     reportProgress({
       status: 'completed',
       phase: 'done',
-      message: options?.retryMissing
-        ? `已补全 ${pendingParagraphs.length} 条配图文案`
-        : `已生成 ${allParagraphs.length} 条纯 LLM 配图文案`,
+      message: testBatchIndex != null
+        ? `测试完成：段批 ${testBatchIndex} 已生成 ${targetParagraphs.length} 段配图文案`
+        : options?.retryMissing
+          ? `已补全 ${pendingParagraphs.length} 条配图文案`
+          : `已生成 ${allParagraphs.length} 条纯 LLM 配图文案`,
       percent: 100,
       paragraph_count: allParagraphs.length,
     })

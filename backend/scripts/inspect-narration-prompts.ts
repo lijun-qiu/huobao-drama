@@ -44,7 +44,7 @@ const BAD_PATTERNS = [
   { name: '具体年份', re: /\b19\d{2}\b|19\d0s?/i },
   { name: '具体服装', re: /花衬衫|喇叭裤|蛤蟆镜|西装|婚纱|护士服|旗袍|皮夹克|身穿|身着|穿着/ },
   { name: '复古画风', re: /\bvintage\b|\bretro\b|复古滤镜|像素|pixel|3D渲染|写实人脸/i },
-  { name: '缺素体关键词', re: /素体|圆头|小圆点眼睛/, invert: true },
+  { name: '缺素体关键词', re: /素体|圆头|正常卡通脸/, invert: true },
   { name: '缺两手两脚', re: /两手两脚|简笔四肢/, invert: true },
 ]
 

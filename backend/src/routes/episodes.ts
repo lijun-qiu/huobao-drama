@@ -16,6 +16,7 @@ import { cropEpisodeNarrationImageWatermarks, restoreEpisodeNarrationImageWaterm
 import {
   clearEpisodeComposedVideos,
   clearEpisodeNarrationImages,
+  clearEpisodeNarrationImagePrompts,
   clearEpisodeNarrationTts,
 } from '../services/episode-asset-clear.js'
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
@@ -436,7 +437,12 @@ app.post('/:id/narration-image-prompts', async (c) => {
     const promptBatchSize = typeof body.prompt_batch_size === 'number'
       ? body.prompt_batch_size
       : undefined
-    const promptOptions = promptBatchSize != null ? { batchSize: promptBatchSize } : undefined
+    const testBatchIndex = typeof body.test_batch_index === 'number'
+      ? body.test_batch_index
+      : undefined
+    const promptOptions = (promptBatchSize != null || testBatchIndex != null)
+      ? { batchSize: promptBatchSize, testBatchIndex }
+      : undefined
 
     if (!acquireNarrationImageBreakdownJob(episodeId)) {
       return badRequest(c, '配图任务进行中，请稍候')
@@ -585,6 +591,21 @@ app.post('/:id/clear-narration-images', async (c) => {
   try {
     const result = await clearEpisodeNarrationImages(episodeId)
     if (!result.cleared) return badRequest(c, '本集暂无配图可清除')
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/clear-narration-image-prompts — 清除本集全部配图文案（保留检测分段）
+app.post('/:id/clear-narration-image-prompts', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await clearEpisodeNarrationImagePrompts(episodeId)
+    if (!result.cleared) return badRequest(c, '本集暂无配图文案可清除')
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)
@@ -750,7 +771,10 @@ app.post('/:id/generate-opening-video', async (c) => {
     return badRequest(c, '开幕视频正在生成中，请稍候')
   }
 
-  startOpeningVideoGeneration(episodeId)
+  const body = await c.req.json().catch(() => ({}))
+  const count = body?.count ?? body?.image_count ?? body?.imageCount
+
+  startOpeningVideoGeneration(episodeId, count)
   return success(c, { status: 'processing' })
 })
 
@@ -782,7 +806,7 @@ app.get('/:id/opening-picked-images.zip', async (c) => {
   if (!ep) return notFound(c)
 
   const images = parseOpeningPickedImages(ep.openingPickedImages)
-  if (!images.length) return badRequest(c, '暂无开幕配图记录，请先导出十张配图')
+  if (!images.length) return badRequest(c, '暂无开幕配图记录，请先导出配图')
 
   let tempDir = ''
   try {
@@ -803,15 +827,18 @@ app.get('/:id/opening-picked-images.zip', async (c) => {
   }
 })
 
-// POST /episodes/:id/opening-picked-images/export — 随机选 10 张（首尾固定）并下载 zip
+// POST /episodes/:id/opening-picked-images/export — 随机选 N 张（首尾固定）并下载 zip
 app.post('/:id/opening-picked-images/export', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c)
 
+  const body = await c.req.json().catch(() => ({}))
+  const count = body?.count ?? body?.image_count ?? body?.imageCount
+
   let tempDir = ''
   try {
-    const picked = pickAndSaveOpeningImages(episodeId)
+    const picked = pickAndSaveOpeningImages(episodeId, count)
     const { zipPath, tempDir: dir } = buildOpeningPickedImagesZip(picked)
     tempDir = dir
     const buf = fs.readFileSync(zipPath)

@@ -13,8 +13,9 @@ import { DEFAULT_VOICEBOX_MODEL_SIZE, resolveVoiceboxModelSize, type VoiceboxMod
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const VOICEBOX_BASE_URL = (process.env.VOICEBOX_BASE_URL || 'http://127.0.0.1:17493').replace(/\/$/, '')
-const VOICEBOX_TIMEOUT_MS = Number(process.env.VOICEBOX_TIMEOUT_MS || 300_000)
-const VOICEBOX_CONCURRENCY = Math.max(1, Number(process.env.VOICEBOX_CONCURRENCY || 4))
+const VOICEBOX_TIMEOUT_MS = Number(process.env.VOICEBOX_TIMEOUT_MS || 600_000)
+/** Voicebox 推理基本串行，并发 >1 会叠加模型加载导致超时 */
+const VOICEBOX_CONCURRENCY = Math.max(1, Number(process.env.VOICEBOX_CONCURRENCY || 1))
 
 export interface VoiceboxProfile {
   id: string
@@ -119,6 +120,9 @@ export function formatVoiceboxError(raw: string): string {
   }
   if (/not downloaded/i.test(text)) {
     return 'Voicebox 对应模型尚未下载完成，请在 Voicebox → Models 中下载后再试'
+  }
+  if (/timeout|timed out|aborted due to timeout|fetch failed|ECONNREFUSED|ECONNRESET/i.test(text)) {
+    return 'Voicebox 响应超时或未连接。预设 CustomVoice 首次生成需加载约 2.4GB 模型（约 3–10 分钟），请确认 Voicebox 已启动且勿并发多条；可在 Voicebox 内先试生成一次，或增大 VOICEBOX_TIMEOUT_MS'
   }
   if (text.startsWith('Voicebox TTS 失败:')) return text
   return text
@@ -332,6 +336,11 @@ function resolveProfileLanguage(profileId: string, profiles: VoiceboxProfile[], 
   return profile?.language || fallback
 }
 
+/** 仅 Qwen CustomVoice 预设音色支持 instruct 感情/风格控制 */
+export function voiceboxProfileSupportsInstruct(profile?: VoiceboxProfile | null): boolean {
+  return profile?.preset_engine === 'qwen_custom_voice'
+}
+
 export async function generateVoiceboxTTS(
   text: string,
   profileId: string,
@@ -359,7 +368,16 @@ export async function generateVoiceboxTTS(
   const resolvedModelSize = modelState.modelSize
   if (!lang) lang = resolveProfileLanguage(resolvedProfileId, profiles)
 
-  const styleInstruct = resolveVoiceboxInstruct(instruct)
+  const styleInstructRaw = resolveVoiceboxInstruct(instruct)
+  const styleInstruct = voiceboxProfileSupportsInstruct(profileMeta) ? styleInstructRaw : undefined
+  if (styleInstructRaw && !styleInstruct) {
+    logTaskProgress('AudioTask', 'voicebox-instruct-skipped', {
+      profileId: resolvedProfileId,
+      voiceType: profileMeta?.voice_type,
+      engine,
+      reason: 'only-qwen-custom-voice-supports-instruct',
+    })
+  }
 
   logTaskStart('AudioTask', 'voicebox-generate', {
     profileId: resolvedProfileId,

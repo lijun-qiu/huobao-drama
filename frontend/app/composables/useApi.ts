@@ -79,7 +79,7 @@ export const episodeAPI = {
       detect_batch_size?: number
     },
   ) => api.post(`/episodes/${id}/narration-image-detect`, options || {}),
-  narrationImagePrompts: (id: number, options?: { style?: string; retry_missing_prompts?: boolean; prompt_batch_size?: number }) =>
+  narrationImagePrompts: (id: number, options?: { style?: string; retry_missing_prompts?: boolean; prompt_batch_size?: number; test_batch_index?: number }) =>
     api.post(`/episodes/${id}/narration-image-prompts`, options || {}),
   narrationImageAudit: (id: number) => api.get(`/episodes/${id}/narration-image-audit`),
   narrationImageOptimize: (id: number, options?: { storyboard_ids?: number[] }) =>
@@ -96,11 +96,16 @@ export const episodeAPI = {
   extractNarrationCharacters: (id: number, options?: { script?: string; style?: string; text_model?: string; text_thinking?: boolean }) =>
     api.post(`/episodes/${id}/extract-narration-characters`, options || {}),
   linkNarrationCharacters: (id: number) => api.post(`/episodes/${id}/link-narration-characters`),
-  generateOpeningVideo: (id: number) => api.post(`/episodes/${id}/generate-opening-video`, {}),
+  generateOpeningVideo: (id: number, options?: { count?: number }) =>
+    api.post(`/episodes/${id}/generate-opening-video`, options || {}),
   openingVideoStatus: (id: number) => api.get(`/episodes/${id}/opening-video`),
   openingPickedImagesZipUrl: (id: number) => `/api/v1/episodes/${id}/opening-picked-images.zip`,
-  exportOpeningPickedImages: async (id: number) => {
-    const resp = await fetch(`/api/v1/episodes/${id}/opening-picked-images/export`, { method: 'POST' })
+  exportOpeningPickedImages: async (id: number, options?: { count?: number }) => {
+    const resp = await fetch(`/api/v1/episodes/${id}/opening-picked-images/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options || {}),
+    })
     const contentType = resp.headers.get('content-type') || ''
     if (!resp.ok) {
       if (contentType.includes('json')) {
@@ -131,6 +136,7 @@ export const episodeAPI = {
   cropNarrationImages: (id: number) => api.post(`/episodes/${id}/crop-narration-images`, {}),
   restoreNarrationImages: (id: number) => api.post(`/episodes/${id}/restore-narration-images`, {}),
   clearNarrationImages: (id: number) => api.post(`/episodes/${id}/clear-narration-images`, {}),
+  clearNarrationImagePrompts: (id: number) => api.post(`/episodes/${id}/clear-narration-image-prompts`, {}),
   clearNarrationTts: (id: number) => api.post(`/episodes/${id}/clear-narration-tts`, {}),
   clearComposedVideos: (id: number) => api.post(`/episodes/${id}/clear-composed-videos`, {}),
 }

@@ -1300,6 +1300,11 @@
                 style="min-width:140px"
                 @update:model-value="localVoiceboxInstructPreset = $event"
               />
+              <span
+                v-if="localTtsEnabled && localTtsEngine === 'voicebox' && !selectedVoiceSupportsInstruct"
+                class="tag warn"
+                title="感情风格仅对 CustomVoice 预设音色生效（如 Eric、Serena）；克隆音色请改用预设或选「默认（自然）」"
+              >当前音色不支持感情</span>
               <input
                 v-if="localTtsEnabled && localTtsEngine === 'voicebox' && localVoiceboxInstructPreset === VOICEBOX_INSTRUCT_CUSTOM"
                 v-model="localVoiceboxInstructCustom"
@@ -1328,6 +1333,11 @@
               />
               <span v-if="localTtsEnabled && localTtsEngine === 'voicebox' && voiceboxAvailable" class="tag ok">Voicebox 已连接</span>
               <span v-else-if="localTtsEnabled && localTtsEngine === 'voicebox' && !voiceboxAvailable" class="tag warn">Voicebox 未运行</span>
+              <span
+                v-if="localTtsEnabled && localTtsEngine === 'voicebox' && voiceboxAvailable && !voiceboxModelLoaded"
+                class="tag warn"
+                title="预设 CustomVoice 首次合成需加载大模型，请单条生成并等待数分钟"
+              >模型未加载·首次较慢</span>
               <span v-else-if="!localTtsEnabled" class="tag warn">将使用付费 API：{{ lockedAudioConfigLabel }}</span>
             </div>
             <div class="custom-tts-panel">
@@ -1445,7 +1455,7 @@
           <!-- Sub: BGM -->
           <div v-else-if="prodTab === 'bgm'" class="prod-content">
             <div class="narration-hint">
-              <strong>BGM 策略：</strong>默认 <code>suno_music_open</code>（纯器乐）；可选 <code>pixverse-sound-effect</code>（按画面生成环境音，需关联已合成镜头）；也可<strong>上传本地音频</strong>直接使用。BGM 库按<strong>项目</strong>共享。合成时自动与旁白混音（BGM 音量约 12%）。
+              <strong>BGM 策略：</strong>默认 <code>suno_music_open</code>（纯器乐）；可选 <code>pixverse-sound-effect</code>（按画面生成环境音，需关联已合成镜头）；也可<strong>上传本地音频</strong>直接使用。BGM 库按<strong>项目</strong>共享。合成时自动与旁白混音（BGM 音量约 8%）。
             </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ bgmAppliedCount }} 已配 BGM</span>
@@ -1599,7 +1609,7 @@
                 镜
               </label>
               <span class="dim" style="font-size:11px">0=不分批</span>
-              <span class="dim" style="font-size:12px;margin-left:12px">文案分批</span>
+              <span class="dim" style="font-size:12px;margin-left:12px">配图文案</span>
               <label class="detect-batch-field">
                 每批
                 <input
@@ -1613,6 +1623,32 @@
                 />
                 段
               </label>
+              <BaseSelect
+                v-if="narrationPromptTestBatchOptions.length > 1"
+                :options="narrationPromptTestBatchOptions"
+                :model-value="narrationPromptTestBatchIndex"
+                placeholder="测试段批"
+                style="min-width:88px"
+                :title="`按每批 ${normalizedImagePromptBatchSize()} 段划分；测试仅生成所选段批`"
+                @update:model-value="narrationPromptTestBatchIndex = Number($event) || 1"
+              />
+              <button
+                class="btn btn-sm"
+                :disabled="narrationImageBreaking || !narrationPromptTestCanRun"
+                :title="narrationPromptTestPendingTitle"
+                @click="doNarrationImagePromptsTest"
+              >
+                <Loader2 v-if="narrationImageBreaking && narrationImagePromptTestActive" :size="11" class="animate-spin" />
+                测试生成
+              </button>
+              <button
+                class="btn btn-sm"
+                :disabled="narrationImageBreaking || narrationAssetClearing || !narrationPromptLiveCount"
+                title="清除本集全部配图锚点的配图文案（保留检测分段与 scene_content，不删配图文件）"
+                @click="clearAllNarrationImagePrompts"
+              >
+                {{ narrationAssetClearing ? '清除中…' : `清除文案 (${narrationPromptLiveCount})` }}
+              </button>
             </div>
             <div class="prod-image-model-bar" style="margin-bottom:12px">
               <span class="dim" style="font-size:12px">文本模型</span>
@@ -1658,7 +1694,7 @@
                 title="根据检测结果生成纯 LLM 六维配图文案（无清洗）"
                 @click="doNarrationImagePrompts"
               >
-                <Loader2 v-if="narrationImageBreaking && narrationImageStep === 'prompts'" :size="11" class="animate-spin" />
+                <Loader2 v-if="narrationImageBreaking && narrationImageStep === 'prompts' && !narrationImagePromptTestActive" :size="11" class="animate-spin" />
                 ② 生成配图文案
                 <span v-if="narrationDetectDisplayCount" class="btn-step-count">{{ narrationPromptDisplayCount }}/{{ narrationDetectDisplayCount }}</span>
               </button>
@@ -1847,11 +1883,11 @@
                 <button
                   class="btn btn-primary btn-sm"
                   :disabled="isBatchRunning('narrationImages') || !narrationImagesPendingCount"
-                  :title="narrationImagesPendingCount ? `将生成：${narrationImagesPendingLabel}` : ''"
+                  :title="narrationImagesPendingTitle"
                   @click="batchNarrationShotImages"
                 >
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-                  生成剩余{{ narrationImagesPendingCount ? ` (${narrationImagesPendingHint})` : '' }}
+                  生成剩余
                 </button>
               </div>
             </div>
@@ -2470,7 +2506,7 @@
           </div>
           <div class="export-opening-body">
             <div class="narration-hint" style="margin-bottom:16px">
-              从本集已生成/上传的配图中<strong>随机选 10 张</strong>合成翻页片头（<strong>第 1 张=集内首张、第 10 张=集内末张</strong>，中间随机；可先导出 zip 再生成视频）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 3 秒片头 + 翻页音效。
+              从本集已生成/上传的配图中<strong>随机选 N 张</strong>合成翻页片头（<strong>第 1 张=集内首张、最后 1 张=集内末张</strong>，中间随机；可先导出 zip 再生成视频）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 3 秒片头 + 翻页音效。
             </div>
             <div class="opening-audio-panel" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px">
               <div style="font-size:13px;font-weight:600;margin-bottom:8px">开幕配音</div>
@@ -2522,6 +2558,11 @@
                   style="min-width:140px"
                   @update:model-value="localVoiceboxInstructPreset = $event"
                 />
+                <span
+                  v-if="localTtsEngine === 'voicebox' && !selectedVoiceSupportsInstruct"
+                  class="tag warn"
+                  title="感情风格仅对 CustomVoice 预设音色生效（如 Eric、Serena）；克隆音色请改用预设或选「默认（自然）」"
+                >当前音色不支持感情</span>
                 <input
                   v-if="localTtsEngine === 'voicebox' && localVoiceboxInstructPreset === VOICEBOX_INSTRUCT_CUSTOM"
                   v-model="localVoiceboxInstructCustom"
@@ -2548,6 +2589,11 @@
                 </button>
                 <span v-if="localTtsEngine === 'voicebox' && voiceboxAvailable" class="tag ok">Voicebox 已连接</span>
                 <span v-else-if="localTtsEngine === 'voicebox' && !voiceboxAvailable" class="tag warn">Voicebox 未运行</span>
+                <span
+                  v-if="localTtsEngine === 'voicebox' && voiceboxAvailable && !voiceboxModelLoaded"
+                  class="tag warn"
+                  title="预设 CustomVoice 首次合成需加载大模型，请单条生成并等待数分钟"
+                >模型未加载·首次较慢</span>
               </div>
               <div class="export-bar" style="margin-bottom:0">
                 <button class="btn" :disabled="openingAudioUploading" @click="triggerOpeningAudioUpload">
@@ -2557,13 +2603,20 @@
                 <span v-if="openingAudioUrl" class="tag tag-success">配音已就绪</span>
               </div>
               <div class="export-bar" style="margin-top:12px;margin-bottom:0">
+                <BaseSelect
+                  :model-value="openingPickCount"
+                  :options="openingPickCountOptions"
+                  placeholder="配图张数"
+                  style="min-width:130px"
+                  @update:model-value="openingPickCount = Number($event) || DEFAULT_OPENING_IMAGE_COUNT"
+                />
                 <button
                   class="btn"
                   :disabled="!illustrationImageCount || openingPickedImagesExporting"
-                  title="随机选 10 张（首尾镜固定）打包下载，无需先生成开幕视频"
+                  :title="`随机选 ${openingPickCount} 张（首尾镜固定）打包下载，无需先生成开幕视频`"
                   @click="exportOpeningPickedImages"
                 >
-                  {{ openingPickedImagesExporting ? '导出中…' : '导出十张配图' }}
+                  {{ openingPickedImagesExporting ? '导出中…' : `导出 ${openingPickCount} 张配图` }}
                 </button>
                 <a
                   v-if="canDownloadOpeningImages"
@@ -2572,7 +2625,7 @@
                   class="btn"
                   :title="`下载已选 ${openingPickedImages.length} 张配图`"
                 >
-                  下载十张
+                  下载 {{ openingPickedImages.length }} 张
                 </a>
               </div>
             </div>
@@ -2590,14 +2643,21 @@
               </div>
               <div class="export-bar">
                 <span class="tag tag-success">已生成</span>
+                <BaseSelect
+                  :model-value="openingPickCount"
+                  :options="openingPickCountOptions"
+                  placeholder="配图张数"
+                  style="min-width:130px"
+                  @update:model-value="openingPickCount = Number($event) || DEFAULT_OPENING_IMAGE_COUNT"
+                />
                 <button class="btn" :disabled="!illustrationImageCount" @click="generateOpeningVideo">重新生成</button>
                 <button
                   class="btn"
                   :disabled="!illustrationImageCount || openingPickedImagesExporting"
-                  title="重新随机选 10 张（首尾镜固定）"
+                  :title="`重新随机选 ${openingPickCount} 张（首尾镜固定）`"
                   @click="exportOpeningPickedImages"
                 >
-                  {{ openingPickedImagesExporting ? '导出中…' : '重新导出十张' }}
+                  {{ openingPickedImagesExporting ? '导出中…' : `重新导出 ${openingPickCount} 张` }}
                 </button>
                 <a
                   v-if="canDownloadOpeningImages"
@@ -2606,16 +2666,16 @@
                   class="btn"
                   :title="`下载已选 ${openingPickedImages.length} 张配图`"
                 >
-                  下载十张
+                  下载 {{ openingPickedImages.length }} 张
                 </a>
                 <button
                   v-else
                   class="btn"
                   :disabled="!illustrationImageCount || openingPickedImagesExporting"
-                  title="随机选 10 张（首尾镜固定）打包下载"
+                  :title="`随机选 ${openingPickCount} 张（首尾镜固定）打包下载`"
                   @click="exportOpeningPickedImages"
                 >
-                  导出十张
+                  导出 {{ openingPickCount }} 张
                 </button>
                 <button
                   v-if="mergeUrl && !mergeHasOpening"
@@ -2636,16 +2696,25 @@
                 </div>
                 <div class="empty-title">生成开幕视频</div>
                 <div v-if="openingVideoError" class="empty-desc" style="color:var(--danger)">{{ openingVideoError }}</div>
-                <div v-else class="empty-desc">需要至少 1 张镜头配图；可先「导出十张配图」，再生成开幕视频</div>
+                <div v-else class="empty-desc">需要至少 1 张镜头配图；可先导出配图 zip，再生成开幕视频</div>
+                <div v-if="illustrationImageCount" class="export-bar" style="margin-top:12px;justify-content:center">
+                  <BaseSelect
+                    :model-value="openingPickCount"
+                    :options="openingPickCountOptions"
+                    placeholder="配图张数"
+                    style="min-width:130px"
+                    @update:model-value="openingPickCount = Number($event) || DEFAULT_OPENING_IMAGE_COUNT"
+                  />
+                </div>
                 <button
                   v-if="illustrationImageCount"
                   class="btn"
                   style="margin-top:12px"
                   :disabled="openingPickedImagesExporting"
-                  title="随机选 10 张（首尾镜固定）打包下载"
+                  :title="`随机选 ${openingPickCount} 张（首尾镜固定）打包下载`"
                   @click="exportOpeningPickedImages"
                 >
-                  {{ openingPickedImagesExporting ? '导出中…' : '导出十张配图' }}
+                  {{ openingPickedImagesExporting ? '导出中…' : `导出 ${openingPickCount} 张配图` }}
                 </button>
                 <a
                   v-if="canDownloadOpeningImages"
@@ -2654,7 +2723,7 @@
                   class="btn"
                   style="margin-top:12px;margin-left:8px"
                 >
-                  下载十张
+                  下载 {{ openingPickedImages.length }} 张
                 </a>
                 <button
                   class="btn btn-primary"
@@ -2840,7 +2909,7 @@
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
                 <div class="empty-title">生成全集视频</div>
-                <div class="empty-desc">将 {{ bodyComposedCount }}/{{ bodyShots.length }} 个正文镜头拼接为主片（不含开幕/片头）{{ !canMergeBody ? '（需全部正文镜头合成完成）' : '' }}{{ exportMixBgm && exportBgmMusicId ? '，并混入所选 BGM' : '' }}；开幕与片头可在生成后单独合并。</div>
+                <div class="empty-desc">将 {{ bodyComposedCount }}/{{ bodyShots.length }} 个正文镜头拼接为主片（不含开幕/片头）{{ !canMergeBody ? '（需全部正文镜头合成完成）' : '' }}{{ exportMixBgm && exportBgmMusicId && !bgmAppliedCount ? '，并混入所选 BGM' : '' }}；开幕与片头可在生成后单独合并。</div>
                 <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;justify-content:center;align-items:center">
                   <button class="btn btn-primary" :disabled="!canMergeBody || anyMergeProcessing" @click="doMerge">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
@@ -2870,11 +2939,14 @@
             <div class="export-bgm-panel export-bgm-panel-primary">
               <div class="export-list-head" style="margin:0;padding:0 0 6px;border:none;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text-1)">成片 BGM</div>
               <label class="export-bgm-toggle">
-                <input v-model="exportMixBgm" type="checkbox" />
+                <input v-model="exportMixBgm" type="checkbox" :disabled="bgmAppliedCount > 0" />
                 <span>拼接时混入 BGM</span>
               </label>
-              <div class="dim" style="font-size:11px;line-height:1.5">
-                默认使用各镜头「镜头合成」时已混入的 BGM；勾选后会在整集成片上再铺一层（与镜头 BGM 可叠加）。
+              <div v-if="bgmAppliedCount > 0" class="dim" style="font-size:11px;line-height:1.5;color:var(--warn, #b45309)">
+                已有 {{ bgmAppliedCount }} 个镜头在「镜头合成」时混入了 BGM，成片将直接使用镜头内音乐，请勿再勾选（避免两轨叠加）。
+              </div>
+              <div v-else class="dim" style="font-size:11px;line-height:1.5">
+                各镜头尚未混入 BGM 时可勾选，在整集成片上统一铺一层背景音乐。
               </div>
               <div v-if="exportMixBgm" class="export-bgm-fields">
                 <BaseSelect
@@ -3209,6 +3281,10 @@ import {
   resolveNarrationEffectiveImage,
   narrationShotsNeedingImage,
   narrationShotsPendingImage,
+  buildNarrationParagraphBatchOptions,
+  narrationShotsInParagraphBatch,
+  narrationShotsMissingPromptInBatch,
+  normalizeParagraphPromptBatchSize,
   getNarrationShotDisplayNo,
   formatNarrationShotDisplayList,
   formatNarrationPendingImageHint,
@@ -3265,24 +3341,29 @@ const localTtsEngine = ref('voicebox')
 const localEdgeVoiceId = ref(DEFAULT_LOCAL_EDGE_VOICE)
 const edgeVoiceProfiles = ref([])
 const voiceboxAvailable = ref(false)
+const voiceboxModelLoaded = ref(false)
 const localTtsEngineOptions = [
   { label: 'Voicebox（声音克隆）', value: 'voicebox' },
   { label: 'Edge TTS（系统音色）', value: 'edge' },
 ]
-const DEFAULT_TTS_SPEED = 0.75
+const DEFAULT_TTS_SPEED = 1
 const localTtsSpeedOptions = [
   { label: '0.5x', value: 0.5 },
   { label: '0.6x', value: 0.6 },
-  { label: '0.75x（默认）', value: 0.75 },
+  { label: '0.75x', value: 0.75 },
   { label: '0.8x', value: 0.8 },
   { label: '0.85x', value: 0.85 },
-  { label: '1.0x', value: 1 },
+  { label: '0.9x', value: 0.9 },
+  { label: '1.0x（默认）', value: 1 },
   { label: '1.25x', value: 1.25 },
 ]
 const localTtsSpeed = ref(DEFAULT_TTS_SPEED)
 const VOICEBOX_INSTRUCT_CUSTOM = '__custom__'
 const voiceboxInstructOptions = [
   { label: '默认（自然）', value: '' },
+  { label: '体验人生解说（推荐）', value: '像在为观众讲述一次全新的人生体验，语气沉静有代入感，略带好奇与感慨，节奏从容，适合「体验365个人生」类解说旁白' },
+  { label: '沉浸第一人称', value: '第一人称沉浸叙述，仿佛正在亲身经历这段人生，情绪随剧情自然起伏，真诚、不夸张' },
+  { label: '命运转折', value: '平时沉稳克制；讲到人生转折、逆袭或关键抉择时略带戏剧张力，句末轻微加重' },
   { label: '沉稳叙述', value: '沉稳、清晰，适合纪录片旁白' },
   { label: '温暖亲切', value: '温暖亲切，带有微笑感' },
   { label: '略带感慨', value: '略带感慨，语速适中，有感情' },
@@ -3297,7 +3378,7 @@ const voiceboxModelSizeOptions = [
   { label: '0.6B（默认·更快）', value: '0.6B' },
   { label: '1.7B（更高质量）', value: '1.7B' },
 ]
-const localVoiceboxInstructPreset = ref('略带感慨，语速适中，有感情')
+const localVoiceboxInstructPreset = ref('像在为观众讲述一次全新的人生体验，语气沉静有代入感，略带好奇与感慨，节奏从容，适合「体验365个人生」类解说旁白')
 const localVoiceboxInstructCustom = ref('')
 const LOCAL_TTS_PREVIEW_DEFAULT = '这是一段旁白试听，用于感受当前音色、语速和感情效果。'
 const localTtsPreviewing = ref(false)
@@ -3336,7 +3417,13 @@ const localTtsEngineLabel = computed(() => {
   if (!localTtsEnabled.value) return lockedAudioConfigLabel.value
   return localTtsEngine.value === 'voicebox' ? '本地 Voicebox' : '本地 Edge TTS'
 })
+const selectedVoiceSupportsInstruct = computed(() => {
+  if (localTtsEngine.value !== 'voicebox') return false
+  const row = edgeVoiceProfiles.value.find(p => p.id === localEdgeVoiceId.value)
+  return row?.supportsInstruct === true
+})
 function resolveVoiceboxInstructText() {
+  if (localTtsEngine.value === 'voicebox' && !selectedVoiceSupportsInstruct.value) return ''
   if (localVoiceboxInstructPreset.value === VOICEBOX_INSTRUCT_CUSTOM) {
     return String(localVoiceboxInstructCustom.value || '').trim()
   }
@@ -3344,6 +3431,7 @@ function resolveVoiceboxInstructText() {
 }
 const localVoiceboxInstructLabel = computed(() => {
   if (localTtsEngine.value !== 'voicebox') return ''
+  if (!selectedVoiceSupportsInstruct.value) return ''
   const instruct = resolveVoiceboxInstructText()
   if (!instruct) return ''
   if (localVoiceboxInstructPreset.value === VOICEBOX_INSTRUCT_CUSTOM) {
@@ -3363,6 +3451,7 @@ const { running: rn, runningType: rt, run: runAgent } = useAgent()
 const narrationBreaking = ref(false)
 const narrationImageBreaking = ref(false)
 const narrationImageStep = ref(null)
+const narrationImagePromptTestActive = ref(false)
 const narrationImageAuditing = ref(false)
 const narrationImageOptimizing = ref(false)
 const narrationImageRestoring = ref(false)
@@ -3549,6 +3638,17 @@ const openingAudioUploading = ref(false)
 const openingAudioGenerating = ref(false)
 const openingVideoProcessing = ref(false)
 const openingPickedImagesExporting = ref(false)
+const DEFAULT_OPENING_IMAGE_COUNT = 20
+const openingPickCountOptions = [
+  { label: '5 张', value: 5 },
+  { label: '10 张', value: 10 },
+  { label: '15 张', value: 15 },
+  { label: '20 张（默认）', value: 20 },
+  { label: '30 张', value: 30 },
+  { label: '40 张', value: 40 },
+  { label: '50 张', value: 50 },
+]
+const openingPickCount = ref(DEFAULT_OPENING_IMAGE_COUNT)
 const titleVideoProcessing = ref(false)
 let openingPollTimer = null
 const openingVideoSrc = computed(() => {
@@ -3587,7 +3687,7 @@ const exportWatermarkText = ref('顺拾人间')
 const exportWatermarkAnimated = ref(false)
 let watermarkSaveTimer = null
 const exportBgmMusicId = ref(null)
-const exportBgmVolume = ref(12)
+const exportBgmVolume = ref(8)
 const exportBgmApplying = ref(false)
 const bgmApplyingAllId = ref(null)
 const visibleBgmLibrary = computed(() => {
@@ -3775,6 +3875,17 @@ function ttsGenerateOptions(force = false) {
   return opts
 }
 
+function persistOpeningPickPrefs() {
+  if (typeof window === 'undefined' || !epId.value) return
+  window.localStorage.setItem(`episode-${epId.value}-opening-pick-count`, String(openingPickCount.value))
+}
+
+function restoreOpeningPickPrefs() {
+  if (typeof window === 'undefined' || !epId.value) return
+  const stored = Number(window.localStorage.getItem(`episode-${epId.value}-opening-pick-count`))
+  if (Number.isFinite(stored) && stored >= 2 && stored <= 100) openingPickCount.value = stored
+}
+
 function persistLocalTtsPrefs() {
   if (typeof window === 'undefined' || !epId.value) return
   window.localStorage.setItem(`episode-${epId.value}-local-tts`, localTtsEnabled.value ? '1' : '0')
@@ -3829,7 +3940,7 @@ function restoreExportBgmPrefs() {
   exportBgmMusicId.value = id ? Number(id) : null
   let vol = window.localStorage.getItem(`drama-${dramaId}-export-bgm-vol`)
   if (vol == null) vol = window.localStorage.getItem(`episode-${epId.value}-export-bgm-vol`)
-  if (vol) exportBgmVolume.value = Number(vol) || 12
+  if (vol) exportBgmVolume.value = Number(vol) || 8
 }
 
 function formatBgmModelLabel(model) {
@@ -3918,7 +4029,8 @@ function buildMergePayload(extra = {}) {
     include_opening_video: false,
     ...extra,
   }
-  if (exportMixBgm.value && exportBgmMusicId.value) {
+  const canMergeLevelBgm = exportMixBgm.value && exportBgmMusicId.value && bgmAppliedCount.value === 0
+  if (canMergeLevelBgm) {
     payload.bgm_music_id = exportBgmMusicId.value
     payload.bgm_volume = Math.max(0.03, Math.min(0.25, exportBgmVolume.value / 100))
   }
@@ -5261,6 +5373,64 @@ watch(narrationCopyBatchOptions, (opts) => {
   }
 })
 
+const narrationPromptTestBatchIndex = ref(1)
+const narrationPromptTestBatchDetails = computed(() =>
+  buildNarrationParagraphBatchOptions(sbs.value, imagePromptBatchSize.value),
+)
+const narrationPromptTestBatchOptions = computed(() =>
+  narrationPromptTestBatchDetails.value.map(o => ({ value: o.value, label: o.label })),
+)
+watch([narrationPromptTestBatchOptions, imagePromptBatchSize], () => {
+  const opts = narrationPromptTestBatchOptions.value
+  if (!opts.length) {
+    narrationPromptTestBatchIndex.value = 1
+    return
+  }
+  if (!opts.some(opt => opt.value === narrationPromptTestBatchIndex.value)) {
+    narrationPromptTestBatchIndex.value = opts[0].value
+  }
+})
+function normalizedImagePromptBatchSize() {
+  return normalizeParagraphPromptBatchSize(imagePromptBatchSize.value)
+}
+const narrationPromptTestBatchAnchors = computed(() =>
+  narrationShotsInParagraphBatch(
+    sbs.value,
+    narrationPromptTestBatchIndex.value,
+    imagePromptBatchSize.value,
+  ),
+)
+const narrationPromptTestBatchAnchorCount = computed(() => narrationPromptTestBatchAnchors.value.length)
+const narrationPromptTestPendingShots = computed(() =>
+  narrationShotsMissingPromptInBatch(
+    sbs.value,
+    narrationPromptTestBatchIndex.value,
+    imagePromptBatchSize.value,
+  ),
+)
+const narrationPromptTestPendingCount = computed(() => narrationPromptTestPendingShots.value.length)
+const narrationPromptTestCanRun = computed(() =>
+  narrationNeedImageCount.value > 0 && narrationPromptTestBatchAnchorCount.value > 0,
+)
+const narrationPromptTestPendingLabel = computed(() => formatNarrationShotDisplayList(
+  narrationPromptTestPendingCount.value
+    ? narrationPromptTestPendingShots.value
+    : narrationPromptTestBatchAnchors.value,
+))
+const narrationPromptTestPendingTitle = computed(() => {
+  const perBatch = normalizedImagePromptBatchSize()
+  const batch = narrationPromptTestBatchDetails.value.find(o => o.value === narrationPromptTestBatchIndex.value)
+  const batchHint = batch
+    ? `${batch.label}（${batch.shotLabel}，${batch.paragraphCount} 段/每批 ${perBatch} 段）`
+    : `每批 ${perBatch} 段`
+  if (!narrationNeedImageCount.value) return '请先执行「① 检测配图」'
+  if (!narrationPromptTestBatchAnchorCount.value) return '当前段批无配图段落'
+  if (!narrationPromptTestPendingCount.value) {
+    return `测试重新生成 ${narrationPromptTestBatchAnchorCount.value} 段：${narrationPromptTestPendingLabel.value}（${batchHint}）`
+  }
+  return `测试生成 ${narrationPromptTestPendingCount.value} 段：${narrationPromptTestPendingLabel.value}（${batchHint}）`
+})
+
 const ttsPendingCount = computed(() => {
   if (isNarrationMode.value) {
     return sbs.value.filter(sb => hasDialogue(sb) && !hasNarrationShotOwnTts(sb)).length
@@ -5309,6 +5479,10 @@ const narrationWmCroppedImageCount = computed(() => {
 const narrationImagesPendingShots = computed(() => narrationShotsPendingImage(sbs.value))
 const narrationImagesPendingLabel = computed(() => formatNarrationShotDisplayList(narrationImagesPendingShots.value))
 const narrationImagesPendingHint = computed(() => formatNarrationPendingImageHint(sbs.value))
+const narrationImagesPendingTitle = computed(() => {
+  if (!narrationImagesPendingCount.value) return ''
+  return `生成剩余 ${narrationImagesPendingShots.value.length} 张：${narrationImagesPendingLabel.value}`
+})
 const composePendingCount = computed(() =>
   sbs.value.filter(sb => canCompose(sb) && !hasComposed(sb)).length,
 )
@@ -6348,6 +6522,33 @@ function doNarrationImagePrompts() {
   })
 }
 
+function doNarrationImagePromptsTest() {
+  persistImageDetectBatchPrefs()
+  const batch = narrationPromptTestBatchDetails.value.find(o => o.value === narrationPromptTestBatchIndex.value)
+  const pending = narrationPromptTestPendingCount.value
+  const total = narrationPromptTestBatchAnchorCount.value
+  narrationImagePromptTestActive.value = true
+  runNarrationImageStep('prompts', () => episodeAPI.narrationImagePrompts(epId.value, {
+    style: drama.value?.style || 'comic',
+    prompt_batch_size: imagePromptBatchSize.value,
+    test_batch_index: narrationPromptTestBatchIndex.value,
+  }), {
+    onSuccess: async () => {
+      await refresh()
+      syncNarrationBreakdownImageCount()
+      const label = batch?.label || `段批 ${narrationPromptTestBatchIndex.value}`
+      toast.success(pending < total
+        ? `测试完成：${label}（${pending} 段新文案）`
+        : `测试完成：${label}（${total} 段已重新生成）`)
+    },
+    startMessage: batch
+      ? (pending < total
+        ? `测试生成 ${batch.label} 配图文案（${pending}/${total} 段缺文案）…`
+        : `测试重新生成 ${batch.label} 配图文案（${total} 段）…`)
+      : '测试生成配图文案…',
+  })
+}
+
 function doRetryMissingNarrationImagePrompts() {
   runNarrationImageStep('prompts', () => episodeAPI.narrationImagePrompts(epId.value, {
     style: drama.value?.style || 'comic',
@@ -6401,6 +6602,7 @@ function runNarrationImageStep(step, apiCall, { onSuccess, startMessage }) {
       stopNarrationImageBreakdownPoll()
       narrationImageBreaking.value = false
       narrationImageStep.value = null
+      narrationImagePromptTestActive.value = false
       try {
         narrationImageBreakdownProgress.value = await episodeAPI.narrationImageBreakdownStatus(epId.value)
       } catch {
@@ -6760,6 +6962,7 @@ async function mapWithConcurrency(items, limit, worker) {
 }
 
 function resolveTtsBatchConcurrency() {
+  if (isNarrationMode.value && localTtsEnabled.value && localTtsEngine.value === 'voicebox') return 1
   return 3
 }
 
@@ -7222,6 +7425,32 @@ function triggerNextShotImageUpload() {
   }
   imageUploadTarget.value = { kind: 'shot-batch', ids: [next.id] }
   imageUploadInputRef.value?.click()
+}
+
+async function clearAllNarrationImagePrompts() {
+  const count = narrationPromptLiveCount.value
+  if (!count) {
+    toast.info('暂无配图文案可清除')
+    return
+  }
+  if (!confirm(`将清除本集 ${count} 条配图锚点的配图文案（保留①检测分段信息，不删除配图文件）。是否继续？`)) return
+  narrationAssetClearing.value = true
+  try {
+    const res = await episodeAPI.clearNarrationImagePrompts(epId.value)
+    narrationImageAuditPanel.value = null
+    persistNarrationBreakdownSummary({
+      ...narrationBreakdownSummary.value,
+      prompts_generated: 0,
+      image_prompt_at: null,
+      image_prompt_source: null,
+    })
+    toast.success(`已清除 ${res?.cleared ?? count} 条配图文案`)
+    await refresh()
+  } catch (e) {
+    toast.error(e.message || '清除配图文案失败')
+  } finally {
+    narrationAssetClearing.value = false
+  }
 }
 
 async function clearAllNarrationImages() {
@@ -8103,15 +8332,83 @@ async function genNarrationShotImage(sb) {
   }
 }
 
-async function batchNarrationShotImages() {
-  const pending = narrationShotsPendingImage(sbs.value)
+async function watchNarrationImageBatchResult(jobs, options = {}) {
+  const attempts = options.attempts ?? 60
+  const delay = options.delay ?? 4000
+
+  for (let i = 0; i < attempts; i++) {
+    await sleep(i === 0 ? 1500 : delay)
+
+    for (const job of jobs) {
+      if (job.status === 'completed' || job.status === 'failed') continue
+      if (!job.generationId) continue
+      try {
+        const gen = await imageAPI.get(job.generationId)
+        if (gen?.status === 'failed') {
+          job.status = 'failed'
+          job.error = gen?.error_msg || gen?.errorMsg || '生成失败'
+          pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+          continue
+        }
+        if (gen?.status === 'completed') {
+          job.status = 'completed'
+          pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+        }
+      } catch {}
+    }
+
+    await refresh()
+    for (const job of jobs) {
+      if (job.status === 'completed' || job.status === 'failed') continue
+      const sb = sbs.value.find(s => s.id === job.shotId)
+      if (hasNarrationShotImage(sb)) {
+        job.status = 'completed'
+        pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+      }
+    }
+
+    if (jobs.every(j => j.status === 'completed' || j.status === 'failed')) {
+      const failed = jobs.filter(j => j.status === 'failed')
+      const completed = jobs.filter(j => j.status === 'completed')
+      if (failed.length && !completed.length) {
+        toast.error(`${failed.length} 张配图失败：${failed[0].error || '请检查图像 API 配置'}`)
+      } else if (failed.length) {
+        toast.warning(`${completed.length} 张完成，${failed.length} 张失败`)
+      }
+      await sleep(failed.length ? 1200 : 0)
+      return true
+    }
+  }
+
+  for (const job of jobs) {
+    if (job.status === 'processing' || job.status === 'pending') {
+      job.status = 'failed'
+      job.error = job.error || '生成超时'
+      pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+    }
+  }
+  toast.warning('配图生成超时，请稍后重试')
+  return false
+}
+
+async function batchNarrationShotImages(options) {
+  const allPending = narrationShotsPendingImage(sbs.value)
+  const pending = options?.shots?.length ? options.shots : allPending
   if (!pending.length) {
     toast.info('所有需配图镜头已生成')
     return
   }
   const pendingLabel = formatNarrationShotDisplayList(pending)
-  const pendingHint = formatNarrationPendingImageHint(sbs.value)
+  const pendingHint = pending.length < allPending.length
+    ? `${pendingLabel}（${pending.length}/${allPending.length} 张）`
+    : formatNarrationPendingImageHint(sbs.value)
   if (!tryBeginBatch('narrationImages', `配图生成中：${pendingHint}…`)) return
+  const jobs = pending.map(sb => ({
+    shotId: sb.id,
+    generationId: null,
+    status: 'pending',
+    error: '',
+  }))
   try {
     const style = drama.value?.style || 'comic'
     pendingNarrationShotIds.value = [...new Set([...pendingNarrationShotIds.value, ...pending.map(sb => sb.id)])]
@@ -8124,16 +8421,35 @@ async function batchNarrationShotImages() {
       }, episodeImageModel.value, characterIds, sbs.value)
       return imageAPI.generate(buildImagePayload(payload))
     }))
-    const failCount = results.filter(r => r.status === 'rejected').length
-    if (failCount) toast.error(`${failCount} 个镜头配图提交失败（${pendingLabel}）`)
-    else toast.success(`已提交配图生成：${pendingHint}`)
-    await refresh()
-    await watchAsyncResult(() => pending.every(sb => {
-      const target = sbs.value.find(s => s.id === sb.id)
-      const done = hasNarrationShotImage(target)
-      if (done) pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(item => item !== sb.id)
-      return done
-    }), 60, 4000)
+    results.forEach((result, index) => {
+      const job = jobs[index]
+      if (!job) return
+      if (result.status === 'fulfilled') {
+        job.generationId = result.value?.id ?? null
+        job.status = job.generationId ? 'processing' : 'failed'
+        if (!job.generationId) {
+          job.error = '提交失败：未返回任务 ID'
+          pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+        }
+      } else {
+        job.status = 'failed'
+        job.error = result.reason?.message || '提交失败'
+        pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+      }
+    })
+    const submitFailCount = jobs.filter(j => j.status === 'failed').length
+    const submitOkCount = jobs.filter(j => j.status === 'processing').length
+    if (submitFailCount && !submitOkCount) {
+      toast.error(`${submitFailCount} 个镜头配图提交失败（${pendingLabel}）`)
+    } else if (submitFailCount) {
+      toast.warning(`已提交 ${submitOkCount} 张，${submitFailCount} 张提交失败`)
+    } else {
+      toast.success(`已提交配图生成：${pendingHint}`)
+    }
+    if (submitOkCount) {
+      await refresh()
+      await watchNarrationImageBatchResult(jobs, { attempts: 60, delay: 4000 })
+    }
   } finally {
     endBatch('narrationImages')
   }
@@ -8482,9 +8798,10 @@ async function exportOpeningPickedImages() {
     toast.warning('暂无可用配图，请先生成或上传镜头配图')
     return
   }
+  const count = openingPickCount.value
   openingPickedImagesExporting.value = true
   try {
-    const blob = await episodeAPI.exportOpeningPickedImages(epId.value)
+    const blob = await episodeAPI.exportOpeningPickedImages(epId.value, { count })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -8492,7 +8809,7 @@ async function exportOpeningPickedImages() {
     a.click()
     URL.revokeObjectURL(url)
     await refresh()
-    toast.success('已导出 10 张配图（第 1 张=集内首张，第 10 张=集内末张）')
+    toast.success(`已导出 ${count} 张配图（第 1 张=集内首张，第 ${count} 张=集内末张）`)
   } catch (e) {
     toast.error(e.message || '导出失败')
   } finally {
@@ -8507,7 +8824,7 @@ async function generateOpeningVideo() {
   }
   try {
     openingVideoProcessing.value = true
-    await episodeAPI.generateOpeningVideo(epId.value)
+    await episodeAPI.generateOpeningVideo(epId.value, { count: openingPickCount.value })
     toast.success('开幕视频生成中…')
     startOpeningPoll()
   } catch (e) {
@@ -8691,10 +9008,11 @@ async function doMerge(options = {}) {
     toast.error(`尚有 ${missing} 个正文镜头未合成（${bodyComposedCount.value}/${bodyShots.value.length}），请先在「镜头合成」完成正文镜头后再导出`)
     return false
   }
-  if (exportMixBgm.value && !exportBgmMusicId.value && exportBgmOptions.value.length) {
+  if (exportMixBgm.value && bgmAppliedCount.value > 0) {
+    toast.info('镜头合成已含 BGM，成片不再额外混入，避免重叠')
+  } else if (exportMixBgm.value && !exportBgmMusicId.value && exportBgmOptions.value.length) {
     exportBgmMusicId.value = exportBgmOptions.value[0].value
-  }
-  if (exportMixBgm.value && !exportBgmMusicId.value) {
+  } else if (exportMixBgm.value && !exportBgmMusicId.value) {
     toast.warning('未选择 BGM，将仅拼接旁白；可在右侧选择曲目或前往「BGM 配乐」生成')
   }
   try {
@@ -8823,6 +9141,7 @@ async function loadVoiceboxVoices() {
   try {
     const health = await voicesAPI.voiceboxHealth()
     voiceboxAvailable.value = !!health?.ok
+    voiceboxModelLoaded.value = !!health?.model_loaded
     if (!health?.ok) return []
     const rows = await voicesAPI.list('voicebox', { model_size: localVoiceboxModelSize.value })
     if (!rows?.length) return []
@@ -8855,11 +9174,13 @@ async function loadVoiceboxVoices() {
           : (desc || `${v.language || '中文'}${isCloned ? ` · 样本 ${v.sample_count ?? 0}` : ''}`),
         modelReady: v.model_ready !== false,
         modelHint: v.model_hint || '',
+        supportsInstruct: v.supports_instruct === true,
       }
     })
   } catch (e) {
     console.error('Failed to load voicebox voices', e)
     voiceboxAvailable.value = false
+    voiceboxModelLoaded.value = false
     return []
   }
 }
@@ -8896,6 +9217,12 @@ watch(localVoiceboxModelSize, () => {
   if (localTtsEngine.value === 'voicebox') refreshLocalVoices()
 })
 watch(localTtsEngine, () => { refreshLocalVoices() })
+watch(bgmAppliedCount, (count) => {
+  if (count > 0 && exportMixBgm.value) {
+    exportMixBgm.value = false
+    persistExportBgmPrefs()
+  }
+})
 watch([exportMixBgm, exportBgmMusicId, exportBgmVolume], persistExportBgmPrefs)
 watch(exportWatermarkText, () => {
   persistExportBgmPrefs()
@@ -8912,7 +9239,8 @@ watch(narratorChar, (c) => {
   const voice = c?.voice_style || c?.voiceStyle
   if (voice) customTtsVoiceId.value = voice
 }, { immediate: true })
-watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs(); restoreImageDetectBatchPrefs() }, { immediate: true })
+watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs(); restoreImageDetectBatchPrefs(); restoreOpeningPickPrefs() }, { immediate: true })
+watch(openingPickCount, persistOpeningPickPrefs)
 watch([imageDetectBatchThreshold, imageDetectBatchSize, imagePromptBatchSize], () => { persistImageDetectBatchPrefs() })
 watch([prodTab, epId], ([tab, id]) => {
   if (tab === 'bgm' && id) loadBgmLibrary()

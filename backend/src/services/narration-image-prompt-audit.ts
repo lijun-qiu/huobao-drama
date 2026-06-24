@@ -4,13 +4,12 @@ import {
   coerceMinimalLLMImagePrompt,
   hasNarrationForbiddenStyleIssue,
   hasNarrationMultipleProtagonistIssue,
+  hasNarrationProtagonistDistinctIssue,
   hasNarrationRedundantTextureIssue,
   hasNarrationSixDimStructure,
   hasNarrationSpecificYearIssue,
   hasNarrationUniversalPrefixIssue,
-  hasNarrationWearOnPersonIssue,
   isNarrationMinimalStyle,
-  NARRATION_PROTAGONIST_BODY,
   NARRATION_UNIVERSAL_SCENE_SUFFIX,
   VIOLENCE_IMAGE_DETECT_RE,
   sanitizeSceneImagePrompt,
@@ -38,7 +37,7 @@ export type NarrationPromptAuditItem = {
 function countProtagonistMentionsInSixDimBody(text: string): number {
   const bodyStart = text.search(/【画面主体[：:]/)
   const body = bodyStart >= 0 ? text.slice(bodyStart) : text
-  return (body.match(new RegExp(NARRATION_PROTAGONIST_BODY, 'g')) || []).length
+  return (body.match(/主人公/g) || []).length
 }
 
 function hasRedundantSuffixIssue(text: string): boolean {
@@ -105,17 +104,25 @@ export function auditNarrationImagePromptText(
     if (hasNarrationMultipleProtagonistIssue(text)) {
       issues.push({
         code: 'multi_protagonist',
-        label: '【画面主体】可能出现多位黑色素体主人公',
+        label: '【画面主体】可能出现多位主人公',
         category: 'character',
         severity: 'error',
       })
     }
-    if (hasNarrationWearOnPersonIssue(text)) {
+    if (/黑色素体/.test(text)) {
       issues.push({
-        code: 'clothing',
-        label: '【画面主体/核心细节动作】含人物穿戴描述',
-        category: 'clothing',
-        severity: 'error',
+        code: 'black_body',
+        label: '仍含黑色素体旧规格（应统一为白色素体）',
+        category: 'character',
+        severity: 'warn',
+      })
+    }
+    if (hasNarrationProtagonistDistinctIssue(text)) {
+      issues.push({
+        code: 'protagonist_indistinct',
+        label: '【画面主体】主人公不够鲜明（须写中心/前景焦点，配角在两侧或背景）',
+        category: 'character',
+        severity: 'warn',
       })
     }
     if (hasNarrationRedundantTextureIssue(text)) {
@@ -129,7 +136,7 @@ export function auditNarrationImagePromptText(
     if (countProtagonistMentionsInSixDimBody(text) > 2) {
       issues.push({
         code: 'protagonist_repeat',
-        label: '六维正文中「黑色素体小人」重复过多',
+        label: '六维正文中「主人公」重复过多',
         category: 'redundancy',
         severity: 'warn',
       })

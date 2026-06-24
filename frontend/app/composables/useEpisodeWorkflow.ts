@@ -629,6 +629,75 @@ export function narrationShotsPendingImage(storyboards: any[]) {
   return narrationShotsNeedingImage(storyboards).filter(sb => !getNarrationShotOwnImage(sb))
 }
 
+/** 配图文案分批：每批段落数（1～20，默认 6） */
+export function normalizeParagraphPromptBatchSize(size?: number | null) {
+  const n = Number(size)
+  if (!Number.isFinite(n)) return 6
+  return Math.min(20, Math.max(1, Math.floor(n)))
+}
+
+export function buildNarrationParagraphBatchOptions(
+  storyboards: any[],
+  batchSize?: number | null,
+) {
+  const anchors = narrationShotsNeedingImage(storyboards)
+  const size = normalizeParagraphPromptBatchSize(batchSize)
+  if (!anchors.length) return []
+  const batchCount = Math.ceil(anchors.length / size)
+  return Array.from({ length: batchCount }, (_, idx) => {
+    const batchItems = anchors.slice(idx * size, (idx + 1) * size)
+    const metaFirst = parseNarrationImageMeta(batchItems[0])
+    const metaLast = parseNarrationImageMeta(batchItems[batchItems.length - 1])
+    const p0 = metaFirst.paragraph_index
+    const p1 = metaLast.paragraph_index
+    let paraLabel: string
+    if (p0 != null && p1 != null) {
+      paraLabel = p0 === p1 ? `段${p0 + 1}` : `段${p0 + 1}-${p1 + 1}`
+    } else {
+      paraLabel = `第${idx + 1}批`
+    }
+    const firstNo = getNarrationShotDisplayNo(batchItems[0])
+    const lastNo = getNarrationShotDisplayNo(batchItems[batchItems.length - 1])
+    return {
+      value: idx + 1,
+      label: paraLabel,
+      shotLabel: `#${firstNo}-#${lastNo}`,
+      paragraphCount: batchItems.length,
+    }
+  })
+}
+
+/** 指定段落批次内的锚点镜（batchIndex 从 1 起） */
+export function narrationShotsInParagraphBatch(
+  storyboards: any[],
+  batchIndex: number,
+  batchSize?: number | null,
+) {
+  const anchors = narrationShotsNeedingImage(storyboards)
+  const size = normalizeParagraphPromptBatchSize(batchSize)
+  const idx = Math.max(1, Math.floor(Number(batchIndex)) || 1)
+  const start = (idx - 1) * size
+  return anchors.slice(start, start + size)
+}
+
+/** 仍缺配图文案的锚点镜 */
+export function narrationShotsMissingPrompt(storyboards: any[]) {
+  return narrationShotsNeedingImage(storyboards).filter(
+    sb => !String(sb?.image_prompt || sb?.imagePrompt || '').trim(),
+  )
+}
+
+/** 指定段批内、仍缺配图文案的锚点镜 */
+export function narrationShotsMissingPromptInBatch(
+  storyboards: any[],
+  batchIndex: number,
+  batchSize?: number | null,
+) {
+  const batch = narrationShotsInParagraphBatch(storyboards, batchIndex, batchSize)
+  const missingIds = new Set(narrationShotsMissingPrompt(storyboards).map(sb => sb.id))
+  return batch.filter(sb => missingIds.has(sb.id))
+}
+
 export function getNarrationShotDisplayNo(sb: any) {
   const n = sb?.storyboard_number ?? sb?.storyboardNumber
   if (n == null || Number.isNaN(Number(n))) return '??'
