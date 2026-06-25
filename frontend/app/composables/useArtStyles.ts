@@ -32,9 +32,9 @@ export const NARRATION_CROWD_BODY = '白色素体小人'
 export const NARRATION_MINIMAL_STYLE_FORBIDDEN =
   '禁止厚涂肌理、赛璐璐、日式精细动画脸、条漫、像素风、渐变阴影、3D渲染、真人照片质感'
 
-/** 素体正常卡通脸表情 */
+/** 素体正常卡通脸表情：主人公大圆眼，群众小圆点眼 */
 export const NARRATION_MINIMAL_EXPRESSION_LLM_RULE =
-  '【面部表情】主人公与同框配角均须写正常卡通脸表情（微笑、惊喜、皱眉、沮丧、温柔、兴奋等），圆眼或弯眼带高光、眉毛嘴巴清晰、可有腮红，与 narration_lines 情绪一致；写入【画面主体】或【核心细节动作】'
+  '【面部表情】主人公及同框第二位主人公（配偶/父母/子女等）须写正常卡通脸表情（圆眼或弯眼带高光、眉毛嘴巴清晰、可有腮红）；路人/群众配角正面/侧面须写两个小圆点眼（小眼睛）与简笔表情；与 narration_lines 情绪一致；写入【画面主体】或【核心细节动作】'
 
 /** 主人公与配角视觉区分（同白色素体，靠构图/服装/焦点区分） */
 export const NARRATION_PROTAGONIST_DISTINCT_LLM_RULE =
@@ -61,7 +61,19 @@ export const NARRATION_BODY_CONSISTENCY_CORE =
   `全片统一简笔素体比例，${NARRATION_MINIMAL_BODY_SIZE_SPEC}`
 
 export const NARRATION_BODY_STAGE_SIZE_HINTS =
-  '小孩比青年小一号约2.2头高；青年严格三头高；中年三头高躯干略宽微胖；老年略佝偻约2.8头高圆头两侧各几条简化白发弧线'
+  '小孩比青年小一号约2.2头高；青年严格三头高圆头无头发；中年三头高躯干略宽微胖仍无头发；老年略佝偻约2.8头高，仅老年期圆头两侧可有若干条简化白发弧线'
+
+/** LLM：人生阶段发型与体型（多主人公同框须统一遵守） */
+export const NARRATION_STAGE_HAIR_LLM_RULE =
+  '【阶段发型】青年期与中年期主人公均无头发（圆头无发丝）；中年期在青年三头身基础上躯干略宽略胖；仅老年期可有简化白发弧线；多主人公同框须同阶段、同发型规则，禁止一人有发一人无发或青年配中年'
+
+/** LLM：同框多主人公（夫妻/父子/母子等）须人生阶段与画风统一 */
+export const NARRATION_DUAL_PROTAGONIST_LLM_RULE =
+  '【多主人公例外】旁白明确同框且同为叙事主角（夫妻、父子、母子、兄妹等）时，【画面主体】可写「两位X期主人公」或「一位X期主人公与一位X期配偶/父亲/母亲/儿子/女儿主人公」，须同处一个人生阶段（同青年/同中年/同老年），两位须同为白色素体、同款简笔比例与发型规则、均写正常卡通脸（圆眼或弯眼带高光），仅通过性别/简化服装/构图区分；禁止把路人或群众写成第二位主人公'
+
+/** LLM：群众配角面部（非背面须小眼睛） */
+export const NARRATION_CROWD_EYE_LLM_RULE =
+  '【配角眼型】路人/顾客/群众配角正面或侧面出镜时须写「两个小圆点眼（小眼睛）」，简笔眉嘴从简；仅背面或远背影时可不写眼；主人公仍用正常卡通脸（圆眼或弯眼带高光），禁止配角也用大圆眼抢戏'
 
 /** 解说配图万能模板：固定前缀 */
 export const NARRATION_UNIVERSAL_SCENE_PREFIX =
@@ -81,7 +93,7 @@ export const NARRATION_CROWD_STYLE_HINT =
 
 /** 解说配图六维结构 */
 export const NARRATION_IMAGE_PROMPT_SIX_PART_HINT =
-  '每条 image_prompt 按六维顺序：【画面主体】→【年代场景】→【核心细节动作】→【光影色调】→【镜头视角】→【质感要求】；须综合 narration_lines 本段全部旁白句，覆盖服装、年代、陈设、动作、表情、情绪等可视要素'
+  '每条 image_prompt 按六维顺序：【画面主体】→【年代场景】→【核心细节动作】→【光影色调】→【镜头视角】→【质感要求】；以 narration_lines 为锚点，结合 full_narration 与 prior_narration 丰富场景、陈设、动作与情绪'
 
 /** 解说配图万能模板：六维正文 */
 export const NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE =
@@ -106,9 +118,9 @@ export const NARRATION_BODY_CONSISTENCY_HINT =
 export const NARRATION_PROTAGONIST_PLOT_HINT =
   `【画面主体】全画面仅 1 位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_PROTAGONIST_FACE}），同框配角为几位${NARRATION_CROWD_BODY}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}`
 
-/** LLM 光影色调须贴合当前段 */
+/** LLM 光影色调须贴合全文剧情 */
 export const NARRATION_ATMOSPHERE_HINT =
-  '【光影色调】根据 narration_lines 写光线、时段、冷暖、人气喧闹或寂静、经营旺衰等可见基调，与年代场景和核心细节动作情绪一致'
+  '【光影色调】结合 full_narration 与 narration_lines 写光线、时段、冷暖、人气与剧情情绪基调，与年代场景和核心细节动作一致'
 
 /** LLM：【年代场景】陈设（权威表述） */
 export const NARRATION_FIXTURES_HINT =
@@ -121,7 +133,7 @@ export const NARRATION_FIXTURES_FORMAT_HINT = NARRATION_FIXTURES_HINT
 export const NARRATION_FIXTURES_DISPLAY_HINT = NARRATION_FIXTURES_HINT
 
 export const NARRATION_CROWD_PLOT_HINT =
-  `同框配角须为几位${NARRATION_CROWD_BODY}配角在两侧或背景（${NARRATION_CROWD_FACE}），低饱和简化便装，不得抢主人公焦点`
+  `同框配角须为几位${NARRATION_CROWD_BODY}配角在两侧或背景（两个小圆点眼小眼睛，${NARRATION_MINIMAL_LIMBS_SPEC}），低饱和简化便装，不得抢主人公焦点；${NARRATION_CROWD_EYE_LLM_RULE}`
 
 /** LLM 素体剧情只写可见动作 */
 export const NARRATION_MINIMAL_PLOT_VISIBILITY_HINT =
@@ -129,18 +141,22 @@ export const NARRATION_MINIMAL_PLOT_VISIBILITY_HINT =
 
 /** LLM 写配图 prompt：如何通读全文 */
 export const NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE =
-  '必须先通读 full_narration 并按时间线理解剧情走向，再联合 prior_narration 与 narration_lines 写每条配图 prompt'
+  '写每条配图 prompt 前须先通读 full_narration（及 previous_episode_narration 若有），按时间线把握人物关系、地点变迁、核心物件与情绪曲线；再读 prior_narration 与 narration_lines 确定本段锚点；画面设计以全文为依据丰富细节，而非仅翻译当前段落'
+
+/** LLM 配图：以全文剧情丰富画面，不单贴当前段落 */
+export const NARRATION_FULL_PLOT_ENRICHMENT_LLM_RULE =
+  '【全文丰富】narration_lines 只定本配图段叙事锚点，但 prompt 须结合 full_narration、prior_narration 与 characters 主动丰富【年代场景】环境、【陈设】具体物件、【核心细节动作】可见互动、【光影色调】剧情氛围；禁止空泛场所或只贴段内字面'
 
 /** 【剧情】通用：物件/品类全文连贯 */
 export const NARRATION_PLOT_CONTINUITY_HINT =
-  '物件/品类须基于当前 narration_lines 或同场景 prior 有据；场景切换时陈设重设，禁止把早期摆摊物件带入店铺/家里/杂货铺等新场景'
+  '物件/品类须基于 full_narration、prior_narration 或 narration_lines 有据；同一场所可延续 prior 物件并补充具体名称；场景切换时陈设重设，禁止无关混搭'
 
 /** @deprecated 使用 NARRATION_FIXTURES_HINT */
 export const NARRATION_FIXTURES_CONTINUITY_HINT = NARRATION_FIXTURES_HINT
 
 /** LLM 写配图 prompt：场景与剧情质量要求（通用） */
 export const NARRATION_SCENE_PLOT_QUALITY_LLM_RULE =
-  '【年代场景】与【核心细节动作】须在同一空间；【核心细节动作】必须以素体小人写可见动作，严禁照抄旁白原文；抽象感慨句须推断成具体可画瞬间'
+  '【年代场景】与【核心细节动作】须在同一空间；【核心细节动作】须写成可见的具体动作与互动，结合全文推断而非只摘 narration_lines 一句；抽象句须据全文推断成可画瞬间（含相应场景陈设）'
 
 /** LLM 配图：禁止暴力血腥画面，改写为温和司法/羁押情节 */
 export const NARRATION_VIOLENCE_CONTENT_LLM_RULE =
