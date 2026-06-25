@@ -1,5 +1,5 @@
 /**
- * 开幕视频 — 随机 N 张配图 + 翻页片头（首尾镜固定 + 翻页音效 + 可选上传配音/字幕）
+ * 开幕视频 — 随机 N 张配图 + 云朵转场片头（首尾镜固定 + 可选上传配音/字幕，转场无音效）
  */
 import { execFileSync, spawnSync } from 'child_process'
 import ffmpeg from 'fluent-ffmpeg'
@@ -444,6 +444,30 @@ async function muxOpeningVideo(
   })
 }
 
+async function trimAudioTrack(inputPath: string, outputPath: string, totalSec: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .outputOptions([
+        '-af', `atrim=0:${totalSec},asetpts=PTS-STARTPTS`,
+        '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
+        '-t', String(totalSec),
+      ])
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+}
+
+function renderSilentAudioTrack(outputPath: string, totalSec: number): void {
+  runFfmpeg([
+    '-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${totalSec}`,
+    '-t', String(totalSec),
+    '-c:a', 'aac', '-b:a', '128k',
+    outputPath,
+  ])
+}
+
 async function muxVideoWithAudio(
   videoPath: string,
   audioPath: string,
@@ -677,29 +701,23 @@ export async function generateOpeningVideo(episodeId: number, count?: number): P
     tempFiles.push(mergedVideoPath)
     await mergeImageClipsWithPageFlip(clipPaths, segmentDurations, mergedVideoPath, totalSec)
 
-    const flipTimes = computePageFlipSoundTimes(segmentDurations, totalSec)
-    const sfxPath = path.join(tempDir, `${uuid()}-flip.wav`)
-    tempFiles.push(sfxPath)
-    preparePageFlipSfxSample(sfxPath)
-
-    const flipTrackPath = path.join(tempDir, `${uuid()}-flip-track.m4a`)
-    tempFiles.push(flipTrackPath)
-    renderPageFlipAudioTrack(flipTimes, sfxPath, flipTrackPath, totalSec)
+    let subtitlePath: string | null = null
+    if (subtitleText) {
+      subtitlePath = path.join(tempDir, `${uuid()}.ass`)
+      tempFiles.push(subtitlePath)
+      fs.writeFileSync(subtitlePath, buildOpeningAssContent(subtitleText, totalSec), 'utf-8')
+    }
 
     if (narrationAbs) {
-      const mixedAudioPath = path.join(tempDir, `${uuid()}-mixed.m4a`)
-      tempFiles.push(mixedAudioPath)
-      await mixNarrationWithPageFlips(narrationAbs, flipTrackPath, mixedAudioPath, totalSec)
-
-      let subtitlePath: string | null = null
-      if (subtitleText) {
-        subtitlePath = path.join(tempDir, `${uuid()}.ass`)
-        tempFiles.push(subtitlePath)
-        fs.writeFileSync(subtitlePath, buildOpeningAssContent(subtitleText, totalSec), 'utf-8')
-      }
-      await muxOpeningVideo(mergedVideoPath, mixedAudioPath, subtitlePath, outputAbs, watermarkText, watermarkAnimated)
+      const narrationTrackPath = path.join(tempDir, `${uuid()}-narration.m4a`)
+      tempFiles.push(narrationTrackPath)
+      await trimAudioTrack(narrationAbs, narrationTrackPath, totalSec)
+      await muxOpeningVideo(mergedVideoPath, narrationTrackPath, subtitlePath, outputAbs, watermarkText, watermarkAnimated)
     } else {
-      await muxVideoWithAudio(mergedVideoPath, flipTrackPath, outputAbs, watermarkText, watermarkAnimated)
+      const silentTrackPath = path.join(tempDir, `${uuid()}-silent.m4a`)
+      tempFiles.push(silentTrackPath)
+      renderSilentAudioTrack(silentTrackPath, totalSec)
+      await muxVideoWithAudio(mergedVideoPath, silentTrackPath, outputAbs, watermarkText, watermarkAnimated)
     }
 
     const relativePath = `static/opening/${outputFilename}`

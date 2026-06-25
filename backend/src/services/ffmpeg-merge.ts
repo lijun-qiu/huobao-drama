@@ -2,6 +2,7 @@
  * FFmpeg 多镜头拼接 — 将所有合成后的镜头视频拼接为一集
  */
 import ffmpeg from 'fluent-ffmpeg'
+import { createHash } from 'crypto'
 import { execFileSync } from 'child_process'
 import fs from 'fs'
 import os from 'os'
@@ -20,10 +21,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 
-/** 换配图时翻页转场：自上往下卷曲翻页（与开幕片头一致） */
+/** 换配图时转场：剪映风格云朵软擦除（自左向右） */
 const IMAGE_CHANGE_TRANSITION = PAGE_FLIP_XFADE_TRANSITION
 const IMAGE_CHANGE_TRANSITION_SEC = PAGE_FLIP_TRANSITION_SEC
+/** 镜头边界音频淡入淡出（秒），消除硬切咔声；不用 acrossfade 避免旁白叠音 */
+const AUDIO_BOUNDARY_FADE_SEC = Math.max(0, Number(process.env.MERGE_AUDIO_BOUNDARY_FADE_SEC ?? 0.04))
 const MAX_XFADE_INPUTS = 48
+/** 成片拼接并行路数（按镜头/画面段分配，最后再总拼接） */
+const MERGE_LANE_CONCURRENCY = Math.max(1, Number(process.env.MERGE_LANE_CONCURRENCY || 3))
+/** 镜头数低于此值时不启用多路拼接 */
+const MERGE_LANE_MIN_CLIPS = Math.max(4, Number(process.env.MERGE_LANE_MIN_CLIPS || 12))
 
 type ComposedStoryboard = {
   id: number
@@ -46,6 +53,7 @@ type ActiveMergeRun = {
   mergeId: number
   cancelled: boolean
   command: ReturnType<typeof ffmpeg> | null
+  commands: Set<ReturnType<typeof ffmpeg>>
 }
 
 export type MergeProgress = {
@@ -74,6 +82,13 @@ type MergeScenesMeta = {
   sourceMergeId?: number
   test?: boolean
   clipLimit?: number
+  mergeLaneCount?: number
+  mergeCacheFingerprint?: string
+}
+
+type MergeLaneManifest = {
+  fingerprint: string
+  lanes: Array<{ index: number; clipPaths: string[] }>
 }
 
 export function isTestMergeRecord(record: { model?: string | null; scenes?: string | null } | null | undefined): boolean {
@@ -180,7 +195,7 @@ function getVideoDuration(filePath: string): Promise<number> {
   })
 }
 
-/** 按镜头顺序硬切拼接，保留各镜已烧录的配音与字幕（不重渲染、不叠音） */
+/** 按镜头顺序拼接，保留各镜配音；边界短 fade 消除硬切咔声 */
 async function concatComposedVideos(
   absPaths: string[],
   outputPath: string,
@@ -192,46 +207,16 @@ async function concatComposedVideos(
     return
   }
 
-  const listPath = createFfmpegListPath()
-  const listContent = absPaths.map(p => `file '${escapeConcatPath(p)}'`).join('\n')
-  fs.writeFileSync(listPath, listContent, 'utf-8')
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const command = ffmpeg()
-        .input(listPath)
-        .inputOptions(['-f', 'concat', '-safe', '0'])
-        .outputOptions([
-          '-fflags', '+genpts',
-          '-c:v', 'libx264',
-          '-preset', 'medium',
-          '-crf', '23',
-          '-c:a', 'aac',
-          '-ar', '48000',
-          '-b:a', '192k',
-          '-movflags', '+faststart',
-        ])
-        .output(outputPath)
-      run.command = command
-      command
-        .on('progress', (progress) => {
-          if (run.cancelled) return
-          onProgress?.(parseTimemark(progress.timemark || '0'))
-        })
-        .on('end', () => resolve())
-        .on('error', (err) => reject(err))
-        .run()
-    })
-  } finally {
-    if (fs.existsSync(listPath)) fs.unlinkSync(listPath)
-  }
+  const durations = await Promise.all(absPaths.map(p => getVideoDuration(p)))
+  const filterComplex = buildConcatDeclickFilterScript(durations)
+  await runFilterComplexMerge(absPaths, filterComplex, outputPath, run, onProgress)
 }
 
 async function concatClipsToFile(clips: ClipSegment[], outputPath: string, run?: ActiveMergeRun): Promise<void> {
   await concatComposedVideos(
     clips.map(c => c.path),
     outputPath,
-    run || { mergeId: 0, cancelled: false, command: null },
+    run || { mergeId: 0, cancelled: false, command: null, commands: new Set() },
   )
 }
 
@@ -239,9 +224,89 @@ function fmtFilterSec(sec: number): string {
   return Math.max(0.001, sec).toFixed(3)
 }
 
+function resolveAudioBoundaryFadeSec(durationSec: number): number {
+  if (AUDIO_BOUNDARY_FADE_SEC <= 0) return 0
+  return Math.min(AUDIO_BOUNDARY_FADE_SEC, Math.max(0.008, durationSec / 4))
+}
+
+/** 每段首尾短 fade，concat 边界不再「咔」一声（不叠两段旁白） */
+function appendAudioDeclickFilter(parts: string[], inputIndex: number, durationSec: number, outLabel: string): void {
+  const dStr = fmtFilterSec(durationSec)
+  const fade = resolveAudioBoundaryFadeSec(durationSec)
+  const base = `[${inputIndex}:a]atrim=duration=${dStr},asetpts=PTS-STARTPTS,aresample=48000`
+  if (fade <= 0) {
+    parts.push(`${base}[${outLabel}]`)
+    return
+  }
+  const fadeStr = fmtFilterSec(fade)
+  if (durationSec <= fade * 2 + 0.02) {
+    const half = fmtFilterSec(durationSec / 2)
+    parts.push(`${base},afade=t=in:st=0:d=${half},afade=t=out:st=${half}:d=${half}[${outLabel}]`)
+    return
+  }
+  const fadeOutStart = fmtFilterSec(Math.max(0, durationSec - fade))
+  parts.push(`${base},afade=t=in:st=0:d=${fadeStr},afade=t=out:st=${fadeOutStart}:d=${fadeStr}[${outLabel}]`)
+}
+
+function buildConcatDeclickFilterScript(segmentDurations: number[]): string {
+  const n = segmentDurations.length
+  const parts: string[] = []
+  const vLabels: string[] = []
+  const aLabels: string[] = []
+  for (let i = 0; i < n; i++) {
+    const dStr = fmtFilterSec(segmentDurations[i])
+    parts.push(`[${i}:v]fps=25,trim=duration=${dStr},setpts=PTS-STARTPTS,format=yuv420p[vin${i}]`)
+    appendAudioDeclickFilter(parts, i, segmentDurations[i], `ain${i}`)
+    vLabels.push(`[vin${i}]`)
+    aLabels.push(`[ain${i}]`)
+  }
+  parts.push(`${vLabels.join('')}concat=n=${n}:v=1:a=0[vout]`)
+  parts.push(`${aLabels.join('')}concat=n=${n}:v=0:a=1[aout]`)
+  return parts.join(';\n')
+}
+
+async function runFilterComplexMerge(
+  inputPaths: string[],
+  filterComplex: string,
+  outputPath: string,
+  run: ActiveMergeRun,
+  onProgress?: (encodedSec: number) => void,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let command = ffmpeg()
+    for (const inputPath of inputPaths) command = command.input(inputPath)
+    command = command
+      .complexFilter(filterComplex)
+      .outputOptions([
+        '-map', '[vout]',
+        '-map', '[aout]',
+        '-c:v', 'libx264',
+        '-preset', 'medium',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        '-r', '25',
+        '-vsync', 'cfr',
+        '-c:a', 'aac',
+        '-ar', '48000',
+        '-b:a', '192k',
+        '-movflags', '+faststart',
+      ])
+      .output(outputPath)
+    attachMergeCommand(run, command)
+    command
+      .on('progress', (progress) => {
+        if (run.cancelled) return
+        onProgress?.(parseTimemark(progress.timemark || '0'))
+      })
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+}
+
 /**
- * 换配图段之间：翻页转场（vdwind，自上往下）；音频硬切 concat（不用 acrossfade，避免叠音/语速错乱）。
- * 每路视频先 trim + setpts 归零，转场前 tpad 预留叠化区，避免 xfade 期间画面卡住、切换后才开始动。
+ * 换配图段之间：云朵软擦除转场（smoothright，自左向右）；
+ * 音频分段 concat + 边界短 fade（不 acrossfade，避免旁白叠音/语速错乱）。
  */
 function buildXfadeFilterScript(segmentDurations: number[]): string {
   const td = IMAGE_CHANGE_TRANSITION_SEC
@@ -267,9 +332,7 @@ function buildXfadeFilterScript(segmentDurations: number[]): string {
         `[${i}:v]fps=25,trim=duration=${dStr},setpts=PTS-STARTPTS,format=yuv420p[${vLabel}]`,
       )
     }
-    parts.push(
-      `[${i}:a]atrim=duration=${dStr},asetpts=PTS-STARTPTS,aresample=48000[${aLabel}]`,
-    )
+    appendAudioDeclickFilter(parts, i, d, aLabel)
     vLabels.push(`[${vLabel}]`)
     aLabels.push(`[${aLabel}]`)
   }
@@ -306,36 +369,13 @@ async function mergeSegmentsWithPageFlip(
 
   const filterComplex = buildXfadeFilterScript(segments.map(s => s.duration))
 
-  await new Promise<void>((resolve, reject) => {
-    let command = ffmpeg()
-    for (const seg of segments) command = command.input(seg.path)
-    command = command
-      .complexFilter(filterComplex)
-      .outputOptions([
-        '-map', '[vout]',
-        '-map', '[aout]',
-        '-c:v', 'libx264',
-        '-preset', 'medium',
-        '-crf', '23',
-        '-pix_fmt', 'yuv420p',
-        '-r', '25',
-        '-vsync', 'cfr',
-        '-c:a', 'aac',
-        '-ar', '48000',
-        '-b:a', '192k',
-        '-movflags', '+faststart',
-      ])
-      .output(outputPath)
-    run.command = command
-    command
-      .on('progress', (progress) => {
-        if (run.cancelled) return
-        onProgress?.(parseTimemark(progress.timemark || '0'))
-      })
-      .on('end', () => resolve())
-      .on('error', (err) => reject(err))
-      .run()
-  })
+  await runFilterComplexMerge(
+    segments.map(s => s.path),
+    filterComplex,
+    outputPath,
+    run,
+    onProgress,
+  )
 }
 
 async function mergeSegmentsSequential(
@@ -402,6 +442,318 @@ async function buildMergeSegments(
   return { segments, temps }
 }
 
+function attachMergeCommand(run: ActiveMergeRun, command: ReturnType<typeof ffmpeg>) {
+  run.command = command
+  run.commands.add(command)
+}
+
+function computeMergeClipFingerprint(storyboards: ComposedStoryboard[]): string {
+  const payload = storyboards
+    .map(sb => String(sb.composedVideoUrl || '').trim())
+    .join('\n')
+  return createHash('sha256').update(payload).digest('hex').slice(0, 24)
+}
+
+function getMergeCacheDir(episodeId: number, fingerprint: string): string {
+  return path.join(STORAGE_ROOT, 'merge-cache', `ep-${episodeId}`, fingerprint)
+}
+
+function laneCachePath(cacheDir: string, laneIndex: number): string {
+  return path.join(cacheDir, `lane-${laneIndex}.mp4`)
+}
+
+function laneManifestPath(cacheDir: string): string {
+  return path.join(cacheDir, 'manifest.json')
+}
+
+function readLaneManifest(cacheDir: string): MergeLaneManifest | null {
+  const manifestFile = laneManifestPath(cacheDir)
+  if (!fs.existsSync(manifestFile)) return null
+  try {
+    return JSON.parse(fs.readFileSync(manifestFile, 'utf-8')) as MergeLaneManifest
+  } catch {
+    return null
+  }
+}
+
+function writeLaneManifest(cacheDir: string, manifest: MergeLaneManifest) {
+  fs.mkdirSync(cacheDir, { recursive: true })
+  fs.writeFileSync(laneManifestPath(cacheDir), JSON.stringify(manifest, null, 2), 'utf-8')
+}
+
+function resolveMergeLaneCount(clipCount: number, groupCount: number, usePageFlip: boolean): number {
+  if (clipCount < MERGE_LANE_MIN_CLIPS) return 1
+  const parts = usePageFlip ? groupCount : clipCount
+  if (parts < 2) return 1
+  return Math.min(MERGE_LANE_CONCURRENCY, parts)
+}
+
+function splitContiguousBalanced<T>(items: T[], laneCount: number): T[][] {
+  if (laneCount <= 1 || items.length <= 1) return [items]
+  const lanes: T[][] = []
+  const total = items.length
+  const base = Math.floor(total / laneCount)
+  const rem = total % laneCount
+  let idx = 0
+  for (let i = 0; i < laneCount; i++) {
+    const size = base + (i < rem ? 1 : 0)
+    if (size <= 0) continue
+    lanes.push(items.slice(idx, idx + size))
+    idx += size
+  }
+  return lanes.length ? lanes : [items]
+}
+
+/** 按画面段顺序切分，尽量均衡每路镜头数 */
+function splitGroupsIntoContiguousLanes(groups: VisualGroup[], laneCount: number): VisualGroup[][] {
+  if (laneCount <= 1 || groups.length <= 1) return [groups]
+  const totalClips = groups.reduce((sum, group) => sum + group.clips.length, 0)
+  const targetClipsPerLane = totalClips / laneCount
+  const lanes: VisualGroup[][] = []
+  let current: VisualGroup[] = []
+  let currentClips = 0
+
+  for (let i = 0; i < groups.length; i++) {
+    current.push(groups[i])
+    currentClips += groups[i].clips.length
+    const lanesLeft = laneCount - lanes.length - 1
+    const groupsLeft = groups.length - i - 1
+    if (lanesLeft > 0 && groupsLeft >= lanesLeft && currentClips >= targetClipsPerLane) {
+      lanes.push(current)
+      current = []
+      currentClips = 0
+    }
+  }
+  if (current.length) lanes.push(current)
+  return lanes.length ? lanes : [groups]
+}
+
+function collectLaneClipPaths(groups: VisualGroup[]): string[] {
+  return groups.flatMap(group => group.clips.map(clip => clip.path))
+}
+
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<void>,
+) {
+  if (!items.length) return
+  let cursor = 0
+  async function runWorker() {
+    while (cursor < items.length) {
+      const index = cursor++
+      await worker(items[index], index)
+    }
+  }
+  const workers = Math.min(Math.max(1, limit), items.length)
+  await Promise.all(Array.from({ length: workers }, () => runWorker()))
+}
+
+async function mergeSegmentListToFile(
+  segments: MergeSegment[],
+  outputPath: string,
+  run: ActiveMergeRun,
+  onProgress?: (encodedSec: number) => void,
+): Promise<void> {
+  if (segments.length === 1) {
+    fs.copyFileSync(segments[0].path, outputPath)
+    return
+  }
+  if (segments.length <= MAX_XFADE_INPUTS) {
+    await mergeSegmentsWithPageFlip(segments, outputPath, run, onProgress)
+    return
+  }
+  await mergeSegmentsSequential(segments, outputPath, run, onProgress)
+}
+
+async function buildLaneOutputFromGroups(
+  groups: VisualGroup[],
+  outputPath: string,
+  run: ActiveMergeRun,
+): Promise<{ duration: number; temps: string[] }> {
+  if (!groups.length) throw new Error('拼接分路为空')
+
+  if (groups.length === 1 && groups[0].clips.length > 1) {
+    await concatComposedVideos(groups[0].clips.map(clip => clip.path), outputPath, run)
+    return { duration: await getVideoDuration(outputPath), temps: [] }
+  }
+
+  const { segments, temps } = await buildMergeSegments(groups, run)
+  if (run.cancelled) return { duration: 0, temps }
+
+  if (segments.length === 1) {
+    fs.copyFileSync(segments[0].path, outputPath)
+    return { duration: segments[0].duration, temps }
+  }
+
+  await mergeSegmentListToFile(segments, outputPath, run)
+  return { duration: await getVideoDuration(outputPath), temps }
+}
+
+type MergeLanePlan = {
+  clipPaths: string[]
+  groups?: VisualGroup[]
+}
+
+function isLaneCacheValid(
+  cachePath: string,
+  manifest: MergeLaneManifest | null,
+  fingerprint: string,
+  laneIndex: number,
+  clipPaths: string[],
+): boolean {
+  if (!manifest || manifest.fingerprint !== fingerprint) return false
+  if (!fs.existsSync(cachePath)) return false
+  const lane = manifest.lanes.find(item => item.index === laneIndex)
+  if (!lane) return false
+  if (lane.clipPaths.length !== clipPaths.length) return false
+  return lane.clipPaths.every((clipPath, idx) => clipPath === clipPaths[idx])
+}
+
+async function mergeEpisodeBodyWithLanes(
+  storyboards: ComposedStoryboard[],
+  groups: VisualGroup[],
+  usePageFlip: boolean,
+  barePath: string,
+  run: ActiveMergeRun,
+  episodeId: number,
+  onProgress: (encodedSec: number) => void,
+): Promise<{ temps: string[]; laneCount: number; cacheFingerprint: string }> {
+  const absPaths = storyboards.map(sb => toAbsPath(sb.composedVideoUrl!))
+  const laneCount = resolveMergeLaneCount(storyboards.length, groups.length, usePageFlip)
+  const cacheFingerprint = computeMergeClipFingerprint(storyboards)
+  const cacheDir = getMergeCacheDir(episodeId, cacheFingerprint)
+  const manifestRaw = readLaneManifest(cacheDir)
+  const manifest = manifestRaw?.fingerprint === cacheFingerprint ? manifestRaw : null
+
+  if (laneCount <= 1) {
+    const temps: string[] = []
+    if (usePageFlip) {
+      const built = await buildMergeSegments(groups, run)
+      temps.push(...built.temps)
+      if (run.cancelled) return { temps, laneCount: 1, cacheFingerprint }
+      await mergeSegmentListToFile(built.segments, barePath, run, onProgress)
+      return { temps, laneCount: 1, cacheFingerprint }
+    }
+    await concatComposedVideos(absPaths, barePath, run, onProgress)
+    return { temps, laneCount: 1, cacheFingerprint }
+  }
+
+  fs.mkdirSync(cacheDir, { recursive: true })
+  const lanePlans: MergeLanePlan[] = usePageFlip
+    ? splitGroupsIntoContiguousLanes(groups, laneCount).map(laneGroups => ({
+      clipPaths: collectLaneClipPaths(laneGroups),
+      groups: laneGroups,
+    }))
+    : splitContiguousBalanced(absPaths, laneCount).map(clipPaths => ({ clipPaths }))
+
+  const effectiveLaneCount = lanePlans.length
+  const laneOutputs: MergeSegment[] = new Array(effectiveLaneCount)
+  const allTemps: string[] = []
+  let finishedLanes = 0
+
+  await mapWithConcurrency(
+    lanePlans.map((_, index) => index),
+    Math.min(MERGE_LANE_CONCURRENCY, effectiveLaneCount),
+    async (laneIndex) => {
+      if (run.cancelled) return
+
+      const lanePlan = lanePlans[laneIndex]
+      const { clipPaths } = lanePlan
+      const cachePath = laneCachePath(cacheDir, laneIndex)
+
+      if (isLaneCacheValid(cachePath, manifest, cacheFingerprint, laneIndex, clipPaths)) {
+        laneOutputs[laneIndex] = {
+          path: cachePath,
+          duration: await getVideoDuration(cachePath),
+          temp: false,
+        }
+        finishedLanes++
+        const pct = 10 + Math.round((finishedLanes / effectiveLaneCount) * 55)
+        setMergeProgress(episodeId, {
+          mergeId: run.mergeId,
+          phase: 'merging',
+          percent: Math.min(65, pct),
+          message: `分路 ${finishedLanes}/${effectiveLaneCount} 已完成（复用缓存）…`,
+          updatedAt: Date.now(),
+        })
+        return
+      }
+
+      const buildPath = path.join(cacheDir, `lane-${laneIndex}-build-${uuid()}.mp4`)
+      allTemps.push(buildPath)
+
+      if (usePageFlip && lanePlan.groups?.length) {
+        const { duration, temps } = await buildLaneOutputFromGroups(lanePlan.groups, buildPath, run)
+        allTemps.push(...temps)
+        if (run.cancelled) return
+        if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath)
+        fs.renameSync(buildPath, cachePath)
+        laneOutputs[laneIndex] = { path: cachePath, duration, temp: false }
+      } else {
+        await concatComposedVideos(clipPaths, buildPath, run)
+        if (run.cancelled) return
+        if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath)
+        fs.renameSync(buildPath, cachePath)
+        laneOutputs[laneIndex] = {
+          path: cachePath,
+          duration: await getVideoDuration(cachePath),
+          temp: false,
+        }
+      }
+
+      finishedLanes++
+      const pct = 10 + Math.round((finishedLanes / effectiveLaneCount) * 55)
+      setMergeProgress(episodeId, {
+        mergeId: run.mergeId,
+        phase: 'merging',
+        percent: Math.min(65, pct),
+        message: `分路 ${finishedLanes}/${effectiveLaneCount} 已生成（${Math.min(MERGE_LANE_CONCURRENCY, effectiveLaneCount)} 路并发）…`,
+        updatedAt: Date.now(),
+      })
+    },
+  )
+
+  if (run.cancelled) return { temps: allTemps, laneCount: effectiveLaneCount, cacheFingerprint }
+
+  writeLaneManifest(cacheDir, {
+    fingerprint: cacheFingerprint,
+    lanes: lanePlans.map((plan, index) => ({
+      index,
+      clipPaths: plan.clipPaths,
+    })),
+  })
+
+  setMergeProgress(episodeId, {
+    mergeId: run.mergeId,
+    phase: 'merging',
+    percent: 68,
+    message: `正在总拼接 ${effectiveLaneCount} 路分片…`,
+    updatedAt: Date.now(),
+  })
+
+  const finalSegments = laneOutputs.filter(Boolean)
+  if (finalSegments.length !== effectiveLaneCount) {
+    throw new Error('部分拼接分路失败，请重试（已完成分路已缓存）')
+  }
+
+  if (usePageFlip) {
+    await mergeSegmentListToFile(finalSegments, barePath, run, onProgress)
+  } else {
+    await concatComposedVideos(finalSegments.map(seg => seg.path), barePath, run, onProgress)
+  }
+
+  logTaskProgress('MergeTask', 'lane-merge-complete', {
+    mergeId: run.mergeId,
+    episodeId,
+    laneCount: effectiveLaneCount,
+    cacheFingerprint,
+    cacheDir,
+  })
+
+  return { temps: allTemps, laneCount: effectiveLaneCount, cacheFingerprint }
+}
+
 function cleanupTempFiles(paths: string[]) {
   for (const p of paths) {
     if (fs.existsSync(p)) fs.unlinkSync(p)
@@ -464,7 +816,7 @@ async function mergeOrderedSegmentsToOutput(
   fs.renameSync(tempOut, outputPath)
 }
 
-/** 无开幕/片头时，黑场 vdwind 翻页进入正文第一镜（与换配图切镜一致） */
+/** 无开幕/片头时，黑场云朵擦除进入正文第一镜（与换配图切镜一致） */
 const BODY_LEAD_DURATION_SEC = IMAGE_CHANGE_TRANSITION_SEC
 
 function runFfmpegSync(args: string[]) {
@@ -555,7 +907,7 @@ async function mixBgmIntoMergedVideo(
         '-movflags', '+faststart',
       ])
       .output(tempOut)
-    run.command = command
+    attachMergeCommand(run, command)
     command
       .on('end', () => resolve())
       .on('error', (err) => reject(err))
@@ -640,9 +992,11 @@ export function cancelEpisodeMerge(episodeId: number): boolean {
   if (!active) return false
 
   active.cancelled = true
-  try {
-    active.command?.kill('SIGKILL')
-  } catch {}
+  for (const command of active.commands) {
+    try {
+      command.kill('SIGKILL')
+    } catch {}
+  }
 
   db.update(schema.videoMerges)
     .set({ status: 'cancelled', errorMsg: '已取消', completedAt: now() })
@@ -682,7 +1036,7 @@ function loadComposedStoryboards(episodeId: number, clipLimit?: number): Compose
 }
 
 async function doMerge(mergeId: number, episodeId: number, options: MergeOptions = {}) {
-  const run: ActiveMergeRun = { mergeId, cancelled: false, command: null }
+  const run: ActiveMergeRun = { mergeId, cancelled: false, command: null, commands: new Set() }
   activeMerges.set(episodeId, run)
   setMergeProgress(episodeId, {
     mergeId,
@@ -736,11 +1090,14 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       phase: 'merging',
       percent,
       message: usePageFlip
-        ? `正在翻页过渡拼接 (${percent}%)…`
+        ? `正在云朵转场拼接 (${percent}%)…`
         : `正在拼接 ${storyboards.length} 个镜头 (${percent}%)…`,
       updatedAt: Date.now(),
     })
   }
+
+  let mergeLaneCount = 1
+  let mergeCacheFingerprint = computeMergeClipFingerprint(storyboards)
 
   try {
     if (usePageFlip) {
@@ -748,38 +1105,32 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         mergeId,
         phase: 'merging',
         percent: 10,
-        message: `正在分组 ${groups.length} 段画面并添加翻页过渡…`,
+        message: `正在按 ${resolveMergeLaneCount(storyboards.length, groups.length, true)} 路并发生成拼接分片…`,
         updatedAt: Date.now(),
       })
-
-      const { segments, temps } = await buildMergeSegments(groups, run, (done, total) => {
-        const pct = 10 + Math.round((done / total) * 15)
-        setMergeProgress(episodeId, {
-          mergeId,
-          phase: 'merging',
-          percent: Math.min(25, pct),
-          message: `正在合并同画面镜头 (${done}/${total})…`,
-          updatedAt: Date.now(),
-        })
-      })
-      tempFiles = temps
-      if (run.cancelled) return
-
-      if (segments.length <= MAX_XFADE_INPUTS) {
-        await mergeSegmentsWithPageFlip(segments, barePath, run, updateEncodeProgress)
-      } else {
-        await mergeSegmentsSequential(segments, barePath, run, updateEncodeProgress)
-      }
     } else {
       setMergeProgress(episodeId, {
         mergeId,
         phase: 'merging',
         percent: 10,
-        message: `正在按顺序拼接 ${storyboards.length} 个镜头…`,
+        message: `正在按 ${resolveMergeLaneCount(storyboards.length, groups.length, false)} 路并发拼接 ${storyboards.length} 个镜头…`,
         updatedAt: Date.now(),
       })
-      await concatComposedVideos(absPaths, barePath, run, updateEncodeProgress)
     }
+
+    const laneResult = await mergeEpisodeBodyWithLanes(
+      storyboards,
+      groups,
+      usePageFlip,
+      barePath,
+      run,
+      episodeId,
+      updateEncodeProgress,
+    )
+    tempFiles = laneResult.temps
+    mergeLaneCount = laneResult.laneCount
+    mergeCacheFingerprint = laneResult.cacheFingerprint
+    if (run.cancelled) return
   } catch (err: any) {
     activeMerges.delete(episodeId)
     clearMergeProgress(episodeId)
@@ -808,7 +1159,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       mergeId,
       phase: 'finalizing',
       percent: 86,
-      message: '正在为首镜添加翻页入场…',
+      message: '正在为首镜添加云朵入场…',
       updatedAt: Date.now(),
     })
     try {
@@ -817,7 +1168,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       await prependBlackLeadPageFlip(barePath, deliverPath, run, tempFiles, updateEncodeProgress)
       totalDurationSec += BODY_LEAD_DURATION_SEC
     } catch (err: any) {
-      throw new Error(`首镜翻页入场失败: ${err.message}`)
+      throw new Error(`首镜云朵入场失败: ${err.message}`)
     } finally {
       cleanupTempFiles(tempFiles)
     }
@@ -899,6 +1250,8 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     test: !!clipLimit,
     clipLimit,
     bgmSkippedEmbedded: bgmSkippedEmbedded || undefined,
+    mergeLaneCount,
+    mergeCacheFingerprint,
   }
 
   // 更新 merge 记录
@@ -936,7 +1289,9 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     output: mergedRelative,
     duration,
     clips: storyboards.length,
-    mergeMode: usePageFlip ? 'page-flip-audio-cut' : 'concat',
+    mergeMode: usePageFlip ? 'cloud-wipe-audio-declick' : 'concat-declick',
+    mergeLaneCount,
+    mergeCacheFingerprint,
     pageFlipTransitions: usePageFlip ? groups.length - 1 : 0,
     bodyLeadPageFlip: !includeOpeningVideo,
     bgmMusicId: options.bgmMusicId,
@@ -1027,7 +1382,7 @@ async function doOpeningMerge(
   sourceMeta: MergeScenesMeta,
   titleAbs?: string | null,
 ) {
-  const run: ActiveMergeRun = { mergeId, cancelled: false, command: null }
+  const run: ActiveMergeRun = { mergeId, cancelled: false, command: null, commands: new Set() }
   activeMerges.set(episodeId, run)
   setMergeProgress(episodeId, {
     mergeId,
@@ -1183,7 +1538,7 @@ async function doTitleMerge(
   sourceMeta: MergeScenesMeta,
   openingAbs?: string | null,
 ) {
-  const run: ActiveMergeRun = { mergeId, cancelled: false, command: null }
+  const run: ActiveMergeRun = { mergeId, cancelled: false, command: null, commands: new Set() }
   activeMerges.set(episodeId, run)
   setMergeProgress(episodeId, {
     mergeId,

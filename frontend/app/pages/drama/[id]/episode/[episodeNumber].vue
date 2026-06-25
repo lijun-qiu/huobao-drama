@@ -1974,14 +1974,27 @@
                 </button>
               </div>
             </div>
+            <div v-if="sbs.length > PROD_SHOT_PAGE_SIZE" class="prod-pagination">
+              <select v-model="shotsListFilter" class="input input-sm prod-page-filter">
+                <option value="all">全部 {{ sbs.length }}</option>
+                <option value="pending">待生成 {{ narrationImagesPendingCount }}</option>
+                <option value="processing">生成中 {{ pendingNarrationShotIds.length }}</option>
+                <option value="need_own">需配图 {{ narrationNeedImageCount }}</option>
+                <option value="done">已有图 {{ shotsDoneCount }}</option>
+                <option value="inherit">沿用 {{ sbs.length - narrationNeedImageCount }}</option>
+              </select>
+              <button class="btn btn-sm" :disabled="shotsListPage <= 1" @click="shotsListPage -= 1">上一页</button>
+              <span class="dim prod-page-indicator">{{ shotsListPage }} / {{ shotsPageCount }} · 每页 {{ PROD_SHOT_PAGE_SIZE }}</span>
+              <button class="btn btn-sm" :disabled="shotsListPage >= shotsPageCount" @click="shotsListPage += 1">下一页</button>
+            </div>
             <div class="prod-grid">
-              <div v-for="(sb, i) in sbs" :key="sb.id" class="card prod-card">
+              <div v-for="sb in shotsPageItems" :key="sb.id" class="card prod-card">
                 <div class="prod-cover">
                   <img
                     v-if="getNarrationDisplayImage(sb)"
                     :src="narrationShotImageSrc(sb)"
                     class="previewable-image"
-                    @click.stop="openImageViewer(narrationShotImageSrc(sb), `镜头 #${String(i + 1).padStart(2, '0')} 配图`)"
+                    @click.stop="openImageViewer(narrationShotImageSrc(sb), `镜头 #${getNarrationShotDisplayNo(sb)} 配图`)"
                   />
                   <div v-else-if="isPendingNarrationShot(sb.id)" class="prod-cover-empty">
                     <Loader2 :size="20" class="animate-spin" style="color:var(--accent)" />
@@ -2168,15 +2181,27 @@
               </div>
             </div>
 
+            <div v-if="sbs.length > PROD_SHOT_PAGE_SIZE" class="prod-pagination">
+              <select v-model="shotsListFilter" class="input input-sm prod-page-filter">
+                <option value="all">全部 {{ sbs.length }}</option>
+                <option value="pending">待生成 {{ shotsPendingCount }}</option>
+                <option value="processing">生成中 {{ pendingShotFrameKeys.length }}</option>
+                <option value="done">已有帧 {{ shotsDoneCount }}</option>
+              </select>
+              <button class="btn btn-sm" :disabled="shotsListPage <= 1" @click="shotsListPage -= 1">上一页</button>
+              <span class="dim prod-page-indicator">{{ shotsListPage }} / {{ shotsPageCount }} · 每页 {{ PROD_SHOT_PAGE_SIZE }}</span>
+              <button class="btn btn-sm" :disabled="shotsListPage >= shotsPageCount" @click="shotsListPage += 1">下一页</button>
+            </div>
+
             <div class="frame-scroll">
               <div class="frame-grid">
-                <div v-for="(sb, i) in sbs" :key="sb.id"
+                <div v-for="sb in shotsPageItems" :key="sb.id"
                   :class="['frame-row', 'card', { active: selectedSb?.id === sb.id }]"
                   @click="selectedSb = sb">
                   <!-- Info: number + type + desc -->
                   <div class="frame-info">
                     <div class="frame-top">
-                      <span class="frame-num">#{{ String(i+1).padStart(2,'0') }}</span>
+                      <span class="frame-num">#{{ String(storyboardDisplayIndex(sb)).padStart(2,'0') }}</span>
                       <span class="frame-badge">{{ sb.shot_type || sb.shotType || '—' }}</span>
                     </div>
                     <div class="frame-desc">{{ sb.description || sb.title || '—' }}</div>
@@ -2197,7 +2222,7 @@
                           v-if="getFirstFrame(sb)"
                           :src="'/' + getFirstFrame(sb)"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getFirstFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 首帧`)"
+                          @click.stop="openImageViewer('/' + getFirstFrame(sb), `镜头 #${String(storyboardDisplayIndex(sb)).padStart(2, '0')} 首帧`)"
                         />
                         <div v-else class="frame-thumb-empty">
                           <Loader2 v-if="isPendingShotFrame(sb.id, 'first_frame')" :size="14" class="animate-spin" />
@@ -2215,7 +2240,7 @@
                           v-if="getLastFrame(sb)"
                           :src="'/' + getLastFrame(sb)"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getLastFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 尾帧`)"
+                          @click.stop="openImageViewer('/' + getLastFrame(sb), `镜头 #${String(storyboardDisplayIndex(sb)).padStart(2, '0')} 尾帧`)"
                         />
                         <div v-else class="frame-thumb-empty">
                           <Loader2 v-if="isPendingShotFrame(sb.id, 'last_frame')" :size="14" class="animate-spin" />
@@ -2517,36 +2542,39 @@
                 </button>
               </div>
             </div>
+            <div v-if="sbs.length > PROD_SHOT_PAGE_SIZE" class="prod-pagination">
+              <select v-model="composeListFilter" class="input input-sm prod-page-filter">
+                <option value="all">全部 {{ sbs.length }}</option>
+                <option value="pending">待合成 {{ composePendingCount }}</option>
+                <option value="processing">合成中 {{ pendingComposeIds.length }}</option>
+                <option value="failed">失败 {{ Object.keys(failedComposeMessages).length }}</option>
+                <option value="done">已完成 {{ composedCount }}</option>
+              </select>
+              <button class="btn btn-sm" :disabled="composeListPage <= 1" @click="composeListPage -= 1">上一页</button>
+              <span class="dim prod-page-indicator">{{ composeListPage }} / {{ composePageCount }} · 每页 {{ PROD_SHOT_PAGE_SIZE }}</span>
+              <button class="btn btn-sm" :disabled="composeListPage >= composePageCount" @click="composeListPage += 1">下一页</button>
+            </div>
             <div class="prod-grid">
-              <div v-for="(sb, i) in sbs" :key="sb.id" class="card prod-card">
-                <div class="prod-cover">
-                  <video
-                    v-if="hasComposed(sb)"
-                    :src="'/' + getComposedVideoUrl(sb)"
-                    class="prod-video"
-                    controls
-                    preload="metadata"
-                    playsinline
-                  />
-                  <video
-                    v-else-if="hasVid(sb)"
-                    :src="'/' + getVideoUrl(sb)"
-                    class="prod-video"
-                    controls
-                    preload="metadata"
-                    playsinline
-                  />
+              <div v-for="sb in composePageShots" :key="sb.id" class="card prod-card">
+                <div
+                  class="prod-cover"
+                  :class="{ 'is-playable': hasComposed(sb) }"
+                  @click="hasComposed(sb) && openComposeVideoPreview(sb)"
+                >
                   <img
-                    v-else-if="hasImg(sb)"
+                    v-if="hasImg(sb)"
                     :src="'/' + getStoryboardCover(sb)"
                     class="previewable-image"
-                    @click.stop="openImageViewer('/' + getStoryboardCover(sb), `镜头 #${String(i + 1).padStart(2, '0')} 参考图`)"
+                    :title="hasComposed(sb) ? '点击预览合成视频' : undefined"
+                    @click.stop="!hasComposed(sb) && openImageViewer('/' + getStoryboardCover(sb), `镜头 #${String(storyboardDisplayIndex(sb)).padStart(2, '0')} 参考图`)"
                   />
                   <div v-else class="prod-cover-empty">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   </div>
-                  <span class="prod-idx">#{{ String(i+1).padStart(2,'0') }}</span>
+                  <span v-if="hasComposed(sb)" class="prod-play-badge" title="预览合成视频">▶</span>
+                  <span class="prod-idx">#{{ String(storyboardDisplayIndex(sb)).padStart(2,'0') }}</span>
                   <span v-if="hasComposed(sb)" class="prod-overlay-badge">已合成</span>
+                  <span v-else-if="isPendingCompose(sb.id)" class="prod-overlay-badge is-pending">合成中</span>
                 </div>
                 <div class="prod-info">
                   <div class="prod-desc truncate">{{ sb.description || sb.title || '—' }}</div>
@@ -2598,7 +2626,7 @@
           </div>
           <div class="export-opening-body">
             <div class="narration-hint" style="margin-bottom:16px">
-              从本集已生成/上传的配图中<strong>随机选 N 张</strong>合成翻页片头（<strong>第 1 张=集内首张、最后 1 张=集内末张</strong>，中间随机；可先导出 zip 再生成视频）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 3 秒片头 + 翻页音效。
+              从本集已生成/上传的配图中<strong>随机选 N 张</strong>合成云朵转场片头（<strong>第 1 张=集内首张、最后 1 张=集内末张</strong>，中间随机；可先导出 zip 再生成视频）。可用 <strong>Voicebox</strong> 生成或上传 MP3 配音，按配音时长生成并叠加<strong>屏幕正中红色字幕</strong>（字号 100）；未配音时为 3 秒无声片头。
             </div>
             <div class="opening-audio-panel" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px">
               <div style="font-size:13px;font-weight:600;margin-bottom:8px">开幕配音</div>
@@ -3282,6 +3310,20 @@
         </div>
       </div>
 
+      <div v-if="composeVideoViewer.open && composeVideoViewer.src" class="overlay image-viewer-overlay" @click.self="closeComposeVideoViewer">
+        <div class="card image-viewer-dialog">
+          <div class="image-viewer-head">
+            <div class="image-viewer-title">{{ composeVideoViewer.title || '合成预览' }}</div>
+            <button class="btn btn-ghost btn-icon" @click="closeComposeVideoViewer">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div class="image-viewer-body">
+            <video :src="composeVideoViewer.src" controls autoplay playsinline class="image-viewer-video" />
+          </div>
+        </div>
+      </div>
+
       <div v-if="imageViewer.open && imageViewer.src" class="overlay image-viewer-overlay" @click.self="closeImageViewer">
         <div class="card image-viewer-dialog">
           <div class="image-viewer-head">
@@ -3650,6 +3692,7 @@ const narrationImageBreakdownProgressMessage = computed(() => {
   return progress.message || '配图分镜进行中…'
 })
 let mergePollTimer = null
+let composePollTimer = null
 let narrationImageBreakdownPollTimer = null
 const mergeVideoSrc = computed(() => {
   if (!mergeUrl.value) return ''
@@ -4213,6 +4256,12 @@ const pendingNarrationShotIds = ref([])
 const pendingShotScanIds = ref([])
 const pendingVideoIds = ref([])
 const pendingComposeIds = ref([])
+const PROD_SHOT_PAGE_SIZE = 24
+const composeListPage = ref(1)
+const composeListFilter = ref('all')
+const shotsListPage = ref(1)
+const shotsListFilter = ref('all')
+const composeVideoViewer = ref({ open: false, src: '', title: '' })
 const batchRunning = ref(new Set())
 const failedVideoMessages = ref({})
 const failedComposeMessages = ref({})
@@ -4730,9 +4779,30 @@ function closeImageViewer() {
   imageViewer.value = { open: false, src: '', title: '' }
 }
 
+function storyboardDisplayIndex(sb) {
+  const idx = sbs.value.findIndex(item => item.id === sb.id)
+  return idx >= 0 ? idx + 1 : 0
+}
+
+function openComposeVideoPreview(sb) {
+  const url = getComposedVideoUrl(sb)
+  if (!url) return
+  const no = storyboardDisplayIndex(sb)
+  composeVideoViewer.value = {
+    open: true,
+    src: `/${String(url).replace(/^\//, '')}`,
+    title: `镜头 #${String(no).padStart(2, '0')} 合成预览`,
+  }
+}
+
+function closeComposeVideoViewer() {
+  composeVideoViewer.value = { open: false, src: '', title: '' }
+}
+
 function handleImageViewerKeydown(event) {
   if (event.key === 'Escape' && shotEditor.value.open) closeShotEditor()
   if (event.key === 'Escape' && imageViewer.value.open) closeImageViewer()
+  if (event.key === 'Escape' && composeVideoViewer.value.open) closeComposeVideoViewer()
 }
 
 onMounted(() => {
@@ -4744,6 +4814,8 @@ onBeforeUnmount(() => {
   stopBgmPoll()
   stopOpeningPoll()
   stopTitlePoll()
+  stopComposePoll()
+  stopMergePoll()
 })
 
 function isPendingSceneImage(id) {
@@ -5598,6 +5670,71 @@ const composePendingCount = computed(() =>
   sbs.value.filter(sb => canCompose(sb) && !hasComposed(sb)).length,
 )
 const composableCount = computed(() => sbs.value.filter(sb => canCompose(sb)).length)
+const composeFilteredShots = computed(() => {
+  const list = sbs.value
+  if (composeListFilter.value === 'pending') {
+    return list.filter(sb => canCompose(sb) && !hasComposed(sb))
+  }
+  if (composeListFilter.value === 'processing') {
+    return list.filter(sb => isPendingCompose(sb.id))
+  }
+  if (composeListFilter.value === 'failed') {
+    return list.filter(sb => !!composeFailMessage(sb.id))
+  }
+  if (composeListFilter.value === 'done') {
+    return list.filter(sb => hasComposed(sb))
+  }
+  return list
+})
+const composePageCount = computed(() =>
+  Math.max(1, Math.ceil(composeFilteredShots.value.length / PROD_SHOT_PAGE_SIZE)),
+)
+const composePageShots = computed(() => {
+  const page = Math.min(Math.max(1, composeListPage.value), composePageCount.value)
+  const start = (page - 1) * PROD_SHOT_PAGE_SIZE
+  return composeFilteredShots.value.slice(start, start + PROD_SHOT_PAGE_SIZE)
+})
+const shotsFiltered = computed(() => {
+  const list = sbs.value
+  if (isNarrationMode.value) {
+    if (shotsListFilter.value === 'pending') return narrationShotsPendingImage(list)
+    if (shotsListFilter.value === 'processing') return list.filter(sb => isPendingNarrationShot(sb.id))
+    if (shotsListFilter.value === 'done') return list.filter(sb => !!getNarrationDisplayImage(sb))
+    if (shotsListFilter.value === 'need_own') return list.filter(sb => narrationShotNeedsOwnImage(sb))
+    if (shotsListFilter.value === 'inherit') return list.filter(sb => !narrationShotNeedsOwnImage(sb))
+    return list
+  }
+  if (shotsListFilter.value === 'pending') {
+    return list.filter(sb => !getFirstFrame(sb) || (frameMode.value === 'first_last' && !getLastFrame(sb)))
+  }
+  if (shotsListFilter.value === 'processing') {
+    return list.filter(sb =>
+      isPendingShotFrame(sb.id, 'first_frame') || isPendingShotFrame(sb.id, 'last_frame'),
+    )
+  }
+  if (shotsListFilter.value === 'done') {
+    return list.filter(sb => getFirstFrame(sb) && (frameMode.value !== 'first_last' || getLastFrame(sb)))
+  }
+  return list
+})
+const shotsPageCount = computed(() =>
+  Math.max(1, Math.ceil(shotsFiltered.value.length / PROD_SHOT_PAGE_SIZE)),
+)
+const shotsPageItems = computed(() => {
+  const page = Math.min(Math.max(1, shotsListPage.value), shotsPageCount.value)
+  const start = (page - 1) * PROD_SHOT_PAGE_SIZE
+  return shotsFiltered.value.slice(start, start + PROD_SHOT_PAGE_SIZE)
+})
+const shotsDoneCount = computed(() => {
+  if (isNarrationMode.value) {
+    return sbs.value.filter(sb => !!getNarrationDisplayImage(sb)).length
+  }
+  return sbs.value.filter(sb => getFirstFrame(sb) && (frameMode.value !== 'first_last' || getLastFrame(sb))).length
+})
+const shotsPendingCount = computed(() => {
+  if (isNarrationMode.value) return narrationImagesPendingCount.value
+  return sbs.value.filter(sb => !getFirstFrame(sb) || (frameMode.value === 'first_last' && !getLastFrame(sb))).length
+})
 const charImagesPendingCount = computed(() =>
   visualChars.value.filter(c => !(c.image_url || c.imageUrl)).length,
 )
@@ -6424,6 +6561,9 @@ async function refresh() {
   try {
     await resumeNarrationImageBreakdownPollIfNeeded()
   } catch {}
+  try {
+    await resumeComposePollIfNeeded()
+  } catch {}
 }
 
 function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
@@ -7155,7 +7295,6 @@ async function mapWithConcurrency(items, limit, worker) {
 }
 
 function resolveTtsBatchConcurrency() {
-  if (isNarrationMode.value && localTtsEnabled.value && localTtsEngine.value === 'voicebox') return 1
   return 3
 }
 
@@ -8626,6 +8765,7 @@ async function batchNarrationShotImages(options) {
     ? `${pendingLabel}（${pending.length}/${allPending.length} 张）`
     : formatNarrationPendingImageHint(sbs.value)
   if (!tryBeginBatch('narrationImages', `配图生成中：${pendingHint}…`)) return
+  if (pending.length) shotsListFilter.value = 'processing'
   const jobs = pending.map(sb => ({
     shotId: sb.id,
     generationId: null,
@@ -8846,7 +8986,7 @@ async function doCompose(sb) {
     await composeAPI.shot(sb.id)
     toast.success('合成完成')
     pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
-    refresh()
+    await refreshStoryboardsOnly()
   } catch (e) {
     pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
     failedComposeMessages.value = {
@@ -8884,6 +9024,7 @@ async function batchCompose() {
   }
   if (!tryBeginBatch('compose', `镜头合成中（剩余 ${pending.length} 个 · 并发）…`)) return
   try {
+    if (pendingComposeIds.value.length) composeListFilter.value = 'processing'
     const res = await composeAPI.all(epId.value, { only_remaining: true })
     const concurrency = res?.concurrency || 3
     pendingComposeIds.value = [...new Set([...pendingComposeIds.value, ...pending.map(sb => sb.id)])]
@@ -8924,6 +9065,82 @@ async function regenerateAllComposeAndMerge() {
     endBatch('compose')
   }
 }
+function stopComposePoll() {
+  if (composePollTimer) {
+    clearInterval(composePollTimer)
+    composePollTimer = null
+  }
+}
+
+function applyComposeStatusPatch(res, options = {}) {
+  const expectStoryboardIds = options.expectStoryboardIds ?? null
+  const items = Array.isArray(res?.items) ? res.items : []
+  const scopedItems = expectStoryboardIds?.length
+    ? items.filter(item => expectStoryboardIds.includes(item.id))
+    : items
+  const byId = new Map(items.map(item => [item.id, item]))
+  for (const sb of sbs.value) {
+    const item = byId.get(sb.id)
+    if (!item) continue
+    const url = item.composed_video_url ?? item.composedVideoUrl
+    const status = item.status ?? sb.status
+    if (url != null && url !== sb.composed_video_url) {
+      sb.composed_video_url = url
+      sb.composedVideoUrl = url
+    }
+    if (status !== sb.status) sb.status = status
+  }
+  pendingComposeIds.value = scopedItems
+    .filter(item => item.status === 'compose_processing')
+    .map(item => item.id)
+  const failedItems = scopedItems.filter(item => item.status === 'compose_failed')
+  if (failedItems.length) {
+    const next = { ...failedComposeMessages.value }
+    failedItems.forEach((item) => {
+      next[item.id] = item.error_msg || item.errorMsg || '视频合成失败'
+    })
+    failedComposeMessages.value = next
+  }
+  return { scopedItems, items }
+}
+
+function evaluateComposePollDone(res, options, scopedItems) {
+  const expectStoryboardIds = options.expectStoryboardIds ?? null
+  const expectTotal = options.expectTotal ?? 0
+  const items = Array.isArray(res?.items) ? res.items : []
+  const processingCount = expectStoryboardIds?.length
+    ? scopedItems.filter(item => item.status === 'compose_processing').length
+    : (res?.processing ?? items.filter(item => item.status === 'compose_processing').length)
+  const completedCount = expectStoryboardIds?.length
+    ? scopedItems.filter(item => item.status === 'compose_completed' && (item.composed_video_url || item.composedVideoUrl)).length
+    : (res?.completed ?? items.filter(item => item.status === 'compose_completed').length)
+  const totalCount = expectStoryboardIds?.length || res?.total || items.length
+  const failedItems = scopedItems.filter(item => item.status === 'compose_failed')
+  if (processingCount > 0) return { done: false, failedItems }
+  const doneTotal = expectStoryboardIds?.length || (expectTotal > 0 ? expectTotal : totalCount)
+  if (completedCount < doneTotal) return { done: false, failedItems }
+  return { done: true, failedItems }
+}
+
+async function tickComposePoll(options = {}) {
+  const res = await composeAPI.status(epId.value)
+  const { scopedItems } = applyComposeStatusPatch(res, options)
+  return evaluateComposePollDone(res, options, scopedItems)
+}
+
+async function resumeComposePollIfNeeded() {
+  if (!epId.value || composePollTimer || batchRunning.value.has('compose')) return
+  try {
+    const res = await composeAPI.status(epId.value)
+    const processing = Number(res?.processing ?? 0)
+    applyComposeStatusPatch(res)
+    if (processing <= 0) return
+    batchRunning.value = new Set([...batchRunning.value, 'compose'])
+    toast.info(`检测到 ${processing} 个镜头仍在合成，继续等待…`)
+    void pollComposeStatus({ maxAttempts: 600 }).finally(() => endBatch('compose'))
+  } catch {}
+}
+
 function stopMergePoll() {
   if (mergePollTimer) {
     clearInterval(mergePollTimer)
@@ -9259,49 +9476,52 @@ async function doMerge(options = {}) {
 }
 
 async function pollComposeStatus(options = {}) {
-  const maxAttempts = options.maxAttempts ?? 120
-  const expectTotal = options.expectTotal ?? 0
-  const expectStoryboardIds = options.expectStoryboardIds ?? null
-  for (let i = 0; i < maxAttempts; i++) {
-    await sleep(3000)
-    try {
-      const res = await composeAPI.status(epId.value)
-      await refresh()
-      const items = Array.isArray(res?.items) ? res.items : []
-      const scopedItems = expectStoryboardIds?.length
-        ? items.filter(item => expectStoryboardIds.includes(item.id))
-        : items
-      const processingCount = expectStoryboardIds?.length
-        ? scopedItems.filter(item => item.status === 'compose_processing').length
-        : (res?.processing ?? items.filter(item => item.status === 'compose_processing').length)
-      const completedCount = expectStoryboardIds?.length
-        ? scopedItems.filter(item => item.status === 'compose_completed' && (item.composed_video_url || item.composedVideoUrl)).length
-        : (res?.completed ?? items.filter(item => item.status === 'compose_completed').length)
-      const totalCount = expectStoryboardIds?.length || res?.total || items.length
-      const processingIds = scopedItems.filter(item => item.status === 'compose_processing').map(item => item.id)
-      pendingComposeIds.value = processingIds
+  const maxAttempts = options.maxAttempts ?? Math.max(120, Math.ceil(sbs.value.length / 3) * 6)
+  const pollIntervalMs = options.pollIntervalMs ?? (sbs.value.length > 80 ? 6000 : 4000)
+  let attempts = 0
+  stopComposePoll()
 
-      const failedItems = scopedItems.filter(item => item.status === 'compose_failed')
-      if (failedItems.length) {
-        const next = { ...failedComposeMessages.value }
-        failedItems.forEach((item) => {
-          next[item.id] = item.error_msg || item.errorMsg || '视频合成失败'
-        })
-        failedComposeMessages.value = next
-      }
-
-      if (processingCount > 0) continue
-
-      const doneTotal = expectStoryboardIds?.length || (expectTotal > 0 ? expectTotal : totalCount)
-      if (completedCount < doneTotal) continue
-
-      if (failedItems.length) toast.error(`有 ${failedItems.length} 个镜头合成失败`)
-      else toast.success(options.successMessage || '剩余镜头合成完成')
-      return failedItems.length === 0
-    } catch {}
+  const finishPoll = async (result) => {
+    stopComposePoll()
+    await refreshStoryboardsOnly()
+    const { failedItems = [] } = result
+    if (failedItems.length) {
+      toast.error(`有 ${failedItems.length} 个镜头合成失败`)
+      return false
+    }
+    toast.success(options.successMessage || '剩余镜头合成完成')
+    return true
   }
-  toast.error('合成等待超时，请稍后在导出页手动拼接')
-  return false
+
+  try {
+    const first = await tickComposePoll(options)
+    if (first.done) return finishPoll(first)
+  } catch {}
+
+  return new Promise((resolve) => {
+    composePollTimer = setInterval(async () => {
+      attempts += 1
+      try {
+        const result = await tickComposePoll(options)
+        if (result.done) {
+          const ok = await finishPoll(result)
+          resolve(ok)
+          return
+        }
+        if (attempts >= maxAttempts) {
+          stopComposePoll()
+          toast.error('合成等待超时，请稍后在导出页手动拼接')
+          resolve(false)
+        }
+      } catch {
+        if (attempts >= maxAttempts) {
+          stopComposePoll()
+          toast.error('合成等待超时，请稍后在导出页手动拼接')
+          resolve(false)
+        }
+      }
+    }, pollIntervalMs)
+  })
 }
 function getRefs(sb) {
   const raw = sb.reference_images || sb.referenceImages
@@ -9467,6 +9687,20 @@ watch(openingPickCount, persistOpeningPickPrefs)
 watch([imageDetectBatchThreshold, imageDetectBatchSize, imagePromptBatchSize], () => { persistImageDetectBatchPrefs() })
 watch([prodTab, epId], ([tab, id]) => {
   if (tab === 'bgm' && id) loadBgmLibrary()
+})
+watch([composeListFilter, () => sbs.value.length], () => { composeListPage.value = 1 })
+watch(composePageCount, (count) => {
+  if (composeListPage.value > count) composeListPage.value = count
+})
+watch(prodTab, (tab, prev) => {
+  if (tab === 'shots' || prev === 'shots') {
+    shotsListFilter.value = 'all'
+    shotsListPage.value = 1
+  }
+})
+watch([shotsListFilter, () => sbs.value.length], () => { shotsListPage.value = 1 })
+watch(shotsPageCount, (count) => {
+  if (shotsListPage.value > count) shotsListPage.value = count
 })
 watch([panel, epId], ([p, id]) => {
   if (p === 'export' && id) loadBgmLibrary({ resumePoll: false })
@@ -10997,6 +11231,41 @@ onMounted(async () => {
   border-radius: 18px;
   box-shadow: 0 18px 48px rgba(8, 14, 24, 0.22);
   background: rgba(255,255,255,0.9);
+}
+.image-viewer-video {
+  display: block;
+  width: min(960px, 92vw);
+  max-height: calc(100vh - 140px);
+  margin: 0 auto;
+  border-radius: 18px;
+  box-shadow: 0 18px 48px rgba(8, 14, 24, 0.22);
+  background: #000;
+}
+.prod-pagination {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+.prod-page-filter { min-width: 148px; }
+.prod-page-indicator { font-size: 12px; white-space: nowrap; }
+.prod-cover.is-playable { cursor: pointer; }
+.prod-play-badge {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 14px;
+  pointer-events: none;
 }
 
 .shot-editor-overlay { z-index: 120; }
