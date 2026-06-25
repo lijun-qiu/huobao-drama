@@ -36,6 +36,8 @@ export interface NarrationImageMeta {
   image_prompt_source?: 'llm_raw' | 'optimized' | 'upload' | 'manual'
   /** 第二步 LLM 原文备份，第三步优化前写入，用于还原 */
   image_prompt_llm_raw?: string
+  /** 配图分镜写入：本镜烧录字幕旁白（可含 **强调**，TTS 仍用 dialogue 纯文本） */
+  subtitle_narration?: string
 }
 
 /**
@@ -100,6 +102,9 @@ export function parseNarrationImageMeta(referenceImages?: string | null): Narrat
       image_prompt_llm_raw: typeof parsed?.image_prompt_llm_raw === 'string' && parsed.image_prompt_llm_raw.trim()
         ? parsed.image_prompt_llm_raw.trim()
         : undefined,
+      subtitle_narration: typeof parsed?.subtitle_narration === 'string' && parsed.subtitle_narration.trim()
+        ? parsed.subtitle_narration.trim()
+        : undefined,
     }
   } catch {}
   return { narration_image_mode: 'inherit' }
@@ -113,6 +118,34 @@ export function buildNarrationImageMeta(
     narration_image_mode: mode,
     ...extra,
   })
+}
+
+export function patchNarrationImageMeta(
+  referenceImages: string | null | undefined,
+  patch: Partial<Omit<NarrationImageMeta, 'narration_image_mode'>>,
+) {
+  let raw: Record<string, unknown> = {}
+  if (referenceImages) {
+    try {
+      const parsed = JSON.parse(referenceImages)
+      if (parsed && typeof parsed === 'object') raw = parsed as Record<string, unknown>
+    } catch {
+      // ignore
+    }
+  }
+  if (!raw.narration_image_mode) raw.narration_image_mode = 'inherit'
+  return JSON.stringify({ ...raw, ...patch })
+}
+
+/** 合成烧录字幕：优先配图分镜写入的 subtitle_narration，否则回退 dialogue */
+export function resolveStoryboardSubtitleNarration(sb: {
+  dialogue?: string | null
+  referenceImages?: string | null
+}): string {
+  const meta = parseNarrationImageMeta(sb.referenceImages)
+  const stored = String(meta.subtitle_narration || '').trim()
+  if (stored) return stored
+  return String(sb.dialogue || '').trim().replace(/^(旁白|剧中)[：:]\s*/, '')
 }
 
 /** 汇总同一场景多句旁白的主要视觉内容 */

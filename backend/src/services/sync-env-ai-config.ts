@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { logTaskProgress } from '../utils/task-logger.js'
 
-const TEXT_MODELS = ['deepseek-v4-pro', 'gpt-4o']
+const TEXT_MODELS = ['deepseek-v4-pro', 'qwen3.5-plus', 'gpt-4o']
 
 /** 从 .env.local 的 AI_API_KEY / AI_BASE_URL 同步文本服务到数据库 */
 export function syncEnvAiConfig(): void {

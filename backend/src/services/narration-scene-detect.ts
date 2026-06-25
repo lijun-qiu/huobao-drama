@@ -27,6 +27,7 @@ import {
   type NarrationImageBreakdownProgressCallback,
 } from './narration-image-breakdown-progress.js'
 import { buildPriorNarrationLines } from './episode-continuity.js'
+import { normalizeParagraphSubtitleLines } from './narration-emphasis-apply.js'
 
 /** 场景段配图 prompt（单次调用）超时 */
 const SCENE_SEGMENTS_PROMPT_LLM_TIMEOUT_MS = 300_000
@@ -592,27 +593,39 @@ function extractJsonObject(text: string) {
   }
 }
 
-function normalizeParagraphPromptRow(row: unknown): { start_index: number; image_prompt: string } | null {
+function normalizeParagraphPromptRow(row: unknown): {
+  start_index: number
+  image_prompt: string
+  subtitle_lines?: string[]
+} | null {
   if (!row || typeof row !== 'object') return null
   const r = row as Record<string, unknown>
   const startIndex = Number(r.start_index ?? r.startIndex)
   const prompt = String(r.image_prompt ?? r.imagePrompt ?? r.prompt ?? '').trim()
   if (!Number.isFinite(startIndex) || !prompt) return null
-  return { start_index: startIndex, image_prompt: prompt }
+  const subtitleLines = Array.isArray(r.subtitle_lines ?? r.subtitleLines)
+    ? (r.subtitle_lines ?? r.subtitleLines as unknown[]).map(s => String(s ?? ''))
+    : undefined
+  return { start_index: startIndex, image_prompt: prompt, subtitle_lines: subtitleLines }
 }
 
 function parseParagraphPromptRows(
   text: string,
   batch: ParagraphPromptInput[],
-): Array<{ start_index: number; image_prompt: string }> | null {
+): Array<{ start_index: number; image_prompt: string; subtitle_lines?: string[] }> | null {
   const raw = String(text || '').trim()
   if (!raw) return null
 
   const expectedStarts = batch.map(p => p.startIndex)
-  const collect = (rows: unknown[]): Array<{ start_index: number; image_prompt: string }> | null => {
+  const collect = (rows: unknown[]): Array<{
+    start_index: number
+    image_prompt: string
+    subtitle_lines?: string[]
+  }> | null => {
     const normalized = rows.map(normalizeParagraphPromptRow).filter(Boolean) as Array<{
       start_index: number
       image_prompt: string
+      subtitle_lines?: string[]
     }>
     if (normalized.length === batch.length) return normalized
     const byStart = normalized.filter(r => expectedStarts.includes(r.start_index))
@@ -1420,8 +1433,15 @@ export type ParagraphPromptInput = {
   index: number
   startIndex: number
   sentences: string[]
+  /** 分镜 TTS 粒度原句（与 narration_lines 一一对应，用于 subtitle_lines） */
+  ttsSentences?: string[]
   layout: 'single' | 'diptych'
   sceneDescription?: string
+}
+
+function narrationEmphasisInImagePromptsEnabled(): boolean {
+  const mode = String(process.env.NARRATION_EMPHASIS_MODE || 'llm').trim().toLowerCase()
+  return !['off', '0', 'false', 'none', 'rules', 'rule'].includes(mode)
 }
 
 type CharacterPromptHint = {
@@ -1519,9 +1539,14 @@ export async function generateParagraphImagePromptsWithLLM(
     onBatchComplete?: (payload: {
       batch: ParagraphPromptInput[]
       promptsByStartIndex: Map<number, string>
+      subtitleLinesByStartIndex: Map<number, string[]>
     }) => void | Promise<void>
   },
-): Promise<{ titlePrompt: string | null; promptsByStartIndex: Map<number, string> } | null> {
+): Promise<{
+  titlePrompt: string | null
+  promptsByStartIndex: Map<number, string>
+  subtitleLinesByStartIndex: Map<number, string[]>
+} | null> {
   const style = options?.style || 'comic'
   const textModel = options?.textModel || null
   const textThinking = options?.textThinking ?? true
@@ -1532,7 +1557,7 @@ export async function generateParagraphImagePromptsWithLLM(
   const characters = options?.characters || []
   const promptBatchSize = resolveParagraphPromptBatchSize(options?.batchSize)
 
-  if (!paragraphs.length) return { titlePrompt: null, promptsByStartIndex: new Map() }
+  if (!paragraphs.length) return { titlePrompt: null, promptsByStartIndex: new Map(), subtitleLinesByStartIndex: new Map() }
 
   try {
     const config = getTextConfig(textModel)
@@ -1586,10 +1611,14 @@ export async function generateParagraphImagePromptsWithLLM(
       }))
 
     const paragraphOutputHint = episodeHasDiptych
-      ? '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；layout=single 按六维输出；layout=diptych 按【左格】【右格】各写完整六维'
-      : '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；按六维输出'
+      ? '[{ start_index: number, image_prompt: string, subtitle_lines?: string[] }]，长度与本批 paragraphs 相同；layout=single 按六维输出；layout=diptych 按【左格】【右格】各写完整六维'
+      : '[{ start_index: number, image_prompt: string, subtitle_lines?: string[] }]，长度与本批 paragraphs 相同；按六维输出'
+    const subtitleOutputHint = narrationEmphasisInImagePromptsEnabled()
+      ? '；subtitle_lines 与 tts_sentences 等长，每句原样或仅用 ** 包裹 1 个关键词（可不标），不得改字'
+      : ''
 
     const promptsByStartIndex = new Map<number, string>()
+    const subtitleLinesByStartIndex = new Map<number, string[]>()
     const reportProgress = options?.onProgress
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
@@ -1625,10 +1654,11 @@ export async function generateParagraphImagePromptsWithLLM(
           prior_narration: buildPriorNarrationLines(previousEpisodeNarration, fullBodyLines, p.startIndex),
           layout: p.layout,
           narration_lines: p.sentences,
+          tts_sentences: p.ttsSentences?.length ? p.ttsSentences : p.sentences,
           ...(p.sceneDescription ? { detect_scene_description: p.sceneDescription } : {}),
         })),
         output_format: {
-          paragraph_prompts: paragraphOutputHint,
+          paragraph_prompts: `${paragraphOutputHint}${subtitleOutputHint}`,
         },
       })
 
@@ -1700,7 +1730,8 @@ export async function generateParagraphImagePromptsWithLLM(
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i]
-        const startIndex = Number(row?.start_index ?? batch[i]?.startIndex)
+        const batchItem = batch.find(p => p.startIndex === Number(row?.start_index)) ?? batch[i]
+        const startIndex = Number(row?.start_index ?? batchItem?.startIndex)
         const prompt = String(row?.image_prompt || '').trim()
         if (!Number.isFinite(startIndex) || !prompt) {
           logTaskWarn('NarrationScene', 'llm-paragraph-prompt-row-invalid', {
@@ -1715,20 +1746,35 @@ export async function generateParagraphImagePromptsWithLLM(
         promptsByStartIndex.set(startIndex, options?.pureLlm
           ? prompt
           : resolveLLMImagePrompt(prompt, style, {
-            narrationLines: batch[i]?.sentences,
+            narrationLines: batchItem?.sentences,
             fullNarrationLines: options?.fullNarrationLines,
             timelineUpToIndex: startIndex,
             protagonistHints,
           }))
+
+        if (narrationEmphasisInImagePromptsEnabled() && batchItem) {
+          const ttsSentences = batchItem.ttsSentences?.length
+            ? batchItem.ttsSentences
+            : batchItem.sentences
+          const normalized = normalizeParagraphSubtitleLines(row.subtitle_lines, ttsSentences)
+          if (normalized?.length) subtitleLinesByStartIndex.set(startIndex, normalized)
+        }
       }
 
       const batchPrompts = new Map<number, string>()
+      const batchSubtitleLines = new Map<number, string[]>()
       for (const item of batch) {
         const p = promptsByStartIndex.get(item.startIndex)
         if (p) batchPrompts.set(item.startIndex, p)
+        const subs = subtitleLinesByStartIndex.get(item.startIndex)
+        if (subs?.length) batchSubtitleLines.set(item.startIndex, subs)
       }
       if (batchPrompts.size) {
-        await options?.onBatchComplete?.({ batch, promptsByStartIndex: batchPrompts })
+        await options?.onBatchComplete?.({
+          batch,
+          promptsByStartIndex: batchPrompts,
+          subtitleLinesByStartIndex: batchSubtitleLines,
+        })
       }
 
       reportProgress?.({
@@ -1753,7 +1799,7 @@ export async function generateParagraphImagePromptsWithLLM(
       paragraphCount: paragraphs.length,
       batchCount: batches.length,
     })
-    return { titlePrompt: null, promptsByStartIndex }
+    return { titlePrompt: null, promptsByStartIndex, subtitleLinesByStartIndex }
   } catch (err: any) {
     const message = String(err?.message || err || 'unknown error')
     logTaskError('NarrationScene', 'llm-paragraph-prompt-failed', { error: message })

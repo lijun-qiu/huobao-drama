@@ -16,6 +16,7 @@ export const DEFAULT_TEXT_THINKING = true
 
 export const TEXT_MODEL_OPTIONS = [
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent）' },
+  { value: 'qwen3.5-plus', label: 'Qwen 3.5 Plus · 思考+VLM（4022）' },
   { value: 'gpt-4o', label: 'GPT-4o · OpenAI 兼容' },
 ] as const
 
@@ -26,7 +27,12 @@ export function resolveEpisodeTextModel(ep?: { text_model?: string | null; textM
 
 export function textModelSupportsThinking(model?: string | null): boolean {
   const m = String(model || '').trim().toLowerCase()
-  return m.includes('deepseek')
+  return m.includes('deepseek') || m.includes('qwen3.5') || m.includes('qwen-3.5')
+}
+
+export function textModelSupportsVision(model?: string | null): boolean {
+  const m = String(model || '').trim().toLowerCase()
+  return m.includes('qwen3.5') || m.includes('qwen-3.5') || m.includes('gpt-4o')
 }
 
 export function resolveEpisodeTextThinking(

@@ -57,6 +57,15 @@ export const episodeAPI = {
   pipelineStatus: (id: number) => api.get(`/episodes/${id}/pipeline-status`),
   narrationStoryboardBreakdown: (id: number, options?: { script?: string }) =>
     api.post(`/episodes/${id}/narration-storyboard-breakdown`, options || {}),
+  narrationScriptChat: (
+    id: number,
+    data: {
+      messages: Array<{ role: 'user' | 'assistant'; content: string }>
+      text_model?: string
+      text_thinking?: boolean
+    },
+    options?: { signal?: AbortSignal },
+  ) => api.post(`/episodes/${id}/narration-script-chat`, data, options),
   narrationImageBreakdown: (
     id: number,
     options?: {
@@ -148,6 +157,8 @@ export const storyboardAPI = {
     api.post(`/storyboards/${id}/generate-tts`, options || {}),
   uploadTTS: (id: number, audioPath: string) =>
     api.post(`/storyboards/${id}/upload-tts`, { audio_path: audioPath }),
+  scanNarrationImage: (id: number, options?: { text_model?: string; text_thinking?: boolean }) =>
+    api.post(`/storyboards/${id}/scan-narration-image`, options || {}),
   resolveCharacters: (id: number) => api.post(`/storyboards/${id}/resolve-characters`, {}),
   del: (id: number) => api.del(`/storyboards/${id}`),
 }

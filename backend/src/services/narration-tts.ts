@@ -1,3 +1,4 @@
+import { stripEmphasisMarkers, limitEmphasisMarkers } from '../utils/subtitle-emphasis.js'
 import { isNarrationStoryboard, parseNarrationImageMeta, sortStoryboardsByOrder } from './narration-image.js'
 
 export type NarrationTtsMode = 'new' | 'inherit' | 'copy'
@@ -7,12 +8,16 @@ const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需
 
 export function parseDialogueForTTS(dialogue?: string | null) {
   const raw = dialogue?.trim() || ''
-  if (!raw) return { speaker: '', pureText: '', ignorable: true }
+  if (!raw) return { speaker: '', pureText: '', markedText: '', ignorable: true }
   const speakerMatch = raw.match(/^(.+?)[:：]/)
   const speaker = speakerMatch ? speakerMatch[1].replace(/[（(].+?[)）]/g, '').trim() : ''
-  const pureText = raw.replace(/^.+?[:：]\s*/, '').replace(/[（(].+?[)）]/g, '').replace(/\s+/g, ' ').trim()
+  const markedText = limitEmphasisMarkers(
+    raw.replace(/^.+?[:：]\s*/, '').replace(/[（(].+?[)）]/g, '').replace(/\s+/g, ' ').trim(),
+    1,
+  )
+  const pureText = stripEmphasisMarkers(markedText)
   const ignorable = (!!speaker && IGNORE_TTS_SPEAKERS.test(speaker)) || !pureText || IGNORE_TTS_TEXT.test(pureText)
-  return { speaker, pureText, ignorable }
+  return { speaker, pureText, markedText, ignorable }
 }
 
 /** 片头「剧中」叠字与旁白配音均用旁白角色音色 */

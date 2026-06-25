@@ -17,6 +17,7 @@ import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuc
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
+import { scanNarrationStoryboardImage } from '../services/narration-image-scan.js'
 
 const app = new Hono()
 
@@ -366,6 +367,21 @@ app.post('/:id/upload-tts', async (c) => {
 
   try {
     const result = await applyUploadedTtsToStoryboard(id, audioPath)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /storyboards/:id/scan-narration-image — VLM 扫描配图与旁白/文案一致性
+app.post('/:id/scan-narration-image', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  try {
+    const result = await scanNarrationStoryboardImage(id, {
+      textModel: body.text_model || body.textModel,
+      textThinking: body.text_thinking ?? body.textThinking,
+    })
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)

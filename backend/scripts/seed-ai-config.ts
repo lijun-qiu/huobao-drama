@@ -16,7 +16,7 @@ if (!apiKey) {
 }
 
 const PRESET_SERVICES = [
-  { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl, model: 'deepseek-v4-pro,gpt-4o', priority: 100 },
+  { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl, model: 'deepseek-v4-pro,qwen3.5-plus,gpt-4o', priority: 100 },
   { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl, model: 'gpt-image-2-all', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: `${baseUrl}/volcengine`, model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: `${baseUrl}/minimax`, model: 'speech-2.8-hd', priority: 97 },

@@ -442,7 +442,7 @@ try {
   `)
   sqlite.exec(`
     UPDATE ai_service_configs
-    SET model = '["deepseek-v4-pro","gpt-4o"]',
+    SET model = '["deepseek-v4-pro","qwen3.5-plus","gpt-4o"]',
         updated_at = datetime('now')
     WHERE service_type = 'text'
       AND (

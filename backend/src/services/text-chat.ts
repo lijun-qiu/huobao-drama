@@ -1,18 +1,28 @@
 /**
- * 文本 LLM 对话 — 统一封装 chat/completions，支持 DeepSeek / 4022 思考模式
+ * 文本 LLM 对话 — 统一封装 chat/completions，支持 DeepSeek / Qwen 思考模式（4022 代理）
  * @see https://api-docs.deepseek.com/guides/thinking_mode
+ * @see https://help.aliyun.com/zh/model-studio/deep-thinking
  */
 import { getTextConfig, getTextProviderBaseUrl } from './ai.js'
 import { joinProviderUrl } from './adapters/url.js'
 
 export type TextThinkingEffort = 'high' | 'max'
+export type TextThinkingFamily = 'deepseek' | 'qwen'
 
-/** 模型是否支持 DeepSeek 思考模式（thinking + reasoning_effort） */
-export function supportsTextThinkingMode(model?: string | null): boolean {
+/** Qwen 3.5 思考预算（token）；未设时由上游默认 */
+export const DEFAULT_QWEN_THINKING_BUDGET = 8192
+
+/** 解析模型思考模式族：DeepSeek 用 thinking+reasoning_effort，Qwen 3.5 用 enable_thinking */
+export function resolveTextThinkingFamily(model?: string | null): TextThinkingFamily | null {
   const m = String(model || '').trim().toLowerCase()
-  if (!m) return false
-  if (m.includes('deepseek')) return true
-  return false
+  if (!m) return null
+  if (m.includes('deepseek')) return 'deepseek'
+  if (m.includes('qwen3.5') || m.includes('qwen-3.5')) return 'qwen'
+  return null
+}
+
+export function supportsTextThinkingMode(model?: string | null): boolean {
+  return resolveTextThinkingFamily(model) != null
 }
 
 /** 为 chat/completions 请求体追加思考模式参数 */
@@ -22,10 +32,19 @@ export function appendTextThinkingOptions(
   effort: TextThinkingEffort = 'high',
   enabled = true,
 ): void {
-  if (!supportsTextThinkingMode(model)) return
-  body.thinking = { type: enabled ? 'enabled' : 'disabled' }
-  if (!enabled) return
-  body.reasoning_effort = effort
+  const family = resolveTextThinkingFamily(model)
+  if (!family) return
+
+  if (family === 'deepseek') {
+    body.thinking = { type: enabled ? 'enabled' : 'disabled' }
+    if (!enabled) return
+    body.reasoning_effort = effort
+  } else {
+    body.enable_thinking = enabled
+    if (!enabled) return
+    body.thinking_budget = DEFAULT_QWEN_THINKING_BUDGET
+  }
+
   // 思考模式下 temperature 等参数无效，去掉以免部分网关告警
   delete body.temperature
   delete body.top_p
@@ -164,6 +183,113 @@ export async function callTextChat(
 
   if (!resp.ok) {
     throw new Error(`Text API error ${resp.status}: ${await resp.text()}`)
+  }
+
+  const json = await resp.json() as { choices?: Array<{ message?: { content?: string | null } }> }
+  return extractChatCompletionText(json)
+}
+
+export type TextChatRole = 'system' | 'user' | 'assistant'
+
+export type TextChatMessage = {
+  role: TextChatRole
+  content: string
+}
+
+/** 多轮文本对话（剧本生成聊天等） */
+export async function callTextChatMessages(
+  messages: TextChatMessage[],
+  modelOverride?: string | null,
+  thinkingEnabled = true,
+  timeoutMs = 300_000,
+  temperature = 0.65,
+): Promise<string> {
+  const config = getTextConfig(modelOverride)
+  if (!config.apiKey) throw new Error('未配置文本模型 API Key')
+
+  const url = joinProviderUrl(getTextProviderBaseUrl(config), '/chat/completions', '')
+  const body: Record<string, unknown> = {
+    model: config.model,
+    messages: messages.map(m => ({ role: m.role, content: m.content })),
+    temperature,
+  }
+  appendTextThinkingOptions(body, config.model, 'high', thinkingEnabled)
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+
+  if (!resp.ok) {
+    throw new Error(`Text API error ${resp.status}: ${await resp.text()}`)
+  }
+
+  const json = await resp.json() as { choices?: Array<{ message?: { content?: string | null } }> }
+  return extractChatCompletionText(json)
+}
+
+export function supportsVisionTextModel(model?: string | null): boolean {
+  const m = String(model || '').trim().toLowerCase()
+  return m.includes('qwen3.5') || m.includes('qwen-3.5') || m.includes('gpt-4o')
+}
+
+type VisionContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
+/** 多模态对话（配图扫描等）；imageUrls 支持 http(s) 或 data:image/ */
+export async function callVisionChat(
+  system: string,
+  userText: string,
+  imageUrls: string[],
+  modelOverride?: string | null,
+  thinkingEnabled = true,
+  timeoutMs = 180_000,
+  jsonObject = false,
+): Promise<string> {
+  const config = getTextConfig(modelOverride)
+  if (!supportsVisionTextModel(config.model)) {
+    throw new Error(`模型 ${config.model} 不支持视觉输入，请选用 qwen3.5-plus 或 gpt-4o`)
+  }
+
+  const url = joinProviderUrl(getTextProviderBaseUrl(config), '/chat/completions', '')
+  const userContent: VisionContentPart[] = [
+    { type: 'text', text: userText },
+    ...imageUrls.filter(Boolean).map(imageUrl => ({
+      type: 'image_url' as const,
+      image_url: { url: imageUrl },
+    })),
+  ]
+  if (userContent.length < 2) throw new Error('缺少配图 URL')
+
+  const body: Record<string, unknown> = {
+    model: config.model,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: userContent },
+    ],
+    temperature: 0.2,
+  }
+  if (jsonObject) body.response_format = { type: 'json_object' }
+  appendTextThinkingOptions(body, config.model, 'high', thinkingEnabled)
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+
+  if (!resp.ok) {
+    throw new Error(`Vision API error ${resp.status}: ${await resp.text()}`)
   }
 
   const json = await resp.json() as { choices?: Array<{ message?: { content?: string | null } }> }

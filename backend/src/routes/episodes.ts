@@ -34,6 +34,7 @@ import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 import { splitNarrationAudioForEpisode, transcribeNarrationAudioFiles } from '../services/narration-audio-split.js'
 import { importNarrationImageDesc, importNarrationStoryboardDesc } from '../services/storyboard-desc-import.js'
+import { chatNarrationScript } from '../services/narration-script-chat.js'
 
 const app = new Hono()
 
@@ -303,6 +304,34 @@ app.post('/:id/transcribe-narration-audio', async (c) => {
 
   try {
     const result = await transcribeNarrationAudioFiles(audioPaths, episodeId)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/narration-script-chat — 体验人生解说稿聊天生成
+app.post('/:id/narration-script-chat', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const rawMessages = Array.isArray(body.messages) ? body.messages : []
+  const messages = rawMessages
+    .map((m: { role?: string; content?: string }) => ({
+      role: m?.role === 'assistant' ? 'assistant' as const : 'user' as const,
+      content: String(m?.content || ''),
+    }))
+    .filter((m: { content: string }) => m.content.trim())
+
+  try {
+    const result = await chatNarrationScript({
+      episodeId,
+      messages,
+      textModel: body.text_model ?? body.textModel,
+      textThinking: resolveEpisodeTextThinking(ep, body.text_thinking ?? body.textThinking),
+    })
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)

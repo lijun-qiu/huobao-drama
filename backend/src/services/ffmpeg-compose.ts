@@ -17,7 +17,7 @@ import { generateTTS } from './tts-generation.js'
 import { resolveEdgeVoice } from './edge-tts-local.js'
 import { resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
+import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, resolveStoryboardVisualSource, resolveStoryboardSubtitleNarration, sortStoryboardsByOrder } from './narration-image.js'
 import { deleteEpisodeAssetFileIfUnreferenced } from './storyboard-asset-replace.js'
 import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
@@ -25,6 +25,14 @@ import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText }
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
+import {
+  buildCombinedAssHeader,
+  buildNarrationEmphasisAssContent,
+  buildNarrationEmphasisAssDialogueLine,
+  buildNarrationPlainAssDialogueLine,
+  hasEmphasisMarkers,
+  stripSubtitlePunctuationPreservingEmphasis,
+} from '../utils/subtitle-emphasis.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -481,8 +489,19 @@ export async function renderSameImageGroupSegment(
 
   let offsetSec = 0
   let titleMode = false
-  const assDialogues: string[] = []
-  const srtBlocks: string[] = []
+  let narrationAssMode = false
+  type GroupSubtitleLine =
+    | { type: 'title'; text: string; startSec: number; endSec: number }
+    | {
+      type: 'narration'
+      displayText: string
+      markedText: string
+      startSec: number
+      endSec: number
+      durationSec: number
+      index: number
+    }
+  const subtitleLines: GroupSubtitleLine[] = []
   const audioPaths: string[] = []
   const shotDurationsSec: number[] = []
 
@@ -498,17 +517,27 @@ export async function renderSameImageGroupSegment(
 
     const durationSec = await probeMediaDuration(audioPath)
     shotDurationsSec.push(durationSec)
-    const text = stripSubtitlePunctuation(parsed.pureText)
+    const subtitleMarkedText = resolveStoryboardSubtitleNarration(sb)
+    const displayText = stripSubtitlePunctuationPreservingEmphasis(subtitleMarkedText)
     const startSec = isTitleShot
       ? offsetSec + TITLE_SUBTITLE_START_DELAY_SEC
       : offsetSec
     const endSec = offsetSec + Math.max(durationSec, 0.05)
 
-    if (text) {
+    if (displayText) {
       if (isTitleShot) {
-        assDialogues.push(buildTitleAssDialogueLine(text, startSec, endSec))
+        subtitleLines.push({ type: 'title', text: displayText, startSec, endSec })
       } else {
-        srtBlocks.push(buildNarrationSubtitleSrtBlock(text, startSec, durationSec, i + 1))
+        if (hasEmphasisMarkers(subtitleMarkedText)) narrationAssMode = true
+        subtitleLines.push({
+          type: 'narration',
+          displayText,
+          markedText: subtitleMarkedText,
+          startSec,
+          endSec,
+          durationSec,
+          index: i,
+        })
       }
     }
 
@@ -516,12 +545,31 @@ export async function renderSameImageGroupSegment(
     offsetSec += durationSec
   }
 
-  const subtitlePath = path.join(tempDir, `${uuid()}.${titleMode ? 'ass' : 'srt'}`)
-  fs.writeFileSync(
-    subtitlePath,
-    titleMode ? `${buildTitleAssHeader()}${assDialogues.join('\n')}\n` : srtBlocks.join('\n'),
-    'utf-8',
-  )
+  const useAssSubtitle = titleMode || narrationAssMode
+  const subtitlePath = path.join(tempDir, `${uuid()}.${useAssSubtitle ? 'ass' : 'srt'}`)
+  let subtitleContent: string
+  if (!useAssSubtitle) {
+    subtitleContent = subtitleLines
+      .filter((line): line is Extract<GroupSubtitleLine, { type: 'narration' }> => line.type === 'narration')
+      .map(line => buildNarrationSubtitleSrtBlock(line.displayText, line.startSec, line.durationSec, line.index + 1))
+      .join('\n')
+  } else {
+    const dialogueLines = subtitleLines.map(line => {
+      if (line.type === 'title') {
+        return buildTitleAssDialogueLine(line.text, line.startSec, line.endSec)
+      }
+      if (narrationAssMode && hasEmphasisMarkers(line.markedText)) {
+        return buildNarrationEmphasisAssDialogueLine(line.displayText, line.startSec, line.endSec)
+      }
+      return buildNarrationPlainAssDialogueLine(line.displayText, line.startSec, line.endSec)
+    })
+    subtitleContent = `${buildCombinedAssHeader({
+      includeTitleStyles: titleMode,
+      includeNarrationStyles: narrationAssMode || !titleMode,
+      titleFontName: TITLE_SUBTITLE_FONT,
+    })}${dialogueLines.join('\n')}\n`
+  }
+  fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
 
   const mergedAudioPath = path.join(tempDir, `${uuid()}.m4a`)
   await concatAudioFiles(audioPaths, mergedAudioPath)
@@ -708,18 +756,21 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       })
     }
 
-    // 2. 生成字幕：正文 SRT 底栏；片头 ASS 剧中红字整句居中
-    const subtitleText = parsedDialogue.pureText
-    const pureText = stripSubtitlePunctuation(subtitleText)
-    if (pureText && (!parsedDialogue.ignorable || isTitleShot)) {
+    // 2. 生成字幕：正文 SRT 底栏；含 **强调** 时用 ASS 黄字加大；片头 ASS 剧中红字
+    const subtitleMarkedText = resolveStoryboardSubtitleNarration(sb)
+    const displayText = stripSubtitlePunctuationPreservingEmphasis(subtitleMarkedText)
+    const useEmphasisAss = !isTitleShot && hasEmphasisMarkers(subtitleMarkedText)
+    if (displayText && (!parsedDialogue.ignorable || isTitleShot)) {
       const srtDir = path.join(STORAGE_ROOT, 'subtitles')
       fs.mkdirSync(srtDir, { recursive: true })
-      const subtitleFilename = `${uuid()}${isTitleShot ? '.ass' : '.srt'}`
+      const subtitleFilename = `${uuid()}${isTitleShot || useEmphasisAss ? '.ass' : '.srt'}`
       subtitlePath = path.join(srtDir, subtitleFilename)
 
       const subtitleContent = isTitleShot
-        ? buildTitleAssContent(pureText, clipDuration)
-        : buildNarrationSubtitleSrtBlock(pureText, 0, clipDuration)
+        ? buildTitleAssContent(displayText, clipDuration)
+        : useEmphasisAss
+          ? buildNarrationEmphasisAssContent(displayText, clipDuration)
+          : buildNarrationSubtitleSrtBlock(displayText, 0, clipDuration)
       fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
 
       const subtitleRelative = `static/subtitles/${subtitleFilename}`

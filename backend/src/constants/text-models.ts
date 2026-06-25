@@ -3,6 +3,7 @@ export const DEFAULT_TEXT_THINKING = true
 
 export const TEXT_MODEL_OPTIONS = [
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent）' },
+  { value: 'qwen3.5-plus', label: 'Qwen 3.5 Plus · 思考+VLM（4022）' },
   { value: 'gpt-4o', label: 'GPT-4o · OpenAI 兼容' },
 ] as const
 

@@ -122,10 +122,93 @@
               </button>
             </div>
           </div>
+
+          <div v-if="isNarrationMode" class="script-chat-panel">
+            <button type="button" class="script-chat-head" @click="scriptChatCollapsed = !scriptChatCollapsed">
+              <div class="script-chat-head-main">
+                <span class="script-chat-title">剧本生成</span>
+                <span class="dim">AI 对话 · 体验人生解说稿</span>
+              </div>
+              <span class="script-chat-chevron" :class="{ collapsed: scriptChatCollapsed }">▾</span>
+            </button>
+            <div v-show="!scriptChatCollapsed" class="script-chat-body">
+              <div class="script-chat-toolbar">
+                <span class="dim" style="font-size:12px">模型</span>
+                <BaseSelect
+                  :model-value="scriptChatModel"
+                  :options="textModelOptions"
+                  placeholder="选择模型"
+                  searchable
+                  style="width:280px"
+                  @update:model-value="v => scriptChatModel = v"
+                />
+                <div v-if="textModelSupportsThinking(scriptChatModel)" class="text-thinking-toggle">
+                  <span class="dim" style="font-size:12px">思考</span>
+                  <div class="prod-tabs text-thinking-tabs">
+                    <button type="button" class="prod-tab" :class="{ active: scriptChatThinking }" @click="scriptChatThinking = true">开</button>
+                    <button type="button" class="prod-tab" :class="{ active: !scriptChatThinking }" @click="scriptChatThinking = false">关</button>
+                  </div>
+                </div>
+                <button type="button" class="btn btn-sm ml-auto" :disabled="scriptChatGenerating" @click="clearScriptChat">清空对话</button>
+              </div>
+              <div ref="scriptChatScrollRef" class="script-chat-messages">
+                <div
+                  v-for="(msg, idx) in scriptChatMessages"
+                  :key="idx"
+                  :class="['script-chat-msg', msg.role === 'user' ? 'is-user' : 'is-assistant']"
+                >
+                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
+                  <div class="script-chat-msg-text">{{ msg.content }}</div>
+                </div>
+                <div v-if="scriptChatGenerating" class="script-chat-msg is-assistant">
+                  <span class="script-chat-msg-role">AI</span>
+                  <div class="script-chat-msg-text dim">
+                    <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
+                    正在生成…
+                  </div>
+                </div>
+              </div>
+              <div v-if="lastScriptChatDraft" class="script-chat-draft-actions">
+                <button type="button" class="btn btn-sm btn-primary" @click="applyScriptChatToEditor('replace')">填入下方文案</button>
+                <button type="button" class="btn btn-sm" @click="applyScriptChatToEditor('append')">追加到文案</button>
+              </div>
+              <div class="script-chat-hints">
+                <button
+                  v-for="hint in scriptChatQuickHints"
+                  :key="hint"
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="scriptChatGenerating"
+                  @click="scriptChatInput = hint"
+                >
+                  {{ hint.slice(0, 18) }}{{ hint.length > 18 ? '…' : '' }}
+                </button>
+              </div>
+              <div class="script-chat-compose">
+                <textarea
+                  v-model="scriptChatInput"
+                  class="script-chat-input"
+                  rows="2"
+                  placeholder="描述本期人生，例如：十八岁职高辍学，八十年代进城摆夜市摊…"
+                  :disabled="scriptChatGenerating"
+                  @keydown.enter.exact.prevent="sendScriptChat"
+                />
+                <button
+                  type="button"
+                  class="btn btn-primary script-chat-send"
+                  :disabled="scriptChatGenerating || !scriptChatInput.trim()"
+                  @click="sendScriptChat"
+                >
+                  发送
+                </button>
+              </div>
+            </div>
+          </div>
+
           <textarea
             class="fill-textarea"
             v-model="localRaw"
-            placeholder="粘贴小说原文、故事大纲或分镜描述..."
+            :placeholder="isNarrationMode ? '解说文案将显示在这里，可用上方「剧本生成」对话后点「填入下方文案」…' : '粘贴小说原文、故事大纲或分镜描述...'"
           />
           <div v-if="isNarrationMode" class="narration-hint" style="margin-top:12px">
             <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。
@@ -770,10 +853,10 @@
               </svg>
             </div>
             <div class="empty-title">{{ isNarrationMode ? '将解说文案拆解为旁白镜头' : '将剧本拆解为分镜序列' }}</div>
-            <div class="empty-desc">{{ isNarrationMode ? '按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
+            <div class="empty-desc">{{ isNarrationMode ? '按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示；强调词在配图分镜时标注' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
             <div v-if="!isNarrationMode" class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
             <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
-              <strong>旁白分镜：</strong>按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并），一句一镜（TTS 粒度）。配图段落与配图文案请在制作阶段单独执行「配图分镜」。
+              <strong>旁白分镜：</strong>按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并），一句一镜（TTS 粒度）。<code>**强调词**</code> 在「配图分镜 → 生成配图文案」时由 AI 一并标注，合成时黄字加大；也可在台词里手动改。配图段落与配图文案请在制作阶段单独执行「配图分镜」。
             </div>
             <div v-if="isNarrationMode" style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
               <span class="tag">旁白 TTS 分镜</span>
@@ -1976,6 +2059,15 @@
                     @click="triggerShotImageUpload(sb.id)"
                   >
                     上传图片
+                  </button>
+                  <button
+                    v-if="textModelSupportsVision(episodeTextModel) && hasNarrationShotImage(sb)"
+                    class="btn btn-sm"
+                    :disabled="pendingShotScanIds.includes(sb.id)"
+                    title="用 VLM 检查配图是否与旁白、配图文案一致"
+                    @click="scanNarrationShotImage(sb)"
+                  >
+                    {{ pendingShotScanIds.includes(sb.id) ? '扫描中' : '扫描配图' }}
                   </button>
                   <button
                     class="btn btn-sm"
@@ -3240,7 +3332,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { toast } from 'vue-sonner'
 import {
   Users, MapPin, Video, ImageIcon, Layers, Mic2, Music, FileText, FolderKanban, Clapperboard, Download, Film,
@@ -3268,6 +3360,7 @@ import {
   resolveEpisodeTextModel,
   resolveEpisodeTextThinking,
   textModelSupportsThinking,
+  textModelSupportsVision,
   BGM_MODEL_OPTIONS,
   DEFAULT_BGM_MODEL,
   bgmModelLabel,
@@ -3469,6 +3562,22 @@ const imageDetectBatchSize = ref(50)
 const imagePromptBatchSize = ref(6)
 
 const localRaw = ref(''), localScript = ref('')
+
+const SCRIPT_CHAT_WELCOME = '描述你想让观众体验的「一段人生」：年代、身份、核心转折。我会按火宝解说格式写稿（首行片头 hook + 正文旁白）。'
+const scriptChatCollapsed = ref(false)
+const scriptChatMessages = ref([{ role: 'assistant', content: SCRIPT_CHAT_WELCOME, local: true }])
+const scriptChatInput = ref('')
+const scriptChatGenerating = ref(false)
+const scriptChatModel = ref(DEFAULT_TEXT_MODEL)
+const scriptChatThinking = ref(DEFAULT_TEXT_THINKING)
+const scriptChatScrollRef = ref(null)
+const scriptChatAbortController = ref(null)
+const scriptChatQuickHints = [
+  '写一篇完整稿：八十年代进城摆夜市摊，从穷到翻身又跌入谷底',
+  '写一篇完整稿：九十年代小镇青年第一次进城打工',
+  '把下面大纲扩成完整解说稿：职高辍学→进厂→摆摊→被骗',
+  '语气更沉静一点，减少夸张词，重新写一版完整稿',
+]
 const rawContent = computed(() => episode.value?.content || '')
 const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
 const epId = computed(() => episode.value?.id || 0)
@@ -4101,6 +4210,7 @@ const pendingCharAppearanceIds = ref([])
 const pendingSceneImageIds = ref([])
 const pendingShotFrameKeys = ref([])
 const pendingNarrationShotIds = ref([])
+const pendingShotScanIds = ref([])
 const pendingVideoIds = ref([])
 const pendingComposeIds = ref([])
 const batchRunning = ref(new Set())
@@ -4703,6 +4813,7 @@ function syncEpisodeImageModel(ep) {
 
 function syncEpisodeTextModel(ep) {
   episodeTextModel.value = resolveEpisodeTextModel(ep)
+  scriptChatModel.value = episodeTextModel.value
 }
 
 function syncEpisodeTextThinking(ep) {
@@ -6316,6 +6427,88 @@ async function refresh() {
 }
 
 function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
+
+const lastScriptChatDraft = computed(() => {
+  for (let i = scriptChatMessages.value.length - 1; i >= 0; i--) {
+    const msg = scriptChatMessages.value[i]
+    if (msg.role === 'assistant' && !msg.local && String(msg.content || '').trim()) {
+      return String(msg.content).trim()
+    }
+  }
+  return ''
+})
+
+function extractScriptFromChat(text) {
+  const raw = String(text || '').trim()
+  const fenced = raw.match(/```(?:markdown|text)?\s*([\s\S]*?)```/i)
+  if (fenced?.[1]?.trim()) return fenced[1].trim()
+  const lines = raw.split('\n')
+  const idx = lines.findIndex(line => /^今天体验的人生剧本是/.test(line.trim()))
+  if (idx >= 0) return lines.slice(idx).join('\n').trim()
+  return raw
+}
+
+function scrollScriptChatToBottom() {
+  const el = scriptChatScrollRef.value
+  if (!el) return
+  el.scrollTop = el.scrollHeight
+}
+
+function clearScriptChat() {
+  if (scriptChatGenerating.value) scriptChatAbortController.value?.abort()
+  scriptChatMessages.value = [{ role: 'assistant', content: SCRIPT_CHAT_WELCOME, local: true }]
+  scriptChatInput.value = ''
+}
+
+function applyScriptChatToEditor(mode = 'replace') {
+  const draft = extractScriptFromChat(lastScriptChatDraft.value)
+  if (!draft) {
+    toast.warning('暂无可填入的解说稿')
+    return
+  }
+  if (mode === 'append' && localRaw.value.trim()) {
+    localRaw.value = `${localRaw.value.trim()}\n\n${draft}`
+  } else {
+    localRaw.value = draft
+  }
+  toast.success(mode === 'append' ? '已追加到下方文案' : '已填入下方文案')
+}
+
+async function sendScriptChat() {
+  const text = scriptChatInput.value.trim()
+  if (!text || scriptChatGenerating.value || !epId.value) return
+
+  scriptChatMessages.value.push({ role: 'user', content: text })
+  scriptChatInput.value = ''
+  scriptChatGenerating.value = true
+
+  const controller = new AbortController()
+  scriptChatAbortController.value = controller
+  await nextTick()
+  scrollScriptChatToBottom()
+
+  try {
+    const payloadMessages = scriptChatMessages.value
+      .filter(msg => !msg.local)
+      .map(({ role, content }) => ({ role, content }))
+
+    const res = await episodeAPI.narrationScriptChat(epId.value, {
+      messages: payloadMessages,
+      text_model: scriptChatModel.value,
+      text_thinking: scriptChatThinking.value,
+    }, { signal: controller.signal })
+
+    scriptChatMessages.value.push({ role: 'assistant', content: res?.reply || '' })
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    scriptChatGenerating.value = false
+    scriptChatAbortController.value = null
+    await nextTick()
+    scrollScriptChatToBottom()
+  }
+}
+
 function saveScr() { episodeAPI.update(epId.value, { script_content: localScript.value }); episode.value.script_content = localScript.value }
 async function saveNarrationScript() {
   const script = (localRaw.value || localScript.value || '').trim()
@@ -7414,6 +7607,36 @@ async function applyShotUploadedImage(sbId, path) {
     row.composed_image = path
     row.composedImage = path
     if (updates.reference_images) row.reference_images = updates.reference_images
+  }
+}
+
+async function scanNarrationShotImage(sb) {
+  if (!hasNarrationShotImage(sb)) {
+    toast.warning('请先上传或生成配图')
+    return
+  }
+  if (!textModelSupportsVision(episodeTextModel.value)) {
+    toast.warning('请先将文本模型设为 qwen3.5-plus 或 gpt-4o')
+    return
+  }
+  pendingShotScanIds.value.push(sb.id)
+  try {
+    const res = await storyboardAPI.scanNarrationImage(sb.id, {
+      text_model: episodeTextModel.value,
+      text_thinking: episodeTextThinking.value,
+    })
+    const score = res?.match_score ?? '—'
+    const summary = res?.summary || '扫描完成'
+    const issues = (res?.issues || []).filter(Boolean)
+    if (issues.length) {
+      toast.warning(`${summary}（${score}分）\n${issues.join('；')}`)
+    } else {
+      toast.success(`${summary}（${score}分）`)
+    }
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    pendingShotScanIds.value = pendingShotScanIds.value.filter(id => id !== sb.id)
   }
 }
 
@@ -10059,6 +10282,86 @@ onMounted(async () => {
   justify-content: center;
   padding: 4px 10px;
 }
+.script-chat-panel {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.script-chat-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: none;
+  background: var(--bg-2);
+  cursor: pointer;
+  text-align: left;
+}
+.script-chat-head-main { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.script-chat-title { font-size: 13px; font-weight: 700; color: var(--text-0); }
+.script-chat-chevron { color: var(--text-3); transition: transform 0.15s; font-size: 12px; }
+.script-chat-chevron.collapsed { transform: rotate(-90deg); }
+.script-chat-body { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 14px; min-height: 0; }
+.script-chat-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.script-chat-messages {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+}
+.script-chat-msg { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.6; }
+.script-chat-msg.is-user { flex-direction: row-reverse; }
+.script-chat-msg-role {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-3);
+  padding-top: 2px;
+  width: 20px;
+}
+.script-chat-msg-text {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.script-chat-msg.is-assistant .script-chat-msg-text {
+  background: var(--bg-2);
+  color: var(--text-1);
+}
+.script-chat-msg.is-user .script-chat-msg-text {
+  background: rgba(79, 195, 247, 0.12);
+  color: var(--text-0);
+}
+.script-chat-draft-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.script-chat-hints { display: flex; gap: 6px; flex-wrap: wrap; }
+.script-chat-compose { display: flex; gap: 8px; align-items: flex-end; }
+.script-chat-input {
+  flex: 1;
+  min-height: 56px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+  color: var(--text-0);
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.script-chat-input:focus { outline: none; border-color: var(--accent); }
+.script-chat-send { flex-shrink: 0; align-self: stretch; min-width: 72px; }
+.ml-auto { margin-left: auto; }
 .narration-hint {
   margin-bottom: 10px;
   padding: 10px 12px;

@@ -26,6 +26,7 @@ import {
 } from './narration-image-breakdown-progress.js'
 import { loadEpisodeContinuityContext } from './episode-continuity.js'
 import { now } from '../utils/response.js'
+import { applySubtitleLinesToStoryboards } from './narration-emphasis-apply.js'
 
 function storyboardNarrationSentence(sb: {
   description?: string | null
@@ -208,6 +209,7 @@ async function runNarrationImagePromptGeneration(
         index: para.index,
         startIndex: para.startIndex,
         sentences: mergeStoryboardLinesForImagePrompt(para.sentences),
+        ttsSentences: para.sentences,
         layout: para.layout,
         sceneDescription: para.sceneDescription,
       })),
@@ -221,17 +223,24 @@ async function runNarrationImagePromptGeneration(
         onProgress: reportProgress,
         pureLlm: true,
         batchSize: testBatchIndex != null ? targetParagraphs.length : promptBatchSize,
-        onBatchComplete: async ({ batch, promptsByStartIndex }) => {
+        onBatchComplete: async ({ batch, promptsByStartIndex, subtitleLinesByStartIndex }) => {
           const anchorMap = buildPromptAnchorMap(
             targetParagraphs.filter(p => batch.some(item => item.startIndex === p.startIndex)),
             promptsByStartIndex,
           )
           savePromptAnchorsOnly(ctx, allParagraphs, anchorMap)
+          applySubtitleLinesToStoryboards(ctx.orderedStoryboards, allParagraphs, subtitleLinesByStartIndex)
         },
       },
     )
 
     if (!llmPrompts) throw new Error('配图 AI 文案生成失败')
+
+    applySubtitleLinesToStoryboards(
+      ctx.orderedStoryboards,
+      allParagraphs,
+      llmPrompts.subtitleLinesByStartIndex,
+    )
 
     const stillMissing = targetParagraphs.filter(
       para => !String(llmPrompts.promptsByStartIndex.get(para.startIndex) || '').trim(),
