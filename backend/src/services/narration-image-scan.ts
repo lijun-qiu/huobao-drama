@@ -3,7 +3,7 @@
  */
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
+import { resolveEpisodeTextThinking, resolveNarrationImageTextModel } from '../constants/text-models.js'
 import { callVisionChat } from './text-chat.js'
 import { parseNarrationImageMeta, storyboardNeedsOwnImage } from './narration-image.js'
 import { readImageAsCompressedDataUrl } from '../utils/storage.js'
@@ -60,7 +60,7 @@ export async function scanNarrationStoryboardImage(
   if (!storyboardNeedsOwnImage(sb)) throw new Error('该镜头无需独立配图')
 
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
-  const textModel = resolveEpisodeTextModel(ep, options?.textModel)
+  const textModel = resolveNarrationImageTextModel(ep, options?.textModel)
   const textThinking = resolveEpisodeTextThinking(ep, options?.textThinking)
 
   const imagePath = String(sb.composedImage || '').trim()

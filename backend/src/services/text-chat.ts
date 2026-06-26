@@ -147,6 +147,104 @@ export function extractChatCompletionText(json: {
   return json.choices?.[0]?.message?.content || ''
 }
 
+function parseOpenAIStreamChunk(line: string): { content: string; reasoning: string } {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('data:')) return { content: '', reasoning: '' }
+  const payload = trimmed.slice(5).trim()
+  if (!payload || payload === '[DONE]') return { content: '', reasoning: '' }
+  try {
+    const json = JSON.parse(payload) as {
+      choices?: Array<{ delta?: {
+        content?: string | null
+        reasoning_content?: string | null
+        reasoning?: string | null
+      } }>
+    }
+    const delta = json.choices?.[0]?.delta
+    return {
+      content: String(delta?.content ?? ''),
+      reasoning: String(delta?.reasoning_content ?? delta?.reasoning ?? ''),
+    }
+  } catch {
+    return { content: '', reasoning: '' }
+  }
+}
+
+/** @deprecated 使用 parseOpenAIStreamChunk */
+function parseOpenAIStreamDataLine(line: string): string {
+  return parseOpenAIStreamChunk(line).content
+}
+
+/** 多轮文本对话流式输出；onDelta 收到正文累积全文；hooks.onThinkingDelta 收到思考过程 */
+export async function streamTextChatMessages(
+  messages: TextChatMessage[],
+  onDelta: (delta: string, full: string) => void,
+  modelOverride?: string | null,
+  thinkingEnabled = true,
+  timeoutMs = 300_000,
+  temperature = 0.65,
+  signal?: AbortSignal,
+  maxTokens?: number,
+  hooks?: { onThinkingDelta?: (delta: string, full: string) => void },
+): Promise<string> {
+  const config = getTextConfig(modelOverride)
+  if (!config.apiKey) throw new Error('未配置文本模型 API Key')
+
+  const url = joinProviderUrl(getTextProviderBaseUrl(config), '/chat/completions', '')
+  const body: Record<string, unknown> = {
+    model: config.model,
+    messages: messages.map(m => ({ role: m.role, content: m.content })),
+    temperature,
+    stream: true,
+  }
+  if (maxTokens != null) body.max_tokens = maxTokens
+  appendTextThinkingOptions(body, config.model, 'high', thinkingEnabled)
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: signal ?? AbortSignal.timeout(timeoutMs),
+  })
+
+  if (!resp.ok) {
+    throw new Error(`Text API error ${resp.status}: ${await resp.text()}`)
+  }
+  if (!resp.body) throw new Error('Text API 未返回流式 body')
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let full = ''
+  let fullReasoning = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+
+    for (const line of lines) {
+      const { content, reasoning } = parseOpenAIStreamChunk(line)
+      if (reasoning) {
+        fullReasoning += reasoning
+        hooks?.onThinkingDelta?.(reasoning, fullReasoning)
+      }
+      if (!content) continue
+      full += content
+      onDelta(content, full)
+    }
+  }
+
+  if (!full.trim()) throw new Error('AI 未返回内容')
+  return full.trim()
+}
+
 export async function callTextChat(
   system: string,
   user: string,
@@ -203,6 +301,7 @@ export async function callTextChatMessages(
   thinkingEnabled = true,
   timeoutMs = 300_000,
   temperature = 0.65,
+  maxTokens?: number,
 ): Promise<string> {
   const config = getTextConfig(modelOverride)
   if (!config.apiKey) throw new Error('未配置文本模型 API Key')
@@ -213,6 +312,7 @@ export async function callTextChatMessages(
     messages: messages.map(m => ({ role: m.role, content: m.content })),
     temperature,
   }
+  if (maxTokens != null) body.max_tokens = maxTokens
   appendTextThinkingOptions(body, config.model, 'high', thinkingEnabled)
 
   const resp = await fetch(url, {

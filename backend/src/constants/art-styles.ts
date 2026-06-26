@@ -274,6 +274,31 @@ export const NARRATION_TITLE_IMAGE_LLM_RULE =
 export const NARRATION_PREVIOUS_EPISODE_LLM_RULE =
   '若输入含 previous_episode_narration（上集正文旁白，按时间顺序），须先通读以理解人物、地点与剧情延续；full_narration 仅含本集旁白；needs_image / start_index 均只针对本集 sentences；prior_narration = previous_episode_narration + 本集锚点之前旁白'
 
+/** 旁白字幕关键词强调（独立 LLM 调用，不与配图六维混批） */
+export const NARRATION_SUBTITLE_EMPHASIS_LLM_RULE =
+  '为每句 tts_sentences 输出 subtitle_lines，与 tts_sentences 等长且逐句一一对应；不得改字删字增字，只允许用 ** 包裹 1 个连续词/数字；每句最多 1 处 **，无合适强调词则原句照抄；优先强调：金额/年龄/数字、转折词（终于/竟然/原来/其实）、核心名词、书名号「」内词'
+
+/** 组装「旁白字幕强调」独立 LLM system prompt */
+export function buildNarrationSubtitleEmphasisLLMSystem(): string {
+  return [
+    '你是解说视频字幕编辑，任务是为旁白逐句标注屏幕字幕强调词。',
+    NARRATION_SUBTITLE_EMPHASIS_LLM_RULE,
+    '只输出 JSON，格式：{"subtitle_results":[{"start_index":0,"subtitle_lines":["**22**岁…","第二句原文"]}]}',
+    'subtitle_results 长度须与本批 paragraphs 相同；不要 markdown，不要解释。',
+  ].join('\n')
+}
+
+/** 组装「解说稿第二阶段：整稿逐句加 **」LLM system prompt */
+export function buildNarrationScriptEmphasisLLMSystem(): string {
+  return [
+    '你是解说视频字幕编辑。输入是一批按顺序排列的旁白句子，输出 marked_sentences 数组。',
+    NARRATION_SUBTITLE_EMPHASIS_LLM_RULE,
+    '尽量每 2～3 句标 1 处 **，但每句仍最多 1 处；无合适强调词则原句照抄。',
+    '只输出 JSON：{"marked_sentences":["**22**岁…","第二句原文"]}',
+    'marked_sentences 长度必须与输入 sentences 完全相同；不要 markdown 标题/列表，不要解释。',
+  ].join('\n')
+}
+
 /** 组装「段落配图」LLM system prompt（素体 / 其他画风） */
 export function buildNarrationParagraphImagePromptLLMSystem(
   style?: string | null,

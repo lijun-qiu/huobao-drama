@@ -27,7 +27,11 @@ import {
   type NarrationImageBreakdownProgressCallback,
 } from './narration-image-breakdown-progress.js'
 import { buildPriorNarrationLines } from './episode-continuity.js'
-import { normalizeParagraphSubtitleLines } from './narration-emphasis-apply.js'
+import { ensureParagraphSubtitleLinesWithLLM, normalizeParagraphSubtitleLines } from './narration-emphasis-apply.js'
+import {
+  narrationEmphasisUsesLlm,
+  resolveNarrationEmphasisMode,
+} from '../utils/subtitle-emphasis.js'
 
 /** 场景段配图 prompt（单次调用）超时 */
 const SCENE_SEGMENTS_PROMPT_LLM_TIMEOUT_MS = 300_000
@@ -1439,11 +1443,6 @@ export type ParagraphPromptInput = {
   sceneDescription?: string
 }
 
-function narrationEmphasisInImagePromptsEnabled(): boolean {
-  const mode = String(process.env.NARRATION_EMPHASIS_MODE || 'llm').trim().toLowerCase()
-  return !['off', '0', 'false', 'none', 'rules', 'rule'].includes(mode)
-}
-
 type CharacterPromptHint = {
   name: string
   appearance?: string | null
@@ -1611,11 +1610,8 @@ export async function generateParagraphImagePromptsWithLLM(
       }))
 
     const paragraphOutputHint = episodeHasDiptych
-      ? '[{ start_index: number, image_prompt: string, subtitle_lines?: string[] }]，长度与本批 paragraphs 相同；layout=single 按六维输出；layout=diptych 按【左格】【右格】各写完整六维'
-      : '[{ start_index: number, image_prompt: string, subtitle_lines?: string[] }]，长度与本批 paragraphs 相同；按六维输出'
-    const subtitleOutputHint = narrationEmphasisInImagePromptsEnabled()
-      ? '；subtitle_lines 与 tts_sentences 等长，每句原样或仅用 ** 包裹 1 个关键词（可不标），不得改字'
-      : ''
+      ? '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；layout=single 按六维输出；layout=diptych 按【左格】【右格】各写完整六维'
+      : '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；按六维输出'
 
     const promptsByStartIndex = new Map<number, string>()
     const subtitleLinesByStartIndex = new Map<number, string[]>()
@@ -1658,7 +1654,7 @@ export async function generateParagraphImagePromptsWithLLM(
           ...(p.sceneDescription ? { detect_scene_description: p.sceneDescription } : {}),
         })),
         output_format: {
-          paragraph_prompts: `${paragraphOutputHint}${subtitleOutputHint}`,
+          paragraph_prompts: paragraphOutputHint,
         },
       })
 
@@ -1751,15 +1747,25 @@ export async function generateParagraphImagePromptsWithLLM(
             timelineUpToIndex: startIndex,
             protagonistHints,
           }))
+      }
 
-        if (narrationEmphasisInImagePromptsEnabled() && batchItem) {
-          const ttsSentences = batchItem.ttsSentences?.length
-            ? batchItem.ttsSentences
-            : batchItem.sentences
-          const normalized = normalizeParagraphSubtitleLines(row.subtitle_lines, ttsSentences)
-          if (normalized?.length) subtitleLinesByStartIndex.set(startIndex, normalized)
+      if (narrationEmphasisUsesLlm()) {
+        await ensureParagraphSubtitleLinesWithLLM(
+          batch.map(p => ({
+            startIndex: p.startIndex,
+            ttsSentences: p.ttsSentences?.length ? p.ttsSentences : p.sentences,
+          })),
+          subtitleLinesByStartIndex,
+          { textModel, textThinking: false },
+        )
+      } else if (resolveNarrationEmphasisMode() === 'rules') {
+        for (const p of batch) {
+          const ttsSentences = p.ttsSentences?.length ? p.ttsSentences : p.sentences
+          const normalized = normalizeParagraphSubtitleLines(undefined, ttsSentences)
+          if (normalized?.length) subtitleLinesByStartIndex.set(p.startIndex, normalized)
         }
       }
+      // script 模式：强调词已在解说稿/旁白分镜 ** 中，配图 LLM 不再标注 subtitle_lines
 
       const batchPrompts = new Map<number, string>()
       const batchSubtitleLines = new Map<number, string[]>()
@@ -1785,6 +1791,17 @@ export async function generateParagraphImagePromptsWithLLM(
         message: `第 ${batchIndex + 1}/${batches.length} 批配图文案已完成`,
         percent: calcPromptBatchPercent(batchIndex + 1, batches.length),
       })
+    }
+
+    if (narrationEmphasisUsesLlm()) {
+      await ensureParagraphSubtitleLinesWithLLM(
+        paragraphs.map(p => ({
+          startIndex: p.startIndex,
+          ttsSentences: p.ttsSentences?.length ? p.ttsSentences : p.sentences,
+        })),
+        subtitleLinesByStartIndex,
+        { textModel, textThinking: false },
+      )
     }
 
     if (paragraphs.length && promptsByStartIndex.size !== paragraphs.length) {

@@ -6,6 +6,7 @@ import {
   SCENE_STYLE_GUARD,
   type NarrationScenePromptOptions,
 } from '../constants/art-styles.js'
+import { ensureSentenceEmphasisMark } from '../utils/subtitle-emphasis.js'
 
 export type NarrationImageMode = 'new' | 'inherit' | 'copy'
 export type NarrationShotType = 'title' | 'normal'
@@ -137,7 +138,7 @@ export function patchNarrationImageMeta(
   return JSON.stringify({ ...raw, ...patch })
 }
 
-/** 合成烧录字幕：优先配图分镜写入的 subtitle_narration，否则回退 dialogue */
+/** 合成烧录字幕：优先 meta.subtitle_narration（LLM 标注）；否则 dialogue 原文 */
 export function resolveStoryboardSubtitleNarration(sb: {
   dialogue?: string | null
   referenceImages?: string | null
@@ -145,7 +146,8 @@ export function resolveStoryboardSubtitleNarration(sb: {
   const meta = parseNarrationImageMeta(sb.referenceImages)
   const stored = String(meta.subtitle_narration || '').trim()
   if (stored) return stored
-  return String(sb.dialogue || '').trim().replace(/^(旁白|剧中)[：:]\s*/, '')
+  const plain = String(sb.dialogue || '').trim().replace(/^(旁白|剧中)[：:]\s*/, '')
+  return ensureSentenceEmphasisMark(plain)
 }
 
 /** 汇总同一场景多句旁白的主要视觉内容 */

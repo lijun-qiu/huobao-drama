@@ -21,7 +21,7 @@ import {
 } from '../services/episode-asset-clear.js'
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
-import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
+import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel } from '../constants/text-models.js'
 import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration, parseOpeningPickedImages, buildOpeningPickedImagesZip, pickAndSaveOpeningImages } from '../services/ffmpeg-opening.js'
 import fs from 'fs'
 import { isTitleVideoProcessing, startTitleSegmentVideoGeneration } from '../services/ffmpeg-title-segment.js'
@@ -34,7 +34,7 @@ import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 import { splitNarrationAudioForEpisode, transcribeNarrationAudioFiles } from '../services/narration-audio-split.js'
 import { importNarrationImageDesc, importNarrationStoryboardDesc } from '../services/storyboard-desc-import.js'
-import { chatNarrationScript } from '../services/narration-script-chat.js'
+import { chatNarrationScript, emphasizeNarrationScriptDraft, streamChatNarrationScript } from '../services/narration-script-chat.js'
 
 const app = new Hono()
 
@@ -310,7 +310,7 @@ app.post('/:id/transcribe-narration-audio', async (c) => {
   }
 })
 
-// POST /episodes/:id/narration-script-chat — 体验人生解说稿聊天生成
+// POST /episodes/:id/narration-script-chat — 体验人生解说稿聊天生成（默认 SSE 流式）
 app.post('/:id/narration-script-chat', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const body = await c.req.json().catch(() => ({}))
@@ -325,14 +325,82 @@ app.post('/:id/narration-script-chat', async (c) => {
     }))
     .filter((m: { content: string }) => m.content.trim())
 
+  const chatParams = {
+    episodeId,
+    messages,
+    textModel: body.text_model ?? body.textModel,
+    textThinking: resolveEpisodeTextThinking(ep, body.text_thinking ?? body.textThinking),
+  }
+
+  const accept = String(c.req.header('accept') || '').toLowerCase()
+  const wantsStream = body.stream !== false && accept.includes('text/event-stream')
+
+  if (!wantsStream) {
+    try {
+      const result = await chatNarrationScript(chatParams)
+      return success(c, result)
+    } catch (err: any) {
+      return badRequest(c, err.message)
+    }
+  }
+
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (payload: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+      }
+
+      try {
+        const result = await streamChatNarrationScript(
+          chatParams,
+          (_delta, full) => send({ type: 'delta', content: full }),
+          c.req.raw.signal,
+          (_delta, full) => send({ type: 'thinking', content: full }),
+        )
+        send({
+          type: 'done',
+          reply: result.reply,
+          model: result.model,
+          text_thinking: result.text_thinking,
+        })
+        controller.close()
+      } catch (err: any) {
+        send({ type: 'error', message: String(err?.message || err || '生成失败') })
+        controller.close()
+      }
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    },
+  })
+})
+
+// POST /episodes/:id/narration-script-emphasis — 手动为解说稿标注字幕 ** 强调
+app.post('/:id/narration-script-emphasis', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const script = String(body.script || body.content || '').trim()
+  if (!script) return badRequest(c, '请提供解说稿正文')
+
   try {
-    const result = await chatNarrationScript({
-      episodeId,
-      messages,
+    const marked = await emphasizeNarrationScriptDraft(script, {
       textModel: body.text_model ?? body.textModel,
       textThinking: resolveEpisodeTextThinking(ep, body.text_thinking ?? body.textThinking),
     })
-    return success(c, result)
+    return success(c, {
+      script: marked,
+      model: resolveNarrationScriptChatTextModel(body.text_model ?? body.textModel),
+    })
   } catch (err: any) {
     return badRequest(c, err.message)
   }
@@ -437,6 +505,8 @@ app.post('/:id/narration-image-detect', async (c) => {
     void detectNarrationImageAnchors(episodeId, style, mode, {
       batchThreshold,
       batchSize,
+      textModel: body.text_model ?? body.textModel,
+      textThinking: body.text_thinking ?? body.textThinking,
     }).catch(() => {}).finally(() => {
       releaseNarrationImageBreakdownJob(episodeId)
     })
@@ -469,9 +539,12 @@ app.post('/:id/narration-image-prompts', async (c) => {
     const testBatchIndex = typeof body.test_batch_index === 'number'
       ? body.test_batch_index
       : undefined
-    const promptOptions = (promptBatchSize != null || testBatchIndex != null)
-      ? { batchSize: promptBatchSize, testBatchIndex }
-      : undefined
+    const promptOptions = {
+      ...(promptBatchSize != null ? { batchSize: promptBatchSize } : {}),
+      ...(testBatchIndex != null ? { testBatchIndex } : {}),
+      textModel: body.text_model ?? body.textModel,
+      textThinking: body.text_thinking ?? body.textThinking,
+    }
 
     if (!acquireNarrationImageBreakdownJob(episodeId)) {
       return badRequest(c, '配图任务进行中，请稍候')
@@ -573,6 +646,8 @@ app.post('/:id/narration-image-breakdown', async (c) => {
     const retryMissing = body.retry_missing_prompts === true
     const result = await breakdownNarrationImages(episodeId, style, mode, {
       retryMissingPrompts: retryMissing,
+      textModel: body.text_model ?? body.textModel,
+      textThinking: body.text_thinking ?? body.textThinking,
     })
     return success(c, result)
   } catch (err: any) {

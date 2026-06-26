@@ -1,6 +1,6 @@
 import { asc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
+import { resolveEpisodeTextThinking, resolveNarrationImageTextModel } from '../constants/text-models.js'
 import { resolveTitleVisualHook } from './narration-breakdown.js'
 import {
   buildNarrationImageMeta,
@@ -42,12 +42,16 @@ function preserveShotMeta(existing: ReturnType<typeof parseNarrationImageMeta>) 
   if (existing.narration_shot_type) extra.narration_shot_type = existing.narration_shot_type
   if (existing.title_hook) extra.title_hook = existing.title_hook
   if (existing.title_full) extra.title_full = existing.title_full
+  if (existing.subtitle_narration) extra.subtitle_narration = existing.subtitle_narration
+  if (typeof existing.body_sentence_index === 'number') extra.body_sentence_index = existing.body_sentence_index
   return extra
 }
 
 export type NarrationImageBreakdownOptions = {
   /** 仅对已有配图段、但 image_prompt 为空的镜头重新调用 AI（不重新换镜检测） */
   retryMissingPrompts?: boolean
+  textModel?: string | null
+  textThinking?: boolean | null
 }
 
 function rebuildParagraphFromAnchor(
@@ -125,6 +129,8 @@ export type NarrationImagePromptOptions = {
   batchSize?: number
   /** 测试：仅生成指定段批（从 1 起，按全量配图段落 + batchSize 划分） */
   testBatchIndex?: number
+  textModel?: string | null
+  textThinking?: boolean | null
 }
 
 function sliceParagraphBatchByIndex<T>(items: T[], batchSize: number, batchIndex: number): T[] {
@@ -143,7 +149,10 @@ async function runNarrationImagePromptGeneration(
   const promptBatchSize = resolveParagraphPromptBatchSize(options?.batchSize)
 
   try {
-    const ctx = loadEpisodeStoryboardContext(episodeId)
+    const ctx = loadEpisodeStoryboardContext(episodeId, {
+      textModel: options?.textModel,
+      textThinking: options?.textThinking,
+    })
     const { allParagraphs, pendingParagraphs, missingWithoutMeta } = collectPendingParagraphs(ctx)
 
     if (!allParagraphs.length) {
@@ -315,7 +324,10 @@ function countTitleImageAnchors(
   return paragraphs.filter(p => titleIndexes.has(p.startIndex)).length
 }
 
-function loadEpisodeStoryboardContext(episodeId: number) {
+function loadEpisodeStoryboardContext(
+  episodeId: number,
+  options?: { textModel?: string | null; textThinking?: boolean | null },
+) {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error('Episode not found')
 
@@ -343,8 +355,8 @@ function loadEpisodeStoryboardContext(episodeId: number) {
     sentenceItems,
     allSentences: sentenceItems.map(item => item.sentence),
     continuity: loadEpisodeContinuityContext(episodeId),
-    textModel: resolveEpisodeTextModel(ep),
-    textThinking: resolveEpisodeTextThinking(ep),
+    textModel: resolveNarrationImageTextModel(ep, options?.textModel),
+    textThinking: resolveEpisodeTextThinking(ep, options?.textThinking),
     episodeCharacters: getEpisodeVisualCharacters(episodeId, ep.dramaId),
   }
 }
@@ -497,13 +509,21 @@ export async function detectNarrationImageAnchors(
   episodeId: number,
   style = 'comic',
   imageDetectMode: ImageDetectMode = 'paragraph',
-  batchOptions?: { batchThreshold?: number; batchSize?: number },
+  batchOptions?: {
+    batchThreshold?: number
+    batchSize?: number
+    textModel?: string | null
+    textThinking?: boolean | null
+  },
 ) {
   startNarrationImageBreakdownProgress(episodeId)
   const reportProgress = createNarrationImageBreakdownProgressReporter(episodeId)
 
   try {
-    const ctx = loadEpisodeStoryboardContext(episodeId)
+    const ctx = loadEpisodeStoryboardContext(episodeId, {
+      textModel: batchOptions?.textModel,
+      textThinking: batchOptions?.textThinking,
+    })
     const { paragraphs, detectSource } = await buildNarrationParagraphsAsync(ctx.sentenceItems, {
       imageDetectMode,
       textModel: ctx.textModel,
@@ -584,10 +604,19 @@ export async function breakdownNarrationImages(
   options?: NarrationImageBreakdownOptions,
 ) {
   if (options?.retryMissingPrompts) {
-    return retryMissingNarrationImagePrompts(episodeId, style)
+    return retryMissingNarrationImagePrompts(episodeId, style, {
+      textModel: options.textModel,
+      textThinking: options.textThinking,
+    })
   }
-  const detect = await detectNarrationImageAnchors(episodeId, style, imageDetectMode)
+  const detect = await detectNarrationImageAnchors(episodeId, style, imageDetectMode, {
+    textModel: options?.textModel,
+    textThinking: options?.textThinking,
+  })
   if (!detect.paragraph_count) return detect
-  const prompts = await generateNarrationImagePromptsOnly(episodeId, style)
+  const prompts = await generateNarrationImagePromptsOnly(episodeId, style, {
+    textModel: options?.textModel,
+    textThinking: options?.textThinking,
+  })
   return { ...detect, ...prompts, image_breakdown_at: Date.now() }
 }

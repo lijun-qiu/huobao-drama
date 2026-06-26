@@ -13,6 +13,10 @@ export const DEFAULT_IMAGE_MODEL = 'gpt-image-2-all'
 
 export const DEFAULT_TEXT_MODEL = 'deepseek-v4-pro'
 export const DEFAULT_TEXT_THINKING = true
+/** 剧本生成对话默认模型 */
+export const DEFAULT_NARRATION_SCRIPT_CHAT_MODEL = 'qwen3.5-plus'
+/** 解说模式：配图等文本 LLM 默认模型 */
+export const DEFAULT_NARRATION_TEXT_MODEL = DEFAULT_NARRATION_SCRIPT_CHAT_MODEL
 
 export const TEXT_MODEL_OPTIONS = [
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent）' },
@@ -23,6 +27,23 @@ export const TEXT_MODEL_OPTIONS = [
 export function resolveEpisodeTextModel(ep?: { text_model?: string | null; textModel?: string | null } | null) {
   const picked = String(ep?.text_model || ep?.textModel || '').trim()
   return picked || DEFAULT_TEXT_MODEL
+}
+
+export function resolveNarrationEpisodeTextModel(
+  ep?: { text_model?: string | null; textModel?: string | null } | null,
+) {
+  const stored = String(ep?.text_model || ep?.textModel || '').trim()
+  if (stored && stored !== DEFAULT_TEXT_MODEL) return stored
+  return DEFAULT_NARRATION_TEXT_MODEL
+}
+
+export function resolveNarrationImageTextModel(
+  ep?: { text_model?: string | null; textModel?: string | null } | null,
+  bodyModel?: string | null,
+) {
+  const picked = String(bodyModel || '').trim()
+  if (picked) return picked
+  return resolveNarrationEpisodeTextModel(ep)
 }
 
 export function textModelSupportsThinking(model?: string | null): boolean {
@@ -860,6 +881,7 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
         id: 'script',
         label: '解说',
         items: [
+          { key: 'script:chat', label: '剧本生成', desc: 'AI 写解说稿', done: s.rawContent },
           { key: 'script:raw', label: '文案输入', desc: '粘贴解说稿', done: s.rawContent },
           { key: 'script:storyboard', label: '旁白分镜', desc: '拆成镜头', done: s.sbsCount > 0 },
         ],
@@ -890,8 +912,16 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
   return null
 }
 
-export function narrationStoryboardStep() {
+export function narrationScriptChatStep() {
+  return 0
+}
+
+export function narrationRawContentStep() {
   return 1
+}
+
+export function narrationStoryboardStep() {
+  return 2
 }
 
 export function dramaStoryboardStep() {
@@ -900,9 +930,10 @@ export function dramaStoryboardStep() {
 
 export function resolveScriptStep(mode: ProductionMode, key: string) {
   if (mode === 'narration') {
-    if (key === 'script:raw') return 0
-    if (key === 'script:storyboard') return 1
-    return 0
+    if (key === 'script:chat') return narrationScriptChatStep()
+    if (key === 'script:raw') return narrationRawContentStep()
+    if (key === 'script:storyboard') return narrationStoryboardStep()
+    return narrationScriptChatStep()
   }
   const stepMap: Record<string, number> = {
     'script:raw': 0,
@@ -928,8 +959,9 @@ export function resolveActiveSubStepKey(
   }
   if (panel === 'production') return `prod:${prodTab}`
   if (mode === 'narration') {
-    if (scriptStep === 1) return 'script:storyboard'
-    return 'script:raw'
+    if (scriptStep === narrationStoryboardStep()) return 'script:storyboard'
+    if (scriptStep === narrationRawContentStep()) return 'script:raw'
+    return 'script:chat'
   }
   if (scriptStep === 0) return 'script:raw'
   if (scriptStep === 1) return 'script:rewrite'
@@ -939,7 +971,7 @@ export function resolveActiveSubStepKey(
 }
 
 export function inferNarrationScriptStep(ep: any, sbsCount: number, _charsCount: number) {
-  if (sbsCount > 0) return 1
-  if (ep?.content || ep?.script_content || ep?.scriptContent) return 0
-  return 0
+  if (sbsCount > 0) return narrationStoryboardStep()
+  if (ep?.content || ep?.script_content || ep?.scriptContent) return narrationRawContentStep()
+  return narrationScriptChatStep()
 }

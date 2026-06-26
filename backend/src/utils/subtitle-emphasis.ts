@@ -1,3 +1,59 @@
+export function resolveNarrationEmphasisMode(): 'off' | 'rules' | 'llm' | 'script' {
+  const mode = String(process.env.NARRATION_EMPHASIS_MODE || 'script').trim().toLowerCase()
+  if (['off', '0', 'false', 'none'].includes(mode)) return 'off'
+  if (['rules', 'rule'].includes(mode)) return 'rules'
+  if (['llm'].includes(mode)) return 'llm'
+  return 'script'
+}
+
+export function narrationEmphasisEnabled(): boolean {
+  return resolveNarrationEmphasisMode() !== 'off'
+}
+
+export function narrationEmphasisUsesLlm(): boolean {
+  return resolveNarrationEmphasisMode() === 'llm'
+}
+
+/** 强调词由解说稿/分镜 ** 提供，配图 LLM 不再标注 */
+export function narrationEmphasisFromScript(): boolean {
+  return resolveNarrationEmphasisMode() === 'script'
+}
+
+/** 从分镜句提取烧录字幕（含 ** 时写入 meta.subtitle_narration） */
+export function ensureSentenceEmphasisMark(sentence: string): string {
+  const text = String(sentence || '').trim()
+  if (!text || !narrationEmphasisEnabled()) return text
+  if (hasEmphasisMarkers(text)) return limitEmphasisMarkers(text, 1)
+  const mode = resolveNarrationEmphasisMode()
+  if (mode === 'off' || mode === 'llm') return text
+  return limitEmphasisMarkers(markEmphasisHeuristic(text, 1), 1)
+}
+
+/** 为解说稿正文逐句补 ** 强调（跳过片头 hook，由调用方只传 body） */
+export function ensureScriptEmphasisInBody(body: string): string {
+  if (!body.trim() || !narrationEmphasisEnabled()) return body
+  const mode = resolveNarrationEmphasisMode()
+  if (mode === 'off' || mode === 'llm') return body
+
+  const paragraphs = body.replace(/\r\n/g, '\n').trim().split(/\n\s*\n+/)
+  return paragraphs.map((paragraph) => {
+    const trimmed = paragraph.trim()
+    if (!trimmed) return paragraph
+    return trimmed.replace(/[^。！？!?\n]+[。！？!?]?/g, (segment) => {
+      const core = segment.trim()
+      if (!core || core.length < 3) return segment
+      const marked = ensureSentenceEmphasisMark(core)
+      return segment.replace(core, marked)
+    })
+  }).join('\n\n')
+}
+
+export function resolveSubtitleNarrationFromSentence(sentence: string): string | undefined {
+  const marked = ensureSentenceEmphasisMark(sentence)
+  if (!hasEmphasisMarkers(marked)) return undefined
+  return marked
+}
+
 /** 旁白字幕强调：分镜 dialogue 中用 **词** 标记，合成时黄色并加大字号 */
 
 export const NARRATION_SUBTITLE_FONT_SIZE = 20

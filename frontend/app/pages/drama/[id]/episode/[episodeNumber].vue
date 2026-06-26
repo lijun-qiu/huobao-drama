@@ -105,33 +105,23 @@
 
       <!-- ===== SCRIPT PANEL ===== -->
       <div v-if="panel === 'script'" class="content-panel">
-        <!-- Step 0: Raw Content -->
-        <div v-if="scriptStep === 0" class="step-editor">
+        <!-- Step 0: AI Script Chat (narration) / Raw Content (drama) -->
+        <div v-if="isNarrationMode && scriptStep === 0" class="step-editor script-chat-step">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
                 <span class="step-num">01</span>
-                <span class="step-name">{{ isNarrationMode ? '解说文案' : '原始内容' }}</span>
+                <span class="step-name">剧本生成</span>
               </div>
+              <span class="dim" style="font-size:12px;margin-left:8px">AI 对话 · 体验人生解说稿</span>
             </div>
             <div class="toolbar-right">
-              <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
-              <button class="btn btn-sm" @click="saveRaw(); toast.success('已保存')">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                保存
-              </button>
+              <button type="button" class="btn btn-sm" :disabled="scriptChatGenerating" @click="clearScriptChat">清空对话</button>
             </div>
           </div>
 
-          <div v-if="isNarrationMode" class="script-chat-panel">
-            <button type="button" class="script-chat-head" @click="scriptChatCollapsed = !scriptChatCollapsed">
-              <div class="script-chat-head-main">
-                <span class="script-chat-title">剧本生成</span>
-                <span class="dim">AI 对话 · 体验人生解说稿</span>
-              </div>
-              <span class="script-chat-chevron" :class="{ collapsed: scriptChatCollapsed }">▾</span>
-            </button>
-            <div v-show="!scriptChatCollapsed" class="script-chat-body">
+          <div class="script-chat-panel script-chat-panel-full">
+            <div class="script-chat-body">
               <div class="script-chat-toolbar">
                 <span class="dim" style="font-size:12px">模型</span>
                 <BaseSelect
@@ -149,7 +139,6 @@
                     <button type="button" class="prod-tab" :class="{ active: !scriptChatThinking }" @click="scriptChatThinking = false">关</button>
                   </div>
                 </div>
-                <button type="button" class="btn btn-sm ml-auto" :disabled="scriptChatGenerating" @click="clearScriptChat">清空对话</button>
               </div>
               <div ref="scriptChatScrollRef" class="script-chat-messages">
                 <div
@@ -158,19 +147,38 @@
                   :class="['script-chat-msg', msg.role === 'user' ? 'is-user' : 'is-assistant']"
                 >
                   <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
-                  <div class="script-chat-msg-text">{{ msg.content }}</div>
-                </div>
-                <div v-if="scriptChatGenerating" class="script-chat-msg is-assistant">
-                  <span class="script-chat-msg-role">AI</span>
-                  <div class="script-chat-msg-text dim">
-                    <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
-                    正在生成…
+                  <div class="script-chat-msg-text">
+                    <template v-if="msg.role === 'assistant' && scriptChatGenerating && idx === scriptChatMessages.length - 1 && !msg.content && !msg.thinking">
+                      <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
+                      <span class="dim">{{ scriptChatThinking ? '等待思考…' : '正在生成…' }}</span>
+                    </template>
+                    <template v-else>
+                      <div v-if="msg.thinking" class="script-chat-thinking">
+                        <div class="script-chat-thinking-label">思考过程</div>
+                        <div class="script-chat-thinking-body">{{ msg.thinking }}</div>
+                      </div>
+                      <div v-if="msg.content" class="script-chat-reply">{{ msg.content }}</div>
+                      <div
+                        v-else-if="msg.role === 'assistant' && scriptChatGenerating && idx === scriptChatMessages.length - 1 && msg.thinking"
+                        class="dim script-chat-writing-hint"
+                      >
+                        正在写稿…
+                      </div>
+                    </template>
                   </div>
                 </div>
               </div>
               <div v-if="lastScriptChatDraft" class="script-chat-draft-actions">
-                <button type="button" class="btn btn-sm btn-primary" @click="applyScriptChatToEditor('replace')">填入下方文案</button>
-                <button type="button" class="btn btn-sm" @click="applyScriptChatToEditor('append')">追加到文案</button>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="scriptChatGenerating || scriptChatEmphasizing"
+                  @click="doScriptChatEmphasis"
+                >
+                  {{ scriptChatEmphasizing ? '标注中…' : '标注字幕强调（**）' }}
+                </button>
+                <button type="button" class="btn btn-sm btn-primary" :disabled="scriptChatGenerating || scriptChatEmphasizing" @click="applyScriptChatToEditor('replace', true)">填入文案并编辑</button>
+                <button type="button" class="btn btn-sm" :disabled="scriptChatGenerating || scriptChatEmphasizing" @click="applyScriptChatToEditor('append', true)">追加到文案</button>
               </div>
               <div class="script-chat-hints">
                 <button
@@ -178,7 +186,7 @@
                   :key="hint"
                   type="button"
                   class="btn btn-sm"
-                  :disabled="scriptChatGenerating"
+                  :disabled="scriptChatGenerating || scriptChatEmphasizing"
                   @click="scriptChatInput = hint"
                 >
                   {{ hint.slice(0, 18) }}{{ hint.length > 18 ? '…' : '' }}
@@ -188,15 +196,15 @@
                 <textarea
                   v-model="scriptChatInput"
                   class="script-chat-input"
-                  rows="2"
+                  rows="3"
                   placeholder="描述本期人生，例如：十八岁职高辍学，八十年代进城摆夜市摊…"
-                  :disabled="scriptChatGenerating"
+                  :disabled="scriptChatGenerating || scriptChatEmphasizing"
                   @keydown.enter.exact.prevent="sendScriptChat"
                 />
                 <button
                   type="button"
                   class="btn btn-primary script-chat-send"
-                  :disabled="scriptChatGenerating || !scriptChatInput.trim()"
+                  :disabled="scriptChatGenerating || scriptChatEmphasizing || !scriptChatInput.trim()"
                   @click="sendScriptChat"
                 >
                   发送
@@ -204,13 +212,56 @@
               </div>
             </div>
           </div>
+        </div>
+
+        <div v-else-if="!isNarrationMode && scriptStep === 0" class="step-editor">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">01</span>
+                <span class="step-name">原始内容</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
+              <button class="btn btn-sm" @click="saveRaw(); toast.success('已保存')">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                保存
+              </button>
+            </div>
+          </div>
 
           <textarea
             class="fill-textarea"
             v-model="localRaw"
-            :placeholder="isNarrationMode ? '解说文案将显示在这里，可用上方「剧本生成」对话后点「填入下方文案」…' : '粘贴小说原文、故事大纲或分镜描述...'"
+            placeholder="粘贴小说原文、故事大纲或分镜描述..."
           />
-          <div v-if="isNarrationMode" class="narration-hint" style="margin-top:12px">
+        </div>
+
+        <!-- Step 1: Raw Content (narration) -->
+        <div v-else-if="isNarrationMode && scriptStep === 1" class="step-editor">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">02</span>
+                <span class="step-name">文案输入</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
+              <button class="btn btn-sm" @click="saveRaw(); toast.success('已保存')">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                保存
+              </button>
+            </div>
+          </div>
+
+          <textarea
+            class="fill-textarea"
+            v-model="localRaw"
+            placeholder="粘贴解说文案，或在「剧本生成」写稿后点「填入文案并编辑」…"
+          />
+          <div class="narration-hint" style="margin-top:12px">
             <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。
           </div>
         </div>
@@ -491,7 +542,7 @@
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
-                <span class="step-num">{{ isNarrationMode ? '02' : '05' }}</span>
+                <span class="step-num">{{ isNarrationMode ? '03' : '05' }}</span>
                 <span class="step-name">{{ isNarrationMode ? '旁白分镜' : '分镜列表' }}</span>
               </div>
             </div>
@@ -853,10 +904,10 @@
               </svg>
             </div>
             <div class="empty-title">{{ isNarrationMode ? '将解说文案拆解为旁白镜头' : '将剧本拆解为分镜序列' }}</div>
-            <div class="empty-desc">{{ isNarrationMode ? '按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示；强调词在配图分镜时标注' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
+            <div class="empty-desc">{{ isNarrationMode ? '按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示；**强调词** 在剧本生成时标注，分镜保留' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
             <div v-if="!isNarrationMode" class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
             <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
-              <strong>旁白分镜：</strong>按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并），一句一镜（TTS 粒度）。<code>**强调词**</code> 在「配图分镜 → 生成配图文案」时由 AI 一并标注，合成时黄字加大；也可在台词里手动改。配图段落与配图文案请在制作阶段单独执行「配图分镜」。
+              <strong>旁白分镜：</strong>按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并），一句一镜（TTS 粒度）。<code>**强调词**</code> 请在「剧本生成」时用 ** 包裹，分镜会保留并写入烧录字幕；TTS 仍读纯文本。配图分镜只生成画面 prompt，不再单独标关键词。
             </div>
             <div v-if="isNarrationMode" style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
               <span class="tag">旁白 TTS 分镜</span>
@@ -3377,7 +3428,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { toast } from 'vue-sonner'
 import {
-  Users, MapPin, Video, ImageIcon, Layers, Mic2, Music, FileText, FolderKanban, Clapperboard, Download, Film,
+  Users, MapPin, Video, ImageIcon, Layers, Mic2, Music, FileText, FolderKanban, Clapperboard, Download, Film, Sparkles,
 } from 'lucide-vue-next'
 import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, musicAPI, uploadAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
@@ -3396,10 +3447,12 @@ import {
   extractNarrationSentence,
   DEFAULT_IMAGE_MODEL,
   DEFAULT_TEXT_MODEL,
+  DEFAULT_NARRATION_SCRIPT_CHAT_MODEL,
   DEFAULT_TEXT_THINKING,
   IMAGE_MODEL_OPTIONS,
   TEXT_MODEL_OPTIONS,
   resolveEpisodeTextModel,
+  resolveNarrationEpisodeTextModel,
   resolveEpisodeTextThinking,
   textModelSupportsThinking,
   textModelSupportsVision,
@@ -3441,6 +3494,8 @@ import {
   findDramaStyleAnchorCharacter,
   sortCharactersForPortraitGeneration,
   dramaStoryboardStep,
+  narrationScriptChatStep,
+  narrationRawContentStep,
   narrationStoryboardStep,
 } from '~/composables/useEpisodeWorkflow'
 import { artStyleLabel } from '~/composables/useArtStyles'
@@ -3605,20 +3660,20 @@ const imagePromptBatchSize = ref(6)
 
 const localRaw = ref(''), localScript = ref('')
 
-const SCRIPT_CHAT_WELCOME = '描述你想让观众体验的「一段人生」：年代、身份、核心转折。我会按火宝解说格式写稿（首行片头 hook + 正文旁白）。'
-const scriptChatCollapsed = ref(false)
+const SCRIPT_CHAT_WELCOME = '描述你想让观众体验的「一段人生」。默认第二人称「你」、语言亲民真实；完整稿 3000～10000 字，时间跨度随题材（不必写满青年中年老年）。生成后可点「标注字幕强调」加 ** 黄字。首行以「今天体验的人生剧本是，」开头。'
 const scriptChatMessages = ref([{ role: 'assistant', content: SCRIPT_CHAT_WELCOME, local: true }])
 const scriptChatInput = ref('')
 const scriptChatGenerating = ref(false)
-const scriptChatModel = ref(DEFAULT_TEXT_MODEL)
+const scriptChatEmphasizing = ref(false)
+const scriptChatModel = ref(DEFAULT_NARRATION_SCRIPT_CHAT_MODEL)
 const scriptChatThinking = ref(DEFAULT_TEXT_THINKING)
 const scriptChatScrollRef = ref(null)
 const scriptChatAbortController = ref(null)
 const scriptChatQuickHints = [
-  '写一篇完整稿：八十年代进城摆夜市摊，从穷到翻身又跌入谷底',
-  '写一篇完整稿：九十年代小镇青年第一次进城打工',
-  '把下面大纲扩成完整解说稿：职高辍学→进厂→摆摊→被骗',
-  '语气更沉静一点，减少夸张词，重新写一版完整稿',
+  '写一篇完整稿（3000～10000 字）：八十年代进城摆夜市摊，从穷到翻身又跌入谷底，写足内心活动',
+  '写一篇完整稿（3000～10000 字）：九十年代小镇青年第一次进城打工，犹豫与期待交织',
+  '把下面大纲扩成 3000～10000 字完整解说稿：职高辍学→进厂→摆摊→被骗',
+  '语气更沉静、更亲民，补内心戏，扩写到 3000 字以上',
 ]
 const rawContent = computed(() => episode.value?.content || '')
 const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
@@ -4884,8 +4939,16 @@ function syncEpisodeImageModel(ep) {
 }
 
 function syncEpisodeTextModel(ep) {
-  episodeTextModel.value = resolveEpisodeTextModel(ep)
-  scriptChatModel.value = episodeTextModel.value
+  episodeTextModel.value = isNarrationMode.value
+    ? resolveNarrationEpisodeTextModel(ep)
+    : resolveEpisodeTextModel(ep)
+}
+
+function narrationTextModelParams() {
+  return {
+    text_model: episodeTextModel.value,
+    text_thinking: episodeTextThinking.value,
+  }
 }
 
 function syncEpisodeTextThinking(ep) {
@@ -5171,7 +5234,7 @@ function goNextProd() {
 
 // Script step navigation
 const stepLabels = computed(() => isNarrationMode.value
-  ? ['解说文案', '旁白分镜']
+  ? ['剧本生成', '文案输入', '旁白分镜']
   : ['原始内容', 'AI 改写', '提取', '音色', '分镜'])
 const prevStepLabel = computed(() => scriptStep.value > 0 ? stepLabels.value[scriptStep.value - 1] : '')
 const nextStepLabel = computed(() => {
@@ -5179,8 +5242,10 @@ const nextStepLabel = computed(() => {
   return stepLabels.value[scriptStep.value + 1] || ''
 })
 const canGoNext = computed(() => {
+  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep()) return true
+  if (isNarrationMode.value && scriptStep.value === narrationRawContentStep()) return !!localRaw.value.trim()
+  if (isNarrationMode.value && scriptStep.value === narrationStoryboardStep()) return sbs.value.length > 0
   if (scriptStep.value === 0) return !!localRaw.value.trim()
-  if (isNarrationMode.value && scriptStep.value === 1) return sbs.value.length > 0
   if (scriptStep.value === 1) return !!localScript.value.trim() || !!scriptContent.value
   if (scriptStep.value === 2) return chars.value.length > 0
   if (scriptStep.value === 3) return charsVoiced.value > 0
@@ -5189,12 +5254,13 @@ const canGoNext = computed(() => {
 })
 function goPrevStep() { if (scriptStep.value > 0) scriptStep.value-- }
 function goNextStep() {
-  if (scriptStep.value === 0 && localRaw.value.trim()) {
+  if (isNarrationMode.value && scriptStep.value === narrationRawContentStep() && localRaw.value.trim()) {
     saveRaw()
-    if (isNarrationMode.value) {
-      localScript.value = localRaw.value
-      saveScr()
-    }
+    localScript.value = localRaw.value
+    saveScr()
+  }
+  if (!isNarrationMode.value && scriptStep.value === 0 && localRaw.value.trim()) {
+    saveRaw()
   }
   if (!isNarrationMode.value && scriptStep.value === 1 && localScript.value.trim()) { saveScr() }
   if (scriptStep.value === storyboardStep.value) {
@@ -5973,6 +6039,7 @@ const workflowState = computed(() => ({
 
 const narrationIconMap = {
   'script:raw': FileText,
+  'script:chat': Sparkles,
   'script:storyboard': Clapperboard,
   'prod:voice': Mic2,
   'prod:chars': Users,
@@ -6104,6 +6171,7 @@ const activeSubSteps = computed(() => {
   if (isNarrationMode.value) {
     if (panel.value === 'script') {
       return [
+        { key: 'script:chat', label: '剧本生成', done: !!rawContent.value },
         { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
         { key: 'script:storyboard', label: '旁白分镜', done: !!sbs.value.length },
       ]
@@ -6164,6 +6232,13 @@ const sidebarJumpSteps = computed(() => {
 
 const bubbleSteps = computed(() => {
   if (panel.value === 'script') {
+    if (isNarrationMode.value) {
+      return [
+        { key: 'script:chat', label: '剧本生成', done: !!rawContent.value },
+        { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
+        { key: 'script:storyboard', label: '旁白分镜', done: !!sbs.value.length },
+      ]
+    }
     return [
       { key: 'script:raw', label: '原始内容', done: !!rawContent.value },
       { key: 'script:rewrite', label: 'AI 改写', done: !!scriptContent.value },
@@ -6600,7 +6675,7 @@ function clearScriptChat() {
   scriptChatInput.value = ''
 }
 
-function applyScriptChatToEditor(mode = 'replace') {
+function applyScriptChatToEditor(mode = 'replace', navigateToRaw = false) {
   const draft = extractScriptFromChat(lastScriptChatDraft.value)
   if (!draft) {
     toast.warning('暂无可填入的解说稿')
@@ -6611,7 +6686,42 @@ function applyScriptChatToEditor(mode = 'replace') {
   } else {
     localRaw.value = draft
   }
-  toast.success(mode === 'append' ? '已追加到下方文案' : '已填入下方文案')
+  saveRaw()
+  toast.success(mode === 'append' ? '已追加到文案' : '已填入文案')
+  if (navigateToRaw) goSubStep('script:raw')
+}
+
+async function doScriptChatEmphasis() {
+  const draft = extractScriptFromChat(lastScriptChatDraft.value)
+  if (!draft || !epId.value) {
+    toast.warning('暂无可标注的解说稿')
+    return
+  }
+  scriptChatEmphasizing.value = true
+  try {
+    const res = await episodeAPI.narrationScriptEmphasis(epId.value, {
+      script: draft,
+      text_model: scriptChatModel.value,
+      text_thinking: scriptChatThinking.value,
+    })
+    const marked = String(res?.script || '').trim()
+    if (!marked) throw new Error('标注失败')
+
+    for (let i = scriptChatMessages.value.length - 1; i >= 0; i--) {
+      const msg = scriptChatMessages.value[i]
+      if (msg.role === 'assistant' && !msg.local) {
+        scriptChatMessages.value[i].content = marked
+        break
+      }
+    }
+    await nextTick()
+    scrollScriptChatToBottom()
+    toast.success('字幕强调已标注')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    scriptChatEmphasizing.value = false
+  }
 }
 
 async function sendScriptChat() {
@@ -6621,6 +6731,8 @@ async function sendScriptChat() {
   scriptChatMessages.value.push({ role: 'user', content: text })
   scriptChatInput.value = ''
   scriptChatGenerating.value = true
+  scriptChatMessages.value.push({ role: 'assistant', content: '', thinking: '' })
+  const assistantIdx = scriptChatMessages.value.length - 1
 
   const controller = new AbortController()
   scriptChatAbortController.value = controller
@@ -6630,17 +6742,33 @@ async function sendScriptChat() {
   try {
     const payloadMessages = scriptChatMessages.value
       .filter(msg => !msg.local)
+      .slice(0, -1)
       .map(({ role, content }) => ({ role, content }))
 
-    const res = await episodeAPI.narrationScriptChat(epId.value, {
+    const result = await episodeAPI.narrationScriptChatStream(epId.value, {
       messages: payloadMessages,
       text_model: scriptChatModel.value,
       text_thinking: scriptChatThinking.value,
-    }, { signal: controller.signal })
-
-    scriptChatMessages.value.push({ role: 'assistant', content: res?.reply || '' })
+    }, {
+      signal: controller.signal,
+      onThinking: thinking => {
+        scriptChatMessages.value[assistantIdx].thinking = thinking
+        scrollScriptChatToBottom()
+      },
+      onDelta: content => {
+        scriptChatMessages.value[assistantIdx].content = content
+        scrollScriptChatToBottom()
+      },
+    })
+    if (result?.reply) {
+      scriptChatMessages.value[assistantIdx].content = result.reply
+    }
   } catch (e) {
-    toast.error(e.message)
+    const msg = scriptChatMessages.value[assistantIdx]
+    if (!msg?.content && !msg?.thinking) {
+      scriptChatMessages.value.splice(assistantIdx, 1)
+    }
+    if (e.message !== '请求已取消') toast.error(e.message)
   } finally {
     scriptChatGenerating.value = false
     scriptChatAbortController.value = null
@@ -6648,6 +6776,12 @@ async function sendScriptChat() {
     scrollScriptChatToBottom()
   }
 }
+
+watch(() => scriptStep.value, step => {
+  if (isNarrationMode.value && step === narrationScriptChatStep()) {
+    nextTick(() => scrollScriptChatToBottom())
+  }
+})
 
 function saveScr() { episodeAPI.update(epId.value, { script_content: localScript.value }); episode.value.script_content = localScript.value }
 async function saveNarrationScript() {
@@ -6813,6 +6947,7 @@ function doNarrationImageDetect() {
     image_detect_mode: imageDetectMode.value === 'conservative' ? 'conservative' : 'paragraph',
     detect_batch_threshold: imageDetectBatchThreshold.value,
     detect_batch_size: imageDetectBatchSize.value,
+    ...narrationTextModelParams(),
   }), {
     onSuccess: () => {
       const count = narrationDetectDisplayCount.value
@@ -6833,6 +6968,7 @@ function doNarrationImagePrompts() {
   runNarrationImageStep('prompts', () => episodeAPI.narrationImagePrompts(epId.value, {
     style: drama.value?.style || 'comic',
     prompt_batch_size: imagePromptBatchSize.value,
+    ...narrationTextModelParams(),
   }), {
     onSuccess: () => {
       const count = narrationPromptDisplayCount.value
@@ -6865,6 +7001,7 @@ function doNarrationImagePromptsTest() {
     style: drama.value?.style || 'comic',
     prompt_batch_size: imagePromptBatchSize.value,
     test_batch_index: narrationPromptTestBatchIndex.value,
+    ...narrationTextModelParams(),
   }), {
     onSuccess: async () => {
       await refresh()
@@ -6887,6 +7024,7 @@ function doRetryMissingNarrationImagePrompts() {
     style: drama.value?.style || 'comic',
     retry_missing_prompts: true,
     prompt_batch_size: imagePromptBatchSize.value,
+    ...narrationTextModelParams(),
   }), {
     onSuccess: async () => {
       await refresh()
@@ -10578,9 +10716,61 @@ onMounted(async () => {
   background: rgba(79, 195, 247, 0.12);
   color: var(--text-0);
 }
+.script-chat-thinking {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 193, 7, 0.08);
+  border: 1px solid rgba(255, 193, 7, 0.18);
+}
+.script-chat-thinking-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin-bottom: 6px;
+}
+.script-chat-thinking-body {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.script-chat-reply {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.script-chat-writing-hint {
+  font-size: 12px;
+  margin-top: 8px;
+}
 .script-chat-draft-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .script-chat-hints { display: flex; gap: 6px; flex-wrap: wrap; }
 .script-chat-compose { display: flex; gap: 8px; align-items: flex-end; }
+.script-chat-step {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+.script-chat-panel-full {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin-bottom: 0;
+}
+.script-chat-panel-full .script-chat-body {
+  flex: 1;
+  min-height: 0;
+}
+.script-chat-panel-full .script-chat-messages {
+  flex: 1;
+  max-height: none;
+  min-height: 320px;
+}
 .script-chat-input {
   flex: 1;
   min-height: 56px;

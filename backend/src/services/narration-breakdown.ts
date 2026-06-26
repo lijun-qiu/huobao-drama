@@ -18,6 +18,7 @@ import {
   splitNarrationSentencesWithMeta,
   splitTitleSentencesWithMeta,
 } from './narration-scene-detect.js'
+import { resolveSubtitleNarrationFromSentence, ensureSentenceEmphasisMark } from '../utils/subtitle-emphasis.js'
 
 const TITLE_PREFIX_RE = /^标题\s*[:：]\s*(.+)$/i
 const TITLE_ALT_PREFIX_RE = /^(?:片头(?:标题)?|开场标题)\s*[:：]\s*(.+)$/i
@@ -191,22 +192,23 @@ export async function breakdownNarrationStoryboards(
   }
 
   sentenceItems.forEach((item, index) => {
-    const sentence = item.sentence
-    const duration = estimateNarrationDuration(sentence)
+    const marked = ensureSentenceEmphasisMark(item.sentence)
+    const duration = estimateNarrationDuration(marked)
     totalDuration += duration
     storyboardNumber++
 
     const res = db.insert(schema.storyboards).values({
       episodeId,
       storyboardNumber,
-      title: sentence.slice(0, 12) || `镜头${storyboardNumber}`,
-      description: sentence,
-      dialogue: `旁白：${sentence}`,
+      title: marked.slice(0, 12) || `镜头${storyboardNumber}`,
+      description: marked,
+      dialogue: `旁白：${marked}`,
       imagePrompt: null,
       referenceImages: buildNarrationImageMeta('inherit', {
         narration_tts_mode: 'new',
         script_paragraph_index: item.paragraphIndex,
         body_sentence_index: index,
+        subtitle_narration: resolveSubtitleNarrationFromSentence(marked),
       }),
       shotType: '中景',
       angle: '平视',
@@ -217,7 +219,7 @@ export async function breakdownNarrationStoryboards(
     }).run()
     linkStoryboardCharactersFromText(
       Number(res.lastInsertRowid),
-      sentence,
+      marked,
       episodeCharacters,
     )
   })

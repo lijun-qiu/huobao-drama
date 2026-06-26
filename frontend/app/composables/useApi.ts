@@ -40,6 +40,52 @@ export const api = {
   del: <T = any>(p: string, options?: { signal?: AbortSignal }) => req<T>('DELETE', p, undefined, options),
 }
 
+async function readJsonErrorMessage(resp: Response) {
+  try {
+    const json = await resp.json()
+    return String(json.message || resp.status)
+  } catch {
+    return String(await resp.text() || resp.status)
+  }
+}
+
+async function readSseJsonEvents(
+  resp: Response,
+  onEvent: (payload: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+) {
+  if (!resp.ok) throw new Error(await readJsonErrorMessage(resp))
+  if (!resp.body) throw new Error('无响应流')
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    if (signal?.aborted) throw new Error('请求已取消')
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    const chunks = buffer.split('\n\n')
+    buffer = chunks.pop() ?? ''
+
+    for (const chunk of chunks) {
+      for (const line of chunk.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data:')) continue
+        const data = trimmed.slice(5).trim()
+        if (!data) continue
+        try {
+          onEvent(JSON.parse(data) as Record<string, unknown>)
+        } catch {
+          // ignore malformed chunk
+        }
+      }
+    }
+  }
+}
+
 export const dramaAPI = {
   list: () => api.get<{ items: any[] }>('/dramas'),
   get: (id: number) => api.get(`/dramas/${id}`),
@@ -66,12 +112,75 @@ export const episodeAPI = {
     },
     options?: { signal?: AbortSignal },
   ) => api.post(`/episodes/${id}/narration-script-chat`, data, options),
+  narrationScriptEmphasis: (
+    id: number,
+    data: { script: string; text_model?: string; text_thinking?: boolean },
+    options?: { signal?: AbortSignal },
+  ) => api.post(`/episodes/${id}/narration-script-emphasis`, data, options),
+  narrationScriptChatStream: async (
+    id: number,
+    data: {
+      messages: Array<{ role: 'user' | 'assistant'; content: string }>
+      text_model?: string
+      text_thinking?: boolean
+    },
+    options?: {
+      signal?: AbortSignal
+      onDelta?: (content: string) => void
+      onThinking?: (content: string) => void
+    },
+  ) => {
+    const resp = await fetch(`${BASE}/episodes/${id}/narration-script-chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify({ ...data, stream: true }),
+      signal: options?.signal,
+    })
+
+    let result: {
+      reply: string
+      model?: string
+      text_thinking?: boolean
+    } | null = null
+    let streamError: Error | null = null
+
+    await readSseJsonEvents(resp, payload => {
+      if (payload.type === 'delta' && typeof payload.content === 'string') {
+        options?.onDelta?.(payload.content)
+        return
+      }
+      if (payload.type === 'thinking' && typeof payload.content === 'string') {
+        options?.onThinking?.(payload.content)
+        return
+      }
+      if (payload.type === 'error') {
+        streamError = new Error(String(payload.message || '生成失败'))
+        return
+      }
+      if (payload.type === 'done') {
+        result = {
+          reply: String(payload.reply || ''),
+          model: payload.model ? String(payload.model) : undefined,
+          text_thinking: payload.text_thinking as boolean | undefined,
+        }
+      }
+    }, options?.signal)
+
+    if (streamError) throw streamError
+    if (!result?.reply) throw new Error('AI 未返回内容')
+    return result
+  },
   narrationImageBreakdown: (
     id: number,
     options?: {
       style?: string
       image_detect_mode?: 'paragraph' | 'conservative' | 'balanced'
       retry_missing_prompts?: boolean
+      text_model?: string
+      text_thinking?: boolean
     },
     fetchOptions?: { signal?: AbortSignal },
   ) => api.post(`/episodes/${id}/narration-image-breakdown`, options || {}, fetchOptions),
@@ -86,10 +195,21 @@ export const episodeAPI = {
       image_detect_mode?: 'paragraph' | 'conservative'
       detect_batch_threshold?: number
       detect_batch_size?: number
+      text_model?: string
+      text_thinking?: boolean
     },
   ) => api.post(`/episodes/${id}/narration-image-detect`, options || {}),
-  narrationImagePrompts: (id: number, options?: { style?: string; retry_missing_prompts?: boolean; prompt_batch_size?: number; test_batch_index?: number }) =>
-    api.post(`/episodes/${id}/narration-image-prompts`, options || {}),
+  narrationImagePrompts: (
+    id: number,
+    options?: {
+      style?: string
+      retry_missing_prompts?: boolean
+      prompt_batch_size?: number
+      test_batch_index?: number
+      text_model?: string
+      text_thinking?: boolean
+    },
+  ) => api.post(`/episodes/${id}/narration-image-prompts`, options || {}),
   narrationImageAudit: (id: number) => api.get(`/episodes/${id}/narration-image-audit`),
   narrationImageOptimize: (id: number, options?: { storyboard_ids?: number[] }) =>
     api.post(`/episodes/${id}/narration-image-optimize`, options || {}),

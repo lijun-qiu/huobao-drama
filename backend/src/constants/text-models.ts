@@ -1,5 +1,9 @@
 export const DEFAULT_TEXT_MODEL = 'deepseek-v4-pro'
 export const DEFAULT_TEXT_THINKING = true
+/** 解说模式：剧本生成 / 配图等文本 LLM 默认模型 */
+export const DEFAULT_NARRATION_TEXT_MODEL = 'qwen3.5-plus'
+export const DEFAULT_NARRATION_SCRIPT_CHAT_MODEL = DEFAULT_NARRATION_TEXT_MODEL
+export const DEFAULT_NARRATION_IMAGE_TEXT_MODEL = DEFAULT_NARRATION_TEXT_MODEL
 
 export const TEXT_MODEL_OPTIONS = [
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent）' },
@@ -35,6 +39,29 @@ export function resolveEpisodeTextModel(
   const picked = String(bodyModel || episode?.textModel || '').trim()
   if (picked) return picked
   return DEFAULT_TEXT_MODEL
+}
+
+export function resolveNarrationEpisodeTextModel(
+  episode?: { textModel?: string | null } | null,
+) {
+  const stored = String(episode?.textModel || '').trim()
+  if (stored && stored !== DEFAULT_TEXT_MODEL) return stored
+  return DEFAULT_NARRATION_TEXT_MODEL
+}
+
+export function resolveNarrationImageTextModel(
+  episode?: { textModel?: string | null } | null,
+  bodyModel?: string | null,
+) {
+  const picked = String(bodyModel || '').trim()
+  if (picked) return picked
+  return resolveNarrationEpisodeTextModel(episode)
+}
+
+export function resolveNarrationScriptChatTextModel(bodyModel?: string | null) {
+  const picked = String(bodyModel || '').trim()
+  if (picked) return picked
+  return DEFAULT_NARRATION_SCRIPT_CHAT_MODEL
 }
 
 export function isKnownTextModel(model?: string | null): boolean {
