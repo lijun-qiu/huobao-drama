@@ -85,8 +85,12 @@ export async function emphasizeNarrationScriptDraft(
   try {
     return await applyNarrationScriptEmphasisWithLLM(trimmed, options)
   } catch (err: unknown) {
+    const msg = String((err as Error)?.message || err || 'unknown')
+    if (/401|403|invalid token|未配置文本模型 api key/i.test(msg)) {
+      throw err
+    }
     logTaskWarn('NarrationScriptChat', 'emphasis-manual-fallback-rules', {
-      error: String((err as Error)?.message || err || 'unknown'),
+      error: msg,
     })
     const { title, body } = parseNarrationScript(trimmed)
     if (!body.trim()) throw err

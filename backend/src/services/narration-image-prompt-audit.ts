@@ -4,8 +4,8 @@ import {
   coerceMinimalLLMImagePrompt,
   hasNarrationForbiddenStyleIssue,
   hasNarrationMultipleProtagonistIssue,
-  hasNarrationProtagonistDistinctIssue,
   hasNarrationRedundantTextureIssue,
+  hasNarrationSixDimOrderIssue,
   hasNarrationSixDimStructure,
   hasNarrationSpecificYearIssue,
   hasNarrationUniversalPrefixIssue,
@@ -85,6 +85,14 @@ export function auditNarrationImagePromptText(
         severity: 'warn',
       })
     }
+    if (hasNarrationSixDimOrderIssue(text)) {
+      issues.push({
+        code: 'six_dim_order',
+        label: '六维标签顺序不符合万能模板',
+        category: 'format',
+        severity: 'error',
+      })
+    }
     if (hasNarrationUniversalPrefixIssue(text)) {
       issues.push({
         code: 'missing_prefix',
@@ -104,7 +112,7 @@ export function auditNarrationImagePromptText(
     if (hasNarrationMultipleProtagonistIssue(text)) {
       issues.push({
         code: 'multi_protagonist',
-        label: '【画面主体】可能出现多位主人公',
+        label: '【画面主体】违反万能模板唯一主人公规则',
         category: 'character',
         severity: 'error',
       })
@@ -113,14 +121,6 @@ export function auditNarrationImagePromptText(
       issues.push({
         code: 'black_body',
         label: '仍含黑色素体旧规格（应统一为白色素体）',
-        category: 'character',
-        severity: 'warn',
-      })
-    }
-    if (hasNarrationProtagonistDistinctIssue(text)) {
-      issues.push({
-        code: 'protagonist_indistinct',
-        label: '【画面主体】主人公不够鲜明（须写中心/前景焦点，配角在两侧或背景）',
         category: 'character',
         severity: 'warn',
       })

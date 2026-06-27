@@ -13,6 +13,8 @@ import {
   resolveNarrationEmphasisMode,
   stripEmphasisMarkers,
   validateEmphasisMarkedSentence,
+  normalizeEmphasisAcrossSentences,
+  hasEmphasisMarkers,
 } from '../utils/subtitle-emphasis.js'
 import { getTextConfig } from './ai.js'
 import { patchNarrationImageMeta, parseNarrationImageMeta } from './narration-image.js'
@@ -59,7 +61,10 @@ export function normalizeParagraphSubtitleLines(
   if (resolveNarrationEmphasisMode() === 'script') return undefined
 
   if (resolveNarrationEmphasisMode() === 'rules') {
-    return markSentencesEmphasisHeuristic(ttsSentences)
+    return normalizeEmphasisAcrossSentences(
+      ttsSentences,
+      markSentencesEmphasisHeuristic(ttsSentences),
+    )
   }
 
   if (!Array.isArray(lines) || lines.length !== ttsSentences.length) {
@@ -202,9 +207,47 @@ export function looksLikeNarrationScriptDraft(text: string): boolean {
   return body.replace(/\s/g, '').length >= 150
 }
 
+export type NarrationEmphasisLLMOptions = {
+  textModel?: string | null
+  textThinking?: boolean
+  fullNarration?: string[]
+  titleHook?: string | null
+}
+
+function buildEmphasisLLMUserPayload(params: {
+  sentences?: string[]
+  paragraphs?: ParagraphSubtitleInput[]
+  batchSentenceStartIndex?: number
+  fullNarration?: string[]
+  titleHook?: string | null
+  outputFormat: Record<string, string>
+}) {
+  const fullNarration = (params.fullNarration || [])
+    .map(s => String(s || '').trim())
+    .filter(Boolean)
+
+  return JSON.stringify({
+    ...(params.titleHook?.trim() ? { title_hook: params.titleHook.trim() } : {}),
+    ...(fullNarration.length ? { full_narration: fullNarration } : {}),
+    ...(params.batchSentenceStartIndex != null && params.batchSentenceStartIndex >= 0
+      ? { batch_sentence_start_index: params.batchSentenceStartIndex }
+      : {}),
+    ...(params.sentences?.length ? { sentences: params.sentences } : {}),
+    ...(params.paragraphs?.length
+      ? {
+        paragraphs: params.paragraphs.map(p => ({
+          start_index: p.startIndex,
+          tts_sentences: p.ttsSentences,
+        })),
+      }
+      : {}),
+    output_format: params.outputFormat,
+  })
+}
+
 async function markSentencesWithEmphasisLLM(
   originals: string[],
-  options?: { textModel?: string | null; textThinking?: boolean },
+  options?: NarrationEmphasisLLMOptions,
 ): Promise<string[]> {
   if (!originals.length) return []
 
@@ -212,7 +255,8 @@ async function markSentencesWithEmphasisLLM(
   if (!config.apiKey) throw new Error('未配置文本模型 API Key')
 
   const system = buildNarrationScriptEmphasisLLMSystem()
-  const textThinking = options?.textThinking ?? false
+  // 结构化 JSON 标注，禁用思考模式以显著加速（125 句约 5 批）
+  const textThinking = false
   const result = [...originals]
   const batches = chunkParagraphSubtitles(
     originals.map((sentence, index) => ({ startIndex: index, ttsSentences: [sentence] })),
@@ -230,9 +274,12 @@ async function markSentencesWithEmphasisLLM(
     const batch = batches[batchIndex]
     if (batchIndex > 0) await sleep(SUBTITLE_EMPHASIS_LLM_BATCH_GAP_MS)
 
-    const user = JSON.stringify({
+    const user = buildEmphasisLLMUserPayload({
       sentences: batch,
-      output_format: { marked_sentences: 'string[]，长度与 sentences 相同' },
+      batchSentenceStartIndex: offset,
+      fullNarration: options?.fullNarration,
+      titleHook: options?.titleHook,
+      outputFormat: { marked_sentences: 'string[]，长度与 sentences 相同' },
     })
 
     let marked: string[] | null = null
@@ -271,6 +318,11 @@ async function markSentencesWithEmphasisLLM(
       normalized.forEach((line, i) => {
         result[offset + i] = line
       })
+      logTaskProgress('NarrationScriptEmphasis', 'batch-done', {
+        batch: batchIndex + 1,
+        batchCount: batches.length,
+        size: batch.length,
+      })
     } else {
       logTaskWarn('NarrationScriptEmphasis', 'batch-fallback-rules', {
         batch: batchIndex + 1,
@@ -288,7 +340,18 @@ async function markSentencesWithEmphasisLLM(
     sentenceCount: originals.length,
   })
 
-  return result
+  const beforeAnchors = result.filter(line => hasEmphasisMarkers(line)).length
+  const normalized = normalizeEmphasisAcrossSentences(originals, result)
+  const afterAnchors = normalized.filter(line => hasEmphasisMarkers(line)).length
+  if (beforeAnchors !== afterAnchors) {
+    logTaskProgress('NarrationScriptEmphasis', 'global-normalize', {
+      beforeAnchors,
+      afterAnchors,
+      sentenceCount: originals.length,
+    })
+  }
+
+  return normalized
 }
 
 /** 剧本生成第二阶段：逐句 LLM 标注 **，不改字 */
@@ -306,7 +369,11 @@ export async function applyNarrationScriptEmphasisWithLLM(
   if (!items.length) return trimmed
 
   const originals = items.map(item => stripEmphasisMarkers(item.sentence))
-  const markedSentences = await markSentencesWithEmphasisLLM(originals, options)
+  const markedSentences = await markSentencesWithEmphasisLLM(originals, {
+    ...options,
+    fullNarration: originals,
+    titleHook: title?.trim() || null,
+  })
   const markedBody = reassembleMarkedBody(items, markedSentences)
 
   if (title?.trim()) return `${title.trim()}\n\n${markedBody}`
@@ -316,7 +383,7 @@ export async function applyNarrationScriptEmphasisWithLLM(
 /** 独立 LLM 调用：为缺失 subtitle_lines 的段落补全关键词强调 */
 export async function fillParagraphSubtitleLinesWithLLM(
   paragraphs: ParagraphSubtitleInput[],
-  options?: { textModel?: string | null; textThinking?: boolean },
+  options?: NarrationEmphasisLLMOptions,
 ): Promise<Map<number, string[]>> {
   const result = new Map<number, string[]>()
   if (!paragraphs.length || !narrationEmphasisUsesLlm()) return result
@@ -338,12 +405,11 @@ export async function fillParagraphSubtitleLinesWithLLM(
     const batch = batches[batchIndex]
     if (batchIndex > 0) await sleep(SUBTITLE_EMPHASIS_LLM_BATCH_GAP_MS)
 
-    const user = JSON.stringify({
-      paragraphs: batch.map(p => ({
-        start_index: p.startIndex,
-        tts_sentences: p.ttsSentences,
-      })),
-      output_format: {
+    const user = buildEmphasisLLMUserPayload({
+      paragraphs: batch,
+      fullNarration: options?.fullNarration,
+      titleHook: options?.titleHook,
+      outputFormat: {
         subtitle_results: '[{ start_index: number, subtitle_lines: string[] }]，长度与本批 paragraphs 相同',
       },
     })
@@ -413,7 +479,7 @@ export async function fillParagraphSubtitleLinesWithLLM(
 export async function ensureParagraphSubtitleLinesWithLLM(
   paragraphs: ParagraphSubtitleInput[],
   subtitleLinesByStartIndex: Map<number, string[]>,
-  options?: { textModel?: string | null; textThinking?: boolean },
+  options?: NarrationEmphasisLLMOptions,
 ): Promise<{ filled: number; stillMissing: number }> {
   if (!narrationEmphasisUsesLlm()) {
     return { filled: 0, stillMissing: 0 }

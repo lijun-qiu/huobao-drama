@@ -33,6 +33,11 @@ data/storage/
 # Config
 configs/config.yaml
 
+# Environment (secrets — do not commit)
+.env
+.env.*
+!.env.example
+
 # Misc
 tmp/
 temp/

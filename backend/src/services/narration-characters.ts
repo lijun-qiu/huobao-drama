@@ -8,19 +8,16 @@ import {
   coerceMinimalCharacterAppearance,
   coerceMinimalLLMImagePrompt,
   isNarrationMinimalStyle,
-  NARRATION_MINIMAL_CLOTHING_LLM_RULE,
-  NARRATION_MINIMAL_EXPRESSION_LLM_RULE,
-  NARRATION_PROTAGONIST_DISTINCT_LLM_RULE,
   normalizeArtStyle,
   sanitizeCharacterAppearance,
   sanitizeAppearanceForPortrait,
   appendToNarrationBracket,
+  NARRATION_MINIMAL_CLOTHING_LLM_RULE,
+  NARRATION_MINIMAL_EXPRESSION_LLM_RULE,
   NARRATION_MINIMAL_BODY_SIZE_SPEC,
   NARRATION_BODY_STAGE_SIZE_HINTS,
   NARRATION_PROTAGONIST_BODY,
   NARRATION_PROTAGONIST_FACE,
-  NARRATION_CROWD_BODY,
-  NARRATION_CROWD_FACE,
   NARRATION_USE_RAW_LLM_PROMPTS,
 } from '../constants/art-styles.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
@@ -735,7 +732,7 @@ export function enrichImagePromptWithCharacters(
     if (NARRATION_USE_RAW_LLM_PROMPTS) {
       if (!relevant.length) return base
       const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
-      const addition = `场景中出现素体：主人公${names}须为画面中心前景的一位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_PROTAGONIST_FACE}，服装鲜明），同框配角须为几位${NARRATION_CROWD_BODY}在两侧或背景（${NARRATION_CROWD_FACE}，低饱和简化便装），${NARRATION_MINIMAL_CLOTHING_LLM_RULE}，${NARRATION_MINIMAL_EXPRESSION_LLM_RULE}，${NARRATION_PROTAGONIST_DISTINCT_LLM_RULE}`
+      const addition = `本镜主人公：${names}`
       if (/【左格/.test(base) && /【右格/.test(base)) {
         return appendToNarrationBracket(appendToNarrationBracket(base, '左格', addition), '右格', addition)
       }
@@ -746,7 +743,7 @@ export function enrichImagePromptWithCharacters(
     }
     if (!relevant.length) return coerced
     const names = relevant.map(ch => formatCharacterDisplayName(ch)).join('、')
-    const addition = `场景中出现素体：主人公${names}须为画面中心前景的一位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_PROTAGONIST_FACE}，服装鲜明），同框配角须为几位${NARRATION_CROWD_BODY}在两侧或背景（${NARRATION_CROWD_FACE}，低饱和简化便装），${NARRATION_MINIMAL_CLOTHING_LLM_RULE}，${NARRATION_MINIMAL_EXPRESSION_LLM_RULE}，${NARRATION_PROTAGONIST_DISTINCT_LLM_RULE}`
+    const addition = `本镜主人公：${names}`
     if (/【左格/.test(coerced) && /【右格/.test(coerced)) {
       return appendToNarrationBracket(appendToNarrationBracket(coerced, '左格', addition), '右格', addition)
     }

@@ -36,13 +36,17 @@ export const NARRATION_MINIMAL_STYLE_FORBIDDEN =
 export const NARRATION_MINIMAL_EXPRESSION_LLM_RULE =
   '【面部表情】主人公及同框第二位主人公（配偶/父母/子女等）须写正常卡通脸表情（圆眼或弯眼带高光、眉毛嘴巴清晰、可有腮红）；路人/群众配角正面/侧面须写两个小圆点眼（小眼睛）与简笔表情；与 narration_lines 情绪一致；写入【画面主体】或【核心细节动作】'
 
-/** 主人公与配角视觉区分（同白色素体，靠构图/服装/焦点区分） */
+/** 主人公与配角视觉区分 — 已并入 NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE */
 export const NARRATION_PROTAGONIST_DISTINCT_LLM_RULE =
-  '【主人公鲜明】全画面仅 1 位主人公须是视觉焦点：写清「一位X期主人公位于画面中心或前景」，服装款式与主色须具体鲜明（如亮花衬衫+喇叭裤、醒目围裙、特色帽饰）；配角写「几位配角在两侧/背景/后方」，服装用低饱和简化便装（灰蓝/深绿/素色块），表情与动作从简；禁止主人公与配角服装款式主色相同；禁止多位人物都像主角一样居中抢镜'
+  '【主人公鲜明】见 NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE'
 
 /** 素体人物须穿与年代剧情一致的简化服装轮廓（简笔色块，非写实） */
 export const NARRATION_MINIMAL_CLOTHING_LLM_RULE =
-  '【服装】主人公须写具体鲜明的简化服装款式与主色（简笔色块）；配角写笼统低饱和便装轮廓，与主人公形成对比；均须与年代、职业、场景匹配，禁止写实布料褶皱与复杂印花；服装写入【画面主体】'
+  '【服装】主人公须写具体鲜明的简化服装款式与主色（简笔色块）；主色一律用六位小写十六进制色值紧挨款式词（如 #ffd700短袖T恤、#2563eb短裤）；配角写笼统低饱和便装轮廓并用 #hex（如 #64748b低饱和便装）；均须与年代、职业、场景匹配，禁止写实布料褶皱与复杂印花；禁止只用中文颜色词而不写 #hex；服装写入【画面主体】'
+
+/** LLM 配图：服装主色须用 #hex 锁定（段内一致） */
+export const NARRATION_OUTFIT_HEX_COLOR_LLM_RULE =
+  '【服装色值】主人公与可见配角（含配偶/路人/群众）服装主色须写六位小写十六进制色值（如 #ffd700、#2563eb、#ffffff、#333333）；格式「#hex紧挨款式词、中间无空格」（如 #ffd700短袖T恤、#2563eb短裤，禁止 #2563eb 短裤）；上下装用「与」连接，整段须以简笔轮廓结尾：身穿#ffd700短袖T恤与#2563eb短裤简笔轮廓；配角写穿#64748b低饱和便装、穿#5f7a6e低饱和校服、穿#9ca3af低饱和连衣裙或穿#ffffff围裙；花衬衫写#ff6b9d花衬衫；禁止亮黄/蓝色/白色等纯中文色词；同一配图段内主人公 #hex 须完全一致（含 diptych 左右格）'
 
 /** @deprecated 使用 NARRATION_MINIMAL_CLOTHING_LLM_RULE */
 export const NARRATION_MINIMAL_NO_CLOTHING_RULE = NARRATION_MINIMAL_CLOTHING_LLM_RULE
@@ -81,10 +85,6 @@ export const NARRATION_CROWD_EYE_LLM_RULE =
 export const NARRATION_MINIMAL_STAGE_FACE_RULE =
   `【形体统一】主人公与配角均为${NARRATION_CROWD_BODY}白色素体身形（${NARRATION_MINIMAL_LIMBS_SPEC}）；须用构图与服装鲜明区分：默认仅 1 位「一位X期主人公」为画面焦点；夫妻/父子/母子等同框双主角时见【多主人公例外】；配角为「几位背景配角」；禁止写黑色素体；${NARRATION_STAGE_HAIR_LLM_RULE}；主人公写正常卡通脸，配角正面写小圆点眼`
 
-/** LLM 配图：唯一主人公 + 黑白素体规格（合并原 PROTAGONIST_PLOT / SINGLE_PROTAGONIST / STAGE_FACE） */
-export const NARRATION_PROTAGONIST_UNIFIED_LLM_RULE =
-  `【唯一主人公】每张配图（含 diptych 每格）全画面仅 1 位主人公（${NARRATION_PROTAGONIST_FACE}，${NARRATION_MINIMAL_LIMBS_SPEC}），须居中或前景、服装鲜明、动作清晰；其余为几位配角在两侧或背景；${NARRATION_PROTAGONIST_DISTINCT_LLM_RULE}；${NARRATION_MINIMAL_STAGE_FACE_RULE}`
-
 /** LLM 配图：年代氛围与服装（统一标准） */
 export const NARRATION_ERA_CLOTHING_LLM_RULE =
   '【年代与着装】年代氛围写「八十年代市井」「九十年代城镇」等概括词，禁止具体年份数字（1980、1990、19XX）及 vintage/retro/复古滤镜；【画面主体】须写主人公与可见配角的年代化简化服装；【年代场景】写地点环境与陈设道具'
@@ -103,7 +103,7 @@ export const NARRATION_IMAGE_STYLE_CORE =
 
 /** 群众/路人/顾客：白色素体，与主人公同款身形 */
 export const NARRATION_CROWD_STYLE_HINT =
-  `顾客、路人、群众等配角一律写成「几位${NARRATION_CROWD_BODY}配角」置于两侧或背景，简化低饱和便装，不得与主人公抢焦点；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
+  `顾客、路人、群众等配角一律写成「几位${NARRATION_CROWD_BODY}配角」，位置在两侧/背景/后方/讲台等不抢焦点处，简化低饱和便装，不得与主人公抢焦点；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
 
 /** 解说配图六维结构（LLM 与规则兜底共用） */
 export const NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE =
@@ -111,7 +111,7 @@ export const NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE =
 
 /** 解说配图万能模板：六维正文 */
 export const NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE =
-  '【画面主体：一位主人公位于画面中心或前景（人生阶段+鲜明简化服装+正常卡通脸表情），几位配角在两侧或背景（低饱和简化便装）】，【年代场景：时代氛围、具体地点环境；有载体时写「载体+陈列物件名」】，【核心细节动作：主人公关键动作与表情清晰，配角陪衬互动】，【光影色调：光线明暗、时段、冷暖与剧情情绪氛围】，【镜头视角：景别与机位，镜头朝向主人公】，【质感要求：画风线条涂色与画面禁忌】'
+  '【画面主体：一位主人公位于{位置}以{姿态}（人生阶段+身穿#hex款式简笔轮廓+正常卡通脸表情），一位或几位配角位于{配角位置}（穿#64748b低饱和便装，两个小圆点眼）】，【年代场景：时代氛围+具体地点；有载体时写「载体+陈列物件名」】，【核心细节动作：配角动作与场景互动（勿写主人公，主人公只在【画面主体】出现一次）】，【光影色调：光线明暗、时段、冷暖与剧情情绪】，【镜头视角：景别机位，镜头朝向该姿态下的主人公】，【质感要求：柔和平涂，简化服装轮廓，正常卡通脸表情，无文字无水印】'
 
 /** LLM：【年代场景】陈设（权威表述，纯 AI 输出，无后处理补全） */
 export const NARRATION_FIXTURES_LLM_RULE =
@@ -138,12 +138,6 @@ export const NARRATION_MINIMAL_TEXTURE_LLM_HINT =
 export const NARRATION_LLM_ANTI_REDUNDANCY_RULE =
   '【去冗余】前缀与后缀已含固定画风与无文字无水印；六维各维只写本镜独有信息；禁止在任一维度重复前缀已有的「16:9/2D扁平插画/素体小人/三头身/正常卡通脸/无复杂光影」等短语；同一关键词全文最多出现一次；禁止在末尾再追加第二遍画风说明'
 
-/** LLM 配图：每张仅一位主人公 */
-export const NARRATION_SINGLE_PROTAGONIST_LLM_RULE = NARRATION_PROTAGONIST_UNIFIED_LLM_RULE
-
-/** LLM：主人公须入画且画风一致（写入【画面主体】【核心细节动作】） */
-export const NARRATION_PROTAGONIST_PLOT_LLM_RULE = NARRATION_PROTAGONIST_UNIFIED_LLM_RULE
-
 /** LLM：素体须符合通用尺寸规格，仅人生阶段微调 */
 export const NARRATION_BODY_CONSISTENCY_LLM_RULE =
   `【通用素体尺寸】【画面主体】须标明人生阶段（小孩/青年/中年/老年）；三头身等通用规格由前缀承担，【质感要求】不必重复；阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
@@ -152,15 +146,42 @@ export const NARRATION_BODY_CONSISTENCY_LLM_RULE =
 export const NARRATION_ATMOSPHERE_LLM_RULE =
   '【光影色调】结合 full_narration、prior_narration 与 narration_lines 写光线明暗、时段、冷暖、人气喧闹或寂静、经营旺衰等可见基调（2–4个短语）；须与【年代场景】【核心细节动作】及全文情绪曲线一致；只写可见光影与色调，不写内心独白'
 
+/** 解说配图万能模板：LLM 唯一结构规范（六维分工与一致性均在此，禁止另加补丁规则） */
+export const NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE = [
+  `【万能模板】完整 prompt = ${NARRATION_UNIVERSAL_SCENE_PREFIX} + 六维正文 + ${NARRATION_UNIVERSAL_SCENE_SUFFIX}；${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
+  `【六维正文·严格按序填空】${NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE}`,
+  '【单帧一致】写六维前先锁定唯一可画瞬间（主人公位置+姿态+动作）；【画面主体】须同时写清位置与姿态，【核心细节动作】【镜头视角】须同一瞬间同一位置同一姿态，禁止动作维再写与主体不同的姿态；与【年代场景】【光影色调】同空间同氛围；配角须与主人公逗号分句分开写位置，禁止挤在同一括号内。',
+  NARRATION_MINIMAL_CLOTHING_LLM_RULE,
+  NARRATION_MINIMAL_EXPRESSION_LLM_RULE,
+  NARRATION_STAGE_HAIR_LLM_RULE,
+  NARRATION_DUAL_PROTAGONIST_LLM_RULE,
+  NARRATION_CROWD_EYE_LLM_RULE,
+  NARRATION_FIXTURES_LLM_RULE,
+  NARRATION_ATMOSPHERE_LLM_RULE,
+  NARRATION_ERA_CLOTHING_LLM_RULE,
+  `【质感要求】仅写「${NARRATION_MINIMAL_TEXTURE_LLM_HINT}」，禁止复述前缀画风`,
+].join(' ')
+
+/** @deprecated 已并入 NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE */
+export const NARRATION_FRAME_TRIAD_CONSISTENCY_LLM_RULE = NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE
+
+/** @deprecated 已并入 NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE */
+export const NARRATION_PROTAGONIST_UNIFIED_LLM_RULE = NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE
+
+/** @deprecated 已并入 NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE */
+export const NARRATION_MINIMAL_PLOT_VISIBILITY_LLM_RULE = NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE
+
+/** @deprecated 已并入 NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE */
+export const NARRATION_SINGLE_PROTAGONIST_LLM_RULE = NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE
+
+/** @deprecated 已并入 NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE */
+export const NARRATION_PROTAGONIST_PLOT_LLM_RULE = NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE
+
 /** LLM：群众/路人须为白色素体配角 */
 export const NARRATION_CROWD_PLOT_LLM_RULE =
-  `【配角一致】顾客、路人、群众一律写成「几位${NARRATION_CROWD_BODY}配角」在两侧或背景（两个小圆点眼小眼睛，${NARRATION_MINIMAL_LIMBS_SPEC}），低饱和简化便装，动作从简，不得与主人公服装主色相同；${NARRATION_CROWD_EYE_LLM_RULE}；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
+  `【配角一致】顾客、路人、群众写成「几位${NARRATION_CROWD_BODY}配角」，有明确互动角色（如老师/店员）可写「一位配角位于讲台/柜台/前方」；位置在两侧/背景/后方/讲台等不抢焦点处（两个小圆点眼小眼睛，${NARRATION_MINIMAL_LIMBS_SPEC}），穿#64748b低饱和便装或穿#5f7a6e低饱和校服等 #hex 简化服装，动作从简，不得与主人公服装 #hex 相同；${NARRATION_CROWD_EYE_LLM_RULE}；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
 export const NARRATION_VEHICLE_LLM_RULE =
   '交通工具须严格按旁白写：自行车/二八杠≠手推车/板车；旁白写自行车或二八杠时写「推着自行车」或「二八杠自行车轮廓」，禁止写成手推车；旁白写手推车/板车时才写手推车；旁白未提及任何车辆时禁止臆造推车或自行车'
-
-/** LLM 素体配图：剧情写可见动作与情绪氛围 */
-export const NARRATION_MINIMAL_PLOT_VISIBILITY_LLM_RULE =
-  '【核心细节动作】主人公动作与表情须清晰具体；【配角】只做陪衬动作；须与【画面主体】焦点一致；禁止内心独白与抽象说理'
 
 /** 配图换镜检测：needs_image=true 的锚点数量占镜头数的比例下限（LLM 硬性约束） */
 export const NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO = 0.25
@@ -199,9 +220,9 @@ export const NARRATION_LLM_ANALYSIS_STEPS_DETECT = [
 /** LLM 配图：写 prompt 用分析流程 */
 export const NARRATION_LLM_ANALYSIS_STEPS_PROMPT = [
   '1) 通读 full_narration（及 previous_episode_narration 若有），把握全文主线、人物关系、地点变迁、核心物件与情绪节奏',
-  '2) 读 prior_narration 与 characters，提取已出现地点、陈设载体、具体物件名、服装款式与人生阶段',
-  '3) 读 narration_lines 确定本配图段叙事锚点；再从全文推断应入画的环境细节、陈设道具、可见动作与氛围',
-  '4) 按六维写出丰富 prompt：【年代场景】写具体场所+载体陈设，【核心细节动作】写可见互动，【光影色调】贴合全文情绪；禁止只贴段内字面',
+  '2) 读 prior_narration 与 characters，提取已出现地点、陈设载体、具体物件名、服装款式与人生阶段；同一配图段内主人公服装款式+#hex 主色须锁定一致',
+  '3) 读 narration_lines 确定本配图段叙事锚点；先锁定单帧（位置+姿态+动作），再按万能模板六维填空',
+  '4) 按 NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE 写出丰富 prompt，结合 full_narration 与 prior_narration；禁止只贴段内字面',
 ] as const
 
 /** @deprecated 使用 NARRATION_LLM_ANALYSIS_STEPS_PROMPT */
@@ -226,30 +247,43 @@ export const NARRATION_FULL_PLOT_ENRICHMENT_LLM_RULE =
 export const NARRATION_PLOT_CONTINUITY_LLM_RULE =
   '【物件连贯】陈设/物件/服装须能在 full_narration、prior_narration 或 narration_lines 中找到依据或合理推断；同一场所可从 prior 与全文前文延续仍相关物件并补充具体名称；场景/时代/经营形态切换时重设，禁止无关物件混搭；有具体名称必须写具体名称，禁止泛称'
 
+/** LLM 配图：同一配图段内主人公服装款式与主色锁定，换段可换装 */
+export const NARRATION_PARAGRAPH_OUTFIT_CONTINUITY_LLM_RULE =
+  '【段落内服装锁定】同一配图段（同一 start_index / paragraph_index；含 layout=diptych 的【左格】【右格】）内，主人公仅一套简化服装，款式与 #hex 主色须完全一致，禁止同段内左格 #ff6b9d花衬衫、右格 #2563ebT恤 或同 prompt 内两套不同 #hex；换配图段（不同 start_index）时，若旁白未明确换装/更衣/洗澡/换季/改行/时段大跳转，须延续上一段主人公服装款式与 #hex；旁白明确换装或场景大切换后，新段可更换服装，但新段内须再次锁定直至下一段；本批 paragraphs 逐段独立检查，不得段内乱换 #hex'
+
 /** @deprecated 使用 NARRATION_FIXTURES_LLM_RULE */
 export const NARRATION_FIXTURES_CONTINUITY_LLM_RULE = NARRATION_FIXTURES_LLM_RULE
 
 /** 六维正文填表示例（硬性规则用，模型须替换为旁白真实内容） */
 export const NARRATION_UNIVERSAL_SCENE_BODY_EXAMPLE =
-  `【画面主体：一位青年期白色素体小人主人公位于画面中心前景（${NARRATION_MINIMAL_LIMBS_SPEC}，正常卡通脸热情微笑，身穿亮花衬衫与喇叭裤鲜明简笔轮廓）与三位白色素体小人配角分列两侧背景（穿灰蓝低饱和市井便装，表情从简）】，【年代场景：八十年代市井夜市，木质摊位上陈列花衬衫与喇叭裤与成捆布料】，【核心细节动作：主人公站在摊位前伸手整理花衬衫面向镜头，配角在两侧挑选货物】，【光影色调：暖黄夜市灯光，喧闹市井人气】，【镜头视角：中景平视，镜头朝向主人公，主体清晰】，【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}】`
+  `【画面主体：一位青年期白色素体小人主人公位于夜市摊位前以站立姿态伸手整理花衬衫（${NARRATION_MINIMAL_LIMBS_SPEC}，正常卡通脸热情微笑，身穿#ff6b9d花衬衫与#333333喇叭裤鲜明简笔轮廓），三位白色素体小人配角位于两侧背景（穿#64748b低饱和市井便装，两个小圆点眼，表情从简）】，【年代场景：八十年代市井夜市，木质摊位上陈列花衬衫与喇叭裤与成捆布料】，【核心细节动作：配角在两侧挑选货物】，【光影色调：暖黄夜市灯光，喧闹市井人气】，【镜头视角：中景平视，镜头朝向摊位前站立的主人公，主体清晰】，【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}】`
 
 /** LLM 配图正反例（素体模式） */
 export const NARRATION_LLM_PROMPT_GOOD_BAD_EXAMPLES = [
   '正反例（须从旁白提取真实内容，勿照抄）：',
-  `✓ 【画面主体：青年期${NARRATION_PROTAGONIST_BODY}主人公穿花衬衫喇叭裤简笔轮廓…】，【年代场景：…】，【核心细节动作：…】，【光影色调：…】`,
+  `✓ 【画面主体：青年期${NARRATION_PROTAGONIST_BODY}主人公身穿#ff6b9d花衬衫与#333333喇叭裤简笔轮廓…】，【年代场景：…】，【核心细节动作：…】，【光影色调：…】`,
   `✓ 【画面主体：两位中年期${NARRATION_PROTAGONIST_BODY}主人公（圆头无头发、躯干略宽，正常卡通脸）并肩位于前景…】（夫妻/父子等同框双主角须同阶段同发型）`,
+  `✓ 【画面主体：一位青年期${NARRATION_PROTAGONIST_BODY}主人公位于教室后排课桌处以趴桌姿态伏低（穿#3b82f6短袖…），一位配角位于后方讲台（穿#4b5563低饱和西装）】…【核心细节动作：配角在讲台手持点名册指向下方（勿写主人公）】…【镜头视角：中景平视，镜头朝向趴桌姿态的主人公】`,
+  '✗ 【核心细节动作】再写「主人公保持趴桌…」（与【画面主体】重复，文生图会画两个同款主人公）',
   '✗ 【画面主体：仅写素体小人无服装】（须写与年代匹配的简化服装）',
+  '✗ 【画面主体】写中心前景站立 + 【核心细节动作】写后排趴桌（三镜矛盾，会生成两个同款主人公）',
+  '✗ 【画面主体】主人公与配角挤在同一括号用「与一位配角」连接（须分开写各自位置）',
+  '✗ 【画面主体：身穿亮黄色T恤与蓝色短裤】（禁止中文色词，须写 #ffd700、#2563eb 等 #hex）',
+  '✗ 【画面主体：身穿#2563eb 短裤】（#hex 与款式词之间禁止空格）',
   '✗ 【质感要求：2D扁平插画，主人公白色素体…】（禁止复述前缀画风）',
   '✗ 只写 narration_lines 首句字面，场景空泛、无具体陈设与动作（须结合全文丰富环境/物件/互动）',
   '✗ 段内句子很短就只写一句抽象话，忽略 prior/全文已交代的地点、道具与经营细节',
-  '✗ 主人公与配角服装主色相同、都居中、难以分辨谁是主角',
+  '✗ 主人公与配角服装 #hex 相同、都居中、难以分辨谁是主角',
+  '✗ 同一段 diptych 左格与右格主人公服装 #hex/款式不同（同段须同一套服装）',
+  '✗ 同一配图段内【画面主体】写两套不同 #hex 服装或同段内随机换色',
+  '✗ 配角写穿低饱和便装却不写 #hex（须写穿#64748b低饱和便装）',
   '✗ 夫妻同框却一青年一中年，或中年主人公写白发（青年/中年均无头发，仅老年可有白发）',
   '✗ 群众配角正面出镜却写圆眼大卡通脸（配角正面须小圆点眼）',
 ].join('\n')
 
 /** 两宫格六维输出格式（layout=diptych） */
 export const NARRATION_DIPPTYCH_SIX_PART_LLM_RULE =
-  `layout=diptych：单张 16:9 横向两宫格；左、右格各写完整六维，格式为【左格】【画面主体：…】，【年代场景：…】，【核心细节动作：…】，【光影色调：…】，【镜头视角：…】，【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}】，【右格】【画面主体：…】…【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}】；禁止旧式【左格场景与剧情】；各格【质感要求】禁止复述前缀画风；每一格全画面仅 1 位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_MINIMAL_LIMBS_SPEC}）`
+  `layout=diptych：单张 16:9 横向两宫格；左、右格各写完整六维，格式为【左格】【画面主体：…】，【年代场景：…】，【核心细节动作：…】，【光影色调：…】，【镜头视角：…】，【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}】，【右格】【画面主体：…】…【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}】；禁止旧式【左格场景与剧情】；各格【质感要求】禁止复述前缀画风；每一格全画面仅 1 位${NARRATION_PROTAGONIST_BODY}主人公（${NARRATION_MINIMAL_LIMBS_SPEC}）；左格与右格主人公服装款式与 #hex 主色须完全一致，仅动作/机位/表情可不同`
 
 export const NARRATION_SCENE_PLOT_QUALITY_LLM_RULE =
   '【年代场景】与【核心细节动作】须在同一空间；【核心细节动作】须写成素体小人可见的具体动作与互动（含配角陪衬），结合全文推断而非只摘 narration_lines 一句；抽象感慨/评价句须据全文剧情推断成可画瞬间（含相应场景陈设）'
@@ -264,7 +298,7 @@ export const NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE =
 
 /** LLM 配图写法抽象示例（不含具体故事情节，模型须从输入旁白中提取内容） */
 export const NARRATION_LLM_PROMPT_PATTERN =
-  `prior 已交代物件 + narration_lines 描述场所活动 →【画面主体：一位${NARRATION_PROTAGONIST_BODY}主人公与配角】，【年代场景：时代+地点+载体上陈列的具体物件名】，【核心细节动作：可见动作】，【光影色调：光线色调】，【镜头视角：景别机位】，【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}，不重复前缀画风】`
+  `prior 已交代物件 + narration_lines 描述场所活动 →【画面主体：一位${NARRATION_PROTAGONIST_BODY}主人公位于{与动作一致的位置}，配角单独分句写位置】，【年代场景：时代+地点+载体上陈列的具体物件名】，【核心细节动作：该位置可见动作】，【光影色调：光线色调】，【镜头视角：景别机位，朝向该位置主人公】，【质感要求：${NARRATION_MINIMAL_TEXTURE_LLM_HINT}，不重复前缀画风】`
 
 /** LLM 写片头标题图 prompt 时的规则（通用） */
 export const NARRATION_TITLE_IMAGE_LLM_RULE =
@@ -275,15 +309,21 @@ export const NARRATION_PREVIOUS_EPISODE_LLM_RULE =
   '若输入含 previous_episode_narration（上集正文旁白，按时间顺序），须先通读以理解人物、地点与剧情延续；full_narration 仅含本集旁白；needs_image / start_index 均只针对本集 sentences；prior_narration = previous_episode_narration + 本集锚点之前旁白'
 
 /** 旁白字幕关键词强调（独立 LLM 调用，不与配图六维混批） */
-export const NARRATION_SUBTITLE_EMPHASIS_LLM_RULE =
-  '为每句 tts_sentences 输出 subtitle_lines，与 tts_sentences 等长且逐句一一对应；不得改字删字增字，只允许用 ** 包裹 1 个连续词/数字；每句最多 1 处 **，无合适强调词则原句照抄；优先强调：金额/年龄/数字、转折词（终于/竟然/原来/其实）、核心名词、书名号「」内词'
+export const NARRATION_SUBTITLE_EMPHASIS_LLM_RULE = [
+  '须先通读 full_narration（及 title_hook 若有）理解本期人生主题、情绪曲线与关键转折，再为本批句子标注；强调词须贴合全文语境，帮观众快速代入「你」的处境与感受，并在屏上形成视觉焦点（黄字加大）。',
+  '为每句 tts_sentences / sentences 输出等长 subtitle_lines 或 marked_sentences，逐句一一对应；不得改字删字增字，只允许用 ** 包裹 1 个连续词/短语（2～8 字）；每句最多 1 处 **，无合适强调词则原句照抄。',
+  '标注重心（三选一，优先顺序）：① 关键情感——犹豫、后悔、心动、不安、觉醒、崩溃、孤独、震惊、触动、失望、害怕、委屈、期待、死心、放手等内心感受词；② 具象物件——文中出现的具体可感知名词（花衬衫、煤油灯、手推车、摊位、账本、彩电、门面…），须从本句/全文提取，禁止「各类商品」「很多东西」等泛称；③ 关键动作——本句核心动词或动宾短语（辞职、摆摊、整理货物、扇蒲扇、押解候审、推车、挑选、喝茶…），2～6 字为宜。',
+  '次要可标：与本期核心转折相关的固定词组（铁饭碗、万元户、摆地摊、离婚、下岗）；书名号「」内词。禁止标：任何纯数字/金额/年龄/百分比；空泛形容词（很好、非常、特别）；单独虚词或连词；与画面和情绪无关的抽象词。',
+  '全文节奏：约每 2～3 句标 1 处，情感高点、物件首次出现、关键动作句可多标，平淡过渡句可不标。',
+].join(' ')
 
 /** 组装「旁白字幕强调」独立 LLM system prompt */
 export function buildNarrationSubtitleEmphasisLLMSystem(): string {
   return [
-    '你是解说视频字幕编辑，任务是为旁白逐句标注屏幕字幕强调词。',
+    '你是解说视频字幕编辑。任务是为旁白逐句标注屏幕强调词，重点标出关键情感、具象物件、关键动作，让观众一眼代入。',
     NARRATION_SUBTITLE_EMPHASIS_LLM_RULE,
-    '只输出 JSON，格式：{"subtitle_results":[{"start_index":0,"subtitle_lines":["**22**岁…","第二句原文"]}]}',
+    '输入含 full_narration 时须结合全文后再标注本批 paragraphs；batch 内 index 仅针对本批 tts_sentences。',
+    '只输出 JSON，格式：{"subtitle_results":[{"start_index":0,"subtitle_lines":["你心里**一阵犹豫**，…","第二句原文"]}]}',
     'subtitle_results 长度须与本批 paragraphs 相同；不要 markdown，不要解释。',
   ].join('\n')
 }
@@ -291,10 +331,10 @@ export function buildNarrationSubtitleEmphasisLLMSystem(): string {
 /** 组装「解说稿第二阶段：整稿逐句加 **」LLM system prompt */
 export function buildNarrationScriptEmphasisLLMSystem(): string {
   return [
-    '你是解说视频字幕编辑。输入是一批按顺序排列的旁白句子，输出 marked_sentences 数组。',
+    '你是解说视频字幕编辑。输入含 full_narration 与 title_hook，须先理解整稿后再标注本批 sentences；重点标关键情感、具象物件、关键动作。',
     NARRATION_SUBTITLE_EMPHASIS_LLM_RULE,
-    '尽量每 2～3 句标 1 处 **，但每句仍最多 1 处；无合适强调词则原句照抄。',
-    '只输出 JSON：{"marked_sentences":["**22**岁…","第二句原文"]}',
+    'batch_sentence_start_index 表示本批 sentences 在 full_narration 中的起始下标，标注时须结合该句前后文。',
+    '只输出 JSON：{"marked_sentences":["你**辞职**那天，…","第二句原文"]}',
     'marked_sentences 长度必须与输入 sentences 完全相同；不要 markdown 标题/列表，不要解释。',
   ].join('\n')
 }
@@ -316,22 +356,11 @@ export function buildNarrationParagraphImagePromptLLMSystem(
     NARRATION_PREVIOUS_EPISODE_LLM_RULE,
     NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE,
     NARRATION_PLOT_CONTINUITY_LLM_RULE,
-    NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE,
-    NARRATION_FIXTURES_LLM_RULE,
-    NARRATION_ATMOSPHERE_LLM_RULE,
-    NARRATION_SCENE_PLOT_QUALITY_LLM_RULE,
-    NARRATION_ERA_CLOTHING_LLM_RULE,
-    minimal ? NARRATION_MINIMAL_EXPRESSION_LLM_RULE : '',
-    minimal ? NARRATION_PROTAGONIST_DISTINCT_LLM_RULE : '',
-    minimal ? NARRATION_MINIMAL_CLOTHING_LLM_RULE : '',
+    NARRATION_PARAGRAPH_OUTFIT_CONTINUITY_LLM_RULE,
+    NARRATION_OUTFIT_HEX_COLOR_LLM_RULE,
+    minimal ? NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE : NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE,
     violenceRule,
     NARRATION_VEHICLE_LLM_RULE,
-    minimal ? NARRATION_MINIMAL_PLOT_VISIBILITY_LLM_RULE : '',
-    minimal ? NARRATION_PROTAGONIST_UNIFIED_LLM_RULE : '',
-    minimal ? NARRATION_DUAL_PROTAGONIST_LLM_RULE : '',
-    minimal ? NARRATION_STAGE_HAIR_LLM_RULE : '',
-    minimal ? NARRATION_CROWD_EYE_LLM_RULE : '',
-    minimal ? NARRATION_CROWD_PLOT_LLM_RULE : '',
     minimal ? NARRATION_LLM_PROMPT_GOOD_BAD_EXAMPLES : '',
     '片头/标题句作为普通配图段处理，与其它旁白同样写六维 prompt，禁止使用单独的【片头背景场景】【主题氛围】格式',
   ].filter(Boolean)
@@ -339,14 +368,11 @@ export function buildNarrationParagraphImagePromptLLMSystem(
   if (minimal) {
     const hardRules = [
       '硬性规则：',
-      `1) 结构：${NARRATION_UNIVERSAL_SCENE_PREFIX} + 六维 + ${NARRATION_UNIVERSAL_SCENE_SUFFIX}；画风仅在前缀/后缀各写一次`,
-      `2) 示例：${NARRATION_UNIVERSAL_SCENE_PREFIX}，${NARRATION_UNIVERSAL_SCENE_BODY_EXAMPLE}，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-      `3) 【质感要求】仅写「${NARRATION_MINIMAL_TEXTURE_LLM_HINT}」；${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
-      '4) layout=single：单张完整场景，禁止 grid/collage/multi-panel/split/storyboard',
-      options?.hasDiptych ? `5) ${NARRATION_DIPPTYCH_SIX_PART_LLM_RULE}` : '',
-      options?.hasCharacters
-        ? 'characters 提供人生阶段与外貌；【画面主体】须写一位主人公居中前景+鲜明服装，配角在两侧背景且服装从简'
-        : '无 characters 时【画面主体】仍须写一位主人公居中前景（阶段+鲜明简化服装），配角不得抢镜',
+      `1) 结构：${NARRATION_UNIVERSAL_SCENE_PREFIX} + 六维 + ${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+      `2) 填空示例：${NARRATION_UNIVERSAL_SCENE_PREFIX}，${NARRATION_UNIVERSAL_SCENE_BODY_EXAMPLE}，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+      '3) layout=single：单张完整场景，禁止 grid/collage/multi-panel/split/storyboard',
+      options?.hasDiptych ? `4) ${NARRATION_DIPPTYCH_SIX_PART_LLM_RULE}` : '',
+      options?.hasCharacters ? 'characters 提供人生阶段与外貌，写入【画面主体】主人公段' : '',
       '每条 prompt 须以 narration_lines 为锚点、结合 full_narration 与 prior_narration 丰富场景/陈设/动作；不要输出负面提示词',
     ].filter(Boolean)
     return [...shared, ...hardRules, '只输出 JSON，不要解释。'].join('\n')
@@ -492,6 +518,8 @@ export function buildNarrationSceneSegmentsImagePromptLLMSystem(style?: string |
     NARRATION_FULL_PLOT_ENRICHMENT_LLM_RULE,
     NARRATION_PARAGRAPH_KEY_MOMENT_LLM_RULE,
     NARRATION_PLOT_CONTINUITY_LLM_RULE,
+    NARRATION_PARAGRAPH_OUTFIT_CONTINUITY_LLM_RULE,
+    NARRATION_OUTFIT_HEX_COLOR_LLM_RULE,
     NARRATION_SCENE_PLOT_QUALITY_LLM_RULE,
     NARRATION_ERA_CLOTHING_LLM_RULE,
     violenceRule,
@@ -1577,6 +1605,51 @@ export function extractNarrationPromptContentCore(raw?: string | null): string {
     text = text.replace(new RegExp(`[，,]?\\s*${escapeRegExp(part)}[，,]?`, 'g'), '，')
   }
   return sanitizeSceneImagePrompt(text)
+}
+
+/** 从【核心细节动作】去掉以「主人公」开头的分句（生图时主人公仅在【画面主体】描述一次） */
+export function stripProtagonistClausesFromNarrationAction(action?: string | null): string {
+  const parts = String(action || '').split(/[，,]/).map(s => s.trim()).filter(Boolean)
+  if (!parts.length) return ''
+  const kept = parts.filter(p => !/^主人公/.test(p) && !/^该主人公/.test(p))
+  if (kept.length) return kept.join('，')
+  return parts.filter(p => /配角|路人|群众|老师|店员|老板|衙役/.test(p)).join('，')
+}
+
+/**
+ * 六维 prompt 落库格式 → 文生图 API 用单行场景描述。
+ * 文生图模型不识别六维标签，且【画面主体】【核心细节动作】各写「主人公」会重复入画。
+ */
+export function compileNarrationImageGenerationPrompt(raw?: string | null): string {
+  const text = String(raw || '').trim()
+  if (!text || !hasNarrationSixDimStructure(text)) return text
+  if (/【左格】/.test(text) && /【右格】/.test(text)) return text
+
+  const bodyStart = text.search(/【(?:画面主体|年代场景)/)
+  const prefix = bodyStart > 0 ? text.slice(0, bodyStart).replace(/[，,]+$/g, '') : NARRATION_UNIVERSAL_SCENE_PREFIX
+
+  const subject = extractNarrationPromptBracketContents(text, '画面主体')[0] ?? ''
+  const era = extractNarrationPromptBracketContents(text, '年代场景')[0] ?? ''
+  const action = extractNarrationPromptBracketContents(text, '核心细节动作')[0] ?? ''
+  const lighting = extractNarrationPromptBracketContents(text, '光影色调')[0] ?? ''
+  const camera = extractNarrationPromptBracketContents(text, '镜头视角')[0] ?? ''
+  const crowdAction = stripProtagonistClausesFromNarrationAction(action)
+
+  const visualCore = [
+    subject,
+    era,
+    crowdAction,
+    lighting,
+    camera,
+    '全画面仅一位主人公，禁止第二个同款服装素体小人',
+  ].filter(Boolean).join('，')
+
+  const nonStanding = /趴|伏|躺|卧|蹲|坐于|伏低/.test(`${subject}${action}`)
+  const prefixFixed = nonStanding
+    ? prefix.replace(/青年标准站姿总高约三个头高/, '姿态以画面描述为准')
+    : prefix
+
+  return tidyAppearancePunctuation([prefixFixed, visualCore, NARRATION_UNIVERSAL_SCENE_SUFFIX].join('，'))
 }
 
 /** 将一段内容拆成场景环境 + 剧情动作 */
@@ -2863,24 +2936,41 @@ export function hasNarrationSpecificYearIssue(text: string): boolean {
   return NARRATION_SPECIFIC_YEAR_RE.test(scope)
 }
 
-/** 【画面主体】主人公不够鲜明（缺焦点位置或与配角难区分） */
-export function hasNarrationProtagonistDistinctIssue(text: string): boolean {
-  const subjects = extractNarrationPromptBracketContents(text, '画面主体')
-  if (!subjects.length) return false
-  for (const subject of subjects) {
-    if (!/主人公/.test(subject)) return true
-    const hasCrowd = /几位|配角|路人|顾客|群众/.test(subject)
-    if (!hasCrowd) continue
-    const hasFocus = /中心|前景|焦点|居中|画面主/.test(subject)
-    const hasCrowdPlacement = /两侧|背景|后方|陪衬|从简/.test(subject)
-    if (!hasFocus || !hasCrowdPlacement) return true
+/** 六维标签顺序是否与万能模板一致 */
+export function hasNarrationSixDimOrderIssue(text: string): boolean {
+  const raw = String(text || '').trim()
+  if (!raw) return false
+
+  const checkChunk = (chunk: string) => {
+    let last = -1
+    for (const label of NARRATION_SIX_DIM_LABELS) {
+      const match = chunk.match(new RegExp(`【${label}[：:]`))
+      if (!match || match.index == null) return false
+      if (match.index < last) return true
+      last = match.index
+    }
+    return false
   }
+
+  if (/【左格】/.test(raw) && /【右格】/.test(raw)) {
+    const rightIdx = raw.indexOf('【右格】')
+    const leftChunk = raw.slice(0, rightIdx)
+    const rightChunk = raw.slice(rightIdx)
+    return checkChunk(leftChunk) || checkChunk(rightChunk)
+  }
+  return checkChunk(raw)
+}
+
+/** 【画面主体】出现多位主人公（不含【多主人公例外】） */
+function isAllowedDualNarrativeProtagonistSubject(subject: string): boolean {
+  if (/一位.+?主人公与一位.+?(?:配偶|父亲|母亲|儿子|女儿|丈夫|妻子|兄长|姐姐|弟弟|妹妹)主人公/.test(subject)) return true
+  if (/两位(?:青年|中年|老年|小孩)?期?(?:白色素体小人)?主人公/.test(subject)) return true
   return false
 }
 
-/** 【画面主体】出现多位主人公 */
 export function hasNarrationMultipleProtagonistIssue(text: string): boolean {
   for (const subject of extractNarrationPromptBracketContents(text, '画面主体')) {
+    if (isAllowedDualNarrativeProtagonistSubject(subject)) continue
     if (/(?:两|三|四|五|几|多|两位|三位|两个|三个).*(?:位|个).*主人公/.test(subject)) return true
     if ((subject.match(/主人公/g) || []).length >= 2) return true
     if (/(?:两位|三位|两个|三个)白色素体小人主人公/.test(subject)) return true

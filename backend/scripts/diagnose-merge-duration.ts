@@ -4,6 +4,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import ffmpeg from 'fluent-ffmpeg'
 import { resolveStoryboardVisualSource, sortStoryboardsByOrder } from '../src/services/narration-image.js'
+import { PAGE_FLIP_TRANSITION_SEC } from '../src/services/ffmpeg-page-transition.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const dataRoot = path.resolve(__dirname, '../../data')
@@ -69,14 +70,14 @@ async function main() {
   }
 
   const groupDurationSum = groups.reduce((s, g) => s + g.duration, 0)
-  const transitionLoss = (groups.length - 1) * 0.45
+  const transitionExtra = Math.max(0, groups.length - 1) * PAGE_FLIP_TRANSITION_SEC
 
   console.log(`\nepisode ${episodeId}:`)
   console.log(`  clips: ${ordered.length}, zero-duration: ${zeroDuration}`)
   console.log(`  clip sum: ${Math.round(clipSum)}s (${(clipSum / 60).toFixed(1)}min)`)
   console.log(`  visual groups: ${groups.length}`)
   console.log(`  group duration sum: ${Math.round(groupDurationSum)}s`)
-  console.log(`  expected after xfade: ~${Math.round(groupDurationSum - transitionLoss)}s (${((groupDurationSum - transitionLoss) / 60).toFixed(1)}min)`)
+  console.log(`  expected after xfade: ~${Math.round(groupDurationSum + transitionExtra)}s (${((groupDurationSum + transitionExtra) / 60).toFixed(1)}min)`)
   console.log(`  multi-shot groups: ${groups.filter(g => g.count > 1).length}`)
   console.log(`  max group size: ${Math.max(...groups.map(g => g.count))}`)
 }

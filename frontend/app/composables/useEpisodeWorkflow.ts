@@ -881,7 +881,7 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
         id: 'script',
         label: '解说',
         items: [
-          { key: 'script:chat', label: '剧本生成', desc: 'AI 写解说稿', done: s.rawContent },
+          { key: 'script:chat', label: '剧本生成', desc: 'AI 写解说稿或直接输入', done: s.rawContent },
           { key: 'script:raw', label: '文案输入', desc: '粘贴解说稿', done: s.rawContent },
           { key: 'script:storyboard', label: '旁白分镜', desc: '拆成镜头', done: s.sbsCount > 0 },
         ],

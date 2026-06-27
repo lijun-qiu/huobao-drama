@@ -4,6 +4,7 @@ import { db, schema } from '../db/index.js'
 import { success, created, now, badRequest } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
 import { resolveEpisodeImageModel, imageModelMaxReferenceImages, imageModelSupportsReferenceImages } from '../constants/image-models.js'
+import { compileNarrationImageGenerationPrompt, isNarrationMinimalStyle } from '../constants/art-styles.js'
 import {
   collectCharacterReferenceImages,
   enrichImagePromptWithCharacters,
@@ -25,6 +26,7 @@ app.post('/', async (c) => {
     let episode: { imageConfigId?: number | null; imageModel?: string | null; dramaId?: number } | null = null
     let prompt = String(body.prompt || '')
     let referenceImages: string[] | Array<{ url?: string }> | undefined = body.reference_images
+    let dramaStyle: string | null = null
 
     if (body.storyboard_id) {
       const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()
@@ -38,19 +40,30 @@ app.post('/', async (c) => {
         if (resolved.characterIds.length) {
           const allChars = getEpisodeVisualCharacters(sb.episodeId, ep!.dramaId)
           const [drama] = db.select({ style: schema.dramas.style }).from(schema.dramas).where(eq(schema.dramas.id, ep!.dramaId)).all()
+          dramaStyle = drama?.style ?? null
           if (imageModelSupportsReferenceImages(model)) {
             const maxRefs = imageModelMaxReferenceImages(model)
             const refs = collectCharacterReferenceImages(allChars, resolved.characterIds, maxRefs)
             if (refs.length) referenceImages = refs
           }
-          prompt = enrichImagePromptWithCharacters(prompt, allChars, resolved.characterIds, drama?.style)
+          prompt = enrichImagePromptWithCharacters(prompt, allChars, resolved.characterIds, dramaStyle)
           logTaskStart('ImageAPI', 'resolve-characters', {
             storyboardId: sb.id,
             characterIds: resolved.characterIds,
             labels: resolved.characters.map(ch => formatCharacterDisplayName(ch)),
           })
+        } else if (ep?.dramaId) {
+          const [drama] = db.select({ style: schema.dramas.style }).from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+          dramaStyle = drama?.style ?? null
         }
       }
+    } else if (body.drama_id) {
+      const [drama] = db.select({ style: schema.dramas.style }).from(schema.dramas).where(eq(schema.dramas.id, Number(body.drama_id))).all()
+      dramaStyle = drama?.style ?? null
+    }
+
+    if (isNarrationMinimalStyle(dramaStyle)) {
+      prompt = compileNarrationImageGenerationPrompt(prompt)
     }
 
     const model = resolveEpisodeImageModel(episode, body.model)

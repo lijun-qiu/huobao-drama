@@ -113,14 +113,75 @@
                 <span class="step-num">01</span>
                 <span class="step-name">剧本生成</span>
               </div>
-              <span class="dim" style="font-size:12px;margin-left:8px">AI 对话 · 体验人生解说稿</span>
+              <span class="dim" style="font-size:12px;margin-left:8px">{{ scriptGenMode === 'chat' ? 'AI 对话 · 体验人生解说稿' : '直接输入 · 粘贴或编写解说稿' }}</span>
             </div>
             <div class="toolbar-right">
-              <button type="button" class="btn btn-sm" :disabled="scriptChatGenerating" @click="clearScriptChat">清空对话</button>
+              <div class="prod-tabs script-gen-tabs">
+                <button
+                  type="button"
+                  class="prod-tab"
+                  :class="{ active: scriptGenMode === 'chat' }"
+                  :disabled="scriptChatGenerating"
+                  @click="scriptGenMode = 'chat'"
+                >
+                  AI 对话
+                </button>
+                <button
+                  type="button"
+                  class="prod-tab"
+                  :class="{ active: scriptGenMode === 'manual' }"
+                  :disabled="scriptChatGenerating"
+                  @click="scriptGenMode = 'manual'"
+                >
+                  直接输入
+                </button>
+              </div>
+              <button
+                v-if="scriptGenMode === 'chat'"
+                type="button"
+                class="btn btn-sm"
+                :disabled="scriptChatGenerating"
+                @click="clearScriptChat"
+              >
+                清空对话
+              </button>
             </div>
           </div>
 
-          <div class="script-chat-panel script-chat-panel-full">
+          <div v-if="scriptGenMode === 'manual'" class="script-manual-panel">
+            <div class="script-manual-toolbar">
+              <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
+              <button
+                v-if="rawHasEmphasis"
+                type="button"
+                class="btn btn-sm"
+                @click="stripRawEmphasis"
+              >
+                去掉 ** 标记
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :disabled="!localRaw.trim() || scriptManualEmphasizing"
+                @click="doScriptManualEmphasis"
+              >
+                {{ scriptManualEmphasizing ? '标注中…' : '标注字幕强调（**）' }}
+              </button>
+              <button type="button" class="btn btn-sm btn-primary" @click="saveRaw(); toast.success('已保存')">
+                保存
+              </button>
+            </div>
+            <textarea
+              v-model="localRaw"
+              class="fill-textarea script-manual-textarea"
+              placeholder="粘贴或编写完整解说稿…&#10;首行建议：今天体验的人生剧本是，…&#10;也可从 Word / 备忘录直接粘贴"
+            />
+            <div class="narration-hint" style="margin-top:10px">
+              自备稿可直接在此编辑；保存后进入「文案输入」或「旁白分镜」继续。需要 AI 写稿请切回「AI 对话」。
+            </div>
+          </div>
+
+          <div v-else class="script-chat-panel script-chat-panel-full">
             <div class="script-chat-body">
               <div class="script-chat-toolbar">
                 <span class="dim" style="font-size:12px">模型</span>
@@ -169,6 +230,14 @@
                 </div>
               </div>
               <div v-if="lastScriptChatDraft" class="script-chat-draft-actions">
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="scriptChatGenerating || scriptChatEmphasizing || !scriptChatDraftHasEmphasis"
+                  @click="doScriptChatStripEmphasis"
+                >
+                  去掉 ** 标记
+                </button>
                 <button
                   type="button"
                   class="btn btn-sm"
@@ -249,6 +318,14 @@
             </div>
             <div class="toolbar-right">
               <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
+              <button
+                v-if="rawHasEmphasis"
+                type="button"
+                class="btn btn-sm"
+                @click="stripRawEmphasis"
+              >
+                去掉 ** 标记
+              </button>
               <button class="btn btn-sm" @click="saveRaw(); toast.success('已保存')">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
                 保存
@@ -3500,6 +3577,7 @@ import {
 } from '~/composables/useEpisodeWorkflow'
 import { artStyleLabel } from '~/composables/useArtStyles'
 import { buildFolderUploadSlots, isImageUploadFile, parseShotImageFilename } from '~/utils/shotImageFilename'
+import { hasEmphasisMarkers, stripEmphasisMarkers } from '~/utils/subtitle-emphasis'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 definePageMeta({ layout: 'studio' })
@@ -3660,11 +3738,13 @@ const imagePromptBatchSize = ref(6)
 
 const localRaw = ref(''), localScript = ref('')
 
-const SCRIPT_CHAT_WELCOME = '描述你想让观众体验的「一段人生」。默认第二人称「你」、语言亲民真实；完整稿 3000～10000 字，时间跨度随题材（不必写满青年中年老年）。生成后可点「标注字幕强调」加 ** 黄字。首行以「今天体验的人生剧本是，」开头。'
+const SCRIPT_CHAT_WELCOME = '描述你想让观众体验的「一段人生」。默认第二人称「你」、语言亲民真实；完整稿 3000～10000 字。也可切「直接输入」粘贴自备稿。生成后可点「标注字幕强调」——结合全文标关键情感、具象物件、关键动作（** 黄字，不标数字）。首行以「今天体验的人生剧本是，」开头。'
+const scriptGenMode = ref('chat')
 const scriptChatMessages = ref([{ role: 'assistant', content: SCRIPT_CHAT_WELCOME, local: true }])
 const scriptChatInput = ref('')
 const scriptChatGenerating = ref(false)
 const scriptChatEmphasizing = ref(false)
+const scriptManualEmphasizing = ref(false)
 const scriptChatModel = ref(DEFAULT_NARRATION_SCRIPT_CHAT_MODEL)
 const scriptChatThinking = ref(DEFAULT_TEXT_THINKING)
 const scriptChatScrollRef = ref(null)
@@ -5242,7 +5322,9 @@ const nextStepLabel = computed(() => {
   return stepLabels.value[scriptStep.value + 1] || ''
 })
 const canGoNext = computed(() => {
-  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep()) return true
+  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep()) {
+    return !!localRaw.value.trim() || !!lastScriptChatDraft.value || scriptGenMode.value === 'chat'
+  }
   if (isNarrationMode.value && scriptStep.value === narrationRawContentStep()) return !!localRaw.value.trim()
   if (isNarrationMode.value && scriptStep.value === narrationStoryboardStep()) return sbs.value.length > 0
   if (scriptStep.value === 0) return !!localRaw.value.trim()
@@ -5254,6 +5336,11 @@ const canGoNext = computed(() => {
 })
 function goPrevStep() { if (scriptStep.value > 0) scriptStep.value-- }
 function goNextStep() {
+  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep() && localRaw.value.trim()) {
+    saveRaw()
+    localScript.value = localRaw.value
+    saveScr()
+  }
   if (isNarrationMode.value && scriptStep.value === narrationRawContentStep() && localRaw.value.trim()) {
     saveRaw()
     localScript.value = localRaw.value
@@ -6415,7 +6502,10 @@ const scriptSteps = computed(() => {
   ]
 })
 
-watch(rawContent, v => { localRaw.value = v }, { immediate: true })
+watch(rawContent, v => {
+  localRaw.value = v
+  if (v?.trim()) scriptGenMode.value = 'manual'
+}, { immediate: true })
 watch(scriptContent, v => { localScript.value = v }, { immediate: true })
 
 async function refreshStoryboardsOnly() {
@@ -6653,6 +6743,22 @@ const lastScriptChatDraft = computed(() => {
   return ''
 })
 
+const scriptChatDraftHasEmphasis = computed(() => hasEmphasisMarkers(lastScriptChatDraft.value))
+const rawHasEmphasis = computed(() => hasEmphasisMarkers(localRaw.value))
+
+function replaceLastScriptChatDraft(content) {
+  const next = String(content || '').trim()
+  if (!next) return false
+  for (let i = scriptChatMessages.value.length - 1; i >= 0; i--) {
+    const msg = scriptChatMessages.value[i]
+    if (msg.role === 'assistant' && !msg.local) {
+      scriptChatMessages.value[i].content = next
+      return true
+    }
+  }
+  return false
+}
+
 function extractScriptFromChat(text) {
   const raw = String(text || '').trim()
   const fenced = raw.match(/```(?:markdown|text)?\s*([\s\S]*?)```/i)
@@ -6697,6 +6803,9 @@ async function doScriptChatEmphasis() {
     toast.warning('暂无可标注的解说稿')
     return
   }
+  const sentCount = Math.max(1, (draft.match(/[。！？!?]/g) || []).length)
+  const batchCount = Math.ceil(sentCount / 25)
+  toast.info(`LLM 标注中（约 ${sentCount} 句 · ${batchCount} 批），预计 ${batchCount}～${batchCount * 2} 分钟，请耐心等待`)
   scriptChatEmphasizing.value = true
   try {
     const res = await episodeAPI.narrationScriptEmphasis(epId.value, {
@@ -6707,13 +6816,7 @@ async function doScriptChatEmphasis() {
     const marked = String(res?.script || '').trim()
     if (!marked) throw new Error('标注失败')
 
-    for (let i = scriptChatMessages.value.length - 1; i >= 0; i--) {
-      const msg = scriptChatMessages.value[i]
-      if (msg.role === 'assistant' && !msg.local) {
-        scriptChatMessages.value[i].content = marked
-        break
-      }
-    }
+    if (!replaceLastScriptChatDraft(marked)) throw new Error('更新对话失败')
     await nextTick()
     scrollScriptChatToBottom()
     toast.success('字幕强调已标注')
@@ -6721,6 +6824,67 @@ async function doScriptChatEmphasis() {
     toast.error(e.message)
   } finally {
     scriptChatEmphasizing.value = false
+  }
+}
+
+function doScriptChatStripEmphasis() {
+  const draft = extractScriptFromChat(lastScriptChatDraft.value)
+  if (!draft) {
+    toast.warning('暂无可处理的解说稿')
+    return
+  }
+  if (!hasEmphasisMarkers(draft)) {
+    toast.info('当前稿没有 ** 标记')
+    return
+  }
+  const stripped = stripEmphasisMarkers(draft)
+  if (!replaceLastScriptChatDraft(stripped)) {
+    toast.error('更新对话失败')
+    return
+  }
+  toast.success('已去掉 ** 标记')
+}
+
+function stripRawEmphasis() {
+  const raw = String(localRaw.value || '').trim()
+  if (!raw) {
+    toast.warning('暂无文案')
+    return
+  }
+  if (!hasEmphasisMarkers(raw)) {
+    toast.info('当前文案没有 ** 标记')
+    return
+  }
+  localRaw.value = stripEmphasisMarkers(raw)
+  saveRaw()
+  toast.success('已去掉 ** 标记')
+}
+
+async function doScriptManualEmphasis() {
+  const script = String(localRaw.value || '').trim()
+  if (!script || !epId.value) {
+    toast.warning('请先输入解说稿')
+    return
+  }
+  const sentCount = Math.max(1, (script.match(/[。！？!?]/g) || []).length)
+  const batchCount = Math.ceil(sentCount / 25)
+  toast.info(`LLM 标注中（约 ${sentCount} 句 · ${batchCount} 批），预计 ${batchCount}～${batchCount * 2} 分钟，请耐心等待`)
+  scriptManualEmphasizing.value = true
+  try {
+    const res = await episodeAPI.narrationScriptEmphasis(epId.value, {
+      script,
+      text_model: scriptChatModel.value,
+      text_thinking: scriptChatThinking.value,
+    })
+    const marked = String(res?.script || '').trim()
+    if (!marked) throw new Error('标注失败')
+    localRaw.value = marked
+    saveRaw()
+    toast.success('字幕强调已标注')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    scriptManualEmphasizing.value = false
   }
 }
 
@@ -10653,6 +10817,32 @@ onMounted(async () => {
   min-width: 32px;
   justify-content: center;
   padding: 4px 10px;
+}
+.script-gen-tabs {
+  padding: 2px;
+  min-width: 148px;
+}
+.script-gen-tabs .prod-tab {
+  min-width: 68px;
+  justify-content: center;
+  padding: 4px 10px;
+}
+.script-manual-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
+}
+.script-manual-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.script-manual-textarea {
+  flex: 1;
+  min-height: 360px;
 }
 .script-chat-panel {
   margin-bottom: 12px;

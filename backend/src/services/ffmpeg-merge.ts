@@ -13,7 +13,8 @@ import { db, schema } from '../db/index.js'
 import { and, desc, eq, inArray } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION } from './ffmpeg-page-transition.js'
+import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION, computePageFlipMergedDuration, computePageFlipTransitionTimes, prependPageFlipSegmentTimeline } from './ffmpeg-page-transition.js'
+import { mixPageFlipSfxIntoMergedVideo } from './ffmpeg-page-flip-sfx.js'
 import { BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { isStoryboardTitleShot, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
 
@@ -248,6 +249,33 @@ function appendAudioDeclickFilter(parts: string[], inputIndex: number, durationS
   parts.push(`${base},afade=t=in:st=0:d=${fadeStr},afade=t=out:st=${fadeOutStart}:d=${fadeStr}[${outLabel}]`)
 }
 
+/**
+ * 转场拼接旁白：整段保留、硬切不叠音；仅首段片头可极短 fade-in 防咔声。
+ */
+function appendAudioFullForMerge(
+  parts: string[],
+  inputIndex: number,
+  durationSec: number,
+  outLabel: string,
+): void {
+  const dStr = fmtFilterSec(durationSec)
+  const base = `[${inputIndex}:a]atrim=duration=${dStr},asetpts=PTS-STARTPTS,aresample=48000`
+  if (inputIndex > 0) {
+    parts.push(`${base}[${outLabel}]`)
+    return
+  }
+  const fade = resolveAudioBoundaryFadeSec(durationSec)
+  if (fade <= 0 || durationSec <= fade * 2 + 0.02) {
+    parts.push(`${base}[${outLabel}]`)
+    return
+  }
+  parts.push(`${base},afade=t=in:st=0:d=${fmtFilterSec(fade)}[${outLabel}]`)
+}
+
+function appendSilenceSegment(parts: string[], durationSec: number, label: string): void {
+  parts.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${fmtFilterSec(durationSec)},asetpts=PTS-STARTPTS[${label}]`)
+}
+
 function buildConcatDeclickFilterScript(segmentDurations: number[]): string {
   const n = segmentDurations.length
   const parts: string[] = []
@@ -306,7 +334,7 @@ async function runFilterComplexMerge(
 
 /**
  * 换配图段之间：云朵软擦除转场（smoothright，自左向右）；
- * 音频分段 concat + 边界短 fade（不 acrossfade，避免旁白叠音/语速错乱）。
+ * 叠加型 td 秒：各段画面/旁白完整保留，转场期间旁白连续硬切播放（不截断、不叠音、不插静音）。
  */
 function buildXfadeFilterScript(segmentDurations: number[]): string {
   const td = IMAGE_CHANGE_TRANSITION_SEC
@@ -316,23 +344,23 @@ function buildXfadeFilterScript(segmentDurations: number[]): string {
   const parts: string[] = []
   const vLabels: string[] = []
   const aLabels: string[] = []
+  const tdStr = fmtFilterSec(td)
 
   for (let i = 0; i < n; i++) {
     const d = segmentDurations[i]
+    const dStr = fmtFilterSec(d)
     const vLabel = `vin${i}`
     const aLabel = `ain${i}`
-    const dStr = fmtFilterSec(d)
-    const tdStr = fmtFilterSec(td)
-    if (i < n - 1) {
+    if (i === 0) {
       parts.push(
         `[${i}:v]fps=25,trim=duration=${dStr},setpts=PTS-STARTPTS,format=yuv420p,tpad=stop_mode=clone:stop_duration=${tdStr}[${vLabel}]`,
       )
     } else {
       parts.push(
-        `[${i}:v]fps=25,trim=duration=${dStr},setpts=PTS-STARTPTS,format=yuv420p[${vLabel}]`,
+        `[${i}:v]fps=25,trim=duration=${dStr},setpts=PTS-STARTPTS,format=yuv420p,tpad=start_mode=clone:start_duration=${tdStr}[${vLabel}]`,
       )
     }
-    appendAudioDeclickFilter(parts, i, d, aLabel)
+    appendAudioFullForMerge(parts, i, d, aLabel)
     vLabels.push(`[${vLabel}]`)
     aLabels.push(`[${aLabel}]`)
   }
@@ -342,16 +370,16 @@ function buildXfadeFilterScript(segmentDurations: number[]): string {
 
   for (let i = 1; i < n; i++) {
     const vOut = i === n - 1 ? 'vout' : `vxf${i}`
-    const offset = Math.max(0.1, cumulative - td)
+    const offset = Math.max(0.001, cumulative - td)
     parts.push(
-      `${vChain}${vLabels[i]}xfade=transition=${IMAGE_CHANGE_TRANSITION}:duration=${fmtFilterSec(td)}:offset=${fmtFilterSec(offset)}[${vOut}]`,
+      `${vChain}${vLabels[i]}xfade=transition=${IMAGE_CHANGE_TRANSITION}:duration=${tdStr}:offset=${fmtFilterSec(offset)}[${vOut}]`,
     )
     vChain = `[${vOut}]`
-    const segDur = i < n - 1 ? segmentDurations[i] + td : segmentDurations[i]
-    cumulative += segDur - td
+    cumulative += segmentDurations[i]
   }
 
-  parts.push(`${aLabels.join('')}concat=n=${n}:v=0:a=1[aout]`)
+  parts.push(`${aLabels.join('')}concat=n=${n}:v=0:a=1[aconcat]`)
+  parts.push(`[aconcat]apad=pad_dur=${tdStr}[aout]`)
 
   return parts.join(';\n')
 }
@@ -397,7 +425,7 @@ async function mergeSegmentsSequential(
       await mergeSegmentsWithPageFlip([current, segments[i]], tempOut, run, onProgress)
       current = {
         path: tempOut,
-        duration: current.duration + segments[i].duration,
+        duration: computePageFlipMergedDuration([current.duration, segments[i].duration]),
         temp: true,
       }
     }
@@ -618,7 +646,7 @@ async function mergeEpisodeBodyWithLanes(
   run: ActiveMergeRun,
   episodeId: number,
   onProgress: (encodedSec: number) => void,
-): Promise<{ temps: string[]; laneCount: number; cacheFingerprint: string }> {
+): Promise<{ temps: string[]; laneCount: number; cacheFingerprint: string; bodyPageFlipTimes: number[] }> {
   const absPaths = storyboards.map(sb => toAbsPath(sb.composedVideoUrl!))
   const laneCount = resolveMergeLaneCount(storyboards.length, groups.length, usePageFlip)
   const cacheFingerprint = computeMergeClipFingerprint(storyboards)
@@ -631,12 +659,15 @@ async function mergeEpisodeBodyWithLanes(
     if (usePageFlip) {
       const built = await buildMergeSegments(groups, run)
       temps.push(...built.temps)
-      if (run.cancelled) return { temps, laneCount: 1, cacheFingerprint }
+      if (run.cancelled) return { temps, laneCount: 1, cacheFingerprint, bodyPageFlipTimes: [] }
       await mergeSegmentListToFile(built.segments, barePath, run, onProgress)
-      return { temps, laneCount: 1, cacheFingerprint }
+      const bodyPageFlipTimes = built.segments.length > 1
+        ? computePageFlipTransitionTimes(built.segments.map(seg => seg.duration))
+        : []
+      return { temps, laneCount: 1, cacheFingerprint, bodyPageFlipTimes }
     }
     await concatComposedVideos(absPaths, barePath, run, onProgress)
-    return { temps, laneCount: 1, cacheFingerprint }
+    return { temps, laneCount: 1, cacheFingerprint, bodyPageFlipTimes: [] }
   }
 
   fs.mkdirSync(cacheDir, { recursive: true })
@@ -714,7 +745,7 @@ async function mergeEpisodeBodyWithLanes(
     },
   )
 
-  if (run.cancelled) return { temps: allTemps, laneCount: effectiveLaneCount, cacheFingerprint }
+  if (run.cancelled) return { temps: allTemps, laneCount: effectiveLaneCount, cacheFingerprint, bodyPageFlipTimes: [] }
 
   writeLaneManifest(cacheDir, {
     fingerprint: cacheFingerprint,
@@ -743,6 +774,10 @@ async function mergeEpisodeBodyWithLanes(
     await concatComposedVideos(finalSegments.map(seg => seg.path), barePath, run, onProgress)
   }
 
+  const bodyPageFlipTimes = usePageFlip && finalSegments.length > 1
+    ? computePageFlipTransitionTimes(finalSegments.map(seg => seg.duration))
+    : []
+
   logTaskProgress('MergeTask', 'lane-merge-complete', {
     mergeId: run.mergeId,
     episodeId,
@@ -751,7 +786,7 @@ async function mergeEpisodeBodyWithLanes(
     cacheDir,
   })
 
-  return { temps: allTemps, laneCount: effectiveLaneCount, cacheFingerprint }
+  return { temps: allTemps, laneCount: effectiveLaneCount, cacheFingerprint, bodyPageFlipTimes }
 }
 
 function cleanupTempFiles(paths: string[]) {
@@ -1098,6 +1133,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
 
   let mergeLaneCount = 1
   let mergeCacheFingerprint = computeMergeClipFingerprint(storyboards)
+  let pageFlipTimes: number[] = []
 
   try {
     if (usePageFlip) {
@@ -1130,6 +1166,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     tempFiles = laneResult.temps
     mergeLaneCount = laneResult.laneCount
     mergeCacheFingerprint = laneResult.cacheFingerprint
+    pageFlipTimes = laneResult.bodyPageFlipTimes
     if (run.cancelled) return
   } catch (err: any) {
     activeMerges.delete(episodeId)
@@ -1167,6 +1204,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       deliverPath = path.join(outputDir, deliverFilename)
       await prependBlackLeadPageFlip(barePath, deliverPath, run, tempFiles, updateEncodeProgress)
       totalDurationSec += BODY_LEAD_DURATION_SEC
+      pageFlipTimes = prependPageFlipSegmentTimeline(BODY_LEAD_DURATION_SEC, pageFlipTimes)
     } catch (err: any) {
       throw new Error(`首镜云朵入场失败: ${err.message}`)
     } finally {
@@ -1185,8 +1223,10 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         updatedAt: Date.now(),
       })
       try {
+        const openingDur = await getVideoDuration(openingAbs)
         await prependOpeningToMergedVideo(openingAbs, deliverPath, run)
-        totalDurationSec += await getVideoDuration(openingAbs)
+        totalDurationSec += openingDur
+        pageFlipTimes = prependPageFlipSegmentTimeline(openingDur, pageFlipTimes)
       } catch (err: any) {
         throw new Error(`开幕视频拼接失败: ${err.message}`)
       }
@@ -1194,6 +1234,25 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
   }
 
   if (run.cancelled) return
+
+  if (pageFlipTimes.length > 0 && !run.cancelled) {
+    setMergeProgress(episodeId, {
+      mergeId,
+      phase: 'finalizing',
+      percent: 90,
+      message: '正在混入转场音效…',
+      updatedAt: Date.now(),
+    })
+    try {
+      await mixPageFlipSfxIntoMergedVideo(
+        deliverPath,
+        pageFlipTimes,
+        cmd => attachMergeCommand(run, cmd),
+      )
+    } catch (err: any) {
+      throw new Error(`转场音效混音失败: ${err.message}`)
+    }
+  }
 
   let bgmSkippedEmbedded = false
   if (options.bgmMusicId && !run.cancelled) {
@@ -1409,6 +1468,16 @@ async function doOpeningMerge(
       return
     }
 
+    const flipTimes = computePageFlipTransitionTimes(segments.map(seg => seg.duration))
+    if (flipTimes.length) {
+      await mixPageFlipSfxIntoMergedVideo(outputPath, flipTimes, cmd => attachMergeCommand(run, cmd))
+    }
+
+    if (run.cancelled) {
+      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+      return
+    }
+
     const duration = Math.round(await getVideoDuration(outputPath))
     const mergedRelative = `static/merged/${outputFilename}`
 
@@ -1560,6 +1629,16 @@ async function doTitleMerge(
       bodyAbs,
     })
     await mergeOrderedSegmentsToOutput(segments, outputPath, run)
+    if (run.cancelled) {
+      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+      return
+    }
+
+    const flipTimes = computePageFlipTransitionTimes(segments.map(seg => seg.duration))
+    if (flipTimes.length) {
+      await mixPageFlipSfxIntoMergedVideo(outputPath, flipTimes, cmd => attachMergeCommand(run, cmd))
+    }
+
     if (run.cancelled) {
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
       return

@@ -29,8 +29,13 @@ import {
   buildCombinedAssHeader,
   buildNarrationEmphasisAssContent,
   buildNarrationEmphasisAssDialogueLine,
+  buildNarrationPlainAssContent,
   buildNarrationPlainAssDialogueLine,
   hasEmphasisMarkers,
+  NARRATION_SUBTITLE_FONT_SIZE,
+  NARRATION_SUBTITLE_MARGIN_V,
+  NARRATION_SUBTITLE_PLAY_RES_X,
+  NARRATION_SUBTITLE_PLAY_RES_Y,
   stripSubtitlePunctuationPreservingEmphasis,
 } from '../utils/subtitle-emphasis.js'
 
@@ -96,28 +101,6 @@ function stripSubtitlePunctuation(text: string): string {
     .trim()
 }
 
-function formatSrtTimestamp(seconds: number) {
-  const totalMs = Math.max(0, Math.round(seconds * 1000))
-  const h = Math.floor(totalMs / 3600000)
-  const m = Math.floor((totalMs % 3600000) / 60000)
-  const s = Math.floor((totalMs % 60000) / 1000)
-  const ms = totalMs % 1000
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`
-}
-
-/** 单条 SRT 字幕块，起止与配音片段对齐 */
-function buildNarrationSubtitleSrtBlock(
-  text: string,
-  startSec: number,
-  durationSec: number,
-  index = 1,
-) {
-  const safeDur = Math.max(durationSec, 0.05)
-  const start = formatSrtTimestamp(startSec)
-  const end = formatSrtTimestamp(startSec + safeDur)
-  return `${index}\n${start} --> ${end}\n${text}\n`
-}
-
 function probeMediaDuration(filePath: string): Promise<number> {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(filePath, (err, data) => {
@@ -136,7 +119,7 @@ function formatAssTimestamp(seconds: number) {
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`
 }
 
-const TITLE_FONT_SIZE = 74
+const TITLE_FONT_SIZE = 94
 const TITLE_WHITE_FONT_SIZE = TITLE_FONT_SIZE + 10
 
 function escapeAssChar(ch: string) {
@@ -192,7 +175,7 @@ function buildSubtitleForceStyle(isTitleShot: boolean) {
   if (isTitleShot) {
     return `FontName=${TITLE_SUBTITLE_FONT}\\,FontSize=${TITLE_FONT_SIZE}\\,PrimaryColour=&H0014F0&\\,OutlineColour=&HFFFFFF&\\,Outline=3\\,Bold=1\\,Alignment=5\\,MarginL=0\\,MarginR=0\\,MarginV=0`
   }
-  return 'FontSize=20\\,PrimaryColour=&HFFFFFF&\\,OutlineColour=&H000000&\\,Outline=2\\,Alignment=2\\,MarginV=24'
+  return `FontSize=${NARRATION_SUBTITLE_FONT_SIZE}\\,PrimaryColour=&HFFFFFF&\\,OutlineColour=&H000000&\\,Outline=2\\,Alignment=2\\,MarginV=${NARRATION_SUBTITLE_MARGIN_V}`
 }
 
 function buildSubtitleFilter(subtitlePath: string, isTitleShot: boolean) {
@@ -200,9 +183,11 @@ function buildSubtitleFilter(subtitlePath: string, isTitleShot: boolean) {
     .replace(/\\/g, '/')
     .replace(/:/g, '\\:')
     .replace(/'/g, "\\'")
-  // 片头 ASS 用 ass 滤镜保留 \move 等动画；任意 .ass 均走 ass 滤镜
+  const playRes = `${NARRATION_SUBTITLE_PLAY_RES_X}x${NARRATION_SUBTITLE_PLAY_RES_Y}`
+  // 片头 ASS 保留 ass 滤镜以兼容 \move；旁白 ASS 走 subtitles+original_size，与历史 SRT 底栏位置一致
   if (subtitlePath.toLowerCase().endsWith('.ass')) {
-    return `ass='${escapedPath}'`
+    if (isTitleShot) return `ass='${escapedPath}'`
+    return `subtitles=filename='${escapedPath}':original_size=${playRes}`
   }
   const forceStyle = buildSubtitleForceStyle(isTitleShot)
   return `subtitles=filename='${escapedPath}':original_size=1280x720:force_style='${forceStyle}'`
@@ -489,7 +474,6 @@ export async function renderSameImageGroupSegment(
 
   let offsetSec = 0
   let titleMode = false
-  let narrationAssMode = false
   type GroupSubtitleLine =
     | { type: 'title'; text: string; startSec: number; endSec: number }
     | {
@@ -528,7 +512,6 @@ export async function renderSameImageGroupSegment(
       if (isTitleShot) {
         subtitleLines.push({ type: 'title', text: displayText, startSec, endSec })
       } else {
-        if (hasEmphasisMarkers(subtitleMarkedText)) narrationAssMode = true
         subtitleLines.push({
           type: 'narration',
           displayText,
@@ -545,29 +528,27 @@ export async function renderSameImageGroupSegment(
     offsetSec += durationSec
   }
 
-  const useAssSubtitle = titleMode || narrationAssMode
-  const subtitlePath = path.join(tempDir, `${uuid()}.${useAssSubtitle ? 'ass' : 'srt'}`)
+  const hasNarrationSubtitles = subtitleLines.some(line => line.type === 'narration')
+  const useAssSubtitle = titleMode || hasNarrationSubtitles
+  const subtitlePath = path.join(tempDir, `${uuid()}.ass`)
   let subtitleContent: string
-  if (!useAssSubtitle) {
-    subtitleContent = subtitleLines
-      .filter((line): line is Extract<GroupSubtitleLine, { type: 'narration' }> => line.type === 'narration')
-      .map(line => buildNarrationSubtitleSrtBlock(line.displayText, line.startSec, line.durationSec, line.index + 1))
-      .join('\n')
-  } else {
+  if (useAssSubtitle) {
     const dialogueLines = subtitleLines.map(line => {
       if (line.type === 'title') {
         return buildTitleAssDialogueLine(line.text, line.startSec, line.endSec)
       }
-      if (narrationAssMode && hasEmphasisMarkers(line.markedText)) {
+      if (hasEmphasisMarkers(line.markedText)) {
         return buildNarrationEmphasisAssDialogueLine(line.displayText, line.startSec, line.endSec)
       }
       return buildNarrationPlainAssDialogueLine(line.displayText, line.startSec, line.endSec)
     })
     subtitleContent = `${buildCombinedAssHeader({
       includeTitleStyles: titleMode,
-      includeNarrationStyles: narrationAssMode || !titleMode,
+      includeNarrationStyles: hasNarrationSubtitles,
       titleFontName: TITLE_SUBTITLE_FONT,
     })}${dialogueLines.join('\n')}\n`
+  } else {
+    subtitleContent = ''
   }
   fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
 
@@ -584,7 +565,7 @@ export async function renderSameImageGroupSegment(
   await new Promise<void>((resolve, reject) => {
     const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount)]
     if (supportsSubtitleFilter()) {
-      filters.push(buildSubtitleFilter(subtitlePath, titleMode))
+      filters.push(buildSubtitleFilter(subtitlePath, titleMode && !hasNarrationSubtitles))
     }
     appendWatermarkFilter(filters, watermarkText, { animated: watermarkAnimated })
 
@@ -756,21 +737,21 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       })
     }
 
-    // 2. 生成字幕：正文 SRT 底栏；含 **强调** 时用 ASS 黄字加大；片头 ASS 剧中红字
+    // 2. 生成字幕：旁白统一 ASS（白字 20 号；含 **强调** 时黄字 25 号）；片头 ASS 剧中红字
     const subtitleMarkedText = resolveStoryboardSubtitleNarration(sb)
     const displayText = stripSubtitlePunctuationPreservingEmphasis(subtitleMarkedText)
     const useEmphasisAss = !isTitleShot && hasEmphasisMarkers(subtitleMarkedText)
     if (displayText && (!parsedDialogue.ignorable || isTitleShot)) {
       const srtDir = path.join(STORAGE_ROOT, 'subtitles')
       fs.mkdirSync(srtDir, { recursive: true })
-      const subtitleFilename = `${uuid()}${isTitleShot || useEmphasisAss ? '.ass' : '.srt'}`
+      const subtitleFilename = `${uuid()}.ass`
       subtitlePath = path.join(srtDir, subtitleFilename)
 
       const subtitleContent = isTitleShot
         ? buildTitleAssContent(displayText, clipDuration)
         : useEmphasisAss
           ? buildNarrationEmphasisAssContent(displayText, clipDuration)
-          : buildNarrationSubtitleSrtBlock(displayText, 0, clipDuration)
+          : buildNarrationPlainAssContent(displayText, clipDuration)
       fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
 
       const subtitleRelative = `static/subtitles/${subtitleFilename}`

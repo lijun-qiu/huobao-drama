@@ -10,6 +10,7 @@ import {
   optimizeEpisodeNarrationImagePrompts,
   restoreEpisodeNarrationImagePrompts,
 } from '../services/narration-image-prompt-audit.js'
+import { unifyEpisodeParagraphOutfits } from '../services/narration-outfit-continuity.js'
 import { getNarrationImageBreakdownProgress, acquireNarrationImageBreakdownJob, releaseNarrationImageBreakdownJob } from '../services/narration-image-breakdown-progress.js'
 import { sortStoryboardsByOrder } from '../services/narration-image.js'
 import { cropEpisodeNarrationImageWatermarks, restoreEpisodeNarrationImageWatermarks } from '../services/narration-image-crop.js'
@@ -598,6 +599,26 @@ app.post('/:id/narration-image-optimize', async (c) => {
 
   try {
     const result = optimizeEpisodeNarrationImagePrompts(episodeId, style, storyboardIds)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/narration-image-unify-outfits — 统一配图段内/跨段主人公服装
+app.post('/:id/narration-image-unify-outfits', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const rawIds = body?.storyboard_ids ?? body?.storyboardIds
+  const storyboardIds = Array.isArray(rawIds)
+    ? rawIds.map((id: unknown) => Number(id)).filter(id => Number.isFinite(id) && id > 0)
+    : undefined
+
+  try {
+    const result = unifyEpisodeParagraphOutfits(episodeId, storyboardIds)
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)

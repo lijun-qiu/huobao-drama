@@ -1655,6 +1655,8 @@ export async function generateParagraphImagePromptsWithLLM(
         })),
         output_format: {
           paragraph_prompts: paragraphOutputHint,
+          paragraph_outfit_continuity:
+            '同一 paragraph_index/start_index 配图段内，主人公服装款式+#hex 须完全一致（含 diptych 左右格）；#hex紧挨款式词无空格，须带简笔轮廓；配角/配偶也须写 #hex（如 #64748b低饱和便装、#ffffff围裙）；禁止中文色词',
         },
       })
 
@@ -1756,7 +1758,12 @@ export async function generateParagraphImagePromptsWithLLM(
             ttsSentences: p.ttsSentences?.length ? p.ttsSentences : p.sentences,
           })),
           subtitleLinesByStartIndex,
-          { textModel, textThinking: false },
+          {
+            textModel,
+            textThinking: false,
+            fullNarration,
+            titleHook: titleHook || titleFull,
+          },
         )
       } else if (resolveNarrationEmphasisMode() === 'rules') {
         for (const p of batch) {
@@ -1800,7 +1807,12 @@ export async function generateParagraphImagePromptsWithLLM(
           ttsSentences: p.ttsSentences?.length ? p.ttsSentences : p.sentences,
         })),
         subtitleLinesByStartIndex,
-        { textModel, textThinking: false },
+        {
+          textModel,
+          textThinking: false,
+          fullNarration,
+          titleHook: titleHook || titleFull,
+        },
       )
     }
 

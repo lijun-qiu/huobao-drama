@@ -1,5 +1,5 @@
 /**
- * 开幕视频 — 随机 N 张配图 + 云朵转场片头（首尾镜固定 + 可选上传配音/字幕，转场无音效）
+ * 开幕视频 — 随机 N 张配图 + 云朵转场片头（首尾镜固定 + 可选上传配音/字幕 + 转场音效）
  */
 import { execFileSync, spawnSync } from 'child_process'
 import ffmpeg from 'fluent-ffmpeg'
@@ -14,6 +14,12 @@ import { sortStoryboardsByOrder } from './narration-image.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
 import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION } from './ffmpeg-page-transition.js'
+import {
+  computeOverlappingPageFlipSoundTimes,
+  mixAudioWithPageFlipSfx,
+  preparePageFlipSfxSample,
+  renderPageFlipAudioTrack,
+} from './ffmpeg-page-flip-sfx.js'
 import { buildTitleSubtitleAssFilter, TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -46,17 +52,10 @@ const OPENING_FPS = 25
 const OPENING_WIDTH = 1280
 const OPENING_HEIGHT = 720
 
-const OPENING_SUBTITLE_SIZE = 100
+const OPENING_SUBTITLE_SIZE = 120
 const OPENING_SUBTITLE_WHITE_SIZE = OPENING_SUBTITLE_SIZE + 10
 /** ASS Alignment 5 = 水平垂直居中 */
 const OPENING_SUBTITLE_ALIGNMENT = 5
-/** 单次书本翻页音效时长（秒），须小于转场间隔避免叠成一片 */
-const PAGE_FLIP_SFX_SEC = 0.17
-/** 内置翻页音效（从用户参考 MP3 截取） */
-const OPENING_PAGE_FLIP_ASSET = path.resolve(__dirname, '../../assets/page-flip.wav')
-/** 翻页音效参考文件，可通过 OPENING_PAGE_FLIP_REF 覆盖 */
-const OPENING_PAGE_FLIP_REF = process.env.OPENING_PAGE_FLIP_REF
-  || 'D:/我的/视频剪辑/NarratoAI/resource/videos/6月16日.mp3'
 
 const processingEpisodes = new Set<number>()
 
@@ -181,227 +180,22 @@ function buildVideoPageFlipFilter(segmentDurations: number[]): string {
   return parts.join(';')
 }
 
-/** 每次翻页转场开始时播放一次书本翻页声 */
-function computePageFlipSoundTimes(segmentDurations: number[], totalSec: number): number[] {
-  const td = PAGE_TRANSITION_SEC
-  const times: number[] = []
-  let cumulative = segmentDurations[0]
-  for (let i = 1; i < segmentDurations.length; i++) {
-    times.push(Math.max(0, cumulative - td))
-    cumulative += segmentDurations[i] - td
-  }
-  return times.map(t => Math.min(totalSec - 0.02, t))
-}
-
-/** 解析参考音频中的翻页声区间（silencedetect） */
-function detectPageFlipRegion(refPath: string): { start: number; end: number } | null {
-  const { stderr } = spawnSync('ffmpeg', [
-    '-hide_banner', '-i', refPath,
-    '-af', 'silencedetect=noise=-45dB:d=0.03',
-    '-f', 'null', '-',
-  ], { encoding: 'utf8' })
-  const log = stderr || ''
-  if (!log) return null
-
-  const events: Array<{ type: 'start' | 'end'; time: number }> = []
-  for (const m of log.matchAll(/silence_(start|end): ([\d.]+)/g)) {
-    events.push({ type: m[1] as 'start' | 'end', time: parseFloat(m[2]) })
-  }
-  if (!events.length) return null
-
-  let soundStart: number | null = null
-  let soundEnd: number | null = null
-  for (const ev of events) {
-    if (ev.type === 'end' && soundStart === null) {
-      soundStart = ev.time
-    } else if (ev.type === 'start' && soundStart !== null && ev.time > soundStart + 0.05) {
-      soundEnd = ev.time
-      break
-    }
-  }
-  if (soundStart === null || soundEnd === null) return null
-  if (soundEnd - soundStart < 0.08) return null
-  return { start: soundStart, end: soundEnd }
-}
-
-function readMonoWavSamples(wavPath: string): { sampleRate: number; samples: Float32Array } {
-  const buf = fs.readFileSync(wavPath)
-  const sampleRate = buf.readUInt32LE(24)
-  let dataStart = 12
-  while (dataStart < buf.length - 8) {
-    const chunkId = buf.toString('ascii', dataStart, dataStart + 4)
-    const chunkSize = buf.readUInt32LE(dataStart + 4)
-    if (chunkId === 'data') {
-      dataStart += 8
-      break
-    }
-    dataStart += 8 + chunkSize
-  }
-  const sampleCount = Math.floor((buf.length - dataStart) / 2)
-  const samples = new Float32Array(sampleCount)
-  for (let i = 0; i < sampleCount; i++) {
-    samples[i] = buf.readInt16LE(dataStart + i * 2) / 32768
-  }
-  return { sampleRate, samples }
-}
-
-/** 在参考音频有效区间内找平均音量最低的片段，模拟轻柔翻页 */
-function findQuietestFlipOffset(refPath: string, region: { start: number; end: number }): number {
-  const span = region.end - region.start
-  if (span <= PAGE_FLIP_SFX_SEC) return 0
-
-  const tempWav = path.join(STORAGE_ROOT, 'temp', 'opening', `_quiet-${uuid()}.wav`)
-  fs.mkdirSync(path.dirname(tempWav), { recursive: true })
-  try {
-    runFfmpeg([
-      '-ss', region.start.toFixed(3), '-i', refPath,
-      '-t', span.toFixed(3),
-      '-ac', '1', '-ar', '48000', '-c:a', 'pcm_s16le',
-      tempWav,
-    ])
-    const { sampleRate, samples } = readMonoWavSamples(tempWav)
-    const win = Math.round(PAGE_FLIP_SFX_SEC * sampleRate)
-    const hop = Math.max(1, Math.round(0.005 * sampleRate))
-    const minRms = 0.0018
-
-    let bestOffsetSec = 0
-    let bestRms = Infinity
-    for (let i = 0; i <= samples.length - win; i += hop) {
-      let sumSq = 0
-      for (let j = i; j < i + win; j++) sumSq += samples[j] * samples[j]
-      const rms = Math.sqrt(sumSq / win)
-      if (rms < minRms || rms >= bestRms) continue
-      bestRms = rms
-      bestOffsetSec = i / sampleRate
-    }
-    return bestOffsetSec
-  } finally {
-    if (fs.existsSync(tempWav)) {
-      try { fs.unlinkSync(tempWav) } catch {}
-    }
-  }
-}
-
-/** 翻页音效后处理：提亮高频，让纸张声更脆 */
-function pageFlipAudioFilters(): string {
-  return [
-    'highpass=f=780',
-    'lowpass=f=9800',
-    'equalizer=f=3000:width_type=h:width=1600:g=4.5',
-    'equalizer=f=5500:width_type=h:width=2200:g=2.8',
-    'afade=t=in:st=0:d=0.005',
-    `afade=t=out:st=${(PAGE_FLIP_SFX_SEC - 0.07).toFixed(3)}:d=0.06`,
-    'volume=2.8',
-  ].join(',')
-}
-
-/** 从参考 MP3 音量较低处截取，模拟轻柔书本翻页 */
-function extractBookPageFlipFromReference(outputPath: string): boolean {
-  if (!fs.existsSync(OPENING_PAGE_FLIP_REF)) return false
-  try {
-    const region = detectPageFlipRegion(OPENING_PAGE_FLIP_REF)
-    const quietOffset = region ? findQuietestFlipOffset(OPENING_PAGE_FLIP_REF, region) : 0.02
-    const ss = region
-      ? region.start + quietOffset
-      : 0.96
-    runFfmpeg([
-      '-ss', ss.toFixed(3), '-i', OPENING_PAGE_FLIP_REF,
-      '-t', String(PAGE_FLIP_SFX_SEC),
-      '-vn',
-      '-af', pageFlipAudioFilters(),
-      '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
-      outputPath,
-    ])
-    return fs.existsSync(outputPath)
-  } catch {
-    return false
-  }
-}
-
-/** 合成短促书本翻页声（兜底） */
-function synthesizeBookPageFlipSample(outputPath: string): void {
-  const dur = PAGE_FLIP_SFX_SEC
-  runFfmpeg([
-    '-f', 'lavfi', '-i', `anoisesrc=color=pink:duration=${dur}:sample_rate=48000`,
-    '-af', [
-      'highpass=f=380',
-      'lowpass=f=4800',
-      'bandpass=f=1100:width_type=h:w=1700',
-      "volume='min(t/0.006,1)*pow(max(0,1-t/0.17),1.35)*exp(-max(t-0.04,0)*5)':eval=frame",
-      'afade=t=in:st=0:d=0.006',
-      `afade=t=out:st=${(dur - 0.08).toFixed(3)}:d=0.06`,
-      'volume=2.4',
-      'asplit=2[a][b]',
-      '[a]volume=exp(-t*9):eval=frame[L]',
-      '[b]adelay=28|28,volume=exp(-(t-0.025)*6)*min(t/0.15,1):eval=frame[R]',
-      '[L][R]amerge=inputs=2,pan=stereo|c0=c0|c1=c1',
-      'volume=1.6',
-    ].join(','),
-    '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
-    outputPath,
-  ])
-}
-
-/** 准备单次书本翻页音效样本 */
-function preparePageFlipSfxSample(outputPath: string): void {
-  if (extractBookPageFlipFromReference(outputPath)) return
-  if (fs.existsSync(OPENING_PAGE_FLIP_ASSET)) {
-    fs.copyFileSync(OPENING_PAGE_FLIP_ASSET, outputPath)
-    return
-  }
-  synthesizeBookPageFlipSample(outputPath)
-}
-
-function renderPageFlipAudioTrack(flipTimes: number[], sfxPath: string, outputPath: string, totalSec: number): void {
-  const n = flipTimes.length
-  if (!n) {
-    runFfmpeg([
-      '-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${totalSec}`,
-      '-t', String(totalSec),
-      '-c:a', 'aac', '-b:a', '128k',
-      outputPath,
-    ])
-    return
-  }
-
-  const splitOut = flipTimes.map((_, i) => `[s${i}]`).join('')
-  const parts: string[] = [`[0:a]asplit=${n}${splitOut}`]
-  flipTimes.forEach((t, i) => {
-    const ms = Math.round(t * 1000)
-    parts.push(`[s${i}]adelay=${ms}|${ms},apad=whole_dur=${totalSec}[f${i}]`)
-  })
-  const mixIn = flipTimes.map((_, i) => `[f${i}]`).join('')
-  parts.push(`${mixIn}amix=inputs=${n}:duration=longest:dropout_transition=0:normalize=0,volume=0.88[aout]`)
-
-  runFfmpeg([
-    '-i', sfxPath,
-    '-filter_complex', parts.join(';'),
-    '-map', '[aout]',
-    '-t', String(totalSec),
-    '-c:a', 'aac', '-b:a', '128k',
-    outputPath,
-  ])
-}
-
-async function mixNarrationWithPageFlips(
-  narrationPath: string,
-  flipTrackPath: string,
-  outputPath: string,
+async function appendPageFlipSfxToAudioTrack(
+  audioPath: string,
+  flipTimes: number[],
   totalSec: number,
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg()
-      .input(narrationPath)
-      .input(flipTrackPath)
-      .complexFilter(
-        `[0:a]atrim=0:${totalSec},asetpts=PTS-STARTPTS[n];[n][1:a]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]`,
-      )
-      .outputOptions(['-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-t', String(totalSec)])
-      .output(outputPath)
-      .on('end', () => resolve())
-      .on('error', (err) => reject(err))
-      .run()
-  })
+  tempDir: string,
+  tempFiles: string[],
+): Promise<string> {
+  if (!flipTimes.length) return audioPath
+  const sfxSample = path.join(tempDir, `${uuid()}-flip.wav`)
+  const flipTrack = path.join(tempDir, `${uuid()}-flip.m4a`)
+  const mixedPath = path.join(tempDir, `${uuid()}-audio-flip.m4a`)
+  tempFiles.push(sfxSample, flipTrack, mixedPath)
+  preparePageFlipSfxSample(sfxSample)
+  renderPageFlipAudioTrack(flipTimes, sfxSample, flipTrack, totalSec)
+  await mixAudioWithPageFlipSfx(audioPath, flipTrack, mixedPath, totalSec)
+  return mixedPath
 }
 
 async function muxOpeningVideo(
@@ -701,6 +495,8 @@ export async function generateOpeningVideo(episodeId: number, count?: number): P
     tempFiles.push(mergedVideoPath)
     await mergeImageClipsWithPageFlip(clipPaths, segmentDurations, mergedVideoPath, totalSec)
 
+    const flipTimes = computeOverlappingPageFlipSoundTimes(segmentDurations, totalSec)
+
     let subtitlePath: string | null = null
     if (subtitleText) {
       subtitlePath = path.join(tempDir, `${uuid()}.ass`)
@@ -712,12 +508,26 @@ export async function generateOpeningVideo(episodeId: number, count?: number): P
       const narrationTrackPath = path.join(tempDir, `${uuid()}-narration.m4a`)
       tempFiles.push(narrationTrackPath)
       await trimAudioTrack(narrationAbs, narrationTrackPath, totalSec)
-      await muxOpeningVideo(mergedVideoPath, narrationTrackPath, subtitlePath, outputAbs, watermarkText, watermarkAnimated)
+      const audioWithSfx = await appendPageFlipSfxToAudioTrack(
+        narrationTrackPath,
+        flipTimes,
+        totalSec,
+        tempDir,
+        tempFiles,
+      )
+      await muxOpeningVideo(mergedVideoPath, audioWithSfx, subtitlePath, outputAbs, watermarkText, watermarkAnimated)
     } else {
       const silentTrackPath = path.join(tempDir, `${uuid()}-silent.m4a`)
       tempFiles.push(silentTrackPath)
       renderSilentAudioTrack(silentTrackPath, totalSec)
-      await muxVideoWithAudio(mergedVideoPath, silentTrackPath, outputAbs, watermarkText, watermarkAnimated)
+      const audioWithSfx = await appendPageFlipSfxToAudioTrack(
+        silentTrackPath,
+        flipTimes,
+        totalSec,
+        tempDir,
+        tempFiles,
+      )
+      await muxVideoWithAudio(mergedVideoPath, audioWithSfx, outputAbs, watermarkText, watermarkAnimated)
     }
 
     const relativePath = `static/opening/${outputFilename}`
