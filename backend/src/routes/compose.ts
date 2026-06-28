@@ -2,8 +2,8 @@ import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
-import { composeStoryboard, getStoryboardVisualSource, pickVisualGroupComposeLeaders } from '../services/ffmpeg-compose.js'
-import { sortStoryboardsByOrder } from '../services/narration-image.js'
+import { composeStoryboard, getStoryboardVisualSource, pickVisualGroupComposeLeaders, collectComposeScopeStoryboardIds, beginEpisodeCompose, finishEpisodeCompose, cancelEpisodeCompose, isComposeCancelled, ComposeCancelledError, reconcileScopeComposeProcessing } from '../services/ffmpeg-compose.js'
+import { sortStoryboardsByOrder, isStoryboardTitleShot } from '../services/narration-image.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { toSnakeCase } from '../utils/transform.js'
 
@@ -27,14 +27,21 @@ async function mapWithConcurrency<T>(items: T[], limit: number, worker: (item: T
 // POST /storyboards/:id/compose — 合成单个镜头
 app.post('/storyboards/:id/compose', async (c) => {
   const id = Number(c.req.param('id'))
+  const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+  if (!sb) return badRequest(c, 'Storyboard not found')
+
+  beginEpisodeCompose(sb.episodeId)
   try {
     logTaskStart('ComposeAPI', 'single-compose', { storyboardId: id })
     const composedUrl = await composeStoryboard(id)
     logTaskSuccess('ComposeAPI', 'single-compose', { storyboardId: id, output: composedUrl })
     return success(c, { id, composed_video_url: composedUrl })
   } catch (err: any) {
+    if (err instanceof ComposeCancelledError) return badRequest(c, '合成已取消')
     logTaskError('ComposeAPI', 'single-compose', { storyboardId: id, error: err.message })
     return badRequest(c, err.message)
+  } finally {
+    finishEpisodeCompose(sb.episodeId)
   }
 })
 
@@ -58,6 +65,7 @@ app.post('/episodes/:id/compose-all', async (c) => {
   if (storyboards.length === 0) return badRequest(c, 'No storyboards found')
 
   let composable = storyboards.filter(sb => {
+    if (isStoryboardTitleShot(sb)) return false
     const visual = getStoryboardVisualSource(sb, storyboards)
     const hasDialogue = !!(sb.dialogue || '').trim()
     return !!visual || hasDialogue
@@ -69,40 +77,59 @@ app.post('/episodes/:id/compose-all', async (c) => {
   if (composable.length === 0) return badRequest(c, 'No storyboards have video or image yet')
 
   const targets = onlyRemaining
-    ? composable.filter(sb => !sb.composedVideoUrl || sb.status === 'compose_failed')
+    ? composable.filter(sb =>
+      !sb.composedVideoUrl
+      || sb.status === 'compose_failed'
+      || sb.status === 'compose_processing'
+      || sb.status === 'compose_cancelled',
+    )
     : composable
   if (targets.length === 0) {
     return badRequest(c, onlyRemaining ? '没有待合成的镜头' : '没有可合成的镜头')
   }
 
   const composeTargets = pickVisualGroupComposeLeaders(targets, storyboards)
+  const scopeStoryboardIds = collectComposeScopeStoryboardIds(targets, storyboards)
+  const scopeIdSet = new Set(scopeStoryboardIds)
 
-  for (const sb of targets) {
+  for (const sb of storyboards) {
+    if (!scopeIdSet.has(sb.id)) continue
     db.update(schema.storyboards)
       .set({
         status: 'compose_processing',
-        composedVideoUrl: onlyRemaining ? sb.composedVideoUrl : null,
+        composedVideoUrl: null,
         updatedAt: now(),
       })
       .where(eq(schema.storyboards.id, sb.id))
       .run()
   }
 
+  beginEpisodeCompose(episodeId)
+
   ;(async () => {
-    await mapWithConcurrency(composeTargets, COMPOSE_CONCURRENCY, async (sb) => {
-      try {
-        await composeStoryboard(sb.id)
-      } catch (err: any) {
-        logTaskError('ComposeAPI', 'batch-item', { storyboardId: sb.id, episodeId, error: err.message })
+    try {
+      await mapWithConcurrency(composeTargets, COMPOSE_CONCURRENCY, async (sb) => {
+        if (isComposeCancelled(episodeId)) return
+        try {
+          await composeStoryboard(sb.id)
+        } catch (err: any) {
+          if (err instanceof ComposeCancelledError || isComposeCancelled(episodeId)) return
+          logTaskError('ComposeAPI', 'batch-item', { storyboardId: sb.id, episodeId, error: err.message })
+        }
+      })
+      if (!isComposeCancelled(episodeId)) {
+        reconcileScopeComposeProcessing(episodeId, scopeStoryboardIds, 'failed')
+        logTaskSuccess('ComposeAPI', 'batch-compose', {
+          episodeId,
+          total: composeTargets.length,
+          storyboardCount: targets.length,
+          onlyRemaining,
+          concurrency: COMPOSE_CONCURRENCY,
+        })
       }
-    })
-    logTaskSuccess('ComposeAPI', 'batch-compose', {
-      episodeId,
-      total: composeTargets.length,
-      storyboardCount: targets.length,
-      onlyRemaining,
-      concurrency: COMPOSE_CONCURRENCY,
-    })
+    } finally {
+      finishEpisodeCompose(episodeId)
+    }
   })()
 
   logTaskStart('ComposeAPI', 'batch-compose', {
@@ -115,14 +142,24 @@ app.post('/episodes/:id/compose-all', async (c) => {
   })
   return success(c, {
     message: onlyRemaining
-      ? `Started composing ${composeTargets.length} visual groups (${targets.length} storyboards)`
-      : `Started composing ${composeTargets.length} visual groups (${targets.length} storyboards)`,
+      ? `Started composing ${composeTargets.length} storyboards`
+      : `Started composing ${composeTargets.length} storyboards`,
     total: composeTargets.length,
     storyboard_count: targets.length,
+    scope_storyboard_ids: scopeStoryboardIds,
     only_remaining: onlyRemaining,
     storyboard_ids: targets.map(sb => sb.id),
     concurrency: COMPOSE_CONCURRENCY,
   })
+})
+
+// POST /episodes/:id/compose/cancel — 取消正在进行的镜头合成
+app.post('/episodes/:id/compose/cancel', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const cancelled = cancelEpisodeCompose(episodeId)
+  if (!cancelled) return badRequest(c, '当前没有进行中的合成任务')
+  logTaskStart('ComposeAPI', 'compose-cancel', { episodeId })
+  return success(c, { status: 'cancelled' })
 })
 
 // GET /episodes/:id/compose-status — 查询批量合成状态
@@ -136,6 +173,7 @@ app.get('/episodes/:id/compose-status', async (c) => {
   )
 
   const composable = storyboards.filter(sb => {
+    if (isStoryboardTitleShot(sb)) return false
     const visual = getStoryboardVisualSource(sb, storyboards)
     const hasDialogue = !!(sb.dialogue || '').trim()
     return !!visual || hasDialogue
@@ -143,6 +181,7 @@ app.get('/episodes/:id/compose-status', async (c) => {
   const completed = composable.filter(sb => sb.status === 'compose_completed' && !!sb.composedVideoUrl)
   const failed = composable.filter(sb => sb.status === 'compose_failed')
   const processing = composable.filter(sb => sb.status === 'compose_processing')
+  const cancelled = composable.filter(sb => sb.status === 'compose_cancelled')
   const idle = composable.filter(sb => !sb.status || !String(sb.status).startsWith('compose_'))
 
   return success(c, {
@@ -150,6 +189,7 @@ app.get('/episodes/:id/compose-status', async (c) => {
     completed: completed.length,
     failed: failed.length,
     processing: processing.length,
+    cancelled: cancelled.length,
     idle: idle.length,
     items: composable.map((sb) => toSnakeCase({
       id: sb.id,

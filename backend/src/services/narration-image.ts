@@ -226,7 +226,9 @@ export function buildParagraphImagePrompt(
 }
 
 export function isNarrationTitleShotMeta(meta: NarrationImageMeta) {
-  return meta.narration_shot_type === 'title'
+  if (meta.narration_shot_type === 'title') return true
+  if (meta.title_full) return true
+  return false
 }
 
 export function isStoryboardTitleShot(sb: { referenceImages?: string | null }) {
@@ -260,6 +262,21 @@ function compareStoryboardOrder(a: VisualSb, b: VisualSb) {
 
 export function sortStoryboardsByOrder<T extends VisualSb>(storyboards: T[]) {
   return [...storyboards].sort(compareStoryboardOrder)
+}
+
+/** 配图锚点镜：本镜为 new，或向前找到最近的 new 锚点 */
+export function resolveStoryboardImageAnchorShot<T extends VisualSb>(
+  storyboards: T[],
+  storyboardId: number,
+): T | null {
+  const ordered = sortStoryboardsByOrder(storyboards)
+  const idx = ordered.findIndex(sb => sb.id === storyboardId)
+  if (idx < 0) return null
+  for (let i = idx; i >= 0; i--) {
+    const meta = parseNarrationImageMeta(ordered[i].referenceImages)
+    if (meta.narration_image_mode === 'new') return ordered[i]
+  }
+  return ordered[idx]
 }
 
 export function getStoryboardDirectVisual(sb: VisualSb) {

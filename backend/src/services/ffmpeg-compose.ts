@@ -10,14 +10,14 @@ import { fileURLToPath } from 'url'
 import { execFileSync } from 'child_process'
 import { v4 as uuid } from 'uuid'
 import { db, schema } from '../db/index.js'
-import { eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { BGM_SOLO_VOLUME, BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { generateTTS } from './tts-generation.js'
 import { resolveEdgeVoice } from './edge-tts-local.js'
 import { resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, resolveStoryboardVisualSource, resolveStoryboardSubtitleNarration, sortStoryboardsByOrder } from './narration-image.js'
+import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, resolveStoryboardImageAnchorShot, resolveStoryboardVisualSource, resolveStoryboardSubtitleNarration, sortStoryboardsByOrder } from './narration-image.js'
 import { deleteEpisodeAssetFileIfUnreferenced } from './storyboard-asset-replace.js'
 import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
@@ -46,6 +46,114 @@ const DATA_ROOT = path.resolve(__dirname, '../../../data')
 let subtitleFilterSupport: boolean | null = null
 const imageBaseCacheInflight = new Map<string, Promise<string>>()
 const groupComposeInflight = new Map<string, Promise<string>>()
+
+type FfmpegCommand = ReturnType<typeof ffmpeg>
+
+type ActiveComposeRun = {
+  cancelled: boolean
+  commands: Set<FfmpegCommand>
+}
+
+const activeComposes = new Map<number, ActiveComposeRun>()
+
+export class ComposeCancelledError extends Error {
+  constructor() {
+    super('合成已取消')
+    this.name = 'ComposeCancelledError'
+  }
+}
+
+export function beginEpisodeCompose(episodeId: number) {
+  const existing = activeComposes.get(episodeId)
+  if (existing) {
+    existing.cancelled = false
+    return
+  }
+  activeComposes.set(episodeId, { cancelled: false, commands: new Set() })
+}
+
+export function finishEpisodeCompose(episodeId: number) {
+  const run = activeComposes.get(episodeId)
+  if (run && !run.cancelled) activeComposes.delete(episodeId)
+}
+
+export function isComposeCancelled(episodeId: number): boolean {
+  return activeComposes.get(episodeId)?.cancelled ?? false
+}
+
+export function isComposeActive(episodeId: number): boolean {
+  return activeComposes.has(episodeId)
+}
+
+function ensureEpisodeComposeRun(episodeId: number): ActiveComposeRun {
+  let run = activeComposes.get(episodeId)
+  if (!run) {
+    run = { cancelled: false, commands: new Set() }
+    activeComposes.set(episodeId, run)
+  }
+  return run
+}
+
+function throwIfComposeCancelled(episodeId: number): void {
+  if (isComposeCancelled(episodeId)) throw new ComposeCancelledError()
+}
+
+function attachComposeCommand(episodeId: number, command: FfmpegCommand) {
+  const run = activeComposes.get(episodeId)
+  if (!run) return
+  run.commands.add(command)
+  const detach = () => run.commands.delete(command)
+  command.on('end', detach)
+  command.on('error', detach)
+}
+
+function resetProcessingStoryboards(episodeId: number): number {
+  const processing = db.select().from(schema.storyboards)
+    .where(and(
+      eq(schema.storyboards.episodeId, episodeId),
+      eq(schema.storyboards.status, 'compose_processing'),
+    ))
+    .all()
+    .filter(row => !row.deletedAt)
+
+  if (!processing.length) return 0
+
+  db.update(schema.storyboards)
+    .set({ status: 'compose_cancelled', updatedAt: now() })
+    .where(inArray(schema.storyboards.id, processing.map(row => row.id)))
+    .run()
+
+  return processing.length
+}
+
+/** 取消正在进行的镜头合成（立即打断 ffmpeg） */
+export function cancelEpisodeCompose(episodeId: number): boolean {
+  const run = activeComposes.get(episodeId)
+  let didSomething = false
+
+  if (run) {
+    run.cancelled = true
+    for (const command of run.commands) {
+      try { command.kill('SIGKILL') } catch {}
+    }
+    run.commands.clear()
+    didSomething = true
+  }
+
+  for (const key of [...groupComposeInflight.keys()]) {
+    if (key.startsWith(`${episodeId}:`)) groupComposeInflight.delete(key)
+  }
+
+  const resetCount = resetProcessingStoryboards(episodeId)
+  activeComposes.delete(episodeId)
+  return didSomething || resetCount > 0
+}
+
+function toComposeError(episodeId: number, err: unknown): Error {
+  if (err instanceof ComposeCancelledError) return err
+  if (isComposeCancelled(episodeId)) return new ComposeCancelledError()
+  return err instanceof Error ? err : new Error(String(err))
+}
 
 function toAbsPath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) return relativePath
@@ -508,6 +616,140 @@ function escapeConcatMediaPath(absPath: string): string {
   return absPath.replace(/\\/g, '/').replace(/'/g, "'\\''")
 }
 
+type ComposeEpisodeContext = {
+  episodeId: number
+  episodeStoryboards: EpisodeStoryboardRow[]
+  ep?: typeof schema.episodes.$inferSelect
+  chars: typeof schema.characters.$inferSelect[]
+}
+
+function buildComposeEpisodeContext(episodeId: number): ComposeEpisodeContext {
+  const episodeStoryboards = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, episodeId))
+    .all()
+    .filter(row => !row.deletedAt)
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  const chars = ep
+    ? db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId)).all()
+    : []
+  return { episodeId, episodeStoryboards, ep, chars }
+}
+
+async function generateInlineTtsForStoryboard(
+  sb: EpisodeStoryboardRow,
+  ctx: ComposeEpisodeContext,
+): Promise<string> {
+  const parsedDialogue = parseDialogueForTTS(sb.dialogue)
+  const pureDialogue = parsedDialogue.pureText
+  if (!pureDialogue) throw new Error(`Storyboard ${sb.id} has no speakable dialogue`)
+
+  const isTitleShot = isStoryboardTitleShot(sb)
+  let voiceId = 'alloy'
+  if (ctx.ep) {
+    voiceId = resolveNarrationVoiceId(parsedDialogue.speaker, ctx.chars, { isTitleShot: !!isTitleShot })
+  }
+
+  const usesOwnNarrationTts = isNarrationStoryboard(sb) || isTitleShot
+  const useLocalTts = usesOwnNarrationTts
+  const localTtsEngine = process.env.LOCAL_TTS_ENGINE === 'voicebox' ? 'voicebox' : 'edge'
+  const ttsVoice = useLocalTts
+    ? (localTtsEngine === 'voicebox'
+      ? await resolveVoiceboxProfileId(voiceId, process.env.VOICEBOX_PROFILE_ID)
+      : resolveEdgeVoice(voiceId))
+    : voiceId
+
+  logTaskProgress('ComposeTask', 'generate-inline-tts', {
+    storyboardId: sb.id,
+    voiceId: ttsVoice,
+    localTts: useLocalTts,
+    localTtsEngine: useLocalTts ? localTtsEngine : undefined,
+    textPreview: pureDialogue.slice(0, 40),
+  })
+
+  const ttsPath = await generateTTS({
+    text: pureDialogue,
+    voice: ttsVoice,
+    speed: resolveTtsSpeed(process.env.TTS_DEFAULT_SPEED),
+    configId: useLocalTts ? null : (ctx.ep?.audioConfigId ?? undefined),
+    localTts: useLocalTts,
+    localTtsEngine: useLocalTts ? localTtsEngine : undefined,
+    voiceboxInstruct: useLocalTts && localTtsEngine === 'voicebox'
+      ? resolveVoiceboxInstruct(process.env.VOICEBOX_DEFAULT_INSTRUCT)
+      : undefined,
+    voiceboxModelSize: useLocalTts && localTtsEngine === 'voicebox'
+      ? resolveVoiceboxModelSize(process.env.VOICEBOX_MODEL_SIZE)
+      : undefined,
+  })
+
+  db.update(schema.storyboards).set({ ttsAudioUrl: ttsPath, updatedAt: now() })
+    .where(eq(schema.storyboards.id, sb.id)).run()
+
+  return toAbsPath(ttsPath)
+}
+
+/** 同配图组内每镜独立音轨：优先本镜配音，缺失则现场生成（组内不复用其它镜配音） */
+async function resolveGroupShotAudioPath(
+  sb: EpisodeStoryboardRow,
+  ctx: ComposeEpisodeContext,
+): Promise<string> {
+  const parsedDialogue = parseDialogueForTTS(sb.dialogue)
+  if (parsedDialogue.ignorable) {
+    throw new Error(`Storyboard ${sb.id} has no speakable dialogue in same-image group`)
+  }
+
+  if (sb.ttsAudioUrl) {
+    const ownPath = toAbsPath(sb.ttsAudioUrl)
+    if (fs.existsSync(ownPath)) return ownPath
+  }
+
+  return generateInlineTtsForStoryboard(sb, ctx)
+}
+
+async function normalizeAudioToFrameDuration(
+  inputPath: string,
+  frameCount: number,
+  fps: number,
+  outputPath: string,
+): Promise<void> {
+  const targetSec = fmtComposeFilterSec(frameCount / fps)
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .audioFilters(`atrim=0:${targetSec},asetpts=PTS-STARTPTS,apad=whole_dur=${targetSec}`)
+      .outputOptions(['-c:a', 'aac', '-ar', '48000', '-b:a', '192k', '-t', targetSec])
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+}
+
+/** 批量结束后将仍卡在 processing 的镜头标为失败，避免无法重试 */
+export function reconcileScopeComposeProcessing(
+  episodeId: number,
+  scopeIds: number[],
+  outcome: 'failed' | 'cancelled' = 'failed',
+) {
+  if (!scopeIds.length) return 0
+  const status = outcome === 'cancelled' ? 'compose_cancelled' : 'compose_failed'
+  const stuck = db.select().from(schema.storyboards)
+    .where(and(
+      eq(schema.storyboards.episodeId, episodeId),
+      inArray(schema.storyboards.id, scopeIds),
+      eq(schema.storyboards.status, 'compose_processing'),
+    ))
+    .all()
+    .filter(row => !row.deletedAt)
+
+  if (!stuck.length) return 0
+
+  db.update(schema.storyboards)
+    .set({ status, updatedAt: now() })
+    .where(inArray(schema.storyboards.id, stuck.map(row => row.id)))
+    .run()
+
+  return stuck.length
+}
+
 async function concatAudioFiles(audioPaths: string[], outputPath: string): Promise<void> {
   if (audioPaths.length === 1) {
     await new Promise<void>((resolve, reject) => {
@@ -559,7 +801,6 @@ export async function renderSameImageGroupSegment(
 
   const transitionPad = resolveComposeTransitionPadSec()
   const transitionPads: ComposeTransitionPads = { startPadSec: transitionPad, endPadSec: transitionPad }
-  let offsetSec = 0
   let titleMode = false
   type GroupSubtitleLine =
     | { type: 'title'; text: string; startSec: number; endSec: number }
@@ -574,26 +815,41 @@ export async function renderSameImageGroupSegment(
     }
   const subtitleLines: GroupSubtitleLine[] = []
   const audioPaths: string[] = []
-  const shotDurationsSec: number[] = []
+  const frameCounts: number[] = []
+  const alignedAudioTemps: string[] = []
+
+  const [firstRow] = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.id, orderedStoryboards[0].id))
+    .all()
+  const composeCtx = firstRow ? buildComposeEpisodeContext(firstRow.episodeId) : null
 
   for (let i = 0; i < orderedStoryboards.length; i++) {
     const sb = orderedStoryboards[i]
+    const row = composeCtx?.episodeStoryboards.find(item => item.id === sb.id)
+      ?? db.select().from(schema.storyboards).where(eq(schema.storyboards.id, sb.id)).all()[0]
+    if (!row) throw new Error(`Storyboard ${sb.id} not found`)
+    if (!composeCtx) throw new Error(`Storyboard ${sb.id} missing episode context`)
+
     const parsed = parseDialogueForTTS(sb.dialogue)
     const isTitleShot = isStoryboardTitleShot(sb)
     if (isTitleShot) titleMode = true
 
-    if (!sb.ttsAudioUrl) throw new Error(`Storyboard ${sb.id} missing narration audio`)
-    const audioPath = toAbsPath(sb.ttsAudioUrl)
-    if (!fs.existsSync(audioPath)) throw new Error(`Storyboard ${sb.id} audio file missing`)
+    const rawAudioPath = await resolveGroupShotAudioPath(row, composeCtx)
+    const rawDurationSec = await probeMediaDuration(rawAudioPath)
+    const frameCount = durationToFrameCount(rawDurationSec, COMPOSE_FPS)
+    frameCounts.push(frameCount)
 
-    const durationSec = await probeMediaDuration(audioPath)
-    shotDurationsSec.push(durationSec)
+    const alignedPath = path.join(tempDir, `${uuid()}.m4a`)
+    await normalizeAudioToFrameDuration(rawAudioPath, frameCount, COMPOSE_FPS, alignedPath)
+    alignedAudioTemps.push(alignedPath)
+    audioPaths.push(alignedPath)
+
     const subtitleMarkedText = resolveStoryboardSubtitleNarration(sb)
     const displayText = stripSubtitlePunctuationPreservingEmphasis(subtitleMarkedText)
-    const startSec = isTitleShot
-      ? offsetSec + transitionPad + TITLE_SUBTITLE_START_DELAY_SEC
-      : offsetSec + transitionPad
-    const endSec = offsetSec + transitionPad + Math.max(durationSec, 0.05)
+    const cumFrames = frameCounts.slice(0, i).reduce((sum, count) => sum + count, 0)
+    const startSec = transitionPad + cumFrames / COMPOSE_FPS
+    const endSec = transitionPad + (cumFrames + frameCount) / COMPOSE_FPS
+    const durationSec = frameCount / COMPOSE_FPS
 
     if (displayText) {
       if (isTitleShot) {
@@ -610,10 +866,9 @@ export async function renderSameImageGroupSegment(
         })
       }
     }
-
-    audioPaths.push(audioPath)
-    offsetSec += durationSec
   }
+
+  const shotDurationsSec = frameCounts.map(count => count / COMPOSE_FPS)
 
   const hasNarrationSubtitles = subtitleLines.some(line => line.type === 'narration')
   const useAssSubtitle = titleMode || hasNarrationSubtitles
@@ -649,10 +904,12 @@ export async function renderSameImageGroupSegment(
   const watermarkText = resolveWatermarkText(ep?.watermarkText)
   const watermarkAnimated = resolveWatermarkAnimated(ep?.watermarkAnimated)
 
-  const contentDuration = offsetSec
+  const contentDuration = shotDurationsSec.reduce((sum, sec) => sum + sec, 0)
   const outputDuration = resolveComposeOutputDuration(contentDuration, transitionPads)
+  const episodeId = firstSb?.episodeId ?? 0
 
   await new Promise<void>((resolve, reject) => {
+    throwIfComposeCancelled(episodeId)
     const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount)]
     appendComposeVideoPostFilters(
       filters,
@@ -673,7 +930,7 @@ export async function renderSameImageGroupSegment(
       .input(imageAbsPath)
       .inputOptions(['-loop', '1'])
       .input(mergedAudioPath)
-    cmd
+    cmd = cmd
       .complexFilter(filterComplex)
       .outputOptions([
         '-t', String(outputDuration),
@@ -691,18 +948,78 @@ export async function renderSameImageGroupSegment(
         '-c:a', 'aac',
       ])
       .output(outputPath)
+    attachComposeCommand(episodeId, cmd)
+    cmd
       .on('end', () => resolve())
-      .on('error', (err) => reject(err))
+      .on('error', (err) => reject(toComposeError(episodeId, err)))
       .run()
   })
 
   if (fs.existsSync(mergedAudioPath)) fs.unlinkSync(mergedAudioPath)
   if (fs.existsSync(subtitlePath)) fs.unlinkSync(subtitlePath)
+  for (const tempAudio of alignedAudioTemps) {
+    if (fs.existsSync(tempAudio)) fs.unlinkSync(tempAudio)
+  }
 
   return outputDuration
 }
 
 type EpisodeStoryboardRow = typeof schema.storyboards.$inferSelect
+
+/** 合成单元 key：配图锚点的 paragraph_index 覆盖整条 inherit 链；否则与分镜配图一致 */
+function resolveComposeUnitKey(sb: EpisodeStoryboardRow, storyboards: EpisodeStoryboardRow[]): string {
+  const anchor = resolveStoryboardImageAnchorShot(storyboards, sb.id) ?? sb
+  const meta = parseNarrationImageMeta(anchor.referenceImages)
+  if (typeof meta.paragraph_index === 'number') {
+    return `para:${meta.paragraph_index}`
+  }
+  return getStoryboardVisualKey(sb, storyboards)
+}
+
+type ComposeUnitGroup = {
+  key: string
+  members: EpisodeStoryboardRow[]
+  startIdx: number
+}
+
+export function buildComposeUnitGroups(episodeStoryboards: EpisodeStoryboardRow[]): ComposeUnitGroup[] {
+  const ordered = sortStoryboardsByOrder(episodeStoryboards)
+  const body = ordered.filter(sb => !isStoryboardTitleShot(sb))
+  const groups: ComposeUnitGroup[] = []
+  let currentKey: string | null = null
+  let members: EpisodeStoryboardRow[] = []
+  let startIdx = 0
+
+  for (let i = 0; i < body.length; i++) {
+    const sb = body[i]
+    const key = resolveComposeUnitKey(sb, ordered)
+    if (currentKey === null || key !== currentKey) {
+      if (members.length && currentKey != null) {
+        groups.push({ key: currentKey, members, startIdx })
+      }
+      currentKey = key
+      members = [sb]
+      startIdx = i
+    } else {
+      members.push(sb)
+    }
+  }
+  if (members.length && currentKey != null) {
+    groups.push({ key: currentKey, members, startIdx })
+  }
+  return groups
+}
+
+/** 拼接导出：每个合成单元一条成片（取单元内任一 composedVideoUrl） */
+export function listComposeMergeUnitStoryboards(
+  episodeStoryboards: EpisodeStoryboardRow[],
+): EpisodeStoryboardRow[] {
+  return buildComposeUnitGroups(episodeStoryboards).map((group) => {
+    const url = group.members.map(m => m.composedVideoUrl).find(Boolean)
+    if (!url) return null
+    return { ...group.members[0], composedVideoUrl: url }
+  }).filter((row): row is EpisodeStoryboardRow => !!row)
+}
 
 type SameImageGroupComposeContext = {
   episodeId: number
@@ -713,9 +1030,10 @@ type SameImageGroupComposeContext = {
   prevGroupShotCount: number
   members: EpisodeStoryboardRow[]
   imageAbsPath: string
+  unitKey: string
 }
 
-function resolveSameImageGroupComposeContext(
+function resolveComposeUnitContext(
   storyboardId: number,
   episodeStoryboards: EpisodeStoryboardRow[],
 ): SameImageGroupComposeContext | null {
@@ -726,55 +1044,81 @@ function resolveSameImageGroupComposeContext(
   const sb = ordered[idx]
   if (isStoryboardTitleShot(sb)) return null
 
-  const groups = buildVisualGroups(ordered)
-  const groupIndex = groups.findIndex(group => idx >= group.start && idx <= group.end)
-  if (groupIndex < 0) return null
+  const groups = buildComposeUnitGroups(episodeStoryboards)
+  const group = groups.find(g => g.members.some(m => m.id === storyboardId))
+  if (!group || group.members.length <= 1) return null
 
-  const group = groups[groupIndex]
-  const members = ordered.slice(group.start, group.end + 1)
-  if (members.length <= 1) return null
-
-  const visual = resolveStoryboardVisualSource(ordered, members[0].id)
+  const visual = resolveStoryboardVisualSource(ordered, group.members[0].id)
   if (!visual || visual.type !== 'image') return null
 
+  const groupIndex = groups.indexOf(group)
   return {
     episodeId: sb.episodeId,
     groupIndex,
-    groupStart: group.start,
-    groupEnd: group.end,
+    groupStart: group.startIdx,
+    groupEnd: group.startIdx + group.members.length - 1,
     pageIndex: groupIndex,
-    prevGroupShotCount: groupIndex > 0
-      ? groups[groupIndex - 1].end - groups[groupIndex - 1].start + 1
-      : 0,
-    members,
+    prevGroupShotCount: groupIndex > 0 ? groups[groupIndex - 1].members.length : 0,
+    members: group.members,
     imageAbsPath: toAbsPath(visual.path),
+    unitKey: group.key,
   }
 }
 
 function groupComposeInflightKey(ctx: SameImageGroupComposeContext) {
-  return `${ctx.episodeId}:${ctx.groupStart}-${ctx.groupEnd}`
+  return `${ctx.episodeId}:unit:${ctx.unitKey}`
 }
 
-/** 批量合成时按同配图组去重，每组只触发一次 */
-export function pickVisualGroupComposeLeaders<T extends { id: number }>(
-  targets: T[],
-  episodeStoryboards: EpisodeStoryboardRow[],
-): T[] {
-  const ordered = sortStoryboardsByOrder(episodeStoryboards)
-  const groups = buildVisualGroups(ordered)
-  const seenStarts = new Set<number>()
-  const leaders: T[] = []
+/** 批量合成 scope：命中合成单元时纳入单元内全部旁白句镜头 */
+export function collectComposeScopeStoryboardIds(
+  targets: EpisodeStoryboardRow[],
+  episodeStoryboards: EpisodeStoryboardRow[] = [],
+): number[] {
+  const ordered = episodeStoryboards.length
+    ? sortStoryboardsByOrder(episodeStoryboards)
+    : targets
+  const scopeIds = new Set<number>()
+  const groups = buildComposeUnitGroups(ordered)
 
   for (const sb of targets) {
-    const idx = ordered.findIndex(item => item.id === sb.id)
-    if (idx < 0) {
-      leaders.push(sb)
-      continue
+    scopeIds.add(sb.id)
+    const group = groups.find(g => g.members.some(m => m.id === sb.id))
+    if (group && group.members.length > 1) {
+      group.members.forEach(m => scopeIds.add(m.id))
     }
-    const group = groups.find(g => idx >= g.start && idx <= g.end)
-    if (!group || seenStarts.has(group.start)) continue
-    seenStarts.add(group.start)
-    leaders.push(sb)
+  }
+  return [...scopeIds]
+}
+
+/** 批量合成：每个合成单元只触发一次（同分镜配图 / 同配图段） */
+export function pickVisualGroupComposeLeaders<T extends { id: number }>(
+  targets: T[],
+  episodeStoryboards: EpisodeStoryboardRow[] = [],
+): T[] {
+  const ordered = episodeStoryboards.length
+    ? sortStoryboardsByOrder(episodeStoryboards)
+    : []
+  const targetIds = new Set(targets.map(t => t.id))
+  const groups = buildComposeUnitGroups(ordered.length ? ordered : targets as EpisodeStoryboardRow[])
+  const seenKeys = new Set<string>()
+  const leaders: T[] = []
+
+  for (const group of groups) {
+    if (!group.members.some(m => targetIds.has(m.id))) continue
+    if (seenKeys.has(group.key)) continue
+    seenKeys.add(group.key)
+    const leaderMember = group.members[0]
+    const leader = targets.find(t => t.id === leaderMember.id)
+      ?? targets.find(t => group.members.some(m => m.id === t.id))
+    if (leader) leaders.push(leader)
+  }
+
+  for (const t of targets) {
+    if (leaders.some(l => l.id === t.id)) continue
+    const row = ordered.find(s => s.id === t.id)
+    if (row && isStoryboardTitleShot(row)) continue
+    const group = groups.find(g => g.members.some(m => m.id === t.id))
+    if (!group || group.members.length <= 1) leaders.push(t)
   }
 
   return leaders
@@ -828,6 +1172,8 @@ async function composeSameImageGroup(
         ctx.prevGroupShotCount,
       )
 
+      throwIfComposeCancelled(ctx.episodeId)
+
       const composedRelative = `static/composed/${outputFilename}`
       db.update(schema.storyboards)
         .set({ composedVideoUrl: composedRelative, status: 'compose_completed', updatedAt: now() })
@@ -842,6 +1188,9 @@ async function composeSameImageGroup(
       })
       return composedRelative
     } catch (err) {
+      if (err instanceof ComposeCancelledError || isComposeCancelled(ctx.episodeId)) {
+        throw new ComposeCancelledError()
+      }
       db.update(schema.storyboards)
         .set({ status: 'compose_failed', composedVideoUrl: null, updatedAt: now() })
         .where(inArray(schema.storyboards.id, memberIds))
@@ -859,19 +1208,21 @@ async function composeSameImageGroup(
 }
 
 /**
- * 合成单个镜头：视频/配图 + TTS音频 + 烧录字幕
- * 同配图多句自动走整组一次渲染（renderSameImageGroupSegment）
+ * 合成镜头：配图段内多句合并一条成片；单句段则一镜一条
  */
 export async function composeStoryboard(storyboardId: number): Promise<string> {
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboardId)).all()
   if (!sb) throw new Error(`Storyboard ${storyboardId} not found`)
+
+  ensureEpisodeComposeRun(sb.episodeId)
+  throwIfComposeCancelled(sb.episodeId)
 
   const episodeStoryboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, sb.episodeId))
     .all()
     .filter(row => !row.deletedAt)
 
-  const groupCtx = resolveSameImageGroupComposeContext(storyboardId, episodeStoryboards)
+  const groupCtx = resolveComposeUnitContext(storyboardId, episodeStoryboards)
   if (groupCtx) {
     return composeSameImageGroup(storyboardId, groupCtx)
   }
@@ -1041,6 +1392,7 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
     const outputPath = path.join(outputDir, outputFilename)
 
     await new Promise<void>(async (resolve, reject) => {
+      throwIfComposeCancelled(sb.episodeId)
       const isTitleShot = isStoryboardTitleShot(sb)
       const filters: string[] = []
 
@@ -1131,10 +1483,14 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
       cmd.complexFilter(complexParts.join(';'))
       cmd.outputOptions(outputOptions)
         .output(outputPath)
+      attachComposeCommand(sb.episodeId, cmd)
+      cmd
         .on('end', () => resolve())
-        .on('error', (err) => reject(err))
+        .on('error', (err) => reject(toComposeError(sb.episodeId, err)))
         .run()
     })
+
+    throwIfComposeCancelled(sb.episodeId)
 
     const composedRelative = `static/composed/${outputFilename}`
     db.update(schema.storyboards).set({ composedVideoUrl: composedRelative, status: 'compose_completed', updatedAt: now() })
@@ -1147,6 +1503,9 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
     })
     return composedRelative
   } catch (err) {
+    if (err instanceof ComposeCancelledError || isComposeCancelled(sb.episodeId)) {
+      throw new ComposeCancelledError()
+    }
     db.update(schema.storyboards)
       .set({ status: 'compose_failed', composedVideoUrl: null, updatedAt: now() })
       .where(eq(schema.storyboards.id, storyboardId))

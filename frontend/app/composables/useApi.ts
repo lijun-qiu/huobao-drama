@@ -362,6 +362,7 @@ export const composeAPI = {
       only_remaining: options?.only_remaining !== false,
       storyboard_ids: options?.storyboard_ids,
     }),
+  cancel: (epId: number) => api.post(`/compose/episodes/${epId}/compose/cancel`),
   status: (epId: number) => api.get(`/compose/episodes/${epId}/compose-status`),
 }
 export const mergeAPI = {

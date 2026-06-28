@@ -17,7 +17,8 @@ import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION, computePageFlipMe
 import { mixPageFlipSfxIntoMergedVideo } from './ffmpeg-page-flip-sfx.js'
 import { BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { isStoryboardTitleShot, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
-import { renderSameImageGroupSegment } from './ffmpeg-compose.js'
+import { buildComposeUnitGroups, listComposeMergeUnitStoryboards } from './ffmpeg-compose.js'
+import { buildComposeUnitGroups } from './ffmpeg-compose.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -438,7 +439,7 @@ async function mergeSegmentsSequential(
   }
 }
 
-/** 同配图组：已组合成片则直接用；旧数据则整组重渲染 */
+/** 同配图组：多镜顺序拼接；每镜已有独立成片时直接 concat */
 async function buildMergeSegments(
   groups: VisualGroup[],
   storyboards: ComposedStoryboard[],
@@ -449,7 +450,6 @@ async function buildMergeSegments(
   fs.mkdirSync(tempDir, { recursive: true })
   const segments: MergeSegment[] = []
   const temps: string[] = []
-  const ordered = sortStoryboardsByOrder(storyboards)
 
   for (let i = 0; i < groups.length; i++) {
     if (run.cancelled) break
@@ -468,21 +468,7 @@ async function buildMergeSegments(
       } else {
         const tempPath = path.join(tempDir, `${uuid()}.mp4`)
         temps.push(tempPath)
-        const members = group.clips
-          .map(clip => ordered.find(sb => sb.id === clip.storyboardId))
-          .filter((sb): sb is ComposedStoryboard => !!sb)
-        const visual = members.length ? resolveStoryboardVisualSource(ordered, members[0].id) : null
-        if (visual?.type === 'image') {
-          await renderSameImageGroupSegment(
-            members,
-            toAbsPath(visual.path),
-            tempPath,
-            i,
-            i > 0 ? groups[i - 1].clips.length : 0,
-          )
-        } else {
-          await concatClipsToFile(group.clips, tempPath, run)
-        }
+        await concatClipsToFile(group.clips, tempPath, run)
         const duration = await getVideoDuration(tempPath)
         segments.push({ path: tempPath, duration, temp: true })
       }
@@ -1078,22 +1064,22 @@ function loadEpisodeStoryboards(episodeId: number) {
   )
 }
 
-/** 主片拼接用镜头：默认不含片头镜（片头需单独合并进成片） */
+/** 主片拼接：按合成单元（与镜头合成一致，不含片头）取代表镜成片 */
 function loadComposedStoryboards(episodeId: number, clipLimit?: number): ComposedStoryboard[] {
   const storyboards = loadEpisodeStoryboards(episodeId)
-  const bodyStoryboards = storyboards.filter(sb => !isStoryboardTitleShot(sb))
-  const composed = bodyStoryboards.filter(sb => !!sb.composedVideoUrl)
+  const unitTotal = buildComposeUnitGroups(storyboards).length
+  const composedUnits = listComposeMergeUnitStoryboards(storyboards) as ComposedStoryboard[]
   if (clipLimit && clipLimit > 0) {
-    if (composed.length === 0) {
-      throw new Error('没有已合成的正文镜头，请先在「镜头合成」完成至少 1 镜')
+    if (composedUnits.length === 0) {
+      throw new Error('没有已合成的正文单元，请先在「镜头合成」完成至少 1 个单元')
     }
-    return composed.slice(0, clipLimit)
+    return composedUnits.slice(0, clipLimit)
   }
-  if (composed.length !== bodyStoryboards.length) {
-    throw new Error(`尚有 ${bodyStoryboards.length - composed.length} 个正文镜头未合成（${composed.length}/${bodyStoryboards.length}），请先在「镜头合成」完成全部正文镜头后再导出`)
+  if (composedUnits.length !== unitTotal) {
+    throw new Error(`尚有 ${unitTotal - composedUnits.length} 个合成单元未完成（${composedUnits.length}/${unitTotal}），请先在「镜头合成」完成全部单元后再导出`)
   }
-  if (composed.length === 0) throw new Error('No videos to merge')
-  return composed
+  if (composedUnits.length === 0) throw new Error('No videos to merge')
+  return composedUnits
 }
 
 async function doMerge(mergeId: number, episodeId: number, options: MergeOptions = {}) {
@@ -1152,7 +1138,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       percent,
       message: usePageFlip
         ? `正在云朵转场拼接 (${percent}%)…`
-        : `正在拼接 ${storyboards.length} 个镜头 (${percent}%)…`,
+        : `正在拼接 ${storyboards.length} 个合成单元 (${percent}%)…`,
       updatedAt: Date.now(),
     })
   }

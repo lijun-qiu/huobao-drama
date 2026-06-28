@@ -214,6 +214,7 @@ export interface NarrationImageMeta {
   body_sentence_index?: number
   image_prompt_source?: 'llm_raw' | 'optimized' | 'upload' | 'manual'
   image_prompt_llm_raw?: string
+  subtitle_narration?: string
 }
 
 export function isNarrationStoryboard(sb: any) {
@@ -260,6 +261,9 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
       image_prompt_llm_raw: typeof raw.image_prompt_llm_raw === 'string' && raw.image_prompt_llm_raw.trim()
         ? raw.image_prompt_llm_raw.trim()
         : undefined,
+      subtitle_narration: typeof raw.subtitle_narration === 'string' && raw.subtitle_narration.trim()
+        ? raw.subtitle_narration.trim()
+        : undefined,
     }
   }
   try {
@@ -294,13 +298,19 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
       image_prompt_llm_raw: typeof parsed?.image_prompt_llm_raw === 'string' && parsed.image_prompt_llm_raw.trim()
         ? parsed.image_prompt_llm_raw.trim()
         : undefined,
+      subtitle_narration: typeof parsed?.subtitle_narration === 'string' && parsed.subtitle_narration.trim()
+        ? parsed.subtitle_narration.trim()
+        : undefined,
     }
   } catch {}
   return { narration_image_mode: 'inherit' }
 }
 
 export function isNarrationTitleShot(sb: any) {
-  return parseNarrationImageMeta(sb).narration_shot_type === 'title'
+  const meta = parseNarrationImageMeta(sb)
+  if (meta.narration_shot_type === 'title') return true
+  if (meta.title_full) return true
+  return false
 }
 
 /** 稳定排序：先镜号，同号时片头镜优先，再按 id */
@@ -316,6 +326,266 @@ export function compareStoryboardOrder(a: any, b: any) {
 
 export function sortStoryboards(list: any[]) {
   return [...list].sort(compareStoryboardOrder)
+}
+
+/** 合成/合并分组用：与后端 resolveStoryboardVisualSource 的 key 对齐 */
+export function getStoryboardComposeVisualKey(sb: any, storyboards: any[]) {
+  if (sb?.video_url || sb?.videoUrl) return `video:${sb.video_url || sb.videoUrl}`
+  const ownImage = sb?.composed_image || sb?.composedImage || sb?.first_frame_image || sb?.firstFrameImage
+  if (ownImage) return `image:${ownImage}`
+  const effective = resolveNarrationEffectiveImage(storyboards, sb)
+  if (effective.path) return `image:${effective.path}`
+  return `none:${sb.id}`
+}
+
+export function buildComposeVisualGroups(storyboards: any[]) {
+  const ordered = sortStoryboards(storyboards)
+  if (!ordered.length) return [] as { start: number; end: number }[]
+
+  const groups: { start: number; end: number }[] = []
+  let groupStart = 0
+  let prevKey = getStoryboardComposeVisualKey(ordered[0], ordered)
+  for (let i = 1; i < ordered.length; i++) {
+    const currKey = getStoryboardComposeVisualKey(ordered[i], ordered)
+    if (currKey !== prevKey) {
+      groups.push({ start: groupStart, end: i - 1 })
+      groupStart = i
+      prevKey = currKey
+    }
+  }
+  groups.push({ start: groupStart, end: ordered.length - 1 })
+  return groups
+}
+
+/** 配图锚点镜：本镜为 new，或向前找到最近的 new 锚点（与 inherit 链对齐） */
+export function resolveNarrationImageAnchorShot(storyboards: any[], sb: any) {
+  const ordered = sortStoryboards(storyboards)
+  const idx = ordered.findIndex(item => item.id === sb.id)
+  if (idx < 0) return sb
+  for (let i = idx; i >= 0; i--) {
+    const meta = parseNarrationImageMeta(ordered[i])
+    if (meta.narration_image_mode === 'new') return ordered[i]
+  }
+  return sb
+}
+
+/** 合成单元（检测配图 paragraph 或分镜同图继承，与后端 buildComposeUnitGroups 对齐） */
+export function resolveComposeUnitKey(sb: any, storyboards: any[]) {
+  const anchor = resolveNarrationImageAnchorShot(storyboards, sb)
+  const meta = parseNarrationImageMeta(anchor)
+  if (typeof meta.paragraph_index === 'number') {
+    return `para:${meta.paragraph_index}`
+  }
+  return getStoryboardComposeVisualKey(sb, storyboards)
+}
+
+export function buildComposeUnitGroups(storyboards: any[]) {
+  const ordered = sortStoryboards(storyboards)
+  const body = ordered.filter(sb => !isNarrationTitleShot(sb))
+  const groups: { key: string; members: any[]; startIdx: number }[] = []
+  let currentKey: string | null = null
+  let members: any[] = []
+  let startIdx = 0
+
+  for (let i = 0; i < body.length; i++) {
+    const sb = body[i]
+    const key = resolveComposeUnitKey(sb, ordered)
+    if (currentKey === null || key !== currentKey) {
+      if (members.length && currentKey != null) {
+        groups.push({ key: currentKey, members, startIdx })
+      }
+      currentKey = key
+      members = [sb]
+      startIdx = i
+    } else {
+      members.push(sb)
+    }
+  }
+  if (members.length && currentKey != null) {
+    groups.push({ key: currentKey, members, startIdx })
+  }
+  return groups
+}
+
+/** @deprecated 别名 */
+export const buildParagraphComposeGroups = buildComposeUnitGroups
+
+export function getParagraphComposeMembers(sb: any, storyboards: any[]) {
+  const group = buildComposeUnitGroups(storyboards).find(g => g.members.some(m => m.id === sb.id))
+  return group?.members ?? [sb]
+}
+
+/** 合成烧录字幕（与后端 resolveStoryboardSubtitleNarration 对齐） */
+export function resolveStoryboardSubtitleNarration(sb: any): string {
+  const meta = parseNarrationImageMeta(sb)
+  const stored = String(meta.subtitle_narration || '').trim()
+  if (stored) return stored
+  return extractNarrationSentence(sb)
+}
+
+export function stripSubtitleEmphasis(text: string): string {
+  return String(text || '').replace(/\*\*/g, '').trim()
+}
+
+export function estimateStoryboardDurationSec(sb: any): number {
+  const stored = Number(sb?.duration)
+  if (Number.isFinite(stored) && stored > 0) return stored
+  const text = resolveStoryboardSubtitleNarration(sb)
+  const chars = text.replace(/\s/g, '').length
+  if (isNarrationTitleShot(sb)) return Math.max(6, Math.min(12, Math.ceil(chars / 3.5)))
+  return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
+}
+
+export type ComposeUnitSubtitleLine = {
+  index: number
+  shotNo: string
+  displayText: string
+  startSec: number
+  endSec: number
+  durationSec: number
+}
+
+/** 合成单元内各句字幕与时间轴（与 group compose 顺序一致） */
+export function getComposeUnitSubtitleLines(sb: any, storyboards: any[]): ComposeUnitSubtitleLine[] {
+  const members = getParagraphComposeMembers(sb, storyboards)
+  let offsetSec = 0
+  const lines: ComposeUnitSubtitleLine[] = []
+  for (let idx = 0; idx < members.length; idx++) {
+    const member = members[idx]
+    const marked = resolveStoryboardSubtitleNarration(member)
+    const displayText = stripSubtitleEmphasis(marked)
+    if (!displayText) continue
+    const durationSec = estimateStoryboardDurationSec(member)
+    const startSec = offsetSec
+    const endSec = offsetSec + durationSec
+    lines.push({
+      index: lines.length + 1,
+      shotNo: getNarrationShotDisplayNo(member),
+      displayText,
+      startSec,
+      endSec,
+      durationSec,
+    })
+    offsetSec = endSec
+  }
+  return lines
+}
+
+export function getComposeUnitTotalDurationSec(sb: any, storyboards: any[]): number {
+  const lines = getComposeUnitSubtitleLines(sb, storyboards)
+  if (!lines.length) return estimateStoryboardDurationSec(sb)
+  return lines[lines.length - 1].endSec
+}
+
+export function formatComposeTimecode(sec: number): string {
+  const s = Math.max(0, sec)
+  if (s < 60) return `${Math.round(s * 10) / 10}s`
+  const m = Math.floor(s / 60)
+  const r = s - m * 60
+  return `${m}:${r.toFixed(1).padStart(4, '0')}`
+}
+
+export function formatComposeUnitDuration(sb: any, storyboards: any[]): string {
+  return formatComposeTimecode(getComposeUnitTotalDurationSec(sb, storyboards))
+}
+
+export function getComposeUnitShotRangeLabel(sb: any, storyboards: any[]): string {
+  const members = getParagraphComposeMembers(sb, storyboards)
+  if (!members.length) return '#??'
+  if (members.length <= 1) return `#${getNarrationShotDisplayNo(members[0])}`
+  return `#${getNarrationShotDisplayNo(members[0])}-#${getNarrationShotDisplayNo(members[members.length - 1])}`
+}
+
+/** 镜头合成/导出：每个配图单元取代表镜（不含片头） */
+export function getComposeUnitLeaders(storyboards: any[]) {
+  return buildComposeUnitGroups(storyboards)
+    .map(g => g.members[0])
+    .filter(leader => {
+      if (!isComposeScopeStoryboard(leader, storyboards)) return false
+      const anchor = resolveNarrationImageAnchorShot(storyboards, leader)
+      return !isNarrationTitleShot(anchor)
+    })
+}
+
+/** 镜头合成列表：每个合成单元只显示代表镜 */
+export function isParagraphComposeLeader(sb: any, storyboards: any[]) {
+  return getComposeUnitLeaders(storyboards).some(leader => leader.id === sb.id)
+}
+
+/** 批量合成 scope：命中合成单元时纳入单元内全部镜头 */
+export function collectComposeScopeStoryboardIds(targets: any[], storyboards: any[]): number[] {
+  const ordered = sortStoryboards(storyboards)
+  const scopeIds = new Set<number>()
+  const groups = buildComposeUnitGroups(ordered)
+  for (const sb of targets) {
+    scopeIds.add(sb.id)
+    const group = groups.find(g => g.members.some(m => m.id === sb.id))
+    if (group && group.members.length > 1) {
+      group.members.forEach(m => scopeIds.add(m.id))
+    }
+  }
+  return [...scopeIds]
+}
+
+/** 与后端 compose-status 的 composable 口径一致（不含片头） */
+export function isComposableStoryboard(sb: any, storyboards: any[]) {
+  if (sb?.video_url || sb?.videoUrl) return true
+  if (String(sb?.dialogue || '').trim()) return true
+  if (sb?.composed_image || sb?.composedImage || sb?.first_frame_image || sb?.firstFrameImage) return true
+  return !!resolveNarrationEffectiveImage(storyboards, sb).path
+}
+
+/** 镜头合成列表/批量：正文镜，片头在导出页单独处理 */
+export function isComposeScopeStoryboard(sb: any, storyboards: any[]) {
+  if (isNarrationTitleShot(sb)) return false
+  return isComposableStoryboard(sb, storyboards)
+}
+
+export function getComposedVideoUrl(sb: any) {
+  return sb?.composed_video_url || sb?.composedVideoUrl || null
+}
+
+export function resolveComposedVideoUrlForShot(sb: any, storyboards: any[]) {
+  const own = getComposedVideoUrl(sb)
+  if (own) return own
+  for (const member of getParagraphComposeMembers(sb, storyboards)) {
+    const url = getComposedVideoUrl(member)
+    if (url) return url
+  }
+  return null
+}
+
+export function hasComposedStoryboard(sb: any, storyboards?: any[]) {
+  if (getComposedVideoUrl(sb)) return true
+  if (!storyboards?.length) return false
+  return getParagraphComposeMembers(sb, storyboards).some(m => !!getComposedVideoUrl(m))
+}
+
+/** 批量合成：每个配图段只触发一次 */
+export function pickVisualGroupComposeLeaders(targets: any[], storyboards: any[]) {
+  const ordered = sortStoryboards(storyboards)
+  const targetIds = new Set(targets.map(sb => sb.id))
+  const groups = buildComposeUnitGroups(ordered)
+  const seenKeys = new Set<string>()
+  const leaders: any[] = []
+
+  for (const group of groups) {
+    if (!group.members.some(m => targetIds.has(m.id))) continue
+    if (seenKeys.has(group.key)) continue
+    seenKeys.add(group.key)
+    const leaderMember = group.members[0]
+    const leader = targets.find(t => t.id === leaderMember.id)
+      ?? targets.find(t => group.members.some(m => m.id === t.id))
+    if (leader) leaders.push(leader)
+  }
+
+  for (const t of targets) {
+    if (leaders.some(l => l.id === t.id)) continue
+    const group = groups.find(g => g.members.some(m => m.id === t.id))
+    if (!group || group.members.length <= 1) leaders.push(t)
+  }
+
+  return leaders
 }
 
 /** 收集当前镜头之前的全部旁白句，供配图【剧情】全文连贯 */
