@@ -3833,7 +3833,7 @@ const previousMergeUrl = computed(() =>
   mergeData.value?.previous_merged_url || mergeData.value?.previousMergedUrl || null,
 )
 const mergeProcessing = computed(() => ['processing', 'pending'].includes(mergeData.value?.status))
-const mergeTestClipLimit = ref(20)
+const mergeTestClipLimit = ref(3)
 const pendingMergeKind = ref(null)
 const testMergeBlock = computed(() => mergeData.value?.test || null)
 const testMergeUrl = computed(() => {
@@ -4388,16 +4388,22 @@ function buildMergePayload(extra = {}) {
 }
 
 function normalizedMergeTestClipLimit() {
-  return Math.max(1, Math.min(50, Number(mergeTestClipLimit.value) || 20))
+  return Math.max(1, Math.min(50, Number(mergeTestClipLimit.value) || 3))
 }
 
 function getTestMergeTargets(limit = normalizedMergeTestClipLimit()) {
-  return bodyShots.value.slice(0, limit)
+  return composeUnitShots.value.slice(0, limit)
+}
+
+function isTestComposeUnitReady(sb) {
+  if (hasVid(sb)) return true
+  if (isNarrationMode.value) return hasImg(sb) && hasComposeTts(sb) && hasDialogueForCompose(sb)
+  return hasImg(sb)
 }
 
 function canTestMerge(limit = normalizedMergeTestClipLimit()) {
   const targets = getTestMergeTargets(limit)
-  return targets.length > 0 && targets.every(sb => canCompose(sb))
+  return targets.length > 0 && targets.every(sb => isTestComposeUnitReady(sb))
 }
 
 async function applyBgmToAllShots(musicId) {
@@ -9561,7 +9567,7 @@ function startMergePoll(onDone) {
     stopMergePoll()
     if (pendingMergeKind.value === 'test') {
       if (testStatus === 'completed') {
-        toast.success(`测试导出完成（前 ${testMergeClipCount.value} 镜）`)
+        toast.success(`测试导出完成（前 ${testMergeClipCount.value} 段）`)
         await refresh()
       } else if (testStatus === 'failed') {
         toast.error(testMergeFailedMessage.value)
@@ -9812,12 +9818,12 @@ async function doTestMerge() {
     toast.error('暂无分镜')
     return false
   }
-  const notReady = targets.filter(sb => !canCompose(sb))
+  const notReady = targets.filter(sb => !isTestComposeUnitReady(sb))
   if (notReady.length) {
-    toast.error(`前 ${limit} 镜中有 ${notReady.length} 镜尚未就绪（需配图+配音）`)
+    toast.error(`前 ${limit} 段中有 ${notReady.length} 段尚未就绪（需配图+配音）`)
     return false
   }
-  if (!tryBeginBatch('compose', `测试导出：重新合成前 ${targets.length} 镜…`)) return false
+  if (!tryBeginBatch('compose', `测试导出：重新合成前 ${targets.length} 段…`)) return false
 
   pendingMergeKind.value = 'test'
   panel.value = 'export'
@@ -9832,11 +9838,11 @@ async function doTestMerge() {
       ? res.scope_storyboard_ids
       : collectComposeScopeStoryboardIds(targets, sbs.value)
     pendingComposeIds.value = [...new Set(scopeIds)]
-    toast.info(`正在重新合成 ${scopeIds.length} 镜…`)
+    toast.info(`正在重新合成前 ${targets.length} 段…`)
 
     const ok = await pollComposeStatus({
       expectStoryboardIds: scopeIds,
-      successMessage: `前 ${targets.length} 镜合成完成，正在测试拼接…`,
+      successMessage: `前 ${targets.length} 段合成完成，正在测试拼接…`,
       maxAttempts: Math.max(120, scopeIds.length * 4),
     })
     await refresh()
@@ -9853,7 +9859,7 @@ async function doTestMerge() {
         merged_url: null,
         mergedUrl: null,
         progress_percent: 0,
-        progress_message: `正在拼接前 ${targets.length} 镜…`,
+        progress_message: `正在拼接前 ${targets.length} 段…`,
       },
     }
     startMergePoll()

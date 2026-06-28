@@ -421,6 +421,40 @@ function buildVisualGroups(ordered: VisualStoryboard[]) {
   return groups
 }
 
+function countEpisodeTitleShots(storyboards: VisualStoryboard[]): number {
+  return storyboards.filter(sb => isStoryboardTitleShot(sb)).length
+}
+
+/** 片头占 virtual page 0（不参与正文合成）；正文合成单元从 page 1 起，首段为收缩（奇数页） */
+function resolveBodyComposePageIndex(bodyUnitIndex: number): number {
+  return bodyUnitIndex + 1
+}
+
+function resolveBodyComposePrevGroupShotCount(
+  bodyUnitIndex: number,
+  composeUnitGroups: ComposeUnitGroup[],
+  episodeStoryboards: EpisodeStoryboardRow[],
+): number {
+  if (bodyUnitIndex > 0) {
+    return composeUnitGroups[bodyUnitIndex - 1].members.length
+  }
+  const titleCount = countEpisodeTitleShots(episodeStoryboards)
+  return titleCount > 0 ? titleCount : 1
+}
+
+function resolveBodyComposeMotionInfo(
+  storyboardId: number,
+  episodeStoryboards: EpisodeStoryboardRow[],
+): { pageIndex: number; prevGroupShotCount: number } | null {
+  const groups = buildComposeUnitGroups(episodeStoryboards)
+  const unitIdx = groups.findIndex(g => g.members.some(m => m.id === storyboardId))
+  if (unitIdx < 0) return null
+  return {
+    pageIndex: resolveBodyComposePageIndex(unitIdx),
+    prevGroupShotCount: resolveBodyComposePrevGroupShotCount(unitIdx, groups, episodeStoryboards),
+  }
+}
+
 /** 当前镜头在分集内的配图组信息 */
 function getVisualGroupInfo(storyboardId: number, episodeStoryboards: VisualStoryboard[]): VisualGroupInfo {
   const ordered = sortStoryboardsByOrder(episodeStoryboards)
@@ -430,13 +464,23 @@ function getVisualGroupInfo(storyboardId: number, episodeStoryboards: VisualStor
   const groups = buildVisualGroups(ordered)
   const groupIndex = groups.findIndex(group => idx >= group.start && idx <= group.end)
   const group = groups[groupIndex >= 0 ? groupIndex : 0]
+  const shotIndexInGroup = idx - group.start
+  const sb = ordered[idx]
+
+  if (!isStoryboardTitleShot(sb)) {
+    const bodyMotion = resolveBodyComposeMotionInfo(storyboardId, episodeStoryboards as EpisodeStoryboardRow[])
+    if (bodyMotion) {
+      return { shotIndexInGroup, ...bodyMotion }
+    }
+  }
+
   const prevGroupShotCount = groupIndex > 0
     ? groups[groupIndex - 1].end - groups[groupIndex - 1].start + 1
     : 0
 
   return {
     pageIndex: groupIndex >= 0 ? groupIndex : 0,
-    shotIndexInGroup: idx - group.start,
+    shotIndexInGroup,
     prevGroupShotCount,
   }
 }
@@ -1185,8 +1229,8 @@ function resolveComposeUnitContext(
     groupIndex,
     groupStart: group.startIdx,
     groupEnd: group.startIdx + group.members.length - 1,
-    pageIndex: groupIndex,
-    prevGroupShotCount: groupIndex > 0 ? groups[groupIndex - 1].members.length : 0,
+    pageIndex: resolveBodyComposePageIndex(groupIndex),
+    prevGroupShotCount: resolveBodyComposePrevGroupShotCount(groupIndex, groups, episodeStoryboards),
     members: group.members,
     imageAbsPath: toAbsPath(visual.path),
     unitKey: group.key,
