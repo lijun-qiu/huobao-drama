@@ -4,6 +4,7 @@ import {
   coerceMinimalLLMImagePrompt,
   hasNarrationForbiddenStyleIssue,
   hasNarrationMultipleProtagonistIssue,
+  hasNarrationPartialCloseupIssue,
   hasNarrationRedundantTextureIssue,
   hasNarrationSixDimOrderIssue,
   hasNarrationSixDimStructure,
@@ -96,7 +97,7 @@ export function auditNarrationImagePromptText(
     if (hasNarrationUniversalPrefixIssue(text)) {
       issues.push({
         code: 'missing_prefix',
-        label: '缺少或偏离万能模板前缀（16:9 + 素体规格）',
+        label: '缺少或偏离【画风规格】（16:9 + 素体规格）',
         category: 'format',
         severity: 'warn',
       })
@@ -115,6 +116,14 @@ export function auditNarrationImagePromptText(
         label: '【画面主体】违反万能模板唯一主人公规则',
         category: 'character',
         severity: 'error',
+      })
+    }
+    if (hasNarrationPartialCloseupIssue(text)) {
+      issues.push({
+        code: 'partial_closeup',
+        label: '肢体局部特写与全身主人公冲突（裤脚/猫爪/接触点机位）',
+        category: 'format',
+        severity: 'warn',
       })
     }
     if (/黑色素体/.test(text)) {

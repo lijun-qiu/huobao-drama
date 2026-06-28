@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url'
 import { execFileSync } from 'child_process'
 import { v4 as uuid } from 'uuid'
 import { db, schema } from '../db/index.js'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { BGM_SOLO_VOLUME, BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { generateTTS } from './tts-generation.js'
@@ -22,6 +22,7 @@ import { deleteEpisodeAssetFileIfUnreferenced } from './storyboard-asset-replace
 import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
+import { PAGE_FLIP_TRANSITION_SEC } from './ffmpeg-page-transition.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
@@ -44,6 +45,7 @@ const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 let subtitleFilterSupport: boolean | null = null
 const imageBaseCacheInflight = new Map<string, Promise<string>>()
+const groupComposeInflight = new Map<string, Promise<string>>()
 
 function toAbsPath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) return relativePath
@@ -166,9 +168,76 @@ function buildTitleAssDialogueLine(text: string, startSec: number, endSec: numbe
   return `${white}\n${red}`
 }
 
-function buildTitleAssContent(text: string, durationSec: number) {
-  const endAt = Math.max(durationSec, 0.1)
-  return `${buildTitleAssHeader()}${buildTitleAssDialogueLine(text, TITLE_SUBTITLE_START_DELAY_SEC, endAt)}\n`
+function buildTitleAssContent(text: string, durationSec: number, startOffsetSec = 0) {
+  const startAt = startOffsetSec + TITLE_SUBTITLE_START_DELAY_SEC
+  const endAt = startOffsetSec + Math.max(durationSec, 0.1)
+  return `${buildTitleAssHeader()}${buildTitleAssDialogueLine(text, startAt, endAt)}\n`
+}
+
+function fmtComposeFilterSec(sec: number): string {
+  return Math.max(0.001, sec).toFixed(3)
+}
+
+/** 合成转场 hold（= PAGE_FLIP_TRANSITION_SEC）；同配图组内仅首镜 start、末镜 stop，避免句间硬切时缩放顿住 */
+function resolveComposeTransitionPadSec(): number {
+  return PAGE_FLIP_TRANSITION_SEC
+}
+
+type ComposeTransitionPads = {
+  startPadSec: number
+  endPadSec: number
+}
+
+function resolveComposeOutputDuration(contentDurationSec: number, pads: ComposeTransitionPads): number {
+  return Math.max(0.001, contentDurationSec + pads.startPadSec + pads.endPadSec)
+}
+
+function buildComposeTransitionVideoPadFilter(pads: ComposeTransitionPads): string | null {
+  const parts: string[] = []
+  if (pads.startPadSec > 0) {
+    parts.push(`start_mode=clone:start_duration=${fmtComposeFilterSec(pads.startPadSec)}`)
+  }
+  if (pads.endPadSec > 0) {
+    parts.push(`stop_mode=clone:stop_duration=${fmtComposeFilterSec(pads.endPadSec)}`)
+  }
+  if (!parts.length) return null
+  return `tpad=${parts.join(':')}`
+}
+
+function appendComposeTransitionVideoPad(filters: string[], pads: ComposeTransitionPads): void {
+  const filter = buildComposeTransitionVideoPadFilter(pads)
+  if (filter) filters.push(filter)
+}
+
+/** 转场 tpad 须在烧录字幕之前，否则首尾 hold 会把已烧字幕整体推迟，与 adelay 旁白不同步 */
+function appendComposeVideoPostFilters(
+  filters: string[],
+  subtitlePath: string | null | undefined,
+  isTitleShot: boolean,
+  pads: ComposeTransitionPads,
+  watermarkText?: string | null,
+  watermarkAnimated = false,
+): void {
+  appendComposeTransitionVideoPad(filters, pads)
+  if (subtitlePath && supportsSubtitleFilter()) {
+    filters.push(buildSubtitleFilter(subtitlePath, isTitleShot))
+  }
+  appendWatermarkFilter(filters, watermarkText, { animated: watermarkAnimated })
+}
+
+function buildComposeTransitionAudioPadFilter(inputIndex: number, label: string, pads: ComposeTransitionPads): string {
+  const filters: string[] = []
+  if (pads.startPadSec > 0) {
+    const delayMs = Math.round(pads.startPadSec * 1000)
+    filters.push(`adelay=${delayMs}|${delayMs}`)
+  }
+  if (pads.endPadSec > 0) {
+    filters.push(`apad=pad_dur=${fmtComposeFilterSec(pads.endPadSec)}`)
+  }
+  if (!filters.length) {
+    return `[${inputIndex}:a]anull[${label}]`
+  }
+  return `[${inputIndex}:a]${filters.join(',')}[${label}]`
 }
 
 function buildSubtitleForceStyle(isTitleShot: boolean) {
@@ -264,6 +333,23 @@ function getVisualGroupInfo(storyboardId: number, episodeStoryboards: VisualStor
   }
 }
 
+function resolveComposeTransitionPads(
+  storyboardId: number,
+  episodeStoryboards: VisualStoryboard[],
+): ComposeTransitionPads {
+  const pad = resolveComposeTransitionPadSec()
+  const ordered = sortStoryboardsByOrder(episodeStoryboards)
+  const idx = ordered.findIndex(sb => sb.id === storyboardId)
+  if (idx < 0) return { startPadSec: pad, endPadSec: pad }
+
+  const groups = buildVisualGroups(ordered)
+  const group = groups.find(g => idx >= g.start && idx <= g.end) ?? groups[0]
+  return {
+    startPadSec: idx === group.start ? pad : 0,
+    endPadSec: idx === group.end ? pad : 0,
+  }
+}
+
 function durationToFrameCount(durationSec: number, fps = COMPOSE_FPS) {
   return Math.max(2, Math.round(durationSec * fps))
 }
@@ -290,7 +376,7 @@ function buildShotZoomMotionFilter(info: VisualGroupInfo, durationSec: number, f
   ].join(',')
 }
 
-/** 同配图多句：每句独立推/拉镜，缩放值在同图内连续递进 */
+/** 同配图多句：整组一条线性推/拉镜，缩放速率随总时长均匀分布 */
 function buildGroupProgressiveZoomFilter(
   shotDurationsSec: number[],
   pageIndex: number,
@@ -299,23 +385,22 @@ function buildGroupProgressiveZoomFilter(
 ) {
   const frameCounts = shotDurationsSec.map(d => durationToFrameCount(d, fps))
   const totalFrames = frameCounts.reduce((sum, count) => sum + count, 0)
+  const shotCount = shotDurationsSec.length
 
-  const zForShot = (shotIndex: number, startFrame: number, frames: number) => {
-    const { startZ, endZ } = buildShotZoomRange(pageIndex, shotIndex, prevGroupShotCount)
-    const delta = endZ - startZ
-    return `${startZ}+${delta}*(on-${startFrame})/${frames - 1}`
+  let startZ: number
+  let endZ: number
+  if (pageIndex % 2 === 0) {
+    startZ = 1
+    endZ = 1 + shotCount * SAME_IMAGE_ZOOM_STEP
+  } else {
+    startZ = 1 + prevGroupShotCount * SAME_IMAGE_ZOOM_STEP
+    endZ = 1
   }
-
-  let startFrame = 0
-  let zExpr = zForShot(0, 0, frameCounts[0])
-  for (let i = 1; i < frameCounts.length; i++) {
-    startFrame += frameCounts[i - 1]
-    zExpr = `if(gte(on,${startFrame}),${zForShot(i, startFrame, frameCounts[i])},${zExpr})`
-  }
+  const delta = endZ - startZ
 
   return [
     'scale=8000:-1',
-    `zoompan=z='${zExpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${totalFrames}:s=1280x720:fps=${fps}`,
+    `zoompan=z='${startZ}+${delta}*on/${totalFrames - 1}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${totalFrames}:s=1280x720:fps=${fps}`,
     'format=yuv420p',
   ].join(',')
 }
@@ -472,6 +557,8 @@ export async function renderSameImageGroupSegment(
   const tempDir = path.join(STORAGE_ROOT, 'temp')
   fs.mkdirSync(tempDir, { recursive: true })
 
+  const transitionPad = resolveComposeTransitionPadSec()
+  const transitionPads: ComposeTransitionPads = { startPadSec: transitionPad, endPadSec: transitionPad }
   let offsetSec = 0
   let titleMode = false
   type GroupSubtitleLine =
@@ -504,9 +591,9 @@ export async function renderSameImageGroupSegment(
     const subtitleMarkedText = resolveStoryboardSubtitleNarration(sb)
     const displayText = stripSubtitlePunctuationPreservingEmphasis(subtitleMarkedText)
     const startSec = isTitleShot
-      ? offsetSec + TITLE_SUBTITLE_START_DELAY_SEC
-      : offsetSec
-    const endSec = offsetSec + Math.max(durationSec, 0.05)
+      ? offsetSec + transitionPad + TITLE_SUBTITLE_START_DELAY_SEC
+      : offsetSec + transitionPad
+    const endSec = offsetSec + transitionPad + Math.max(durationSec, 0.05)
 
     if (displayText) {
       if (isTitleShot) {
@@ -562,23 +649,36 @@ export async function renderSameImageGroupSegment(
   const watermarkText = resolveWatermarkText(ep?.watermarkText)
   const watermarkAnimated = resolveWatermarkAnimated(ep?.watermarkAnimated)
 
+  const contentDuration = offsetSec
+  const outputDuration = resolveComposeOutputDuration(contentDuration, transitionPads)
+
   await new Promise<void>((resolve, reject) => {
     const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount)]
-    if (supportsSubtitleFilter()) {
-      filters.push(buildSubtitleFilter(subtitlePath, titleMode && !hasNarrationSubtitles))
-    }
-    appendWatermarkFilter(filters, watermarkText, { animated: watermarkAnimated })
+    appendComposeVideoPostFilters(
+      filters,
+      subtitlePath,
+      titleMode && !hasNarrationSubtitles,
+      transitionPads,
+      watermarkText,
+      watermarkAnimated,
+    )
+
+    const videoChain = `[0:v]${filters.join(',')}[vout]`
+    const filterComplex = [
+      videoChain,
+      buildComposeTransitionAudioPadFilter(1, 'aout', transitionPads),
+    ].join(';')
 
     let cmd = ffmpeg()
       .input(imageAbsPath)
       .inputOptions(['-loop', '1'])
       .input(mergedAudioPath)
-    if (filters.length > 0) cmd = cmd.videoFilter(filters)
     cmd
+      .complexFilter(filterComplex)
       .outputOptions([
-        '-t', String(offsetSec),
-        '-map', '0:v',
-        '-map', '1:a',
+        '-t', String(outputDuration),
+        '-map', '[vout]',
+        '-map', '[aout]',
         '-c:v', 'libx264',
         '-preset', 'fast',
         '-crf', '23',
@@ -589,7 +689,6 @@ export async function renderSameImageGroupSegment(
         '-r', '25',
         '-vsync', 'cfr',
         '-c:a', 'aac',
-        '-shortest',
       ])
       .output(outputPath)
       .on('end', () => resolve())
@@ -600,13 +699,186 @@ export async function renderSameImageGroupSegment(
   if (fs.existsSync(mergedAudioPath)) fs.unlinkSync(mergedAudioPath)
   if (fs.existsSync(subtitlePath)) fs.unlinkSync(subtitlePath)
 
-  return offsetSec
+  return outputDuration
+}
+
+type EpisodeStoryboardRow = typeof schema.storyboards.$inferSelect
+
+type SameImageGroupComposeContext = {
+  episodeId: number
+  groupIndex: number
+  groupStart: number
+  groupEnd: number
+  pageIndex: number
+  prevGroupShotCount: number
+  members: EpisodeStoryboardRow[]
+  imageAbsPath: string
+}
+
+function resolveSameImageGroupComposeContext(
+  storyboardId: number,
+  episodeStoryboards: EpisodeStoryboardRow[],
+): SameImageGroupComposeContext | null {
+  const ordered = sortStoryboardsByOrder(episodeStoryboards)
+  const idx = ordered.findIndex(sb => sb.id === storyboardId)
+  if (idx < 0) return null
+
+  const sb = ordered[idx]
+  if (isStoryboardTitleShot(sb)) return null
+
+  const groups = buildVisualGroups(ordered)
+  const groupIndex = groups.findIndex(group => idx >= group.start && idx <= group.end)
+  if (groupIndex < 0) return null
+
+  const group = groups[groupIndex]
+  const members = ordered.slice(group.start, group.end + 1)
+  if (members.length <= 1) return null
+
+  const visual = resolveStoryboardVisualSource(ordered, members[0].id)
+  if (!visual || visual.type !== 'image') return null
+
+  return {
+    episodeId: sb.episodeId,
+    groupIndex,
+    groupStart: group.start,
+    groupEnd: group.end,
+    pageIndex: groupIndex,
+    prevGroupShotCount: groupIndex > 0
+      ? groups[groupIndex - 1].end - groups[groupIndex - 1].start + 1
+      : 0,
+    members,
+    imageAbsPath: toAbsPath(visual.path),
+  }
+}
+
+function groupComposeInflightKey(ctx: SameImageGroupComposeContext) {
+  return `${ctx.episodeId}:${ctx.groupStart}-${ctx.groupEnd}`
+}
+
+/** 批量合成时按同配图组去重，每组只触发一次 */
+export function pickVisualGroupComposeLeaders<T extends { id: number }>(
+  targets: T[],
+  episodeStoryboards: EpisodeStoryboardRow[],
+): T[] {
+  const ordered = sortStoryboardsByOrder(episodeStoryboards)
+  const groups = buildVisualGroups(ordered)
+  const seenStarts = new Set<number>()
+  const leaders: T[] = []
+
+  for (const sb of targets) {
+    const idx = ordered.findIndex(item => item.id === sb.id)
+    if (idx < 0) {
+      leaders.push(sb)
+      continue
+    }
+    const group = groups.find(g => idx >= g.start && idx <= g.end)
+    if (!group || seenStarts.has(group.start)) continue
+    seenStarts.add(group.start)
+    leaders.push(sb)
+  }
+
+  return leaders
+}
+
+async function composeSameImageGroup(
+  storyboardId: number,
+  ctx: SameImageGroupComposeContext,
+): Promise<string> {
+  const inflightKey = groupComposeInflightKey(ctx)
+  const inflight = groupComposeInflight.get(inflightKey)
+  if (inflight) return inflight
+
+  const composePromise = (async () => {
+    const memberIds = ctx.members.map(m => m.id)
+    logTaskStart('ComposeTask', 'same-image-group-compose', {
+      storyboardId,
+      episodeId: ctx.episodeId,
+      memberIds,
+      pageIndex: ctx.pageIndex,
+      shotCount: ctx.members.length,
+    })
+
+    for (const member of ctx.members) {
+      if (member.composedVideoUrl) {
+        deleteEpisodeAssetFileIfUnreferenced(
+          member.composedVideoUrl,
+          member.episodeId,
+          'composedVideoUrl',
+          member.id,
+        )
+      }
+    }
+
+    db.update(schema.storyboards)
+      .set({ status: 'compose_processing', composedVideoUrl: null, subtitleUrl: null, updatedAt: now() })
+      .where(inArray(schema.storyboards.id, memberIds))
+      .run()
+
+    const outputDir = path.join(STORAGE_ROOT, 'composed')
+    fs.mkdirSync(outputDir, { recursive: true })
+    const outputFilename = `${uuid()}.mp4`
+    const outputPath = path.join(outputDir, outputFilename)
+
+    try {
+      await renderSameImageGroupSegment(
+        ctx.members,
+        ctx.imageAbsPath,
+        outputPath,
+        ctx.pageIndex,
+        ctx.prevGroupShotCount,
+      )
+
+      const composedRelative = `static/composed/${outputFilename}`
+      db.update(schema.storyboards)
+        .set({ composedVideoUrl: composedRelative, status: 'compose_completed', updatedAt: now() })
+        .where(inArray(schema.storyboards.id, memberIds))
+        .run()
+
+      logTaskSuccess('ComposeTask', 'same-image-group-compose', {
+        storyboardId,
+        episodeId: ctx.episodeId,
+        memberIds,
+        output: composedRelative,
+      })
+      return composedRelative
+    } catch (err) {
+      db.update(schema.storyboards)
+        .set({ status: 'compose_failed', composedVideoUrl: null, updatedAt: now() })
+        .where(inArray(schema.storyboards.id, memberIds))
+        .run()
+      throw err
+    }
+  })()
+
+  groupComposeInflight.set(inflightKey, composePromise)
+  try {
+    return await composePromise
+  } finally {
+    groupComposeInflight.delete(inflightKey)
+  }
 }
 
 /**
- * 合成单个镜头：视频/配图 + TTS对白音频 + 烧录字幕
+ * 合成单个镜头：视频/配图 + TTS音频 + 烧录字幕
+ * 同配图多句自动走整组一次渲染（renderSameImageGroupSegment）
  */
 export async function composeStoryboard(storyboardId: number): Promise<string> {
+  const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboardId)).all()
+  if (!sb) throw new Error(`Storyboard ${storyboardId} not found`)
+
+  const episodeStoryboards = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, sb.episodeId))
+    .all()
+    .filter(row => !row.deletedAt)
+
+  const groupCtx = resolveSameImageGroupComposeContext(storyboardId, episodeStoryboards)
+  if (groupCtx) {
+    return composeSameImageGroup(storyboardId, groupCtx)
+  }
+  return composeStoryboardSingle(storyboardId)
+}
+
+async function composeStoryboardSingle(storyboardId: number): Promise<string> {
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboardId)).all()
   if (!sb) throw new Error(`Storyboard ${storyboardId} not found`)
 
@@ -737,7 +1009,10 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       })
     }
 
-    // 2. 生成字幕：旁白统一 ASS（白字 20 号；含 **强调** 时黄字 25 号）；片头 ASS 剧中红字
+    const transitionPads = resolveComposeTransitionPads(storyboardId, episodeStoryboards)
+    const outputDuration = resolveComposeOutputDuration(clipDuration, transitionPads)
+
+    // 2. 生成字幕：旁白统一 ASS；片头 ASS 剧中红字（时间轴偏移 startPad，对齐首段 hold）
     const subtitleMarkedText = resolveStoryboardSubtitleNarration(sb)
     const displayText = stripSubtitlePunctuationPreservingEmphasis(subtitleMarkedText)
     const useEmphasisAss = !isTitleShot && hasEmphasisMarkers(subtitleMarkedText)
@@ -748,10 +1023,10 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       subtitlePath = path.join(srtDir, subtitleFilename)
 
       const subtitleContent = isTitleShot
-        ? buildTitleAssContent(displayText, clipDuration)
+        ? buildTitleAssContent(displayText, clipDuration, transitionPads.startPadSec)
         : useEmphasisAss
-          ? buildNarrationEmphasisAssContent(displayText, clipDuration)
-          : buildNarrationPlainAssContent(displayText, clipDuration)
+          ? buildNarrationEmphasisAssContent(displayText, clipDuration, transitionPads.startPadSec)
+          : buildNarrationPlainAssContent(displayText, clipDuration, transitionPads.startPadSec)
       fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
 
       const subtitleRelative = `static/subtitles/${subtitleFilename}`
@@ -768,21 +1043,12 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
     await new Promise<void>(async (resolve, reject) => {
       const isTitleShot = isStoryboardTitleShot(sb)
       const filters: string[] = []
-      if (subtitlePath && supportsSubtitleFilter()) {
-        filters.push(buildSubtitleFilter(subtitlePath, !!isTitleShot))
-      } else if (subtitlePath) {
-        logTaskProgress('ComposeTask', 'subtitle-filter-unavailable', {
-          storyboardId,
-          subtitlePath,
-        })
-      }
-      appendWatermarkFilter(filters, watermarkText, { animated: watermarkAnimated })
 
       let cmd = ffmpeg()
       if (useBlackFrame) {
         cmd = cmd.input(`color=c=black:s=1280x720:r=25:d=${clipDuration}`).inputOptions(['-f', 'lavfi'])
-        filters.unshift('fps=25,format=yuv420p')
-        logTaskProgress('ComposeTask', 'black-frame-compose', { storyboardId, duration: clipDuration })
+        filters.push('fps=25,format=yuv420p')
+        logTaskProgress('ComposeTask', 'black-frame-compose', { storyboardId, duration: clipDuration, outputDuration })
       } else if (visual!.type === 'image') {
         const useTitleDynamic = !!isTitleShot
         const titleGroupInfo = useTitleDynamic
@@ -792,9 +1058,9 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
           ? undefined
           : getVisualGroupInfo(storyboardId, episodeStoryboards)
         if (useTitleDynamic) {
-          filters.unshift(buildTitleShotMotionFilter(clipDuration, titleGroupInfo!.shotIndexInGroup))
+          filters.push(buildTitleShotMotionFilter(clipDuration, titleGroupInfo!.shotIndexInGroup))
         } else {
-          filters.unshift(buildShotZoomMotionFilter(visualGroupInfo!, clipDuration))
+          filters.push(buildShotZoomMotionFilter(visualGroupInfo!, clipDuration))
         }
         cmd = cmd.input(visual!.path).inputOptions(['-loop', '1'])
         logTaskProgress('ComposeTask', 'image-slideshow-compose', {
@@ -808,7 +1074,23 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         })
       } else {
         cmd = cmd.input(visual!.path)
+        filters.push(`trim=duration=${fmtComposeFilterSec(clipDuration)},setpts=PTS-STARTPTS,fps=25,format=yuv420p`)
       }
+
+      if (subtitlePath && !supportsSubtitleFilter()) {
+        logTaskProgress('ComposeTask', 'subtitle-filter-unavailable', {
+          storyboardId,
+          subtitlePath,
+        })
+      }
+      appendComposeVideoPostFilters(
+        filters,
+        subtitlePath,
+        !!isTitleShot,
+        transitionPads,
+        watermarkText,
+        watermarkAnimated,
+      )
 
       if (audioPath) {
         cmd = cmd.input(audioPath)
@@ -817,59 +1099,36 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         cmd = cmd.input(bgmPath).inputOptions(['-stream_loop', '-1'])
       }
 
-      if (filters.length > 0) {
-        cmd = cmd.videoFilter(filters)
-      }
-
       const outputOptions = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p']
       const hasVoice = !!audioPath
       const hasBgm = !!bgmPath
-
-      if (useBlackFrame || visual?.type === 'image') {
-        outputOptions.push('-t', String(clipDuration), '-vsync', 'cfr', '-r', '25')
-        if (visual?.type === 'image') {
-          outputOptions.push('-g', '1', '-keyint_min', '1')
-        }
-      }
+      const outputDurationStr = fmtComposeFilterSec(outputDuration)
+      const videoChain = `[0:v]${filters.join(',')}[vout]`
+      const complexParts: string[] = [videoChain]
 
       if (hasVoice && hasBgm) {
         const voiceInput = 1
         const bgmInput = 2
-        outputOptions.push(
-          '-filter_complex',
-          `[${voiceInput}:a]volume=1[voice];[${bgmInput}:a]volume=${BGM_VOICE_MIX_VOLUME}[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]`,
-          '-map', '0:v',
-          '-map', '[aout]',
-          '-c:a', 'aac',
-          '-shortest',
-        )
-        if (useBlackFrame || visual?.type === 'image') {
-          outputOptions.push('-tune', 'stillimage')
-        }
+        complexParts.push(buildComposeTransitionAudioPadFilter(voiceInput, 'voice', transitionPads))
+        complexParts.push(`[${bgmInput}:a]volume=${BGM_VOICE_MIX_VOLUME},atrim=0:${outputDurationStr}[bgm]`)
+        complexParts.push('[voice][bgm]amix=inputs=2:duration=longest:dropout_transition=2:normalize=0[aout]')
+        outputOptions.push('-map', '[vout]', '-map', '[aout]', '-c:a', 'aac')
       } else if (hasVoice) {
-        const audioInput = 1
-        outputOptions.push('-map', '0:v', '-map', `${audioInput}:a`, '-c:a', 'aac', '-shortest')
-        if (useBlackFrame || visual?.type === 'image') {
-          outputOptions.push('-tune', 'stillimage')
-        }
+        complexParts.push(buildComposeTransitionAudioPadFilter(1, 'aout', transitionPads))
+        outputOptions.push('-map', '[vout]', '-map', '[aout]', '-c:a', 'aac')
       } else if (hasBgm) {
-        const bgmInput = 1
-        outputOptions.push(
-          '-filter_complex',
-          `[${bgmInput}:a]volume=${BGM_SOLO_VOLUME},atrim=0:${clipDuration}[aout]`,
-          '-map', '0:v',
-          '-map', '[aout]',
-          '-c:a', 'aac',
-        )
-        if (useBlackFrame || visual?.type === 'image') {
-          outputOptions.push('-tune', 'stillimage')
-        }
-      } else if (useBlackFrame || visual?.type === 'image') {
-        outputOptions.push('-an')
+        complexParts.push(`[1:a]volume=${BGM_SOLO_VOLUME},atrim=0:${outputDurationStr}[aout]`)
+        outputOptions.push('-map', '[vout]', '-map', '[aout]', '-c:a', 'aac')
       } else {
-        outputOptions.push('-an')
+        outputOptions.push('-map', '[vout]', '-an')
       }
 
+      outputOptions.push('-t', outputDurationStr, '-vsync', 'cfr', '-r', '25')
+      if (visual?.type === 'image') {
+        outputOptions.push('-g', '1', '-keyint_min', '1', '-tune', 'stillimage')
+      }
+
+      cmd.complexFilter(complexParts.join(';'))
       cmd.outputOptions(outputOptions)
         .output(outputPath)
         .on('end', () => resolve())

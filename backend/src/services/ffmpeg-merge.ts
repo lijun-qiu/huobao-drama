@@ -17,6 +17,7 @@ import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION, computePageFlipMe
 import { mixPageFlipSfxIntoMergedVideo } from './ffmpeg-page-flip-sfx.js'
 import { BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { isStoryboardTitleShot, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
+import { renderSameImageGroupSegment } from './ffmpeg-compose.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -437,9 +438,10 @@ async function mergeSegmentsSequential(
   }
 }
 
-/** 同配图组内硬切拼接已合成镜头，不重渲染 */
+/** 同配图组：已组合成片则直接用；旧数据则整组重渲染 */
 async function buildMergeSegments(
   groups: VisualGroup[],
+  storyboards: ComposedStoryboard[],
   run: ActiveMergeRun,
   onGroupProgress?: (done: number, total: number) => void,
 ): Promise<{ segments: MergeSegment[]; temps: string[] }> {
@@ -447,6 +449,7 @@ async function buildMergeSegments(
   fs.mkdirSync(tempDir, { recursive: true })
   const segments: MergeSegment[] = []
   const temps: string[] = []
+  const ordered = sortStoryboardsByOrder(storyboards)
 
   for (let i = 0; i < groups.length; i++) {
     if (run.cancelled) break
@@ -458,11 +461,31 @@ async function buildMergeSegments(
     if (group.clips.length === 1) {
       segments.push({ path: group.clips[0].path, duration: group.clips[0].duration, temp: false })
     } else {
-      const tempPath = path.join(tempDir, `${uuid()}.mp4`)
-      temps.push(tempPath)
-      await concatClipsToFile(group.clips, tempPath, run)
-      const duration = await getVideoDuration(tempPath)
-      segments.push({ path: tempPath, duration, temp: true })
+      const uniquePaths = [...new Set(group.clips.map(clip => clip.path))]
+      if (uniquePaths.length === 1) {
+        const duration = await getVideoDuration(uniquePaths[0])
+        segments.push({ path: uniquePaths[0], duration, temp: false })
+      } else {
+        const tempPath = path.join(tempDir, `${uuid()}.mp4`)
+        temps.push(tempPath)
+        const members = group.clips
+          .map(clip => ordered.find(sb => sb.id === clip.storyboardId))
+          .filter((sb): sb is ComposedStoryboard => !!sb)
+        const visual = members.length ? resolveStoryboardVisualSource(ordered, members[0].id) : null
+        if (visual?.type === 'image') {
+          await renderSameImageGroupSegment(
+            members,
+            toAbsPath(visual.path),
+            tempPath,
+            i,
+            i > 0 ? groups[i - 1].clips.length : 0,
+          )
+        } else {
+          await concatClipsToFile(group.clips, tempPath, run)
+        }
+        const duration = await getVideoDuration(tempPath)
+        segments.push({ path: tempPath, duration, temp: true })
+      }
     }
     onGroupProgress?.(i + 1, groups.length)
   }
@@ -596,17 +619,13 @@ async function mergeSegmentListToFile(
 
 async function buildLaneOutputFromGroups(
   groups: VisualGroup[],
+  storyboards: ComposedStoryboard[],
   outputPath: string,
   run: ActiveMergeRun,
 ): Promise<{ duration: number; temps: string[] }> {
   if (!groups.length) throw new Error('拼接分路为空')
 
-  if (groups.length === 1 && groups[0].clips.length > 1) {
-    await concatComposedVideos(groups[0].clips.map(clip => clip.path), outputPath, run)
-    return { duration: await getVideoDuration(outputPath), temps: [] }
-  }
-
-  const { segments, temps } = await buildMergeSegments(groups, run)
+  const { segments, temps } = await buildMergeSegments(groups, storyboards, run)
   if (run.cancelled) return { duration: 0, temps }
 
   if (segments.length === 1) {
@@ -656,17 +675,24 @@ async function mergeEpisodeBodyWithLanes(
 
   if (laneCount <= 1) {
     const temps: string[] = []
+    const built = await buildMergeSegments(groups, storyboards, run)
+    temps.push(...built.temps)
+    if (run.cancelled) return { temps, laneCount: 1, cacheFingerprint, bodyPageFlipTimes: [] }
+
     if (usePageFlip) {
-      const built = await buildMergeSegments(groups, run)
-      temps.push(...built.temps)
-      if (run.cancelled) return { temps, laneCount: 1, cacheFingerprint, bodyPageFlipTimes: [] }
       await mergeSegmentListToFile(built.segments, barePath, run, onProgress)
       const bodyPageFlipTimes = built.segments.length > 1
         ? computePageFlipTransitionTimes(built.segments.map(seg => seg.duration))
         : []
       return { temps, laneCount: 1, cacheFingerprint, bodyPageFlipTimes }
     }
-    await concatComposedVideos(absPaths, barePath, run, onProgress)
+
+    if (built.segments.length === 1) {
+      fs.copyFileSync(built.segments[0].path, barePath)
+      onProgress?.(built.segments[0].duration)
+    } else {
+      await concatComposedVideos(built.segments.map(seg => seg.path), barePath, run, onProgress)
+    }
     return { temps, laneCount: 1, cacheFingerprint, bodyPageFlipTimes: [] }
   }
 
@@ -715,7 +741,7 @@ async function mergeEpisodeBodyWithLanes(
       allTemps.push(buildPath)
 
       if (usePageFlip && lanePlan.groups?.length) {
-        const { duration, temps } = await buildLaneOutputFromGroups(lanePlan.groups, buildPath, run)
+        const { duration, temps } = await buildLaneOutputFromGroups(lanePlan.groups, storyboards, buildPath, run)
         allTemps.push(...temps)
         if (run.cancelled) return
         if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath)

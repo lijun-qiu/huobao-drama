@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
-import { composeStoryboard, getStoryboardVisualSource } from '../services/ffmpeg-compose.js'
+import { composeStoryboard, getStoryboardVisualSource, pickVisualGroupComposeLeaders } from '../services/ffmpeg-compose.js'
 import { sortStoryboardsByOrder } from '../services/narration-image.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { toSnakeCase } from '../utils/transform.js'
@@ -75,6 +75,8 @@ app.post('/episodes/:id/compose-all', async (c) => {
     return badRequest(c, onlyRemaining ? '没有待合成的镜头' : '没有可合成的镜头')
   }
 
+  const composeTargets = pickVisualGroupComposeLeaders(targets, storyboards)
+
   for (const sb of targets) {
     db.update(schema.storyboards)
       .set({
@@ -87,7 +89,7 @@ app.post('/episodes/:id/compose-all', async (c) => {
   }
 
   ;(async () => {
-    await mapWithConcurrency(targets, COMPOSE_CONCURRENCY, async (sb) => {
+    await mapWithConcurrency(composeTargets, COMPOSE_CONCURRENCY, async (sb) => {
       try {
         await composeStoryboard(sb.id)
       } catch (err: any) {
@@ -96,7 +98,8 @@ app.post('/episodes/:id/compose-all', async (c) => {
     })
     logTaskSuccess('ComposeAPI', 'batch-compose', {
       episodeId,
-      total: targets.length,
+      total: composeTargets.length,
+      storyboardCount: targets.length,
       onlyRemaining,
       concurrency: COMPOSE_CONCURRENCY,
     })
@@ -104,16 +107,18 @@ app.post('/episodes/:id/compose-all', async (c) => {
 
   logTaskStart('ComposeAPI', 'batch-compose', {
     episodeId,
-    total: targets.length,
+    total: composeTargets.length,
+    storyboardCount: targets.length,
     onlyRemaining,
     storyboardIds: storyboardIds.length ? storyboardIds : undefined,
     concurrency: COMPOSE_CONCURRENCY,
   })
   return success(c, {
     message: onlyRemaining
-      ? `Started composing ${targets.length} remaining storyboards`
-      : `Started composing ${targets.length} storyboards`,
-    total: targets.length,
+      ? `Started composing ${composeTargets.length} visual groups (${targets.length} storyboards)`
+      : `Started composing ${composeTargets.length} visual groups (${targets.length} storyboards)`,
+    total: composeTargets.length,
+    storyboard_count: targets.length,
     only_remaining: onlyRemaining,
     storyboard_ids: targets.map(sb => sb.id),
     concurrency: COMPOSE_CONCURRENCY,

@@ -14,6 +14,7 @@ interface GenerateImageParams {
   sceneId?: number
   characterId?: number
   prompt: string
+  negativePrompt?: string
   model?: string
   size?: string
   referenceImages?: string[]
@@ -41,6 +42,7 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     sceneId: params.sceneId,
     characterId: params.characterId,
     prompt: params.prompt,
+    negativePrompt: params.negativePrompt,
     model,
     provider,
     size: params.size || '1920x1080',
@@ -99,6 +101,7 @@ async function processImageGeneration(id: number, config: AIConfig) {
       id: record.id,
       model: record.model,
       prompt: record.prompt,
+      negativePrompt: record.negativePrompt,
       size: record.size,
       frameType: record.frameType,
       referenceImages: resolvedReferenceImages ? JSON.stringify(resolvedReferenceImages) : null,

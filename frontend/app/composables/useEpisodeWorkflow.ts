@@ -168,7 +168,7 @@ export function parseDramaMetadata(drama: any) {
 
 export function narrationStoryboardPrompt(style = 'comic') {
   const styleHint = isNarrationMinimalStyle(style)
-    ? `${NARRATION_IMAGE_STYLE_CORE}。通用素体尺寸：圆头约占身高三分之一、成人三头高简笔比例；禁止写年龄/服装；仅人生阶段可微调胖瘦/佝偻/小胡子，只写动作姿态。`
+    ? `${NARRATION_IMAGE_STYLE_CORE}。圆头直径全片锁定画面高12%；人生阶段按阶段表锁定总高与躯干宽高，只写动作姿态。`
     : `${artStylePrompt(style, 'agent')}。`
   return [
     '这是旁白解说视频，必须按「一句旁白 = 一个镜头」拆分，严禁把多句旁白合并到同一镜头。',

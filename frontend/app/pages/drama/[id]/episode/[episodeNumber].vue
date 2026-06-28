@@ -8439,11 +8439,7 @@ async function copyNarrationShotPromptsBatch() {
   }
   const firstNo = getNarrationShotDisplayNo(batch[0])
   const lastNo = getNarrationShotDisplayNo(batch[batch.length - 1])
-  const blocks = batch.map((sb) => {
-    const prompt = getNarrationImagePromptForCopy(sb)
-    const label = `#${getNarrationShotDisplayNo(sb)} ${extractNarrationSentence(sb) || '镜头'}`
-    return prompt ? `【${label}】\n${prompt}` : ''
-  }).filter(Boolean)
+  const blocks = batch.map((sb) => getNarrationImagePromptForCopy(sb)).filter(Boolean)
   if (!blocks.length) {
     toast.warning(`镜头 #${firstNo}-#${lastNo} 暂无描述词`)
     return

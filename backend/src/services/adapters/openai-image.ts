@@ -23,6 +23,11 @@ export function isGptImageModel(model?: string | null) {
   return String(model || '').toLowerCase().startsWith('gpt-image')
 }
 
+export function isSeedreamImageModel(model?: string | null) {
+  const m = String(model || '').toLowerCase()
+  return m.startsWith('doubao-seedream') || m.startsWith('seedream')
+}
+
 function resolveGptImageModel(model?: string | null) {
   const picked = String(model || GPT_IMAGE_DEFAULT_MODEL).trim()
   return picked || GPT_IMAGE_DEFAULT_MODEL
@@ -128,6 +133,7 @@ export class OpenAIImageAdapter implements ImageProviderAdapter {
   buildGenerateRequest(config: AIConfig, record: ImageGenerationRecord): ProviderRequest {
     const model = record.model || config.model || 'dall-e-3'
     const gptImage = isGptImageModel(model)
+    const seedream = isSeedreamImageModel(model)
     const qwen = isQwenImageModel(model)
     const refs = parseReferenceImages(record.referenceImages)
 
@@ -161,6 +167,13 @@ export class OpenAIImageAdapter implements ImageProviderAdapter {
       body.watermark = false
       body.prompt_extend = !String(model || '').toLowerCase().includes('edit')
         && !/character reference portrait|character concept art/i.test(record.prompt || '')
+    }
+
+    if (seedream) {
+      body.watermark = false
+      if (record.negativePrompt) {
+        body.negative_prompt = record.negativePrompt
+      }
     }
 
     if (refs.length) {

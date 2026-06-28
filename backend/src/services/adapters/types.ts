@@ -81,6 +81,7 @@ export interface ImageGenerationRecord {
   id: number
   model?: string | null
   prompt?: string | null
+  negativePrompt?: string | null
   size?: string | null
   frameType?: string | null
   referenceImages?: string | null

@@ -79,7 +79,7 @@ export function resolveSubtitleNarrationFromSentence(sentence: string): string |
 
 /** 旁白字幕强调：分镜 dialogue 中用 **词** 标记，合成时黄色并加大字号 */
 
-export const NARRATION_SUBTITLE_FONT_SIZE = 40
+export const NARRATION_SUBTITLE_FONT_SIZE = 65
 export const NARRATION_EMPHASIS_FONT_DELTA = 5
 export const NARRATION_EMPHASIS_FONT_SIZE = NARRATION_SUBTITLE_FONT_SIZE + NARRATION_EMPHASIS_FONT_DELTA
 export const NARRATION_SUBTITLE_PLAY_RES_X = 1280
@@ -95,7 +95,7 @@ const NARRATION_EMPHASIS_FONT_SCALE = Math.round(
 /** 底栏居中固定锚点，避免混字号/滤镜差异导致上下漂移 */
 const NARRATION_ASS_LAYOUT_TAG = `{\\an2\\pos(${NARRATION_SUBTITLE_POS_X},${NARRATION_SUBTITLE_POS_Y})}`
 const NARRATION_ASS_WHITE_TAG = `{\\fs${NARRATION_SUBTITLE_FONT_SIZE}\\fscx100\\fscy100\\c&HFFFFFF&}`
-/** 布局仍按 20 号，仅 fscx/fscy 放大黄字，避免 \\fs25 撑高整行 */
+/** 布局仍按正文字号，仅 fscx/fscy 放大黄字，避免 \\fs 更大撑高整行 */
 const NARRATION_ASS_EMPHASIS_TAG = `{\\fs${NARRATION_SUBTITLE_FONT_SIZE}\\fscx${NARRATION_EMPHASIS_FONT_SCALE}\\fscy${NARRATION_EMPHASIS_FONT_SCALE}\\c&H0000FFFF&}`
 
 const SUBTITLE_PUNCT_RE = /[，。！？；：、,.!?;:'"''""（）()\[\]《》【】「」『』…—·\-~～]/g
@@ -458,9 +458,10 @@ export function buildNarrationPlainAssDialogueLine(text: string, startSec: numbe
   return `Dialogue: 0,${start},${end},Default,,0,0,0,,${line}`
 }
 
-export function buildNarrationPlainAssContent(text: string, durationSec: number) {
-  const endAt = Math.max(durationSec, 0.05)
-  return `${buildNarrationEmphasisAssHeader()}${buildNarrationPlainAssDialogueLine(text, 0, endAt)}\n`
+export function buildNarrationPlainAssContent(text: string, durationSec: number, startOffsetSec = 0) {
+  const startAt = Math.max(0, startOffsetSec)
+  const endAt = startAt + Math.max(durationSec, 0.05)
+  return `${buildNarrationEmphasisAssHeader()}${buildNarrationPlainAssDialogueLine(text, startAt, endAt)}\n`
 }
 
 export function buildNarrationEmphasisAssDialogueLine(text: string, startSec: number, endSec: number) {
@@ -470,9 +471,10 @@ export function buildNarrationEmphasisAssDialogueLine(text: string, startSec: nu
   return `Dialogue: 0,${start},${end},Default,,0,0,0,,${line}`
 }
 
-export function buildNarrationEmphasisAssContent(text: string, durationSec: number) {
-  const endAt = Math.max(durationSec, 0.05)
-  return `${buildNarrationEmphasisAssHeader()}${buildNarrationEmphasisAssDialogueLine(text, 0, endAt)}\n`
+export function buildNarrationEmphasisAssContent(text: string, durationSec: number, startOffsetSec = 0) {
+  const startAt = Math.max(0, startOffsetSec)
+  const endAt = startAt + Math.max(durationSec, 0.05)
+  return `${buildNarrationEmphasisAssHeader()}${buildNarrationEmphasisAssDialogueLine(text, startAt, endAt)}\n`
 }
 
 /** 合并片头 Title 样式与旁白 Default 样式（同配图多句混排） */

@@ -4,7 +4,7 @@ import { db, schema } from '../db/index.js'
 import { success, created, now, badRequest } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
 import { resolveEpisodeImageModel, imageModelMaxReferenceImages, imageModelSupportsReferenceImages } from '../constants/image-models.js'
-import { compileNarrationImageGenerationPrompt, isNarrationMinimalStyle } from '../constants/art-styles.js'
+import { compileNarrationImageGenerationBundle, isNarrationMinimalStyle } from '../constants/art-styles.js'
 import {
   collectCharacterReferenceImages,
   enrichImagePromptWithCharacters,
@@ -62,8 +62,12 @@ app.post('/', async (c) => {
       dramaStyle = drama?.style ?? null
     }
 
+    let negativePrompt: string | undefined
+
     if (isNarrationMinimalStyle(dramaStyle)) {
-      prompt = compileNarrationImageGenerationPrompt(prompt)
+      const compiled = compileNarrationImageGenerationBundle(prompt)
+      prompt = compiled.prompt
+      negativePrompt = compiled.negativePrompt
     }
 
     const model = resolveEpisodeImageModel(episode, body.model)
@@ -82,6 +86,7 @@ app.post('/', async (c) => {
       sceneId: body.scene_id,
       characterId: body.character_id,
       prompt,
+      negativePrompt,
       model,
       size: body.size,
       referenceImages: Array.isArray(referenceImages) ? referenceImages as string[] : undefined,

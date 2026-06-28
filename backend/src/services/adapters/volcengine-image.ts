@@ -25,6 +25,10 @@ export class VolcEngineImageAdapter implements ImageProviderAdapter {
       prompt: record.prompt,
     }
 
+    if (record.negativePrompt) {
+      body.negative_prompt = record.negativePrompt
+    }
+
     // 尺寸参数
     if (record.size) {
       const [w, h] = record.size.split('x')
@@ -33,6 +37,8 @@ export class VolcEngineImageAdapter implements ImageProviderAdapter {
         body.height = parseInt(h)
       }
     }
+
+    body.watermark = false
 
     return {
       url: joinProviderUrl(config.baseUrl, '/api/v3', '/images/generations'),

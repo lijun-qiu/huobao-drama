@@ -53,19 +53,63 @@ export const NARRATION_MINIMAL_NO_CLOTHING_LLM_RULE = NARRATION_MINIMAL_CLOTHING
 /** 素体四肢：仅两手两脚 */
 export const NARRATION_MINIMAL_LIMBS_SPEC = '简笔四肢仅两手两脚，等粗黑线轮廓'
 
-/** 解说素体通用尺寸（全片统一简笔比例，仅人生阶段微调） */
+/** 全片锁定的圆头绝对尺寸（锚定 16:9 画幅竖向高度） */
+export const NARRATION_BODY_HEAD_DIAMETER_ANCHOR =
+  '圆头直径为全片固定设计尺寸：中景全身入镜时圆头占画面竖向高度12%；跨镜头须保持同一圆头绝对大小（近景可整体放大、禁止只放大头部）'
+
+/** 轮廓线粗相对圆头（与头径同比） */
+export const NARRATION_BODY_LINE_WEIGHT_ANCHOR = '黑轮廓线线粗约为圆头直径的1/10'
+
+/** 素体尺寸计量单位（1份 = 上述固定圆头直径） */
+export const NARRATION_BODY_MEASURE_UNIT = '以全片锁定的圆头直径为1份竖向计量（1份=画面高12%）'
+
+export type NarrationBodyStage = '小孩' | '少年' | '青年' | '中年' | '老年'
+
+/** 各阶段共用解剖基准（写入画风规格） */
+export const NARRATION_BODY_ANATOMY_BASE =
+  `${NARRATION_BODY_HEAD_DIAMETER_ANCHOR}，${NARRATION_BODY_LINE_WEIGHT_ANCHOR}，${NARRATION_BODY_MEASURE_UNIT}，${NARRATION_MINIMAL_LIMBS_SPEC}，全片共用同一计量标尺，禁止同画面随机放大缩小或胖瘦不一`
+
+/** 各人生阶段具象尺寸（1份=圆头直径=画面高12%） */
+export const NARRATION_BODY_STAGE_SPECS: Record<NarrationBodyStage, string> = {
+  小孩:
+    '小孩期：圆头1份=画面高12%，站立总高2.2份=画面高26%，躯干0.65份高×0.7份宽（幼童纤细），单肢各约0.35份，手脚极小，圆头无头发',
+  少年:
+    '少年期：圆头1份=画面高12%，站立总高2.7份=画面高32%，躯干0.85份高×0.85份宽（肩窄腰直偏瘦），单肢各约0.6份，圆头无头发',
+  青年:
+    '青年期：圆头1份=画面高12%，站立总高3.0份=画面高36%严格三头身，躯干1.0份高×1.0份宽（标准匀称），单肢各约0.75份，圆头无头发',
+  中年:
+    '中年期：圆头1份=画面高12%，站立总高3.0份=画面高36%，躯干1.0份高×1.15份宽（腰腹微鼓略胖不臃肿），四肢同青年，圆头无头发',
+  老年:
+    '老年期：圆头1份=画面高12%，站立总高2.8份=画面高34%微驼背，躯干0.9份高×0.9份宽（消瘦），单肢各约0.65份略细，圆头两侧各2-3条白发弧线',
+}
+
+/** 解说素体通用尺寸（画风规格维：标尺 + 阶段表索引） */
 export const NARRATION_MINIMAL_BODY_SIZE_SPEC =
-  `圆头约占身高三分之一，简笔躯干与圆头相当，${NARRATION_MINIMAL_LIMBS_SPEC}，青年标准站姿总高约三个头高`
+  `${NARRATION_BODY_ANATOMY_BASE}；具体总高与胖瘦按【画面主体】人生阶段执行对应规格（青年期三头身为基准）`
 
 export const NARRATION_BODY_CONSISTENCY_CORE =
   `全片统一简笔素体比例，${NARRATION_MINIMAL_BODY_SIZE_SPEC}`
 
-export const NARRATION_BODY_STAGE_SIZE_HINTS =
-  '小孩比青年小一号约2.2头高；青年严格三头高圆头无头发；中年三头高躯干略宽微胖仍无头发；老年略佝偻约2.8头高，仅老年期圆头两侧可有若干条简化白发弧线'
+export const NARRATION_BODY_STAGE_SIZE_HINTS = Object.values(NARRATION_BODY_STAGE_SPECS).join('；')
+
+export function formatNarrationBodyStageSpec(stage?: string | null): string {
+  const key = normalizeNarrationBodyStage(stage)
+  return NARRATION_BODY_STAGE_SPECS[key]
+}
+
+export function normalizeNarrationBodyStage(stage?: string | null): NarrationBodyStage {
+  const t = String(stage || '').trim().replace(/期$/, '')
+  if (t === '小孩' || /童年|幼年|孩童|儿时/.test(t)) return '小孩'
+  if (t === '少年') return '少年'
+  if (t === '青年' || /年轻|小伙/.test(t)) return '青年'
+  if (t === '中年') return '中年'
+  if (t === '老年' || /晚年|垂暮|苍老|年迈/.test(t)) return '老年'
+  return '青年'
+}
 
 /** LLM：人生阶段发型与体型（多主人公同框须统一遵守） */
 export const NARRATION_STAGE_HAIR_LLM_RULE =
-  '【阶段发型】青年期与中年期主人公均无头发（圆头无发丝）；中年期在青年三头身基础上躯干略宽略胖；仅老年期可有简化白发弧线；多主人公同框须同阶段、同发型规则，禁止一人有发一人无发或青年配中年'
+  '【阶段发型】小孩/少年/青年/中年期主人公均无头发（圆头无发丝）；中年期在青年三头身基础上仅加宽躯干至1.15份；仅老年期圆头两侧可有2-3条简化白发弧线；多主人公同框须同阶段、同规格、同发型规则，禁止一人有发一人无发或青年配中年'
 
 /** LLM：同框多主人公（夫妻/父子/母子等）须人生阶段与画风统一 */
 export const NARRATION_DUAL_PROTAGONIST_LLM_RULE =
@@ -75,9 +119,21 @@ export const NARRATION_DUAL_PROTAGONIST_LLM_RULE =
 export const NARRATION_CROWD_EYE_LLM_RULE =
   '【配角眼型】路人/顾客/群众配角正面或侧面出镜时须写「两个小圆点眼（小眼睛）」，简笔眉嘴从简；仅背面或远背影时可不写眼；主人公仍用正常卡通脸（圆眼或弯眼带高光），禁止配角也用大圆眼抢戏'
 
-/** 解说配图万能模板：固定前缀 */
-export const NARRATION_UNIVERSAL_SCENE_PREFIX =
+/** 解说配图万能模板：画风规格维固定正文（原无前缀前缀块，不含【】） */
+export const NARRATION_UNIVERSAL_STYLE_SPEC_BODY =
   `16:9 横屏，2D 扁平插画，全员${NARRATION_CROWD_BODY}简笔身形纯色平涂无复杂光影（${NARRATION_CROWD_FACE}），黑色轮廓线，${NARRATION_BODY_CONSISTENCY_CORE}`
+
+/** 画风规格维标签（七维之首） */
+export const NARRATION_STYLE_SPEC_DIM_LABEL = '画风规格'
+
+/** 组装【画风规格】 bracket */
+export function formatNarrationStyleSpecBracket(body?: string | null): string {
+  const content = String(body || NARRATION_UNIVERSAL_STYLE_SPEC_BODY).trim()
+  return `【${NARRATION_STYLE_SPEC_DIM_LABEL}：${content}】`
+}
+
+/** @deprecated 使用 NARRATION_UNIVERSAL_STYLE_SPEC_BODY */
+export const NARRATION_UNIVERSAL_SCENE_PREFIX = NARRATION_UNIVERSAL_STYLE_SPEC_BODY
 
 /** 解说配图万能模板：固定后缀 */
 export const NARRATION_UNIVERSAL_SCENE_SUFFIX =
@@ -220,10 +276,10 @@ export const ART_STYLES = [
 
 const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
   [NARRATION_MINIMAL_STYLE]: {
-    scene: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    diptych: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    title: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    portrait: `${NARRATION_UNIVERSAL_SCENE_PREFIX}，【场景：浅灰纯色背景，单人全身${NARRATION_PROTAGONIST_BODY}定妆参考图】，【剧情：${NARRATION_PROTAGONIST_EYES}，人生阶段与动作姿态】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    scene: `${formatNarrationStyleSpecBracket()}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    diptych: `${formatNarrationStyleSpecBracket()}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    title: `${formatNarrationStyleSpecBracket()}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    portrait: `${formatNarrationStyleSpecBracket()}，【场景：浅灰纯色背景，单人全身${NARRATION_PROTAGONIST_BODY}定妆参考图】，【剧情：${NARRATION_PROTAGONIST_EYES}，人生阶段与动作姿态】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     agent: NARRATION_IMAGE_STYLE_CORE,
   },
   'short-drama': {
@@ -634,9 +690,9 @@ export function normalizeMinimalCrowdInPlot(plot?: string | null): string {
 
   text = text
     .replace(/黑色素体小人/g, body)
-    .replace(/(小孩|青年|中年|老年)期?白色素体小人主人公/g, `$1期${PROT}主人公`)
+    .replace(/(小孩|少年|青年|中年|老年)期?白色素体小人主人公/g, `$1期${PROT}主人公`)
     .replace(/白色素体小人主人公/g, `${PROT}主人公`)
-    .replace(/(小孩|青年|中年|老年)期?素体小人主人公/g, `$1期${PROT}主人公`)
+    .replace(/(小孩|少年|青年|中年|老年)期?素体小人主人公/g, `$1期${PROT}主人公`)
 
   const crowdReplacements: Array<[RegExp, string]> = [
     [/几位白色素体小人/g, `几位${body}`],
@@ -1412,7 +1468,7 @@ export function wrapNarrationMinimalDiptychPrompt(left: string, right: string): 
     rightPart ? ensureNarrationBracket('右格', rightPart) : '',
   ].filter(Boolean).join('，')
   return tidyScenePrompt([
-    NARRATION_UNIVERSAL_SCENE_PREFIX,
+    formatNarrationStyleSpecBracket(),
     body,
     NARRATION_UNIVERSAL_SCENE_SUFFIX,
   ].join('，'))
@@ -1438,7 +1494,7 @@ export function applyNarrationStyleToPrompt(
 function inferMinimalSubjectFromPlot(plot: string): string {
   const text = String(plot || '').trim()
   if (!text) return `${NARRATION_PROTAGONIST_BODY}主人公`
-  const stageMatch = text.match(/(小孩|青年|中年|老年)期?(?:黑色素体|白色素体)?小人/)
+  const stageMatch = text.match(/(小孩|少年|青年|中年|老年)期?(?:黑色素体|白色素体)?小人/)
   if (stageMatch) return `${stageMatch[0]}与同框${NARRATION_CROWD_BODY}`
   if (/白色素体小人主人公|白色素体小人|素体小人/.test(text)) {
     const m = text.match(/(?:黑色素体|白色素体|素体)小人[^，,。]{0,24}/)
@@ -1457,6 +1513,7 @@ export function assembleNarrationUniversalScenePrompt(
     subject?: string
     camera?: string
     texture?: string
+    styleSpec?: string
   },
 ): string {
   const scenePart = sanitizeSceneImagePrompt(scene)
@@ -1485,7 +1542,7 @@ export function assembleNarrationUniversalScenePrompt(
   }
   if (!body) return ''
   return tidyScenePrompt([
-    NARRATION_UNIVERSAL_SCENE_PREFIX,
+    formatNarrationStyleSpecBracket(options?.styleSpec),
     body,
     NARRATION_UNIVERSAL_SCENE_SUFFIX,
   ].join('，'))
@@ -1655,13 +1712,15 @@ export function sanitizeSceneImagePrompt(prompt?: string | null): string {
 export function buildMinimalPortraitPostureHint(variantLabel?: string | null): string {
   const face = NARRATION_PROTAGONIST_FACE
   const body = NARRATION_PROTAGONIST_BODY
-  const size = NARRATION_MINIMAL_BODY_SIZE_SPEC
   const label = String(variantLabel || '').trim()
-  if (/童年|幼年|孩童|儿时|幼|小孩/.test(label)) return `${body}主人公，${face}，开心微笑，简化童装轮廓，比青年小一号约2.2头高，站立，简单活泼姿态`
-  if (/青年|少年|年轻/.test(label)) return `${body}主人公，${face}，自信微笑，简化年代服装轮廓，${size}，三头高标准身形，站立或行走，可持简单道具轮廓`
-  if (/中年/.test(label)) return `${body}主人公，${face}，沉稳表情，简化中年便装轮廓，三头高躯干略宽微胖，坐或站放松姿态，可手持茶杯轮廓`
-  if (/老年|晚年|垂暮|苍老|年迈/.test(label)) return `${body}主人公，${face}，慈祥微笑，简化老年便装轮廓，总高约2.8头高略佝偻，圆头两侧各几条简化白发弧线，坐于凳上，可手持圆扇轮廓`
-  return `${body}主人公，${face}，中性表情，简化服装轮廓，${size}，中性站立姿态`
+  const stage = normalizeNarrationBodyStage(label)
+  const spec = formatNarrationBodyStageSpec(stage)
+  if (stage === '小孩') return `${body}主人公，${face}，开心微笑，简化童装轮廓，${spec}，站立，简单活泼姿态`
+  if (stage === '少年') return `${body}主人公，${face}，青涩微笑，简化校服或休闲装轮廓，${spec}，站立或行走，可背书包轮廓`
+  if (stage === '青年') return `${body}主人公，${face}，自信微笑，简化年代服装轮廓，${spec}，站立或行走，可持简单道具轮廓`
+  if (stage === '中年') return `${body}主人公，${face}，沉稳表情，简化中年便装轮廓，${spec}，坐或站放松姿态，可手持茶杯轮廓`
+  if (stage === '老年') return `${body}主人公，${face}，慈祥微笑，简化老年便装轮廓，${spec}，坐于凳上，可手持圆扇轮廓`
+  return `${body}主人公，${face}，中性表情，简化服装轮廓，${spec}，中性站立姿态`
 }
 
 export function buildNarrationPortraitPromptContent(scene: string, plot: string): string {
@@ -1854,7 +1913,7 @@ export const NARRATION_USE_RAW_LLM_PROMPTS = true
 export function isStoredNarrationImagePromptComplete(raw?: string | null): boolean {
   const text = String(raw || '').trim()
   if (!text) return false
-  if (/【(年代场景|画面主体|核心细节动作)[：:]/.test(text)) return true
+  if (/【(画风规格|年代场景|画面主体|核心细节动作)[：:]/.test(text)) return true
   return /【左格[：:]/.test(text) && /【(画面主体|年代场景)[：:]/.test(text)
 }
 
@@ -1921,14 +1980,15 @@ export function coerceMinimalLLMImagePrompt(prompt?: string | null): string {
       .replace(/白色黑色素体小人/g, NARRATION_CROWD_BODY)
       .replace(/黑色黑色素体小人/g, `${NARRATION_CROWD_BODY}主人公`)
 
-    const bracketStart = text.search(/【(?:画面主体|年代场景|片头|左格|主题氛围)/)
+    const bracketStart = text.search(/【(?:画风规格|画面主体|年代场景|片头|左格|主题氛围)/)
     if (bracketStart > 0) {
-      text = `${NARRATION_UNIVERSAL_SCENE_PREFIX}，${text.slice(bracketStart)}`
+      const legacyPrefix = text.slice(0, bracketStart).replace(/[，,]+$/g, '').trim()
+      text = `${formatNarrationStyleSpecBracket(/16:9\s*横屏/.test(legacyPrefix) ? legacyPrefix : undefined)}，${text.slice(bracketStart)}`
     } else if (/^16:9\s*横屏/.test(text)) {
       const sceneSplit = text.match(/总高约三个头高[，,]\s*/)
       if (sceneSplit?.index != null) {
         const bodyStart = sceneSplit.index + sceneSplit[0].length
-        text = `${NARRATION_UNIVERSAL_SCENE_PREFIX}，${text.slice(bodyStart)}`
+        text = `${formatNarrationStyleSpecBracket()}，${text.slice(bodyStart)}`
       }
     }
 
