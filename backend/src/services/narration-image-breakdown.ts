@@ -380,7 +380,7 @@ function saveDetectResults(
         imagePrompt: null,
         referenceImages: buildNarrationImageMeta(isParagraphAnchor ? 'new' : 'inherit', {
           ...shotMeta,
-          narration_tts_mode: existing.narration_tts_mode || 'new',
+          narration_tts_mode: isParagraphAnchor ? 'new' : 'inherit',
           script_paragraph_index: existing.script_paragraph_index ?? sentenceItems[index]?.paragraphIndex,
           scene_content: paraInfo?.content,
           narration_lines: para?.sentences,
@@ -419,7 +419,7 @@ function savePromptAnchorsOnly(
         imagePrompt: paraInfo.prompt,
         referenceImages: buildNarrationImageMeta('new', {
           ...shotMeta,
-          narration_tts_mode: existing.narration_tts_mode || 'new',
+          narration_tts_mode: isParagraphAnchor ? 'new' : 'inherit',
           script_paragraph_index: existing.script_paragraph_index ?? ctx.sentenceItems[startIndex]?.paragraphIndex,
           scene_content: paraInfo.content ?? existing.scene_content,
           narration_lines: para?.sentences ?? existing.narration_lines,
@@ -466,7 +466,7 @@ function savePromptResults(
         imagePrompt: isParagraphAnchor ? (paraInfo?.prompt || null) : null,
         referenceImages: buildNarrationImageMeta(isParagraphAnchor ? 'new' : 'inherit', {
           ...shotMeta,
-          narration_tts_mode: existing.narration_tts_mode || 'new',
+          narration_tts_mode: isParagraphAnchor ? 'new' : 'inherit',
           script_paragraph_index: existing.script_paragraph_index ?? ctx.sentenceItems[index]?.paragraphIndex,
           scene_content: paraInfo?.content ?? existing.scene_content,
           narration_lines: para?.sentences ?? existing.narration_lines,

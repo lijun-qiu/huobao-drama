@@ -674,7 +674,7 @@
             <div class="narration-breakdown-steps">
               <strong>下一步：</strong>
               ① 制作阶段完成「定妆参考」
-              → ② 生成配音 → ③ <strong>检测配图 → 生成文案 → 优化文案</strong> → ④ 生成配图 → ⑤ 镜头合成 → ⑥ 导出
+              → ② 检测配图 → 生成文案 → 优化文案 → ③ <strong>生成配图</strong> → ④ 生成配音 → ⑤ 镜头合成 → ⑥ 导出
             </div>
           </div>
 
@@ -984,7 +984,7 @@
             <div class="empty-desc">{{ isNarrationMode ? '按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示；**强调词** 在剧本生成时标注，分镜保留' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
             <div v-if="!isNarrationMode" class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
             <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
-              <strong>旁白分镜：</strong>按句末标点拆分（便于<strong>逐句配音</strong>）；配图与镜头合成按<strong>场景段</strong>（检测配图后同段多句共用一图、合成一条视频）。<code>**强调词**</code> 在剧本生成时用 ** 包裹。
+              <strong>旁白分镜：</strong>按句拆分便于编辑；<strong>配音与镜头合成</strong>按场景段（同配图段合并为一段配音、一条成片）。<code>**强调词**</code> 在剧本生成时用 ** 包裹。
             </div>
             <div v-if="isNarrationMode" style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
               <span class="tag">旁白 TTS 分镜</span>
@@ -1305,7 +1305,7 @@
           <!-- Sub: Dubbing -->
           <div v-else-if="prodTab === 'dubbing'" class="prod-content">
             <div v-if="isNarrationMode" class="narration-hint">
-              <strong>配音策略：</strong>先<strong>上传 MP3</strong>（可多段），确认无误后点<strong>按文案裁剪</strong>。Whisper 字幕仅作预览参考（常有错字）；<strong>裁剪按分镜旁白字数在音频总时长上比例切分</strong>，相同音频再次裁剪将复用已生成的 SRT。
+              <strong>配音策略：</strong>与镜头合成一致，<strong>同配图段合并为一段配音</strong>（多句旁白一次 TTS）；片头镜仍逐镜生成。可先上传 MP3 再「按文案裁剪」；裁剪按<strong>分镜旁白字数比例</strong>切分时长。
             </div>
             <div v-else class="narration-hint">
               <strong>配音策略：</strong>先上传 MP3，再点「按文案裁剪」分配到各镜台词；或逐镜上传 / TTS 生成。
@@ -1592,7 +1592,7 @@
               </div>
             </div>
             <div class="prod-section-bar">
-              <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条旁白</span>
+              <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 个配音段</span>
               <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已就绪</span>
               <span v-if="localTtsEnabled" class="tag">{{ localTtsEngineLabel }} · {{ localTtsSpeedLabel }}{{ localVoiceboxModelSizeLabel ? ` · ${localVoiceboxModelSizeLabel}` : '' }}{{ localVoiceboxInstructLabel ? ` · ${localVoiceboxInstructLabel}` : '' }}</span>
               <span v-else class="tag">{{ lockedAudioConfigLabel }}</span>
@@ -1633,21 +1633,26 @@
             </div>
 
             <div v-else class="dub-grid">
-                <div v-for="(sb, i) in sbs.filter(hasDialogue)" :key="sb.id" class="card dub-card">
+                <div v-for="(sb, i) in narrationTtsUnitList" :key="sb.id" class="card dub-card">
                   <div class="dub-head">
                     <div class="dub-copy">
                     <div class="dub-title">
-                      <span class="frame-num">#{{ String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2, '0') }}</span>
-                      <span class="frame-badge">{{ getDialogueSpeaker(sb) }}</span>
+                      <span class="frame-num">{{ isNarrationTitleShot(sb) ? `#${getNarrationShotDisplayNo(sb)}` : getComposeUnitShotRangeLabel(sb, sbs) }}</span>
+                      <span class="frame-badge">{{ isNarrationTitleShot(sb) ? '片头' : `配音段 ${i + 1}` }}</span>
                     </div>
-                    <div class="dub-desc">{{ getDialogueText(sb) || '未填写文本' }}</div>
+                    <ul v-if="!isNarrationTitleShot(sb) && getComposeUnitSubtitleLines(sb, sbs).length > 1" class="compose-subtitle-lines dub-unit-lines">
+                      <li v-for="line in getComposeUnitSubtitleLines(sb, sbs)" :key="line.index">
+                        <span class="compose-subtitle-time">#{{ line.shotNo }}</span>
+                        <span class="compose-subtitle-text">{{ line.displayText }}</span>
+                      </li>
+                    </ul>
+                    <div v-else class="dub-desc">{{ getComposeUnitMergedTtsText(sb, sbs) || getDialogueText(sb) || '未填写文本' }}</div>
                     </div>
-                    <span class="tag" :class="hasEffectiveTTS(sb) ? 'tag-success' : ''">{{ narrationTtsStatusLabel(sb) }}</span>
+                    <span class="tag" :class="narrationTtsUnitReady(sbs, sb) ? 'tag-success' : ''">{{ narrationTtsUnitStatusLabel(sb) }}</span>
                   </div>
                 <div class="dub-meta">
-                  <span class="dim">{{ sb.shot_type || sb.shotType || '未设景别' }}</span>
-                  <span class="dim">{{ sb.duration || 10 }}s</span>
-                  <span class="dim">{{ sb.location || '未设地点' }}</span>
+                  <span class="dim">{{ getComposeUnitSubtitleLines(sb, sbs).length || 1 }} 句</span>
+                  <span class="dim">约 {{ formatComposeUnitDuration(sb, sbs) }}</span>
                 </div>
                 <div class="dub-foot">
                   <audio v-if="getEffectiveTTSUrl(sb)" :src="'/' + getEffectiveTTSUrl(sb)" controls preload="none" class="dub-audio" />
@@ -3577,6 +3582,10 @@ import {
   getComposeUnitLeaders,
   getParagraphComposeMembers,
   getComposeUnitSubtitleLines,
+  getComposeUnitMergedTtsText,
+  listNarrationTtsUnits,
+  isNarrationTtsUnitLeader,
+  narrationTtsUnitReady,
   formatComposeTimecode,
   formatComposeUnitDuration,
   getComposeUnitShotRangeLabel,
@@ -4191,7 +4200,7 @@ async function generateCustomTts() {
   }
 }
 
-function ttsGenerateOptions(force = false) {
+function ttsGenerateOptions(force = false, sb = null) {
   const opts = {}
   if (force) opts.force = true
   if (isNarrationMode.value && localTtsEnabled.value !== false) {
@@ -4208,6 +4217,10 @@ function ttsGenerateOptions(force = false) {
     // drama mode: never send local_tts
   } else {
     opts.local_tts = false
+  }
+  if (isNarrationMode.value && sb && isNarrationTtsUnitLeader(sb, sbs.value) && !isNarrationTitleShot(sb)) {
+    opts.unit_tts = true
+    opts.tts_text = getComposeUnitMergedTtsText(sb, sbs.value)
   }
   return opts
 }
@@ -4908,7 +4921,7 @@ async function saveShotEditor(remake = false) {
         shot.composed_video_url = null
         shot.composedVideoUrl = null
       }
-      await storyboardAPI.generateTTS(shot.id, ttsGenerateOptions(true))
+      await storyboardAPI.generateTTS(shot.id, ttsGenerateOptions(true, shot))
       delete failedComposeMessages.value[shot.id]
       if (!isPendingCompose(shot.id)) pendingComposeIds.value.push(shot.id)
       await composeAPI.shot(shot.id)
@@ -5705,9 +5718,16 @@ async function doGridSplit() {
 
 const charImgCount = computed(() => visualChars.value.filter(c => c.image_url || c.imageUrl).length)
 const sceneImgCount = computed(() => scenes.value.filter(s => s.image_url || s.imageUrl).length)
-const ttsEligibleCount = computed(() => sbs.value.filter(s => hasDialogue(s)).length)
+const ttsEligibleCount = computed(() =>
+  isNarrationMode.value ? listNarrationTtsUnits(sbs.value).length : sbs.value.filter(s => hasDialogue(s)).length,
+)
+const narrationTtsUnitList = computed(() =>
+  isNarrationMode.value ? listNarrationTtsUnits(sbs.value) : sbs.value.filter(s => hasDialogue(s)),
+)
 const ttsGeneratedCount = computed(() => {
-  if (isNarrationMode.value) return sbs.value.filter(s => hasDialogue(s) && hasNarrationShotOwnTts(s)).length
+  if (isNarrationMode.value) {
+    return narrationTtsUnitList.value.filter(sb => narrationTtsUnitReady(sbs.value, sb)).length
+  }
   return sbs.value.filter(s => hasDialogue(s) && hasTTS(s)).length
 })
 const narrationTtsReady = computed(() => narrationTtsAllReady(sbs.value))
@@ -6145,9 +6165,9 @@ const prodTabDefs = computed(() => {
     return [
       { id: 'voice', label: '旁白音色', icon: Mic2, badge: narratorReady.value ? '✓' : '' },
       { id: 'chars', label: '定妆参考', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
+      { id: 'shots', label: '生成配图', icon: ImageIcon, badge: narrationNeedImageCount.value ? `${shotImgCount.value}/${narrationNeedImageCount.value}` : '' },
       { id: 'dubbing', label: '生成配音', icon: Mic2, badge: ttsEligibleCount.value ? `${ttsGeneratedCount.value}/${ttsEligibleCount.value}` : '' },
       { id: 'bgm', label: 'BGM 配乐', icon: Music, badge: sbs.value.length ? `${bgmAppliedCount.value}/${sbs.value.length}` : '' },
-      { id: 'shots', label: '生成配图', icon: ImageIcon, badge: narrationNeedImageCount.value ? `${shotImgCount.value}/${narrationNeedImageCount.value}` : '' },
       { id: 'compose', label: '镜头合成', icon: Layers, badge: composableCount.value ? `${composedCount.value}/${composableCount.value}` : '' },
     ]
   }
@@ -6333,9 +6353,9 @@ const activeSubSteps = computed(() => {
       return [
         { key: 'prod:voice', label: '旁白音色', done: narratorReady.value },
         { key: 'prod:chars', label: '定妆参考', done: !visualCharTotal.value || charImgCount.value === visualCharTotal.value },
+        { key: 'prod:shots', label: '生成配图', done: !!sbs.value.length && narrationImageReady.value },
         { key: 'prod:dubbing', label: '生成配音', done: isNarrationMode.value ? narrationTtsReady.value : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value) },
         { key: 'prod:bgm', label: 'BGM 配乐', done: bgmAppliedCount.value > 0 },
-        { key: 'prod:shots', label: '生成配图', done: !!sbs.value.length && narrationImageReady.value },
         { key: 'prod:compose', label: '镜头合成', done: composableCount.value > 0 && composedCount.value === composableCount.value },
       ]
     }
@@ -7667,9 +7687,11 @@ function resolveTtsBatchConcurrency() {
 }
 
 function getTtsBatchTargets(force = false) {
-  return sbs.value
-    .filter(sb => hasDialogue(sb))
-    .filter(sb => force || (isNarrationMode.value ? !hasNarrationShotOwnTts(sb) : !hasTTS(sb)))
+  const list = isNarrationMode.value
+    ? narrationTtsUnitList.value
+    : sbs.value.filter(sb => hasDialogue(sb))
+  return list
+    .filter(sb => force || (isNarrationMode.value ? !narrationTtsUnitReady(sbs.value, sb) : !hasTTS(sb)))
     .sort((a, b) => (a.storyboard_number || a.storyboardNumber || 0) - (b.storyboard_number || b.storyboardNumber || 0))
 }
 
@@ -8743,8 +8765,10 @@ function getTTSUrl(sb) { return sb?.tts_audio_url || sb?.ttsAudioUrl || '' }
 function applyTtsResultToStoryboard(storyboardId, result) {
   const path = result?.tts_audio_url || result?.ttsAudioUrl
   if (!path) return
+  const rawIds = result?.unit_member_ids ?? result?.unitMemberIds
+  const memberIds = Array.isArray(rawIds) && rawIds.length ? rawIds : [storyboardId]
   sbs.value = sbs.value.map(sb => {
-    if (sb.id !== storyboardId) return sb
+    if (!memberIds.includes(sb.id)) return sb
     return { ...sb, tts_audio_url: path, ttsAudioUrl: path }
   })
 }
@@ -8756,6 +8780,13 @@ function hasEffectiveTTS(sb) {
 function getEffectiveTTSUrl(sb) {
   if (!isNarrationMode.value) return getTTSUrl(sb)
   return resolveNarrationEffectiveTts(sbs.value, sb).path || ''
+}
+function narrationTtsUnitStatusLabel(sb) {
+  if (!isNarrationMode.value) return hasTTS(sb) ? '已生成' : '待生成'
+  if (narrationTtsUnitReady(sbs.value, sb)) return '已就绪'
+  const members = isNarrationTitleShot(sb) ? [sb] : getParagraphComposeMembers(sb, sbs.value)
+  if (members.length > 1) return '待生成（整段）'
+  return '待生成'
 }
 function narrationTtsStatusLabel(sb) {
   if (!isNarrationMode.value) return hasTTS(sb) ? '已生成' : '待生成'
@@ -8770,11 +8801,14 @@ function getDialogueSpeaker(sb) {
 }
 async function genShotTTS(sb, force = false) {
   try {
-    const res = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force))
+    const res = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force, sb))
     applyTtsResultToStoryboard(sb.id, res)
     const provider = res?.provider || (localTtsEnabled.value ? localTtsEngine.value : 'api')
     const mode = provider === 'edge' ? '（本地 Edge）' : provider === 'voicebox' ? '（Voicebox）' : '（付费 API）'
-    toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成${mode}`)
+    const label = isNarrationMode.value && !isNarrationTitleShot(sb)
+      ? getComposeUnitShotRangeLabel(sb, sbs.value)
+      : `#${sb.storyboard_number || sb.storyboardNumber || sb.id}`
+    toast.success(`${label} 配音已生成${mode}`)
     await refreshStoryboardsOnly()
   } catch (e) { toast.error(e.message) }
 }
@@ -8784,7 +8818,7 @@ async function batchShotTTS() {
     toast.info(ttsEligibleCount.value ? '所有镜头配音已就绪' : '当前没有可生成的对白或旁白')
     return
   }
-  await runBatchShotTTS(`配音生成中（剩余 ${pending.length} 条${localTtsEnabled.value ? ' · 并发' : ''}）…`, false)
+  await runBatchShotTTS(`配音生成中（剩余 ${pending.length} 段${localTtsEnabled.value ? ' · 并发' : ''}）…`, false)
 }
 
 async function batchShotTTSAll() {
@@ -8794,7 +8828,7 @@ async function batchShotTTSAll() {
     return
   }
   await runBatchShotTTS(
-    `正在重新生成全部 ${targets.length} 条配音${localTtsEnabled.value ? ' · 并发' : ''}…`,
+    `正在重新生成全部 ${targets.length} 段配音${localTtsEnabled.value ? ' · 并发' : ''}…`,
     true,
   )
 }
@@ -8816,7 +8850,7 @@ async function runBatchShotTTS(batchMessage, force) {
         pending,
         concurrency,
         async (sb) => {
-          const result = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force))
+          const result = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force, sb))
           applyTtsResultToStoryboard(sb.id, result)
           roundSuccess++
           totalSuccess++
@@ -11681,6 +11715,9 @@ onMounted(async () => {
   min-width: 0;
   color: var(--text-2);
   word-break: break-word;
+}
+.dub-unit-lines {
+  margin-top: 6px;
 }
 .prod-dots { display: flex; align-items: center; gap: 4px; margin-top: 5px; color: var(--text-3); }
 .prod-error {

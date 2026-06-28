@@ -496,6 +496,36 @@ export function getComposeUnitShotRangeLabel(sb: any, storyboards: any[]): strin
   return `#${getNarrationShotDisplayNo(members[0])}-#${getNarrationShotDisplayNo(members[members.length - 1])}`
 }
 
+export function getComposeUnitMergedTtsText(sb: any, storyboards: any[]): string {
+  const lines = getComposeUnitSubtitleLines(sb, storyboards)
+  if (!lines.length) return resolveStoryboardSubtitleNarration(sb).replace(/\*\*/g, '').trim()
+  return lines.map(line => line.displayText).join('')
+}
+
+/** 配音列表：片头逐镜 + 正文按合成单元（一段一配音） */
+export function listNarrationTtsUnits(storyboards: any[]) {
+  const ordered = sortStoryboards(storyboards)
+  const leaderIds = new Set(getComposeUnitLeaders(storyboards).map(item => item.id))
+  return ordered.filter(sb => {
+    const dialogue = String(sb?.dialogue || '').trim()
+    if (!dialogue) return false
+    if (isNarrationTitleShot(sb)) return true
+    return leaderIds.has(sb.id)
+  })
+}
+
+export function isNarrationTtsUnitLeader(sb: any, storyboards: any[]) {
+  if (isNarrationTitleShot(sb)) return true
+  return getComposeUnitLeaders(storyboards).some(leader => leader.id === sb.id)
+}
+
+export function narrationTtsUnitReady(storyboards: any[], sb: any) {
+  const members = isNarrationTitleShot(sb)
+    ? [sb]
+    : getParagraphComposeMembers(sb, storyboards)
+  return members.every(member => hasEffectiveNarrationTts(storyboards, member))
+}
+
 /** 镜头合成/导出：每个配图单元取代表镜（不含片头） */
 export function getComposeUnitLeaders(storyboards: any[]) {
   return buildComposeUnitGroups(storyboards)
@@ -1078,15 +1108,14 @@ export function hasEffectiveNarrationTts(storyboards: any[], sb: any) {
 }
 
 export function narrationShotTtsReady(storyboards: any[], sb: any) {
+  const dialogue = String(sb?.dialogue || '').trim()
+  if (!dialogue) return true
   return hasEffectiveNarrationTts(storyboards, sb)
 }
 
 export function narrationTtsReady(storyboards: any[]) {
   if (!storyboards.length) return false
-  return storyboards.filter(sb => {
-    const dialogue = String(sb?.dialogue || '').trim()
-    return !!dialogue
-  }).every(sb => !!getNarrationShotOwnTts(sb))
+  return listNarrationTtsUnits(storyboards).every(sb => narrationTtsUnitReady(storyboards, sb))
 }
 
 export function workflowStepTotal(mode: ProductionMode) {
@@ -1162,9 +1191,9 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
         items: [
           { key: 'prod:voice', label: '旁白音色', desc: '选择配音', done: s.narratorReady },
           { key: 'prod:chars', label: '定妆参考', desc: '角色参考图', done: s.charsCount > 0 },
+          { key: 'prod:shots', label: '生成配图', desc: '换场景配图', done: s.sbsCount > 0 && (s.narrationImagesReady ?? s.shotImgCount === s.sbsCount) },
           { key: 'prod:dubbing', label: '生成配音', desc: 'TTS 旁白', done: s.sbsCount > 0 && (s.narrationTtsReady ?? (!s.ttsEligibleCount || s.ttsGeneratedCount === s.ttsEligibleCount)) },
           { key: 'prod:bgm', label: 'BGM 配乐', desc: 'Suno / PixVerse', done: s.sbsCount > 0 && (s.bgmAppliedCount ?? 0) > 0 },
-          { key: 'prod:shots', label: '生成配图', desc: '换场景配图', done: s.sbsCount > 0 && (s.narrationImagesReady ?? s.shotImgCount === s.sbsCount) },
           { key: 'prod:compose', label: '镜头合成', desc: '配图+旁白', done: s.sbsCount > 0 && s.composedCount === s.sbsCount },
         ],
       },

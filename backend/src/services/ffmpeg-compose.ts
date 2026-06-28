@@ -17,7 +17,7 @@ import { generateTTS } from './tts-generation.js'
 import { resolveEdgeVoice } from './edge-tts-local.js'
 import { resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, resolveStoryboardImageAnchorShot, resolveStoryboardVisualSource, resolveStoryboardSubtitleNarration, sortStoryboardsByOrder } from './narration-image.js'
+import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta, resolveStoryboardImageAnchorShot, resolveStoryboardVisualSource, resolveStoryboardSubtitleNarration, sortStoryboardsByOrder } from './narration-image.js'
 import { deleteEpisodeAssetFileIfUnreferenced } from './storyboard-asset-replace.js'
 import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
@@ -823,18 +823,79 @@ export async function renderSameImageGroupSegment(
     .all()
   const composeCtx = firstRow ? buildComposeEpisodeContext(firstRow.episodeId) : null
 
-  for (let i = 0; i < orderedStoryboards.length; i++) {
-    const sb = orderedStoryboards[i]
+  const memberRows = orderedStoryboards.map((sb) => {
     const row = composeCtx?.episodeStoryboards.find(item => item.id === sb.id)
       ?? db.select().from(schema.storyboards).where(eq(schema.storyboards.id, sb.id)).all()[0]
     if (!row) throw new Error(`Storyboard ${sb.id} not found`)
     if (!composeCtx) throw new Error(`Storyboard ${sb.id} missing episode context`)
+    return row
+  })
+
+  if (membersShareSegmentTts(memberRows)) {
+    const audioAbsPath = toAbsPath(memberRows[0].ttsAudioUrl!)
+    const rawDurationSec = await probeMediaDuration(audioAbsPath)
+    const totalFrameCount = durationToFrameCount(rawDurationSec, COMPOSE_FPS)
+
+    type WeightedLine = { chars: number; marked: string; display: string; isTitle: boolean }
+    const weighted: WeightedLine[] = []
+    for (const sb of memberRows) {
+      const parsed = parseDialogueForTTS(sb.dialogue)
+      if (parsed.ignorable) continue
+      const isTitleShot = isStoryboardTitleShot(sb)
+      if (isTitleShot) titleMode = true
+      const marked = resolveStoryboardSubtitleNarration(sb)
+      const display = stripSubtitlePunctuationPreservingEmphasis(marked)
+      const plain = display.replace(/\*\*/g, '').trim() || parsed.pureText
+      weighted.push({
+        chars: Math.max(1, plain.replace(/\s/g, '').length),
+        marked,
+        display,
+        isTitle: isTitleShot,
+      })
+    }
+
+    const totalChars = weighted.reduce((sum, item) => sum + item.chars, 0)
+    let cumFrames = 0
+    for (let i = 0; i < weighted.length; i++) {
+      const item = weighted[i]
+      const frameCount = i === weighted.length - 1
+        ? Math.max(1, totalFrameCount - cumFrames)
+        : Math.max(1, Math.round(totalFrameCount * (item.chars / totalChars)))
+      frameCounts.push(frameCount)
+      const startSec = transitionPad + cumFrames / COMPOSE_FPS
+      const endSec = transitionPad + (cumFrames + frameCount) / COMPOSE_FPS
+      const durationSec = frameCount / COMPOSE_FPS
+      cumFrames += frameCount
+      if (!item.display) continue
+      if (item.isTitle) {
+        subtitleLines.push({ type: 'title', text: item.display, startSec, endSec })
+      } else {
+        subtitleLines.push({
+          type: 'narration',
+          displayText: item.display,
+          markedText: item.marked,
+          startSec,
+          endSec,
+          durationSec,
+          index: i,
+        })
+      }
+    }
+
+    const alignedPath = path.join(tempDir, `${uuid()}.m4a`)
+    await normalizeAudioToFrameDuration(audioAbsPath, totalFrameCount, COMPOSE_FPS, alignedPath)
+    alignedAudioTemps.push(alignedPath)
+    audioPaths.push(alignedPath)
+  } else {
+  for (let i = 0; i < orderedStoryboards.length; i++) {
+    const sb = orderedStoryboards[i]
+    const row = memberRows[i]
 
     const parsed = parseDialogueForTTS(sb.dialogue)
     const isTitleShot = isStoryboardTitleShot(sb)
     if (isTitleShot) titleMode = true
 
-    const rawAudioPath = await resolveGroupShotAudioPath(row, composeCtx)
+    const rawAudioPath = await resolveGroupShotAudioPath(row, composeCtx!)
     const rawDurationSec = await probeMediaDuration(rawAudioPath)
     const frameCount = durationToFrameCount(rawDurationSec, COMPOSE_FPS)
     frameCounts.push(frameCount)
@@ -866,6 +927,7 @@ export async function renderSameImageGroupSegment(
         })
       }
     }
+  }
   }
 
   const shotDurationsSec = frameCounts.map(count => count / COMPOSE_FPS)
@@ -1019,6 +1081,72 @@ export function listComposeMergeUnitStoryboards(
     if (!url) return null
     return { ...group.members[0], composedVideoUrl: url }
   }).filter((row): row is EpisodeStoryboardRow => !!row)
+}
+
+export function findComposeUnitMembers(
+  storyboardId: number,
+  episodeStoryboards: EpisodeStoryboardRow[],
+): EpisodeStoryboardRow[] {
+  const groups = buildComposeUnitGroups(episodeStoryboards)
+  return groups.find(g => g.members.some(m => m.id === storyboardId))?.members ?? []
+}
+
+/** 合成单元合并旁白文本（一段一配音） */
+export function buildComposeUnitMergedTtsText(
+  storyboardId: number,
+  episodeStoryboards: EpisodeStoryboardRow[],
+): string {
+  const members = findComposeUnitMembers(storyboardId, episodeStoryboards)
+  const parts: string[] = []
+  for (const sb of members) {
+    const parsed = parseDialogueForTTS(sb.dialogue)
+    if (parsed.ignorable) continue
+    const marked = resolveStoryboardSubtitleNarration(sb)
+    const display = stripSubtitlePunctuationPreservingEmphasis(marked).replace(/\*\*/g, '').trim()
+    const text = display || parsed.pureText
+    if (text) parts.push(text)
+  }
+  return parts.join('')
+}
+
+/** 单元配音写入全部成员（同段共用一条音轨） */
+export function propagateComposeUnitTts(
+  leaderId: number,
+  episodeStoryboards: EpisodeStoryboardRow[],
+  audioPath: string,
+): number[] {
+  const members = findComposeUnitMembers(leaderId, episodeStoryboards)
+  if (members.length <= 1) return [leaderId]
+  const ts = now()
+  const updated: number[] = []
+  for (const member of members) {
+    const existing = parseNarrationImageMeta(member.referenceImages)
+    const nextMeta = {
+      ...existing,
+      narration_tts_mode: (member.id === leaderId ? 'new' : 'inherit') as 'new' | 'inherit',
+    }
+    db.update(schema.storyboards)
+      .set({
+        ttsAudioUrl: audioPath,
+        referenceImages: buildNarrationImageMeta(
+          existing.narration_image_mode === 'new' || existing.narration_image_mode === 'copy' || existing.narration_image_mode === 'inherit'
+            ? existing.narration_image_mode
+            : 'inherit',
+          nextMeta,
+        ),
+        updatedAt: ts,
+      })
+      .where(eq(schema.storyboards.id, member.id))
+      .run()
+    updated.push(member.id)
+  }
+  return updated
+}
+
+function membersShareSegmentTts(members: EpisodeStoryboardRow[]): boolean {
+  const url = members[0]?.ttsAudioUrl
+  if (!url || members.length <= 1) return false
+  return members.every(m => m.ttsAudioUrl === url)
 }
 
 type SameImageGroupComposeContext = {

@@ -6,6 +6,7 @@ import { toSnakeCase } from '../utils/transform.js'
 import { generateTTS } from '../services/tts-generation.js'
 import { findReusableTtsByText, narrationShotNeedsOwnTts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from '../services/narration-tts.js'
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta } from '../services/narration-image.js'
+import { buildComposeUnitMergedTtsText, findComposeUnitMembers, propagateComposeUnitTts } from '../services/ffmpeg-compose.js'
 import { formatCharacterDisplayName, resolveStoryboardCharacterIdsForShot } from '../services/narration-characters.js'
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.js'
@@ -263,13 +264,24 @@ app.post('/:id/generate-tts', async (c) => {
     voiceId = resolveNarrationVoiceId(speaker, chars, { isTitleShot: !!isTitleShot })
   }
 
-  const pureDialogue = parsedDialogue.pureText
-  if (!pureDialogue) return badRequest(c, '未提取到可合成的文本')
+  const pureDialogueFromDialogue = parsedDialogue.pureText
+  if (!pureDialogueFromDialogue && !(body?.tts_text ?? body?.ttsText)) return badRequest(c, '未提取到可合成的文本')
 
   const episodeStoryboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, sb.episodeId))
     .all()
     .filter(row => !row.deletedAt)
+
+  const unitTts = (body?.unit_tts === true || body?.unitTts === true)
+    && isNarrationStoryboard(sb)
+    && !isTitleShot
+  let pureDialogue = String(body?.tts_text ?? body?.ttsText ?? '').trim()
+    || pureDialogueFromDialogue
+  if (unitTts) {
+    const merged = buildComposeUnitMergedTtsText(id, episodeStoryboards)
+    if (merged) pureDialogue = merged
+  }
+  if (!pureDialogue) return badRequest(c, '未提取到可合成的文本')
 
   if (!force && !isNarrationStoryboard(sb) && !narrationShotNeedsOwnTts(sb)) {
     const inherited = resolveStoryboardTtsSource(episodeStoryboards, id)
@@ -303,6 +315,9 @@ app.post('/:id/generate-tts', async (c) => {
       .set({ ttsAudioUrl: reusablePath, updatedAt: now() })
       .where(eq(schema.storyboards.id, id))
       .run()
+    if (unitTts && findComposeUnitMembers(id, episodeStoryboards).length > 1) {
+      propagateComposeUnitTts(id, episodeStoryboards, reusablePath)
+    }
     logTaskSuccess('StoryboardAPI', 'generate-tts', {
       storyboardId: id,
       reused: true,
@@ -334,6 +349,10 @@ app.post('/:id/generate-tts', async (c) => {
     .where(eq(schema.storyboards.id, id))
     .run()
 
+    if (unitTts && findComposeUnitMembers(id, episodeStoryboards).length > 1) {
+      propagateComposeUnitTts(id, episodeStoryboards, audioPath)
+    }
+
     logTaskSuccess('StoryboardAPI', 'generate-tts', {
       storyboardId: id,
       voiceId: ttsVoice,
@@ -345,6 +364,8 @@ app.post('/:id/generate-tts', async (c) => {
       tts_audio_url: audioPath,
       voice_id: ttsVoice,
       text: pureDialogue,
+      unit_tts: unitTts,
+      unit_member_ids: unitTts ? findComposeUnitMembers(id, episodeStoryboards).map(m => m.id) : undefined,
       local_tts: localTts,
       local_tts_engine: localTts ? localTtsEngine : undefined,
       tts_speed: ttsSpeed,
