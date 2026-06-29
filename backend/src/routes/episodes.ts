@@ -408,7 +408,7 @@ app.post('/:id/narration-script-emphasis', async (c) => {
   }
 })
 
-// POST /episodes/:id/narration-storyboard-breakdown — 旁白分镜（Qwen 拆句 + ** 标注）
+// POST /episodes/:id/narration-storyboard-breakdown — 旁白分镜（整稿 LLM 拆镜 + ** 标注）
 app.post('/:id/narration-storyboard-breakdown', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const body = await c.req.json().catch(() => ({}))

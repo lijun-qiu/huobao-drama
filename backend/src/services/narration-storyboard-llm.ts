@@ -10,9 +10,8 @@ import {
 } from './narration-scene-detect.js'
 import { callTextChat } from './text-chat.js'
 
-const STORYBOARD_LLM_TIMEOUT_MS = 180_000
+const STORYBOARD_LLM_TIMEOUT_MS = 300_000
 const STORYBOARD_LLM_RETRIES = 2
-const STORYBOARD_LLM_PARAGRAPH_GAP_MS = 800
 
 function sleep(ms: number) {
   return new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -38,12 +37,21 @@ function extractJsonObject(raw: string): Record<string, unknown> | null {
   }
 }
 
-function parseStoryboardSentencesResponse(text: string): string[] | null {
+function parseFullStoryboardResponse(text: string): { titleSentences: string[]; sentences: string[] } | null {
   const obj = extractJsonObject(text)
-  const raw = obj?.sentences
-  if (!Array.isArray(raw) || !raw.length) return null
-  const sentences = raw.map(line => String(line ?? '').trim()).filter(Boolean)
-  return sentences.length ? sentences : null
+  if (!obj) return null
+
+  const bodyRaw = obj.sentences
+  if (!Array.isArray(bodyRaw) || !bodyRaw.length) return null
+  const sentences = bodyRaw.map(line => String(line ?? '').trim()).filter(Boolean)
+  if (!sentences.length) return null
+
+  const titleRaw = obj.title_sentences
+  const titleSentences = Array.isArray(titleRaw)
+    ? titleRaw.map(line => String(line ?? '').trim()).filter(Boolean)
+    : []
+
+  return { titleSentences, sentences }
 }
 
 function validateSplitFidelity(original: string, sentences: string[]): boolean {
@@ -54,27 +62,82 @@ function validateSplitFidelity(original: string, sentences: string[]): boolean {
   return ratio <= 0.08
 }
 
-async function splitParagraphWithLLM(
-  paragraph: string,
-  paragraphIndex: number,
+function splitBodyParagraphs(body: string): string[] {
+  return body.replace(/\r\n/g, '\n').trim().split(/\n\s*\n+/).map(p => p.trim()).filter(Boolean)
+}
+
+function attachParagraphIndices(body: string, sentences: string[]): NarrationSentenceItem[] {
+  const paragraphs = splitBodyParagraphs(body)
+  if (!paragraphs.length) {
+    return sentences.map(sentence => ({ sentence, paragraphIndex: 0 }))
+  }
+
+  const norm = (s: string) => stripEmphasisMarkers(s).replace(/\s/g, '')
+  const paraNorms = paragraphs.map(norm)
+  const items: NarrationSentenceItem[] = []
+  let paragraphIndex = 0
+  let offset = 0
+
+  for (const sentence of sentences) {
+    const sentenceNorm = norm(sentence)
+    if (!sentenceNorm) continue
+
+    let matched = false
+    while (paragraphIndex < paraNorms.length) {
+      const rest = paraNorms[paragraphIndex].slice(offset)
+      if (
+        rest.startsWith(sentenceNorm)
+        || sentenceNorm.startsWith(rest.slice(0, Math.max(1, Math.min(sentenceNorm.length, rest.length))))
+      ) {
+        items.push({ sentence, paragraphIndex })
+        offset += sentenceNorm.length
+        if (offset >= paraNorms[paragraphIndex].length) {
+          paragraphIndex += 1
+          offset = 0
+        }
+        matched = true
+        break
+      }
+      paragraphIndex += 1
+      offset = 0
+    }
+
+    if (!matched) {
+      items.push({
+        sentence,
+        paragraphIndex: Math.min(Math.max(paragraphIndex, 0), paragraphs.length - 1),
+      })
+    }
+  }
+
+  return items
+}
+
+async function splitFullScriptWithLLM(
+  title: string | null,
+  body: string,
   options: {
     textModel: string
-    textThinking: boolean
-    isTitle?: boolean
     titleHook?: string | null
-    fullNarration?: string[]
   },
-): Promise<NarrationSentenceItem[] | null> {
-  const trimmed = String(paragraph || '').trim()
-  if (!trimmed) return []
+): Promise<{ titleItems: NarrationSentenceItem[]; sentenceItems: NarrationSentenceItem[] } | null> {
+  const bodyTrimmed = body.trim()
+  const titleTrimmed = title?.trim() || ''
+  if (!bodyTrimmed && !titleTrimmed) {
+    return { titleItems: [], sentenceItems: [] }
+  }
+
+  const plainBody = stripEmphasisMarkers(bodyTrimmed)
+  const plainTitle = titleTrimmed ? stripEmphasisMarkers(titleTrimmed) : ''
 
   const user = JSON.stringify({
-    is_title: !!options.isTitle,
-    paragraph_index: paragraphIndex,
-    paragraph: trimmed,
+    ...(plainTitle ? { title: plainTitle } : {}),
+    ...(plainBody ? { body: plainBody } : {}),
     ...(options.titleHook?.trim() ? { title_hook: options.titleHook.trim() } : {}),
-    ...(options.fullNarration?.length ? { full_narration: options.fullNarration } : {}),
-    output_format: { sentences: 'string[]，本段拆镜后的旁白句，可含 **' },
+    output_format: {
+      title_sentences: 'string[]，片头句（无 title 则 []）',
+      sentences: 'string[]，正文一镜一句，可含 **',
+    },
   })
 
   const system = buildNarrationStoryboardLLMSystem()
@@ -87,44 +150,47 @@ async function splitParagraphWithLLM(
         system,
         user,
         options.textModel,
-        options.textThinking,
+        false,
         STORYBOARD_LLM_TIMEOUT_MS,
         true,
       )
-      const sentences = parseStoryboardSentencesResponse(text)
-      if (!sentences?.length) {
-        lastError = 'invalid sentences JSON'
+      const parsed = parseFullStoryboardResponse(text)
+      if (!parsed) {
+        lastError = 'invalid storyboard JSON'
         continue
       }
-      if (!validateSplitFidelity(trimmed, sentences)) {
-        lastError = 'split fidelity check failed'
+      if (plainBody && !validateSplitFidelity(plainBody, parsed.sentences)) {
+        lastError = 'body fidelity check failed'
         continue
       }
-      return sentences.map(sentence => ({ sentence, paragraphIndex }))
+      if (
+        plainTitle
+        && parsed.titleSentences.length
+        && !validateSplitFidelity(plainTitle, parsed.titleSentences)
+      ) {
+        lastError = 'title fidelity check failed'
+        continue
+      }
+
+      const titleItems: NarrationSentenceItem[] = plainTitle
+        ? (parsed.titleSentences.length
+          ? parsed.titleSentences.map((sentence, index) => ({ sentence, paragraphIndex: index }))
+          : [{ sentence: plainTitle, paragraphIndex: 0 }])
+        : []
+
+      const sentenceItems = plainBody
+        ? attachParagraphIndices(bodyTrimmed, parsed.sentences)
+        : []
+
+      return { titleItems, sentenceItems }
     } catch (err: unknown) {
       lastError = String((err as Error)?.message || err || 'unknown error')
       if (attempt >= STORYBOARD_LLM_RETRIES) throw err
     }
   }
 
-  logTaskWarn('NarrationStoryboardLLM', 'paragraph-fallback-rules', {
-    paragraphIndex,
-    isTitle: !!options.isTitle,
-    error: lastError,
-  })
+  logTaskWarn('NarrationStoryboardLLM', 'full-script-fallback-rules', { error: lastError })
   return null
-}
-
-function splitBodyParagraphs(body: string): string[] {
-  return body.replace(/\r\n/g, '\n').trim().split(/\n\s*\n+/).map(p => p.trim()).filter(Boolean)
-}
-
-function ruleSplitTitle(title: string): NarrationSentenceItem[] {
-  return splitTitleSentencesWithMeta(title)
-}
-
-function ruleSplitBody(body: string): NarrationSentenceItem[] {
-  return splitNarrationSentencesWithMeta(body)
 }
 
 export type StoryboardLLMOptions = {
@@ -134,7 +200,7 @@ export type StoryboardLLMOptions = {
   titleHook?: string | null
 }
 
-/** Qwen 旁白分镜：按段 LLM 拆句并标注 **，失败时回退规则拆句 + LLM 仅标注 */
+/** 旁白分镜：整稿一次 LLM 拆镜 + ** 标注；失败时规则拆句 + 批量标注 */
 export async function buildStoryboardSentenceItemsWithLLM(
   title: string | null,
   body: string,
@@ -144,81 +210,62 @@ export async function buildStoryboardSentenceItemsWithLLM(
     options?.episodeTextModel ? { textModel: options.episodeTextModel } : null,
     options?.textModel,
   )
-  const textThinking = options?.textThinking ?? false
   const config = getTextConfig(textModel)
   if (!config.apiKey) {
     throw new Error('未配置文本模型 API Key')
   }
 
-  const bodyParagraphs = splitBodyParagraphs(body)
-  const ruleTitleItems = title ? ruleSplitTitle(title) : []
-  const ruleBodyItems = body.trim() ? ruleSplitBody(body) : []
-  const fullNarration = ruleBodyItems.map(item => stripEmphasisMarkers(item.sentence))
+  const ruleTitleItems = title ? splitTitleSentencesWithMeta(title) : []
+  const ruleBodyItems = body.trim() ? splitNarrationSentencesWithMeta(body) : []
 
   logTaskProgress('NarrationStoryboardLLM', 'start', {
     model: textModel,
-    titleParagraphs: title ? 1 : 0,
-    bodyParagraphs: bodyParagraphs.length,
+    bodyChars: stripEmphasisMarkers(body).replace(/\s/g, '').length,
     ruleSentenceCount: ruleBodyItems.length,
   })
 
-  const titleItems: NarrationSentenceItem[] = []
-  if (title?.trim()) {
-    const llmTitle = await splitParagraphWithLLM(title.trim(), 0, {
+  try {
+    const llmResult = await splitFullScriptWithLLM(title, body, {
       textModel,
-      textThinking,
-      isTitle: true,
       titleHook: options?.titleHook ?? title,
-      fullNarration,
     })
-    titleItems.push(...(llmTitle ?? ruleTitleItems))
-  }
-
-  const sentenceItems: NarrationSentenceItem[] = []
-  let usedLlmSplit = true
-
-  for (let i = 0; i < bodyParagraphs.length; i++) {
-    if (i > 0) await sleep(STORYBOARD_LLM_PARAGRAPH_GAP_MS)
-    const llmItems = await splitParagraphWithLLM(bodyParagraphs[i], i, {
-      textModel,
-      textThinking,
-      titleHook: options?.titleHook ?? title,
-      fullNarration,
-    })
-    if (llmItems?.length) {
-      sentenceItems.push(...llmItems)
-    } else {
-      usedLlmSplit = false
-      const fallback = ruleSplitBody(bodyParagraphs[i]).map(item => ({
-        ...item,
-        paragraphIndex: i,
-      }))
-      sentenceItems.push(...fallback)
+    if (llmResult) {
+      logTaskSuccess('NarrationStoryboardLLM', 'done', {
+        titleCount: llmResult.titleItems.length,
+        sentenceCount: llmResult.sentenceItems.length,
+        usedLlmSplit: true,
+      })
+      return llmResult
     }
-  }
-
-  if (!usedLlmSplit && sentenceItems.length) {
-    logTaskProgress('NarrationStoryboardLLM', 'emphasis-fallback-batch', {
-      sentenceCount: sentenceItems.length,
-    })
-    const originals = sentenceItems.map(item => stripEmphasisMarkers(item.sentence))
-    const { markStoryboardSentencesWithEmphasisLLM } = await import('./narration-emphasis-apply.js')
-    const marked = await markStoryboardSentencesWithEmphasisLLM(originals, {
-      textModel,
-      textThinking: false,
-      fullNarration: originals,
-      titleHook: options?.titleHook ?? title,
-    })
-    marked.forEach((sentence, index) => {
-      if (sentenceItems[index]) sentenceItems[index].sentence = sentence
+  } catch (err: unknown) {
+    logTaskWarn('NarrationStoryboardLLM', 'full-script-error', {
+      error: String((err as Error)?.message || err || 'unknown'),
     })
   }
 
-  logTaskSuccess('NarrationStoryboardLLM', 'done', {
-    titleCount: titleItems.length,
-    sentenceCount: sentenceItems.length,
-    usedLlmSplit,
+  logTaskProgress('NarrationStoryboardLLM', 'emphasis-fallback-batch', {
+    sentenceCount: ruleBodyItems.length,
   })
 
-  return { titleItems, sentenceItems }
+  const originals = ruleBodyItems.map(item => stripEmphasisMarkers(item.sentence))
+  const { markStoryboardSentencesWithEmphasisLLM } = await import('./narration-emphasis-apply.js')
+  const marked = await markStoryboardSentencesWithEmphasisLLM(originals, {
+    textModel,
+    textThinking: false,
+    fullNarration: originals,
+    titleHook: options?.titleHook ?? title,
+  })
+
+  const sentenceItems = ruleBodyItems.map((item, index) => ({
+    ...item,
+    sentence: marked[index] ?? item.sentence,
+  }))
+
+  logTaskSuccess('NarrationStoryboardLLM', 'done', {
+    titleCount: ruleTitleItems.length,
+    sentenceCount: sentenceItems.length,
+    usedLlmSplit: false,
+  })
+
+  return { titleItems: ruleTitleItems, sentenceItems }
 }

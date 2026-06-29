@@ -955,7 +955,7 @@
 
           <div v-else-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" class="step-loading">
             <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
-            <div class="loading-text">{{ isNarrationMode ? '正在按规则拆分旁白分镜...' : '正在拆解分镜并生成提示词...' }}</div>
+            <div class="loading-text">{{ isNarrationMode ? '正在整稿拆镜并标注字幕强调…' : '正在拆解分镜并生成提示词...' }}</div>
           </div>
 
           <div v-else class="step-empty">
@@ -965,7 +965,7 @@
               </svg>
             </div>
             <div class="empty-title">{{ isNarrationMode ? '将解说文案拆解为旁白镜头' : '将剧本拆解为分镜序列' }}</div>
-            <div class="empty-desc">{{ isNarrationMode ? 'Qwen 按句末标点拆镜（逗号相邻合计 ≤16 字合并），并自动标注 ** 强调词；片头写「标题：」后按句拆镜' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
+            <div class="empty-desc">{{ isNarrationMode ? '整稿一次交给 LLM 拆镜（句末标点断句、长句按逗号合并），并自动标注 ** 强调词；片头写「标题：」或「今天体验的人生剧本是…」' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
             <div v-if="!isNarrationMode" class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
             <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
               <strong>旁白分镜：</strong>按句拆分便于编辑；<strong>配音与镜头合成</strong>按场景段（同配图段合并为一段配音、一条成片）。<code>**强调词**</code> 在剧本生成时用 ** 包裹。
@@ -3772,8 +3772,8 @@ const storyboardDescUploadInputRef = ref(null)
 const narrationExtracting = ref(false)
 const narrationBreakdownSummary = ref(null)
 const imageDetectMode = ref('paragraph')
-const imageDetectBatchThreshold = ref(100)
-const imageDetectBatchSize = ref(50)
+const imageDetectBatchThreshold = ref(80)
+const imageDetectBatchSize = ref(30)
 const narrationImageStyle = ref(NARRATION_MINIMAL_STYLE)
 const narrationImageStyleOptions = NARRATION_IMAGE_STYLE_OPTIONS.map(item => ({
   value: item.value,
@@ -7084,7 +7084,7 @@ function doNarrationBreakdown() {
   void (async () => {
     try {
       const script = await saveNarrationScript()
-      toast.info('Qwen 正在拆镜并标注字幕强调…')
+      toast.info('正在整稿拆镜并标注字幕强调…')
       const res = await episodeAPI.narrationStoryboardBreakdown(epId.value, {
         script,
         ...narrationTextModelParams(),
@@ -7167,15 +7167,20 @@ function doNarrationImageDetect() {
     detect_batch_size: imageDetectBatchSize.value,
     ...narrationTextModelParams(),
   }), {
-    onSuccess: () => {
+    onSuccess: (progress) => {
       const count = narrationDetectDisplayCount.value
-      toast.success(`检测完成：${count} 张需配图`)
+      const source = progress?.image_detect_source ?? progress?.imageDetectSource ?? 'llm'
+      if (source !== 'llm') {
+        toast.warning(`检测完成（规则兜底）：${count} 张需配图。可缩小「每批镜数」后重试 LLM 检测`)
+      } else {
+        toast.success(`检测完成：${count} 张需配图`)
+      }
       persistNarrationBreakdownSummary({
         ...narrationBreakdownSummary.value,
         image_needed_count: count,
         paragraph_count: count,
         image_detect_at: Date.now(),
-        image_detect_source: 'llm',
+        image_detect_source: source,
       })
     },
     startMessage: '正在 LLM 检测需配图镜头…',
@@ -7278,13 +7283,14 @@ function runNarrationImageStep(step, apiCall, { onSuccess, startMessage }) {
   startNarrationImageBreakdownPoll()
   void (async () => {
     let jobStarted = false
+    let stepResult = null
     try {
-      await apiCall()
+      stepResult = await apiCall()
       jobStarted = true
-      await waitForNarrationImageBreakdownDone()
+      const progress = await waitForNarrationImageBreakdownDone()
       await refresh()
       syncNarrationBreakdownImageCount()
-      onSuccess?.()
+      onSuccess?.(progress || stepResult)
     } catch (e) {
       toast.error(e.message)
     } finally {

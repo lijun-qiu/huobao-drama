@@ -7,6 +7,10 @@ import {
   buildNarrationTitleImagePromptLLMSystem,
   buildMinimalPortraitPostureHint,
   coerceMinimalCharacterAppearance,
+  detectNarrationWeightArcTheme,
+  extractNarrationBodyStageFromText,
+  formatNarrationBodyWeightSpec,
+  inferParagraphBodyWeightTier,
   resolveLLMImagePrompt,
   isNarrationDateOnlySentence,
   isNarrationMinimalStyle,
@@ -81,7 +85,9 @@ const IMAGE_DETECT_LLM_TIMEOUT_MIN_MS = 240_000
 const IMAGE_DETECT_LLM_TIMEOUT_MAX_MS = 900_000
 
 /** 每个检测单元估算耗时（毫秒），用于按镜头数缩放超时 */
-const IMAGE_DETECT_LLM_TIMEOUT_PER_UNIT_MS = 3_500
+const IMAGE_DETECT_LLM_TIMEOUT_PER_UNIT_MS = 4_500
+
+const IMAGE_DETECT_LLM_BATCH_RETRIES = 2
 
 function resolveDetectLLMTimeoutMs(detectUnitCount: number, attempt = 1): number {
   const scaled = Math.max(
@@ -1163,7 +1169,7 @@ async function callDetectImageNeedsLLM(
   system: string,
   user: string,
   textModel?: string | null,
-  textThinking = true,
+  textThinking = false,
   timeoutMs = IMAGE_DETECT_LLM_TIMEOUT_MIN_MS,
 ): Promise<{
   analysis: Array<Record<string, unknown>>
@@ -1176,6 +1182,41 @@ async function callDetectImageNeedsLLM(
     throw new Error('配图换镜 AI 返回无效（缺少 analysis）')
   }
   return { analysis, image_prompts: parsed?.image_prompts }
+}
+
+async function callDetectImageNeedsLLMWithRetry(
+  system: string,
+  user: string,
+  detectUnitCount: number,
+  textModel?: string | null,
+  batchMeta?: { batchIndex: number; batchCount: number },
+): Promise<{
+  analysis: Array<Record<string, unknown>>
+  image_prompts: unknown
+}> {
+  let lastError = ''
+  for (let attempt = 1; attempt <= IMAGE_DETECT_LLM_BATCH_RETRIES + 1; attempt++) {
+    try {
+      return await callDetectImageNeedsLLM(
+        system,
+        user,
+        textModel,
+        false,
+        resolveDetectLLMTimeoutMs(detectUnitCount, attempt),
+      )
+    } catch (err: unknown) {
+      lastError = String((err as Error)?.message || err || 'unknown error')
+      if (!isLLMTimeoutError(lastError) || attempt > IMAGE_DETECT_LLM_BATCH_RETRIES) throw err
+      logTaskWarn('NarrationScene', 'llm-detect-batch-retry', {
+        ...(batchMeta || {}),
+        attempt,
+        detectUnitCount,
+        error: lastError.slice(0, 200),
+      })
+      await sleep(2_000 * attempt)
+    }
+  }
+  throw new Error(lastError || '配图换镜 AI 检测失败')
 }
 
 export async function detectImageNeedsWithLLM(
@@ -1231,7 +1272,7 @@ export async function detectImageNeedsWithLLM(
     ratioRange,
     previousEpisodeNarration,
     textModel,
-    textThinking,
+    textThinking: false,
   }
 
   try {
@@ -1257,12 +1298,12 @@ export async function detectImageNeedsWithLLM(
           percent: calcDetectBatchPercent(bi, batches.length),
         })
 
-        const llmResult = await callDetectImageNeedsLLM(
+        const llmResult = await callDetectImageNeedsLLMWithRetry(
           callCtx.system,
           buildDetectUserPayload(callCtx, batchUnits, { batchIndex: bi + 1, batchCount: batches.length }),
+          batchUnits.length,
           callCtx.textModel,
-          callCtx.textThinking,
-          resolveDetectLLMTimeoutMs(batchUnits.length, 1),
+          { batchIndex: bi + 1, batchCount: batches.length },
         )
         if (llmResult.analysis.length !== batchUnits.length) {
           logTaskWarn('NarrationScene', 'llm-detect-batch-invalid', {
@@ -1316,12 +1357,11 @@ export async function detectImageNeedsWithLLM(
       percent: 5,
     })
 
-    let llmResult = await callDetectImageNeedsLLM(
+    let llmResult = await callDetectImageNeedsLLMWithRetry(
       callCtx.system,
       buildDetectUserPayload(callCtx, units),
+      units.length,
       callCtx.textModel,
-      callCtx.textThinking,
-      resolveDetectLLMTimeoutMs(units.length, 1),
     )
     if (llmResult.analysis.length !== units.length) {
       logTaskWarn('NarrationScene', 'llm-detect-invalid', { expected: units.length, got: llmResult.analysis.length })
@@ -1343,12 +1383,11 @@ export async function detectImageNeedsWithLLM(
         '凡有场景/时间/动作/物件/经营阶段/视觉焦点变化的一律标 true。',
         '输出完整 JSON，analysis 长度仍须与 sentences 相同。',
       ].join('')
-      llmResult = await callDetectImageNeedsLLM(
+      llmResult = await callDetectImageNeedsLLMWithRetry(
         callCtx.system,
         buildDetectUserPayload(callCtx, units, undefined, retryHint),
+        units.length,
         callCtx.textModel,
-        callCtx.textThinking,
-        resolveDetectLLMTimeoutMs(units.length, 2),
       )
       if (llmResult.analysis.length !== units.length) {
         throw new Error(`配图换镜 AI 重试返回无效（期望 ${units.length} 项 analysis）`)
@@ -1416,21 +1455,46 @@ export async function resolveImageNeeds(
   source: ImageDetectSource
 }> {
   const mode = options?.mode || 'paragraph'
-  const { needs, segmentDescriptions } = await detectImageNeedsWithLLM(
-    items,
-    mode,
-    options?.textModel,
-    options?.textThinking ?? true,
-    options?.style || 'comic',
-    options?.fullNarrationLines,
-    options?.previousEpisodeNarration,
-    {
-      batchThreshold: options?.batchThreshold,
-      batchSize: options?.batchSize,
-      onProgress: options?.onProgress,
-    },
-  )
-  return { needs, segmentDescriptions, source: 'llm' }
+  try {
+    const { needs, segmentDescriptions } = await detectImageNeedsWithLLM(
+      items,
+      mode,
+      options?.textModel,
+      false,
+      options?.style || 'comic',
+      options?.fullNarrationLines,
+      options?.previousEpisodeNarration,
+      {
+        batchThreshold: options?.batchThreshold,
+        batchSize: options?.batchSize,
+        onProgress: options?.onProgress,
+      },
+    )
+    return { needs, segmentDescriptions, source: 'llm' }
+  } catch (err: unknown) {
+    const message = String((err as Error)?.message || err || '配图换镜 AI 检测失败')
+    logTaskWarn('NarrationScene', 'llm-detect-fallback-rules', {
+      error: message.slice(0, 300),
+      mode,
+      sentenceCount: items.length,
+    })
+    options?.onProgress?.({
+      phase: 'detecting',
+      message: 'LLM 检测超时，改用规则兜底分配配图段…',
+      percent: 90,
+    })
+    const minimumTrueCount = resolveMinimumDetectTrueCount(items.length)
+    const maximumTrueCount = resolveMaximumDetectTrueCount(items.length)
+    const rawNeeds = mode === 'conservative'
+      ? detectImageNeedsConservative(items)
+      : detectImageNeedsBalanced(items)
+    const needs = applyImageAnchorConstraints(rawNeeds, minimumTrueCount, maximumTrueCount)
+    return {
+      needs,
+      segmentDescriptions: new Map(),
+      source: mode === 'conservative' ? 'conservative' : 'balanced',
+    }
+  }
 }
 
 export type ParagraphPromptInput = {
@@ -1573,12 +1637,21 @@ export async function generateParagraphImagePromptsWithLLM(
     })
 
     const episodeHasDiptych = paragraphs.some(p => p.layout === 'diptych')
+    const fullBodyLines = options?.fullNarrationLines || []
+    const previousEpisodeNarration = options?.previousEpisodeNarration || []
+    const fullNarrationForArc = fullBodyLines.length
+      ? fullBodyLines.map(s => String(s || '').trim()).filter(Boolean)
+      : buildFullNarrationForPrompt({
+        titleHook,
+        titleFull,
+        bodySentences: [],
+      })
+    const weightArc = detectNarrationWeightArcTheme(fullNarrationForArc)
     const system = buildNarrationParagraphImagePromptLLMSystem(style, {
       hasCharacters: characters.length > 0,
       hasDiptych: episodeHasDiptych,
+      weightArc,
     })
-    const fullBodyLines = options?.fullNarrationLines || []
-    const previousEpisodeNarration = options?.previousEpisodeNarration || []
     const protagonistHints = characters.map(ch => ({
       name: ch.name,
       variantLabel: (ch as { variantLabel?: string | null }).variantLabel,
@@ -1627,6 +1700,7 @@ export async function generateParagraphImagePromptsWithLLM(
         : buildNarrationParagraphImagePromptLLMSystem(style, {
           hasCharacters: characters.length > 0,
           hasDiptych: batchHasDiptych,
+          weightArc,
         })
 
       reportProgress?.({
@@ -1641,22 +1715,47 @@ export async function generateParagraphImagePromptsWithLLM(
 
       const user = JSON.stringify({
         ...(previousEpisodeNarration.length ? { previous_episode_narration: previousEpisodeNarration } : {}),
+        ...(weightArc
+          ? {
+            weight_arc: {
+              theme_labels: weightArc.theme_labels,
+              tier_spec_table: weightArc.tier_spec_table,
+            },
+          }
+          : {}),
         full_narration: fullNarration,
         characters: characterPayload,
-        paragraphs: batch.map(p => ({
-          paragraph_index: p.index,
-          start_index: p.startIndex,
-          timeline_up_to_index: p.startIndex,
-          prior_narration: buildPriorNarrationLines(previousEpisodeNarration, fullBodyLines, p.startIndex),
-          layout: p.layout,
-          narration_lines: p.sentences,
-          tts_sentences: p.ttsSentences?.length ? p.ttsSentences : p.sentences,
-          ...(p.sceneDescription ? { detect_scene_description: p.sceneDescription } : {}),
-        })),
+        paragraphs: batch.map(p => {
+          const priorNarration = buildPriorNarrationLines(previousEpisodeNarration, fullBodyLines, p.startIndex)
+          const suggestedTier = inferParagraphBodyWeightTier(p.sentences, priorNarration, fullBodyLines)
+          const stage = extractNarrationBodyStageFromText(p.sentences.join('\n'))
+            || extractNarrationBodyStageFromText(priorNarration.join('\n'))
+            || '青年'
+          return {
+            paragraph_index: p.index,
+            start_index: p.startIndex,
+            timeline_up_to_index: p.startIndex,
+            prior_narration: priorNarration,
+            layout: p.layout,
+            narration_lines: p.sentences,
+            tts_sentences: p.ttsSentences?.length ? p.ttsSentences : p.sentences,
+            suggested_body_weight_tier: suggestedTier,
+            ...(suggestedTier !== 'standard'
+              ? { suggested_body_spec: formatNarrationBodyWeightSpec(stage, suggestedTier) }
+              : {}),
+            ...(p.sceneDescription ? { detect_scene_description: p.sceneDescription } : {}),
+          }
+        }),
         output_format: {
           paragraph_prompts: paragraphOutputHint,
           paragraph_outfit_continuity:
             '同一 paragraph_index/start_index 配图段内，主人公服装款式+#hex 须完全一致（含 diptych 左右格）；#hex紧挨款式词无空格，须带简笔轮廓；配角/配偶也须写 #hex（如 #64748b低饱和便装、#ffffff围裙）；禁止中文色词',
+          ...(weightArc
+            ? {
+              paragraph_body_weight:
+                '同一配图段内 suggested_body_weight_tier 与【画面主体】躯干宽高须一致；跨段可随剧情从 obese/chubby 过渡到 slim',
+            }
+            : {}),
         },
       })
 

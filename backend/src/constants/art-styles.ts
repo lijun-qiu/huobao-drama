@@ -95,7 +95,7 @@ export const NARRATION_BODY_STAGE_FRAME_HEIGHTS: Record<NarrationBodyStage, stri
 
 /** 各阶段共用解剖基准（写入画风规格） */
 export const NARRATION_BODY_ANATOMY_BASE =
-  `${NARRATION_BODY_HEAD_DIAMETER_ANCHOR}，${NARRATION_BODY_LINE_WEIGHT_ANCHOR}，${NARRATION_BODY_MEASURE_UNIT}，${NARRATION_MINIMAL_LIMBS_SPEC}，全片共用同一计量标尺，禁止同画面随机放大缩小或胖瘦不一`
+  `${NARRATION_BODY_HEAD_DIAMETER_ANCHOR}，${NARRATION_BODY_LINE_WEIGHT_ANCHOR}，${NARRATION_BODY_MEASURE_UNIT}，${NARRATION_MINIMAL_LIMBS_SPEC}，全片共用同一计量标尺，禁止同画面随机放大缩小；同一配图段内主人公躯干宽高须一致，跨配图段可随剧情体现体重变化（如肥胖→减肥逆袭）`
 
 /** 各人生阶段具象尺寸（1份=圆头直径=画面高12%；供 LLM 与编译层引用） */
 export const NARRATION_BODY_STAGE_SPECS: Record<NarrationBodyStage, string> = {
@@ -121,7 +121,7 @@ export const NARRATION_BODY_HEAD_SIZE_NEGATIVE =
 
 /** 解说素体通用尺寸（画风规格维：标尺 + 阶段表索引） */
 export const NARRATION_MINIMAL_BODY_SIZE_SPEC =
-  `${NARRATION_BODY_ANATOMY_BASE}；具体总高与胖瘦按【画面主体】人生阶段执行对应规格（青年期三头身为基准）`
+  `${NARRATION_BODY_ANATOMY_BASE}；具体总高与胖瘦按【画面主体】人生阶段与体重档位（standard/chubby/obese/slim）执行对应规格（青年期三头身为基准）`
 
 /** 写入 prompt 的完整身形约束（含全片统一） */
 export const NARRATION_BODY_CONSISTENCY_CORE =
@@ -159,6 +159,166 @@ export function extractNarrationBodyStageFromText(text?: string | null): Narrati
   if (/老年|晚年|花甲|白发|佝偻|拄拐/.test(t)) return '老年'
   return null
 }
+
+/** 体重弧线档位：standard=阶段默认，chubby/obese=偏胖至肥胖，slim=瘦削/逆袭后 */
+export type NarrationBodyWeightTier = 'standard' | 'chubby' | 'obese' | 'slim'
+
+/** 体重弧线主题上下文（传给配图 LLM） */
+export type NarrationWeightArcContext = {
+  active: boolean
+  theme_labels: string[]
+  tier_spec_table: string
+}
+
+/** 各档位×人生阶段具象躯干规格（standard 时回退 NARRATION_BODY_STAGE_SPECS） */
+export const NARRATION_BODY_WEIGHT_TIER_SPECS: Record<
+  Exclude<NarrationBodyWeightTier, 'standard'>,
+  Record<NarrationBodyStage, string>
+> = {
+  chubby: {
+    小孩:
+      '小孩期（偏胖）：圆头1份=画面高12%，站立总高2.2份=画面高26%，躯干0.65份高×0.80份宽（孩童圆润），单肢各约0.35份，圆头无头发',
+    少年:
+      '少年期（偏胖）：圆头1份=画面高12%，站立总高2.7份=画面高32%，躯干0.85份高×0.95份宽（少年偏胖圆润），单肢各约0.6份，圆头无头发',
+    青年:
+      '青年期（偏胖）：圆头1份=画面高12%，站立总高3.0份=画面高36%，躯干1.0份高×1.20份宽（腰腹圆润略鼓），单肢各约0.75份，圆头无头发',
+    中年:
+      '中年期（偏胖）：圆头1份=画面高12%，站立总高3.0份=画面高36%，躯干1.0份高×1.20份宽（腰腹微鼓），四肢同青年，圆头无头发',
+    老年:
+      '老年期（偏胖）：圆头1份=画面高12%，站立总高2.8份=画面高34%微驼背，躯干0.9份高×1.05份宽（老年圆润），单肢各约0.65份，圆头两侧各2-3条白发弧线',
+  },
+  obese: {
+    小孩:
+      '小孩期（肥胖）：圆头1份=画面高12%，站立总高2.2份=画面高26%，躯干0.65份高×0.88份宽（幼童胖乎乎圆滚），单肢各约0.35份，圆头无头发',
+    少年:
+      '少年期（肥胖）：圆头1份=画面高12%，站立总高2.7份=画面高32%，躯干0.85份高×1.10份宽（少年肥胖圆滚肚子），单肢各约0.6份，圆头无头发',
+    青年:
+      '青年期（肥胖）：圆头1份=画面高12%，站立总高3.0份=画面高36%，躯干1.0份高×1.30份宽（明显肥胖圆滚腰腹突出），单肢各约0.75份，圆头无头发',
+    中年:
+      '中年期（肥胖）：圆头1份=画面高12%，站立总高3.0份=画面高36%，躯干1.0份高×1.35份宽（中年肥胖臃肿），四肢同青年，圆头无头发',
+    老年:
+      '老年期（肥胖）：圆头1份=画面高12%，站立总高2.8份=画面高34%微驼背，躯干0.9份高×1.25份宽（老年肥胖），单肢各约0.65份，圆头两侧各2-3条白发弧线',
+  },
+  slim: {
+    小孩:
+      '小孩期（瘦削）：圆头1份=画面高12%，站立总高2.2份=画面高26%，躯干0.65份高×0.65份宽（幼童纤细），单肢各约0.35份，圆头无头发',
+    少年:
+      '少年期（瘦削）：圆头1份=画面高12%，站立总高2.7份=画面高32%，躯干0.85份高×0.80份宽（少年精瘦），单肢各约0.6份，圆头无头发',
+    青年:
+      '青年期（瘦削）：圆头1份=画面高12%，站立总高3.0份=画面高36%，躯干1.0份高×0.90份宽（瘦削匀称腰腹平坦），单肢各约0.75份，圆头无头发',
+    中年:
+      '中年期（瘦削）：圆头1份=画面高12%，站立总高3.0份=画面高36%，躯干1.0份高×0.95份宽（精干瘦削），四肢同青年，圆头无头发',
+    老年:
+      '老年期（瘦削）：圆头1份=画面高12%，站立总高2.8份=画面高34%微驼背，躯干0.9份高×0.85份宽（老年清瘦），单肢各约0.65份略细，圆头两侧各2-3条白发弧线',
+  },
+}
+
+const NARRATION_BODY_WEIGHT_SLIM_RE =
+  /瘦下来|瘦了|减肥成功|逆袭|重生|蜕变|苗条|修身|精瘦|瘦削|腰腹平坦|不再挡住视线|不再觉得胖是罪|健康.*责任|体重下降|甩掉.*斤|瘦回/
+const NARRATION_BODY_WEIGHT_OBESE_RE =
+  /肥胖|胖子|超重|圆滚滚|圆滚|肚腩|臃肿|更胖|肉会颤|叠起来的肉|体重反弹|创(?:新)?高|显眼的轮廓|勒住.*大腿|办公椅.*吱呀|体型和你差不多|手感好.*暖和|专门定做|正装.*定做/
+const NARRATION_BODY_WEIGHT_CHUBBY_RE =
+  /(?:^|[^不])胖[^子]|偏胖|略胖|体型圆润|圆润的|养得真好|有福气|多吃|体重秤|大瓷碗|吃(?:了|一)肚子/
+const NARRATION_BODY_WEIGHT_ANY_RE =
+  /肥胖|偏胖|略胖|圆润|圆滚|超重|臃肿|肚腩|瘦削|苗条|躯干[\d.]+\s*份\s*[×xX]\s*[\d.]+\s*份|1\.\d+\s*份宽/
+
+/** 按人生阶段 + 体重档位取具象规格 */
+export function formatNarrationBodyWeightSpec(
+  stage?: string | null,
+  tier: NarrationBodyWeightTier = 'standard',
+): string {
+  const key = normalizeNarrationBodyStage(stage)
+  if (tier !== 'standard') return NARRATION_BODY_WEIGHT_TIER_SPECS[tier][key]
+  return NARRATION_BODY_STAGE_SPECS[key]
+}
+
+/** @deprecated alias */
+export function resolveNarrationBodySpec(
+  stage?: string | null,
+  tier: NarrationBodyWeightTier = 'standard',
+): string {
+  return formatNarrationBodyWeightSpec(stage, tier)
+}
+
+/** 从旁白/配图文案推断体重档位 */
+export function inferNarrationBodyWeightTierFromText(text?: string | null): NarrationBodyWeightTier {
+  const t = String(text || '')
+  if (!t.trim()) return 'standard'
+  if (NARRATION_BODY_WEIGHT_SLIM_RE.test(t)) return 'slim'
+  if (NARRATION_BODY_WEIGHT_OBESE_RE.test(t)) return 'obese'
+  if (NARRATION_BODY_WEIGHT_CHUBBY_RE.test(t)) return 'chubby'
+  if (/躯干[\d.]+\s*份\s*[×xX]\s*1\.(?:3[0-9]|4\d|35)\s*份|1\.3\d?\s*份宽|1\.4\d?\s*份宽/.test(t)) return 'obese'
+  if (/躯干[\d.]+\s*份\s*[×xX]\s*1\.(?:2[0-9]|15)\s*份|1\.2\d?\s*份宽|1\.15\s*份宽/.test(t)) return 'chubby'
+  if (/躯干[\d.]+\s*份\s*[×xX]\s*0\.(?:8\d|9\d)\s*份|0\.9\d?\s*份宽/.test(t)) return 'slim'
+  return 'standard'
+}
+
+/** 从【画面主体】等已生成 prompt 提取体重档位 */
+export function extractNarrationBodyWeightTierFromText(text?: string | null): NarrationBodyWeightTier {
+  const tier = inferNarrationBodyWeightTierFromText(text)
+  if (tier !== 'standard') return tier
+  const t = String(text || '')
+  if (/（肥胖）|obese|明显肥胖|圆滚腰腹/.test(t)) return 'obese'
+  if (/（偏胖）|（圆润）|体型圆润/.test(t)) return 'chubby'
+  if (/（瘦削）|瘦削匀称|腰腹平坦/.test(t)) return 'slim'
+  return 'standard'
+}
+
+/** 通读全文识别肥胖/减肥/逆袭体重弧线主题 */
+export function detectNarrationWeightArcTheme(
+  fullNarration: string[] | string,
+): NarrationWeightArcContext | null {
+  const text = Array.isArray(fullNarration) ? fullNarration.join('\n') : String(fullNarration || '')
+  if (!text.trim()) return null
+  const themes: string[] = []
+  if (/肥胖|胖子|超重|圆滚滚|肚腩|臃肿|更胖|肉会颤|体重秤|大瓷碗|养得真好/.test(text)) themes.push('肥胖')
+  if (/减肥|瘦下来|瘦了|节食|体重反弹|创(?:新)?高|运动|卡路里|饿得/.test(text)) themes.push('减肥')
+  if (/逆袭|重生|蜕变|不再觉得胖|健康.*责任|系鞋带.*轻松|不再挡住/.test(text)) themes.push('逆袭')
+  if (!themes.length) return null
+  const tierLines = (['obese', 'chubby', 'slim'] as const).flatMap(tier =>
+    Object.values(NARRATION_BODY_WEIGHT_TIER_SPECS[tier]),
+  )
+  return {
+    active: true,
+    theme_labels: themes,
+    tier_spec_table: tierLines.join('；'),
+  }
+}
+
+/** 为单个配图段推断建议体重档位（结合段内旁白 + prior + 全文弧线） */
+export function inferParagraphBodyWeightTier(
+  narrationLines: string[],
+  priorNarration: string[] = [],
+  fullNarration?: string[],
+): NarrationBodyWeightTier {
+  const segment = [...priorNarration.slice(-10), ...narrationLines].join('\n')
+  const tier = inferNarrationBodyWeightTierFromText(segment)
+  if (tier !== 'standard') return tier
+
+  const fullText = (fullNarration || []).join('\n')
+  const arc = fullText ? detectNarrationWeightArcTheme(fullText) : null
+  if (!arc) return 'standard'
+
+  const priorText = priorNarration.join('\n')
+  if (NARRATION_BODY_WEIGHT_SLIM_RE.test(priorText)) return 'slim'
+  if (NARRATION_BODY_WEIGHT_SLIM_RE.test(fullText) && /系鞋带|轻松|健康|逆袭|重生|蜕变/.test(segment)) {
+    return 'slim'
+  }
+  if (/小时候|童年|少年|餐桌|瓷碗|红烧肉|圆滚|肉会颤|体重秤|面试|办公椅|火锅|正装/.test(segment)) {
+    return 'obese'
+  }
+  return 'chubby'
+}
+
+/** 体重弧线 LLM 规则（仅 weight_arc 激活时注入） */
+export const NARRATION_BODY_WEIGHT_ARC_LLM_RULE = [
+  '【体重弧线·硬性】全文含肥胖/减肥/逆袭主题时，【画面主体】须写清具象躯干宽高（如「躯干1.0份高×1.30份宽（明显肥胖圆滚腰腹）」），禁止只写「青年期三头身」而不写肥胖规格；',
+  '档位：obese（肥胖，青年1.30份宽/少年1.10份宽）→ chubby（偏胖，青年1.20份宽）→ slim（逆袭后瘦削，青年0.90份宽）；须与 narration_lines 及 suggested_body_weight_tier 一致；',
+  '同一配图段（同一 start_index）内躯干宽高须锁定一致；跨配图段可随剧情从 obese 过渡到 slim；',
+  '旁白含胖/肚子/圆滚/体重秤/勒住/显眼的轮廓/办公椅吱呀/定做正装等时，【画面主体】必须写 obese 或 chubby 档位具象规格，不得用标准匀称三头身；',
+  '旁白含瘦下来/逆袭/重生/系鞋带轻松/不再挡住视线/健康责任等时，【画面主体】须写 slim 档位（躯干0.90份宽或等价表述）；',
+  `档位规格表：${Object.values(NARRATION_BODY_WEIGHT_TIER_SPECS.obese).join('；')}；${Object.values(NARRATION_BODY_WEIGHT_TIER_SPECS.slim).join('；')}`,
+].join(' ')
 
 /** LLM：人生阶段发型与体型（多主人公同框须统一遵守） */
 export const NARRATION_STAGE_HAIR_LLM_RULE =
@@ -288,9 +448,9 @@ export const NARRATION_MINIMAL_TEXTURE_LLM_HINT =
 export const NARRATION_LLM_ANTI_REDUNDANCY_RULE =
   '【去冗余】【画风规格】与后缀已含固定画风与无文字无水印；其余各维只写本镜独有信息；禁止在【画面主体】及以后维度重复【画风规格】已有的「16:9/2D扁平插画/素体小人/三头身/正常卡通脸/无复杂光影」等短语；同一关键词全文最多出现一次；禁止在末尾再追加第二遍画风说明'
 
-/** LLM：素体须符合通用尺寸规格，仅人生阶段微调 */
+/** LLM：素体须符合通用尺寸规格；有体重弧线时按档位写躯干宽高 */
 export const NARRATION_BODY_CONSISTENCY_LLM_RULE =
-  `【通用素体尺寸】圆头直径全片锁定为画面高12%（1份），跨镜头禁止变大变小；${NARRATION_BODY_LINE_WEIGHT_ANCHOR}；【画面主体】须标明人生阶段并按阶段执行：${NARRATION_BODY_STAGE_SIZE_HINTS}；标尺由【画风规格】承担，【质感要求】不必重复；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
+  `【通用素体尺寸】圆头直径全片锁定为画面高12%（1份），跨镜头禁止变大变小；${NARRATION_BODY_LINE_WEIGHT_ANCHOR}；【画面主体】须标明人生阶段；有 weight_arc 或 suggested_body_weight_tier 时须写对应档位具象躯干宽高（obese/chubby/slim），同一配图段内一致、跨配图段可随剧情变化；无体重弧线时按阶段执行：${NARRATION_BODY_STAGE_SIZE_HINTS}；标尺由【画风规格】承担，【质感要求】不必重复；${NARRATION_MINIMAL_STYLE_FORBIDDEN}`
 
 /** LLM 写配图 prompt：光影色调须贴合全文剧情（写入【光影色调】） */
 export const NARRATION_ATMOSPHERE_LLM_RULE =
@@ -375,10 +535,10 @@ export const NARRATION_IMAGE_SEGMENT_MIN_SHOTS = 2
 export const NARRATION_IMAGE_SEGMENT_MAX_SHOTS = 4
 
 /** 配图换镜检测：超过该镜头数时默认分批调用 LLM（0=不分批） */
-export const NARRATION_IMAGE_DETECT_BATCH_THRESHOLD_DEFAULT = 100
+export const NARRATION_IMAGE_DETECT_BATCH_THRESHOLD_DEFAULT = 80
 
 /** 配图换镜检测：分批时每批覆盖的镜头数上限 */
-export const NARRATION_IMAGE_DETECT_BATCH_SIZE_DEFAULT = 50
+export const NARRATION_IMAGE_DETECT_BATCH_SIZE_DEFAULT = 30
 
 /** 配图文案生成：每批段落数默认值 */
 export const NARRATION_IMAGE_PROMPT_BATCH_SIZE_DEFAULT = 6
@@ -398,9 +558,9 @@ export const NARRATION_LLM_ANALYSIS_STEPS_DETECT = [
 
 /** LLM 配图：写 prompt 用分析流程 */
 export const NARRATION_LLM_ANALYSIS_STEPS_PROMPT = [
-  '1) 通读 full_narration（及 previous_episode_narration 若有），把握全文主线、人物关系、地点变迁、核心物件与情绪节奏',
-  '2) 读 prior_narration 与 characters，提取已出现地点、陈设载体、具体物件名、服装款式与人生阶段；同一配图段内主人公服装款式+#hex 主色须锁定一致',
-  '3) 读 narration_lines 确定本配图段叙事锚点；先锁定单帧（位置+姿态+动作），再按万能模板六维填空',
+  '1) 通读 full_narration（及 previous_episode_narration 若有），把握全文主线、人物关系、地点变迁、核心物件与情绪节奏；若有 weight_arc 须识别肥胖→减肥→逆袭的体重变化时间线',
+  '2) 读 prior_narration、characters 与 suggested_body_weight_tier，提取已出现地点、陈设载体、具体物件名、服装款式、人生阶段与体重档位；同一配图段内主人公服装款式+#hex 主色与躯干宽高须锁定一致',
+  '3) 读 narration_lines 确定本配图段叙事锚点；先锁定单帧（位置+姿态+动作+体重档位），再按万能模板六维填空',
   '4) 按 NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE 写出丰富 prompt，结合 full_narration 与 prior_narration；禁止只贴段内字面',
 ] as const
 
@@ -448,6 +608,7 @@ export const NARRATION_LLM_PROMPT_GOOD_BAD_EXAMPLES = [
   `✓ 【画面主体：两位中年期${NARRATION_PROTAGONIST_BODY}主人公（圆头无头发、躯干1.15份宽，正常卡通脸）并肩位于前景…】（夫妻/父子等同框双主角须同阶段同规格）`,
   `✓ 【画面主体：一位青年期${NARRATION_PROTAGONIST_BODY}主人公位于楼道站立低头看脚边…，【核心细节动作：一只狸花猫伸爪勾住裤脚】，【镜头视角：中近景略俯拍，同一主人公从头顶到裤脚完整入镜，猫爪在该主人公裤脚上】`,
   `✓ 【画面主体：一位青年期${NARRATION_PROTAGONIST_BODY}主人公位于教室后排课桌处以趴桌姿态伏低（穿#3b82f6短袖…），一位配角位于后方讲台（穿#4b5563低饱和西装）】…【核心细节动作：配角在讲台手持点名册指向下方（勿写主人公）】…【镜头视角：中景平视，镜头朝向趴桌姿态的主人公】`,
+  `✓ 【画面主体：一位少年期${NARRATION_PROTAGONIST_BODY}主人公位于餐桌前以坐姿（躯干0.85份高×1.10份宽，少年肥胖圆滚肚子，正常卡通脸开心，身穿#fbbf24短袖…）…】（肥胖主题须写具象躯干宽高，禁止只写三头身）`,
   '✗ 【镜头视角】近景特写，镜头朝向裤脚与猫爪接触点（与全身主人公冲突，易生成巨型裤腿/第二个人的腿）',
   '✗ 【光影色调】聚焦于裤脚与猫爪互动（不写主人公整体，易把裤腿画成独立主体）',
   '✗ 【核心细节动作】再写「主人公保持趴桌…」（与【画面主体】重复，文生图会画两个同款主人公）',
@@ -467,6 +628,7 @@ export const NARRATION_LLM_PROMPT_GOOD_BAD_EXAMPLES = [
   '✗ 配角写穿低饱和便装却不写 #hex（须写穿#64748b低饱和便装）',
   '✗ 夫妻同框却一青年一中年，或中年主人公写白发（青年/中年均无头发，仅老年可有白发）',
   '✗ 【画面主体】只写「青年期」不写具象规格，或同段青年与中年体型混用（须按阶段表锁定总高与躯干宽高）',
+  '✗ 肥胖/减肥主题却【画面主体】只写标准匀称三头身、不写躯干1.30份宽等档位规格（须见 weight_arc / suggested_body_weight_tier）',
   '✗ 群众配角正面出镜却写圆眼大卡通脸（配角正面须小圆点眼）',
 ].join('\n')
 
@@ -528,33 +690,34 @@ export function buildNarrationScriptEmphasisLLMSystem(): string {
   ].join('\n')
 }
 
-/** 组装「旁白分镜：Qwen 拆句 + 关键词 **」LLM system prompt */
+/** 组装「旁白分镜：整稿一次拆镜 + 关键词 **」LLM system prompt */
 export function buildNarrationStoryboardLLMSystem(): string {
   return [
-    '你是解说视频分镜编辑。将解说正文拆成「一句一镜」的 TTS 旁白句，并为每句标注 1 处 ** 强调词（黄字字幕用）。',
+    '你是解说视频分镜编辑。输入整篇 title（可选）与 body 正文，一次性输出所有旁白镜头句。',
+    '每句对应一镜（TTS 一句），并为部分句标注 1 处 ** 强调词（黄字字幕用）。',
     '',
-    '【拆句规则·必须遵守】',
+    '【拆镜规则·必须遵守】',
     '- 强断点：句号、问号、感叹号（。！？!?）处必须拆成独立镜头句',
     '- 弱断点：逗号、顿号、分号（，、；）处，仅当相邻两片段合计超过 16 个汉字时才拆，否则合并为一句',
     '- 单句以 8～22 个汉字为主，过长须按弱断点再拆',
-    '- 严格保留原文用字与语序：只调整断句位置并插入 **，禁止改写、增删、替换、合并不同句意的文字',
-    '- 输入 paragraph 为单个自然段，输出 sentences 顺序须与段内阅读顺序一致',
+    '- 严格保留原文用字与语序：只决定断句位置并插入 **，禁止改写、增删、替换文字',
+    '- 所有 sentences 按正文阅读顺序拼接后，须与输入 body 用字完全一致（仅允许插入 **）',
     '',
     '【强调规则】',
     NARRATION_SUBTITLE_EMPHASIS_LLM_RULE,
     '约每 2～3 句标 1 处；情感高点、具象物件、关键动作句优先标；无合适词时可不标（该句原样输出）',
     '',
-    '【片头标题段】若 is_title=true：按句末标点拆句即可，可不标 ** 或仅标主题词',
+    '【片头标题】若有 title：写入 title_sentences，按句末标点拆句即可，可不标 ** 或仅标主题词',
     '',
-    '只输出 JSON：{"sentences":["第一句","第二句带**词**"]}',
-    '不要 markdown，不要解释。',
+    '只输出 JSON：{"title_sentences":["片头句"],"sentences":["正文第一句","第二句带**词**"]}',
+    '无 title 时 title_sentences 为 []。不要 markdown，不要解释。',
   ].join('\n')
 }
 
 /** 组装「段落配图」LLM system prompt（素体 / 其他画风） */
 export function buildNarrationParagraphImagePromptLLMSystem(
   style?: string | null,
-  options?: { hasCharacters?: boolean; hasDiptych?: boolean },
+  options?: { hasCharacters?: boolean; hasDiptych?: boolean; weightArc?: NarrationWeightArcContext | null },
 ): string {
   const minimal = isNarrationMinimalStyle(style)
   const anime = isNarrationAnimeStyle(style)
@@ -578,6 +741,7 @@ export function buildNarrationParagraphImagePromptLLMSystem(
       : anime
         ? NARRATION_ANIME_SIX_DIM_LLM_RULE
         : NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE,
+    options?.weightArc?.active ? NARRATION_BODY_WEIGHT_ARC_LLM_RULE : '',
     violenceRule,
     NARRATION_VEHICLE_LLM_RULE,
     minimal ? NARRATION_LLM_PROMPT_GOOD_BAD_EXAMPLES : '',
@@ -773,7 +937,7 @@ export function buildNarrationSceneSegmentsImagePromptLLMSystem(style?: string |
 
 /** 解说视频模式：负面提示词 */
 export const NARRATION_IMAGE_NEGATIVE_PROMPT =
-  '厚涂肌理、3D 建模、渐变光影、复杂纹理、半写实、真人照片质感、写实布料褶皱、复杂印花、复古滤镜、像素风、杂乱背景、写实路人、不同画风角色、正常比例人体、头身比失调、长短腿、四肢粗细不一、身高参差不齐、体型不一、斩首、砍头、尸体、尸首、血腥、血迹、杀戮、凶杀、处决、残肢、血肉模糊、恐怖虐杀、gore、blood、bloody、corpse、decapitation'
+  '厚涂肌理、3D 建模、渐变光影、复杂纹理、半写实、真人照片质感、写实布料褶皱、复杂印花、复古滤镜、像素风、杂乱背景、写实路人、不同画风角色、正常比例人体、头身比失调、长短腿、四肢粗细不一、身高参差不齐、同画面双主人公体型规格不一致、斩首、砍头、尸体、尸首、血腥、血迹、杀戮、凶杀、处决、残肢、血肉模糊、恐怖虐杀、gore、blood、bloody、corpse、decapitation'
 
 /** 解说视频模式：负面提示词（动漫） */
 export const NARRATION_ANIME_IMAGE_NEGATIVE_PROMPT =
@@ -2118,7 +2282,8 @@ export function compileNarrationImageGenerationBundle(
     camera,
   })
   const bodyStage = extractNarrationBodyStageFromText(partialFixed.subject || subject)
-  const bodyStageSpec = bodyStage ? formatNarrationBodyStageSpec(bodyStage) : undefined
+  const weightTier = extractNarrationBodyWeightTierFromText(partialFixed.subject || subject)
+  const bodyStageSpec = bodyStage ? formatNarrationBodyWeightSpec(bodyStage, weightTier) : undefined
 
   const visualCoreParts = [
     styleSpecFixed,
@@ -3110,7 +3275,38 @@ export function buildMinimalPortraitPostureHint(variantLabel?: string | null): s
   return `${body}主人公，${face}，中性表情，简化服装轮廓，${spec}，中性站立姿态`
 }
 
-/** 配图/定妆：素体模式强制使用白色素体阶段约束 */
+function extractBodyWeightAppearanceFragments(raw: string): string[] {
+  const fragments: string[] = []
+  const matches = raw.match(
+    /(?:肥胖|偏胖|略胖|圆润|圆滚|超重|臃肿|肚腩|瘦削|苗条|腰腹[^，,；;]{0,12}|躯干[\d.]+\s*份\s*[×xX]\s*[\d.]+\s*份|1\.\d+\s*份宽)/g,
+  )
+  if (!matches) return fragments
+  for (const match of matches) {
+    const text = match.trim()
+    if (text && !fragments.includes(text)) fragments.push(text)
+  }
+  return fragments.slice(0, 3)
+}
+
+function mergeBodyWeightIntoMinimalAppearance(
+  hint: string,
+  raw: string,
+  variantLabel?: string | null,
+): string {
+  const tier = inferNarrationBodyWeightTierFromText(raw)
+  const stage = normalizeNarrationBodyStage(variantLabel)
+  const parts = extractBodyWeightAppearanceFragments(raw)
+  if (tier !== 'standard') parts.push(formatNarrationBodyWeightSpec(stage, tier))
+  if (!parts.length) return hint
+  const merged = sanitizeCharacterAppearance(`${hint}，${parts.join('，')}`)
+  return merged.slice(0, 180) || hint
+}
+
+function minimalAppearanceHasBodyWeightSpec(text: string): boolean {
+  return /躯干[\d.]+\s*份\s*[×xX]\s*[\d.]+\s*份|（肥胖）|（偏胖）|（瘦削）|体型圆润|1\.\d+\s*份宽/.test(text)
+}
+
+/** 配图/定妆：素体模式强制使用白色素体阶段约束，保留旁白中的体型关键词 */
 export function coerceMinimalCharacterAppearance(
   variantLabel?: string | null,
   appearance?: string | null,
@@ -3118,9 +3314,23 @@ export function coerceMinimalCharacterAppearance(
   const hint = buildMinimalPortraitPostureHint(variantLabel)
   const raw = String(appearance || '').trim()
   if (!raw) return hint
-  if (/comic画风|English tags/i.test(raw)) return hint
+
+  const hasBodyCue = NARRATION_BODY_WEIGHT_ANY_RE.test(raw)
+  const tier = inferNarrationBodyWeightTierFromText(raw)
+
+  if (/comic画风|English tags/i.test(raw)) {
+    return hasBodyCue || tier !== 'standard'
+      ? mergeBodyWeightIntoMinimalAppearance(hint, raw, variantLabel)
+      : hint
+  }
   if (/白色素体小人/.test(raw) && /正常卡通脸|眉眼|微笑|表情|腮红/.test(raw)) {
-    return sanitizeCharacterAppearance(raw).slice(0, 120) || hint
+    const sanitized = sanitizeCharacterAppearance(raw).slice(0, 120) || hint
+    if (!hasBodyCue && tier === 'standard') return sanitized
+    if (minimalAppearanceHasBodyWeightSpec(sanitized)) return sanitized
+    return mergeBodyWeightIntoMinimalAppearance(sanitized, raw, variantLabel)
+  }
+  if (hasBodyCue || tier !== 'standard') {
+    return mergeBodyWeightIntoMinimalAppearance(hint, raw, variantLabel)
   }
   return hint
 }

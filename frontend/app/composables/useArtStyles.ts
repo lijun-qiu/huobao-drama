@@ -82,7 +82,7 @@ export type NarrationBodyStage = '小孩' | '少年' | '青年' | '中年' | '�
 
 /** 各阶段共用解剖基准（写入画风规格） */
 export const NARRATION_BODY_ANATOMY_BASE =
-  `${NARRATION_BODY_HEAD_DIAMETER_ANCHOR}，${NARRATION_BODY_LINE_WEIGHT_ANCHOR}，${NARRATION_BODY_MEASURE_UNIT}，${NARRATION_MINIMAL_LIMBS_SPEC}，全片共用同一计量标尺，禁止同画面随机放大缩小或胖瘦不一`
+  `${NARRATION_BODY_HEAD_DIAMETER_ANCHOR}，${NARRATION_BODY_LINE_WEIGHT_ANCHOR}，${NARRATION_BODY_MEASURE_UNIT}，${NARRATION_MINIMAL_LIMBS_SPEC}，全片共用同一计量标尺，禁止同画面随机放大缩小；同一配图段内主人公躯干宽高须一致，跨配图段可随剧情体现体重变化（如肥胖→减肥逆袭）`
 
 /** 各人生阶段具象尺寸（1份=圆头直径=画面高12%） */
 export const NARRATION_BODY_STAGE_SPECS: Record<NarrationBodyStage, string> = {
@@ -100,7 +100,7 @@ export const NARRATION_BODY_STAGE_SPECS: Record<NarrationBodyStage, string> = {
 
 /** 解说素体通用尺寸（画风规格维：标尺 + 阶段表索引） */
 export const NARRATION_MINIMAL_BODY_SIZE_SPEC =
-  `${NARRATION_BODY_ANATOMY_BASE}；具体总高与胖瘦按【画面主体】人生阶段执行对应规格（青年期三头身为基准）`
+  `${NARRATION_BODY_ANATOMY_BASE}；具体总高与胖瘦按【画面主体】人生阶段与体重档位（standard/chubby/obese/slim）执行对应规格（青年期三头身为基准）`
 
 export const NARRATION_BODY_CONSISTENCY_CORE =
   `全片统一简笔素体比例，${NARRATION_MINIMAL_BODY_SIZE_SPEC}`

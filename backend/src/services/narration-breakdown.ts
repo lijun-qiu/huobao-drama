@@ -125,7 +125,7 @@ export function estimateNarrationDuration(sentence: string, isTitle = false) {
   return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
 }
 
-/** 旁白分镜：Qwen LLM 拆句 + ** 标注（失败回退规则拆句） */
+/** 旁白分镜：整稿一次 LLM 拆镜 + ** 标注（失败回退规则拆句 + 批量标注） */
 export async function breakdownNarrationStoryboards(
   episodeId: number,
   scriptOverride?: string,

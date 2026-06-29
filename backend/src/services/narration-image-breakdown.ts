@@ -419,7 +419,7 @@ function savePromptAnchorsOnly(
         imagePrompt: paraInfo.prompt,
         referenceImages: buildNarrationImageMeta('new', {
           ...shotMeta,
-          narration_tts_mode: isParagraphAnchor ? 'new' : 'inherit',
+          narration_tts_mode: 'new',
           script_paragraph_index: existing.script_paragraph_index ?? ctx.sentenceItems[startIndex]?.paragraphIndex,
           scene_content: paraInfo.content ?? existing.scene_content,
           narration_lines: para?.sentences ?? existing.narration_lines,
@@ -559,9 +559,12 @@ export async function detectNarrationImageAnchors(
     reportProgress({
       status: 'completed',
       phase: 'done',
-      message: `换镜检测完成：${paragraphs.length} 张需配图`,
+      message: detectSource === 'llm'
+        ? `换镜检测完成：${paragraphs.length} 张需配图`
+        : `换镜检测完成（规则兜底）：${paragraphs.length} 张需配图`,
       percent: 100,
       paragraph_count: paragraphs.length,
+      image_detect_source: detectSource,
     })
 
     return {

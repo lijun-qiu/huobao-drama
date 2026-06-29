@@ -6,6 +6,9 @@ import {
   buildMinimalPortraitPostureHint,
   buildNarrationPortraitPromptContent,
   coerceMinimalCharacterAppearance,
+  detectNarrationWeightArcTheme,
+  formatNarrationBodyWeightSpec,
+  inferNarrationBodyWeightTierFromText,
   coerceMinimalLLMImagePrompt,
   isNarrationMinimalStyle,
   normalizeArtStyle,
@@ -791,6 +794,13 @@ export async function generateCharacterAppearance(params: {
 }): Promise<string> {
   const { character, script, style = 'comic', textModel, textThinking = true, contentContext } = params
   const minimal = isNarrationMinimalStyle(style)
+  const scriptText = [
+    contentContext?.mentionExcerpt,
+    script,
+    ...(contentContext?.storyboardSnippets || []),
+  ].filter(Boolean).join('\n')
+  const weightArc = minimal && scriptText.trim() ? detectNarrationWeightArcTheme(scriptText) : null
+  const scriptWeightTier = inferNarrationBodyWeightTierFromText(scriptText)
   logTaskProgress('CharacterAppearance', 'llm-generate-start', { name: character.name, model: getTextConfig(textModel).model })
   const system = minimal
     ? [
@@ -802,9 +812,12 @@ export async function generateCharacterAppearance(params: {
       `示例（青年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸自信微笑，简化花衬衫与喇叭裤轮廓，${NARRATION_BODY_STAGE_SPECS.青年}，站立或行走`,
       `示例（中年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸沉稳表情，简化围裙或便装轮廓，${NARRATION_BODY_STAGE_SPECS.中年}，坐于柜台后手持茶杯轮廓`,
       `示例（老年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸慈祥微笑，简化老年便装轮廓，${NARRATION_BODY_STAGE_SPECS.老年}，坐于凳上手持圆扇轮廓`,
+      weightArc
+        ? `【体重弧线】剧本含${weightArc.theme_labels.join('/')}主题：须写体重档位与具象躯干宽高（如 obese 青年期躯干1.0份高×1.30份宽）；参考：${formatNarrationBodyWeightSpec('青年', scriptWeightTier !== 'standard' ? scriptWeightTier : 'obese')}`
+        : '',
       '禁止：厚涂写实真人面相、复杂印花、English tags',
       '只输出正文，不要标题、markdown、JSON。',
-    ].join('\n')
+    ].filter(Boolean).join('\n')
     : [
     '你是影视角色定妆造型设计助手。',
     '必须根据解说稿/剧本中该角色的出场情节、对白、行为来推断外貌，与故事时代、题材、氛围一致。',
@@ -896,6 +909,7 @@ export async function extractNarrationCharacters(
 
     logTaskProgress('NarrationChars', 'llm-extract-start', { episodeId, model: config.model })
 
+      const extractWeightArc = detectNarrationWeightArcTheme(script.slice(0, 12000))
       const system = [
         '你是影视解说项目的角色设定师。解说视频采用极简素体小人画风，画面里只需给「主人公」做定妆参考，配角不需要单独定妆。',
         '规则：',
@@ -906,10 +920,13 @@ export async function extractNarrationCharacters(
         '5) 同一主人公若文案出现明显不同人生阶段（回忆、多年后、少年与晚年等），必须拆成多条记录：name 相同，variant_label 不同，appearance 各自独立',
         '6) 第一人称「我」叙述时，name 用「男主」或「女主」，并按青年/中年/老年等阶段拆分 variant_label',
         '7) appearance：中英混合，只写人物外貌与服饰（年龄、性别、发型、服装、体型、标志特征、动作道具）；禁止画风/艺术风格/retro/vintage look/pixel/复古风/Q版/条漫；年代只体现在服装发型（如80年代花衬衫、三七分发型），禁止写 "1980s retro style" 或 "retro hairstyle"，应写 "1980s side-part hairstyle"',
+        extractWeightArc
+          ? `7b) 剧本含${extractWeightArc.theme_labels.join('/')}主题：appearance 须写体重档位与具象躯干宽高（如 obese 青年期躯干1.0份高×1.30份宽；逆袭后 slim 0.90份宽），禁止只写标准三头身`
+          : '',
         '8) 示例 appearance：28岁男性个体户，精干结实。\nEnglish tags: 1980s side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, bicycle',
         '9) 合并同一人物同一时期的称呼，不要重复',
         '只输出 JSON，不要解释。',
-      ].join('\n')
+      ].filter(Boolean).join('\n')
 
       const user = JSON.stringify({
         script: script.slice(0, 12000),
