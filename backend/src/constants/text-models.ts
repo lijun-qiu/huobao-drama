@@ -4,6 +4,7 @@ export const DEFAULT_TEXT_THINKING = true
 export const DEFAULT_NARRATION_TEXT_MODEL = 'qwen3.5-plus'
 export const DEFAULT_NARRATION_SCRIPT_CHAT_MODEL = DEFAULT_NARRATION_TEXT_MODEL
 export const DEFAULT_NARRATION_IMAGE_TEXT_MODEL = DEFAULT_NARRATION_TEXT_MODEL
+export const DEFAULT_NARRATION_STORYBOARD_TEXT_MODEL = DEFAULT_NARRATION_TEXT_MODEL
 
 export const TEXT_MODEL_OPTIONS = [
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent）' },
@@ -62,6 +63,15 @@ export function resolveNarrationScriptChatTextModel(bodyModel?: string | null) {
   const picked = String(bodyModel || '').trim()
   if (picked) return picked
   return DEFAULT_NARRATION_SCRIPT_CHAT_MODEL
+}
+
+export function resolveNarrationStoryboardTextModel(
+  episode?: { textModel?: string | null } | null,
+  bodyModel?: string | null,
+) {
+  const picked = String(bodyModel || '').trim()
+  if (picked) return picked
+  return resolveNarrationEpisodeTextModel(episode)
 }
 
 export function isKnownTextModel(model?: string | null): boolean {

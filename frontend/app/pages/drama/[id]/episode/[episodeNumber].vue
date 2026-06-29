@@ -159,14 +159,6 @@
               >
                 去掉 ** 标记
               </button>
-              <button
-                type="button"
-                class="btn btn-sm"
-                :disabled="!localRaw.trim() || scriptManualEmphasizing"
-                @click="doScriptManualEmphasis"
-              >
-                {{ scriptManualEmphasizing ? '标注中…' : '标注字幕强调（**）' }}
-              </button>
               <button type="button" class="btn btn-sm btn-primary" @click="saveRaw(); toast.success('已保存')">
                 保存
               </button>
@@ -177,7 +169,7 @@
               placeholder="粘贴或编写完整解说稿…&#10;首行建议：今天体验的人生剧本是，…&#10;也可从 Word / 备忘录直接粘贴"
             />
             <div class="narration-hint" style="margin-top:10px">
-              自备稿可直接在此编辑；保存后进入「文案输入」或「旁白分镜」继续。需要 AI 写稿请切回「AI 对话」。
+              自备稿可直接在此编辑；保存后进入「文案输入」或「旁白分镜」继续。字幕 ** 强调在分镜时由 Qwen 自动标注。
             </div>
           </div>
 
@@ -233,21 +225,13 @@
                 <button
                   type="button"
                   class="btn btn-sm"
-                  :disabled="scriptChatGenerating || scriptChatEmphasizing || !scriptChatDraftHasEmphasis"
+                  :disabled="scriptChatGenerating || scriptChatDraftHasEmphasis"
                   @click="doScriptChatStripEmphasis"
                 >
                   去掉 ** 标记
                 </button>
-                <button
-                  type="button"
-                  class="btn btn-sm"
-                  :disabled="scriptChatGenerating || scriptChatEmphasizing"
-                  @click="doScriptChatEmphasis"
-                >
-                  {{ scriptChatEmphasizing ? '标注中…' : '标注字幕强调（**）' }}
-                </button>
-                <button type="button" class="btn btn-sm btn-primary" :disabled="scriptChatGenerating || scriptChatEmphasizing" @click="applyScriptChatToEditor('replace', true)">填入文案并编辑</button>
-                <button type="button" class="btn btn-sm" :disabled="scriptChatGenerating || scriptChatEmphasizing" @click="applyScriptChatToEditor('append', true)">追加到文案</button>
+                <button type="button" class="btn btn-sm btn-primary" :disabled="scriptChatGenerating" @click="applyScriptChatToEditor('replace', true)">填入文案并编辑</button>
+                <button type="button" class="btn btn-sm" :disabled="scriptChatGenerating" @click="applyScriptChatToEditor('append', true)">追加到文案</button>
               </div>
               <div class="script-chat-hints">
                 <button
@@ -255,7 +239,7 @@
                   :key="hint"
                   type="button"
                   class="btn btn-sm"
-                  :disabled="scriptChatGenerating || scriptChatEmphasizing"
+                  :disabled="scriptChatGenerating"
                   @click="scriptChatInput = hint"
                 >
                   {{ hint.slice(0, 18) }}{{ hint.length > 18 ? '…' : '' }}
@@ -267,13 +251,13 @@
                   class="script-chat-input"
                   rows="3"
                   placeholder="描述本期人生，例如：十八岁职高辍学，八十年代进城摆夜市摊…"
-                  :disabled="scriptChatGenerating || scriptChatEmphasizing"
+                  :disabled="scriptChatGenerating"
                   @keydown.enter.exact.prevent="sendScriptChat"
                 />
                 <button
                   type="button"
                   class="btn btn-primary script-chat-send"
-                  :disabled="scriptChatGenerating || scriptChatEmphasizing || !scriptChatInput.trim()"
+                  :disabled="scriptChatGenerating || !scriptChatInput.trim()"
                   @click="sendScriptChat"
                 >
                   发送
@@ -981,7 +965,7 @@
               </svg>
             </div>
             <div class="empty-title">{{ isNarrationMode ? '将解说文案拆解为旁白镜头' : '将剧本拆解为分镜序列' }}</div>
-            <div class="empty-desc">{{ isNarrationMode ? '按句末标点拆分旁白（逗号处相邻合计 ≤16 字则合并）；片头写「标题：」后按句拆镜，合成时剧中红字逐句显示；**强调词** 在剧本生成时标注，分镜保留' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
+            <div class="empty-desc">{{ isNarrationMode ? 'Qwen 按句末标点拆镜（逗号相邻合计 ≤16 字合并），并自动标注 ** 强调词；片头写「标题：」后按句拆镜' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
             <div v-if="!isNarrationMode" class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
             <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
               <strong>旁白分镜：</strong>按句拆分便于编辑；<strong>配音与镜头合成</strong>按场景段（同配图段合并为一段配音、一条成片）。<code>**强调词**</code> 在剧本生成时用 ** 包裹。
@@ -1867,6 +1851,15 @@
               </button>
             </div>
             <div class="prod-image-model-bar" style="margin-bottom:12px">
+              <span class="dim" style="font-size:12px">画风风格</span>
+              <BaseSelect
+                :model-value="narrationImageStyle"
+                :options="narrationImageStyleOptions"
+                placeholder="选择配图画风"
+                style="min-width:120px"
+                title="配图生成专用画风，默认简体素人；与项目级画风独立"
+                @update:model-value="onNarrationImageStyleChange"
+              />
               <span class="dim" style="font-size:12px">文本模型</span>
               <BaseSelect
                 :model-value="episodeTextModel"
@@ -3622,7 +3615,7 @@ import {
   narrationRawContentStep,
   narrationStoryboardStep,
 } from '~/composables/useEpisodeWorkflow'
-import { artStyleLabel } from '~/composables/useArtStyles'
+import { artStyleLabel, NARRATION_MINIMAL_STYLE, NARRATION_IMAGE_STYLE_OPTIONS, resolveNarrationImageStyle } from '~/composables/useArtStyles'
 import { buildFolderUploadSlots, isImageUploadFile, parseShotImageFilename } from '~/utils/shotImageFilename'
 import { hasEmphasisMarkers, stripEmphasisMarkers } from '~/utils/subtitle-emphasis'
 import BaseSelect from '~/components/BaseSelect.vue'
@@ -3781,17 +3774,40 @@ const narrationBreakdownSummary = ref(null)
 const imageDetectMode = ref('paragraph')
 const imageDetectBatchThreshold = ref(100)
 const imageDetectBatchSize = ref(50)
+const narrationImageStyle = ref(NARRATION_MINIMAL_STYLE)
+const narrationImageStyleOptions = NARRATION_IMAGE_STYLE_OPTIONS.map(item => ({
+  value: item.value,
+  label: item.label,
+}))
+
+function getNarrationImageStyle() {
+  return resolveNarrationImageStyle(narrationImageStyle.value)
+}
+
+function onNarrationImageStyleChange(value) {
+  narrationImageStyle.value = resolveNarrationImageStyle(value)
+  persistNarrationImageStylePref()
+}
+
+function restoreNarrationImageStylePref() {
+  if (typeof window === 'undefined') return
+  const saved = window.localStorage.getItem('huobao-narration-image-style')
+  if (saved) narrationImageStyle.value = resolveNarrationImageStyle(saved)
+}
+
+function persistNarrationImageStylePref() {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem('huobao-narration-image-style', getNarrationImageStyle())
+}
 const imagePromptBatchSize = ref(6)
 
 const localRaw = ref(''), localScript = ref('')
 
-const SCRIPT_CHAT_WELCOME = '描述你想让观众体验的「一段人生」。默认第二人称「你」、语言亲民真实；完整稿 3000～10000 字。也可切「直接输入」粘贴自备稿。生成后可点「标注字幕强调」——结合全文标关键情感、具象物件、关键动作（** 黄字，不标数字）。首行以「今天体验的人生剧本是，」开头。'
+const SCRIPT_CHAT_WELCOME = '描述你想让观众体验的「一段人生」。默认第二人称「你」、语言亲民真实；完整稿 3000～10000 字。也可切「直接输入」粘贴自备稿。首行以「今天体验的人生剧本是，」开头；** 黄字强调在「旁白分镜」时由 Qwen 自动标注。'
 const scriptGenMode = ref('chat')
 const scriptChatMessages = ref([{ role: 'assistant', content: SCRIPT_CHAT_WELCOME, local: true }])
 const scriptChatInput = ref('')
 const scriptChatGenerating = ref(false)
-const scriptChatEmphasizing = ref(false)
-const scriptManualEmphasizing = ref(false)
 const scriptChatModel = ref(DEFAULT_NARRATION_SCRIPT_CHAT_MODEL)
 const scriptChatThinking = ref(DEFAULT_TEXT_THINKING)
 const scriptChatScrollRef = ref(null)
@@ -5988,13 +6004,13 @@ const sceneImagesPendingCount = computed(() =>
 )
 const videosPendingCount = computed(() => sbs.value.filter(s => !hasVid(s)).length)
 
-function getNarrationImagePromptText(sb, style = drama.value?.style || 'comic') {
+function getNarrationImagePromptText(sb, style = getNarrationImageStyle()) {
   const stored = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
   if (stored) return stored
   return buildNarrationImagePrompt(sb, style, sbs.value)
 }
 
-function getNarrationImagePromptForCopy(sb, style = drama.value?.style || 'comic') {
+function getNarrationImagePromptForCopy(sb, style = getNarrationImageStyle()) {
   const text = getNarrationImagePromptText(sb, style)
   if (text) return text
   const meta = parseNarrationImageMeta(sb)
@@ -6889,36 +6905,6 @@ function applyScriptChatToEditor(mode = 'replace', navigateToRaw = false) {
   if (navigateToRaw) goSubStep('script:raw')
 }
 
-async function doScriptChatEmphasis() {
-  const draft = extractScriptFromChat(lastScriptChatDraft.value)
-  if (!draft || !epId.value) {
-    toast.warning('暂无可标注的解说稿')
-    return
-  }
-  const sentCount = Math.max(1, (draft.match(/[。！？!?]/g) || []).length)
-  const batchCount = Math.ceil(sentCount / 25)
-  toast.info(`LLM 标注中（约 ${sentCount} 句 · ${batchCount} 批），预计 ${batchCount}～${batchCount * 2} 分钟，请耐心等待`)
-  scriptChatEmphasizing.value = true
-  try {
-    const res = await episodeAPI.narrationScriptEmphasis(epId.value, {
-      script: draft,
-      text_model: scriptChatModel.value,
-      text_thinking: scriptChatThinking.value,
-    })
-    const marked = String(res?.script || '').trim()
-    if (!marked) throw new Error('标注失败')
-
-    if (!replaceLastScriptChatDraft(marked)) throw new Error('更新对话失败')
-    await nextTick()
-    scrollScriptChatToBottom()
-    toast.success('字幕强调已标注')
-  } catch (e) {
-    toast.error(e.message)
-  } finally {
-    scriptChatEmphasizing.value = false
-  }
-}
-
 function doScriptChatStripEmphasis() {
   const draft = extractScriptFromChat(lastScriptChatDraft.value)
   if (!draft) {
@@ -6950,34 +6936,6 @@ function stripRawEmphasis() {
   localRaw.value = stripEmphasisMarkers(raw)
   saveRaw()
   toast.success('已去掉 ** 标记')
-}
-
-async function doScriptManualEmphasis() {
-  const script = String(localRaw.value || '').trim()
-  if (!script || !epId.value) {
-    toast.warning('请先输入解说稿')
-    return
-  }
-  const sentCount = Math.max(1, (script.match(/[。！？!?]/g) || []).length)
-  const batchCount = Math.ceil(sentCount / 25)
-  toast.info(`LLM 标注中（约 ${sentCount} 句 · ${batchCount} 批），预计 ${batchCount}～${batchCount * 2} 分钟，请耐心等待`)
-  scriptManualEmphasizing.value = true
-  try {
-    const res = await episodeAPI.narrationScriptEmphasis(epId.value, {
-      script,
-      text_model: scriptChatModel.value,
-      text_thinking: scriptChatThinking.value,
-    })
-    const marked = String(res?.script || '').trim()
-    if (!marked) throw new Error('标注失败')
-    localRaw.value = marked
-    saveRaw()
-    toast.success('字幕强调已标注')
-  } catch (e) {
-    toast.error(e.message)
-  } finally {
-    scriptManualEmphasizing.value = false
-  }
 }
 
 async function sendScriptChat() {
@@ -7126,7 +7084,11 @@ function doNarrationBreakdown() {
   void (async () => {
     try {
       const script = await saveNarrationScript()
-      const res = await episodeAPI.narrationStoryboardBreakdown(epId.value, { script })
+      toast.info('Qwen 正在拆镜并标注字幕强调…')
+      const res = await episodeAPI.narrationStoryboardBreakdown(epId.value, {
+        script,
+        ...narrationTextModelParams(),
+      })
       const titleCount = res?.title_count ?? res?.titleCount ?? 0
       const titleHook = res?.title_hook ?? res?.titleHook
       const sentenceCount = res?.sentence_count ?? res?.sentenceCount ?? 0
@@ -7199,7 +7161,7 @@ async function resumeNarrationImageBreakdownPollIfNeeded() {
 function doNarrationImageDetect() {
   persistImageDetectBatchPrefs()
   runNarrationImageStep('detect', () => episodeAPI.narrationImageDetect(epId.value, {
-    style: drama.value?.style || 'comic',
+    style: getNarrationImageStyle(),
     image_detect_mode: imageDetectMode.value === 'conservative' ? 'conservative' : 'paragraph',
     detect_batch_threshold: imageDetectBatchThreshold.value,
     detect_batch_size: imageDetectBatchSize.value,
@@ -7222,7 +7184,7 @@ function doNarrationImageDetect() {
 
 function doNarrationImagePrompts() {
   runNarrationImageStep('prompts', () => episodeAPI.narrationImagePrompts(epId.value, {
-    style: drama.value?.style || 'comic',
+    style: getNarrationImageStyle(),
     prompt_batch_size: imagePromptBatchSize.value,
     ...narrationTextModelParams(),
   }), {
@@ -7254,7 +7216,7 @@ function doNarrationImagePromptsTest() {
   const total = narrationPromptTestBatchAnchorCount.value
   narrationImagePromptTestActive.value = true
   runNarrationImageStep('prompts', () => episodeAPI.narrationImagePrompts(epId.value, {
-    style: drama.value?.style || 'comic',
+    style: getNarrationImageStyle(),
     prompt_batch_size: imagePromptBatchSize.value,
     test_batch_index: narrationPromptTestBatchIndex.value,
     ...narrationTextModelParams(),
@@ -7277,7 +7239,7 @@ function doNarrationImagePromptsTest() {
 
 function doRetryMissingNarrationImagePrompts() {
   runNarrationImageStep('prompts', () => episodeAPI.narrationImagePrompts(epId.value, {
-    style: drama.value?.style || 'comic',
+    style: getNarrationImageStyle(),
     retry_missing_prompts: true,
     prompt_batch_size: imagePromptBatchSize.value,
     ...narrationTextModelParams(),
@@ -7520,7 +7482,7 @@ async function doExtractNarrationCharacters() {
   narrationExtracting.value = true
   try {
     const script = await saveNarrationScript()
-    const style = drama.value?.style || 'comic'
+    const style = getNarrationImageStyle()
     const res = await episodeAPI.extractNarrationCharacters(epId.value, {
       script,
       style,
@@ -8996,7 +8958,7 @@ async function clearNarrationShotImage(sb) {
 }
 async function markNarrationShotNeedImage(sb) {
   const sceneContent = resolveSceneContentForShot(sbs.value, sb)
-  const style = drama.value?.style || 'comic'
+  const style = getNarrationImageStyle()
   const meta = {
     narration_image_mode: 'new',
     scene_content: sceneContent,
@@ -9035,7 +8997,7 @@ async function setNarrationShotLayout(sb, layout) {
   if (meta.narration_shot_type) parsed.narration_shot_type = meta.narration_shot_type
   if (meta.narration_tts_mode) parsed.narration_tts_mode = meta.narration_tts_mode
 
-  const style = drama.value?.style || 'comic'
+  const style = getNarrationImageStyle()
   const existingPrompt = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
   const draft = {
     ...sb,
@@ -9060,7 +9022,7 @@ async function setNarrationShotLayout(sb, layout) {
 function isPendingNarrationShot(id) { return pendingNarrationShotIds.value.includes(id) }
 
 async function genNarrationShotImage(sb) {
-  const style = drama.value?.style || 'comic'
+  const style = getNarrationImageStyle()
   const basePrompt = getNarrationImagePromptText(sb, style)
   if (!basePrompt) {
     toast.warning('该镜头没有旁白文案，无法生成配图')
@@ -9177,7 +9139,7 @@ async function batchNarrationShotImages(options) {
     error: '',
   }))
   try {
-    const style = drama.value?.style || 'comic'
+    const style = getNarrationImageStyle()
     pendingNarrationShotIds.value = [...new Set([...pendingNarrationShotIds.value, ...pending.map(sb => sb.id)])]
     const results = await Promise.allSettled(pending.map(async sb => {
       const characterIds = await resolveShotCharacterIds(sb)
@@ -10119,7 +10081,7 @@ watch(narratorChar, (c) => {
   const voice = c?.voice_style || c?.voiceStyle
   if (voice) customTtsVoiceId.value = voice
 }, { immediate: true })
-watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs(); restoreImageDetectBatchPrefs(); restoreOpeningPickPrefs() }, { immediate: true })
+watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs(); restoreImageDetectBatchPrefs(); restoreNarrationImageStylePref(); restoreOpeningPickPrefs() }, { immediate: true })
 watch(openingPickCount, persistOpeningPickPrefs)
 watch([imageDetectBatchThreshold, imageDetectBatchSize, imagePromptBatchSize], () => { persistImageDetectBatchPrefs() })
 watch([prodTab, epId], ([tab, id]) => {

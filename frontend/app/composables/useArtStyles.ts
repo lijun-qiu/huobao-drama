@@ -5,6 +5,21 @@ export const DEFAULT_ART_STYLE = 'short-drama'
 /** 解说素体极简叙事画风（项目级视觉风格 value） */
 export const NARRATION_MINIMAL_STYLE = 'narration-minimal'
 
+/** 解说配图动漫风格（正常头身比 2D 动漫，七维结构与素体相同） */
+export const NARRATION_ANIME_STYLE = 'narration-anime'
+
+/** 解说配图可选画风（独立于项目 drama.style） */
+export const NARRATION_IMAGE_STYLE_OPTIONS = [
+  { value: NARRATION_MINIMAL_STYLE, label: '简体素人' },
+  { value: NARRATION_ANIME_STYLE, label: '动漫风格' },
+] as const
+
+export function resolveNarrationImageStyle(style?: string | null): string {
+  const key = String(style || '').trim().toLowerCase()
+  if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
+  return NARRATION_MINIMAL_STYLE
+}
+
 /** 主人公面部：素体头上的正常卡通脸（参考温馨叙事插画） */
 export const NARRATION_PROTAGONIST_FACE =
   '头部正常卡通脸，圆眼或弯眼带高光，眉毛嘴巴清晰，可有腮红，表情生动'
@@ -123,12 +138,30 @@ export const NARRATION_CROWD_EYE_LLM_RULE =
 export const NARRATION_UNIVERSAL_STYLE_SPEC_BODY =
   `16:9 横屏，2D 扁平插画，全员${NARRATION_CROWD_BODY}简笔身形纯色平涂无复杂光影（${NARRATION_CROWD_FACE}），黑色轮廓线，${NARRATION_BODY_CONSISTENCY_CORE}`
 
+/** 解说配图动漫风格：画风规格维固定正文 */
+export const NARRATION_ANIME_STYLE_SPEC_BODY =
+  '16:9 横屏，现代高质量 2D 动漫插画，清晰线稿，赛璐璐平涂结合柔和渐变，正常青年头身比（非Q版非三头身），大而富有表现力的动漫眼睛带瞳孔高光，日常叙事 slice-of-life 质感，低饱和写实配色'
+
+/** 动漫风格固定后缀 */
+export const NARRATION_ANIME_SCENE_SUFFIX =
+  '电影感叙事构图，干净整洁的画面，无文字无水印'
+
+/** LLM 写【质感要求】时的短补充项（动漫） */
+export const NARRATION_ANIME_TEXTURE_LLM_HINT =
+  '清晰线稿，赛璐璐平涂与柔和渐变，表情夸张生动，环境陈设有细节，无文字无水印'
+
+export function getNarrationStyleSpecBody(style?: string | null): string {
+  const key = String(style || '').trim().toLowerCase()
+  if (key === NARRATION_ANIME_STYLE) return NARRATION_ANIME_STYLE_SPEC_BODY
+  return NARRATION_UNIVERSAL_STYLE_SPEC_BODY
+}
+
 /** 画风规格维标签（七维之首） */
 export const NARRATION_STYLE_SPEC_DIM_LABEL = '画风规格'
 
 /** 组装【画风规格】 bracket */
-export function formatNarrationStyleSpecBracket(body?: string | null): string {
-  const content = String(body || NARRATION_UNIVERSAL_STYLE_SPEC_BODY).trim()
+export function formatNarrationStyleSpecBracket(body?: string | null, style?: string | null): string {
+  const content = String(body || getNarrationStyleSpecBody(style)).trim()
   return `【${NARRATION_STYLE_SPEC_DIM_LABEL}：${content}】`
 }
 
@@ -238,6 +271,11 @@ export const ART_STYLES = [
     description: '全员白色素体简笔三头身，正常卡通脸表情，柔和平涂温馨叙事插画感',
   },
   {
+    value: NARRATION_ANIME_STYLE,
+    label: '解说动漫（正常比例）',
+    description: '现代 2D 动漫插画，清晰线稿、赛璐璐+柔和渐变，正常头身比，表情夸张',
+  },
+  {
     value: 'webtoon',
     label: '解说条漫（Q版夸张）',
     description: '粗黑线描、平涂赛璐璐、Q 版比例，偏夸张表情包感',
@@ -276,11 +314,18 @@ export const ART_STYLES = [
 
 const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
   [NARRATION_MINIMAL_STYLE]: {
-    scene: `${formatNarrationStyleSpecBracket()}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    diptych: `${formatNarrationStyleSpecBracket()}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    title: `${formatNarrationStyleSpecBracket()}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    portrait: `${formatNarrationStyleSpecBracket()}，【场景：浅灰纯色背景，单人全身${NARRATION_PROTAGONIST_BODY}定妆参考图】，【剧情：${NARRATION_PROTAGONIST_EYES}，人生阶段与动作姿态】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    scene: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    diptych: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    title: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【场景：浅灰纯色背景，单人全身${NARRATION_PROTAGONIST_BODY}定妆参考图】，【剧情：${NARRATION_PROTAGONIST_EYES}，人生阶段与动作姿态】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     agent: NARRATION_IMAGE_STYLE_CORE,
+  },
+  [NARRATION_ANIME_STYLE]: {
+    scene: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_ANIME_SCENE_SUFFIX}`,
+    diptych: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_ANIME_SCENE_SUFFIX}`,
+    title: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【片头背景场景】，【主题氛围】，${NARRATION_ANIME_SCENE_SUFFIX}`,
+    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【场景：浅灰纯色背景，单人全身动漫人物定妆参考图】，【剧情：正常头身比，清晰线稿，人生阶段与动作姿态】，${NARRATION_ANIME_SCENE_SUFFIX}`,
+    agent: `${NARRATION_ANIME_STYLE_SPEC_BODY}，禁止Q版三头身、3D渲染、真人照片`,
   },
   'short-drama': {
     scene: 'Chinese short drama 2D animation style, normal realistic body proportions, clean consistent line art, soft cel shading, expressive anime faces, Douyin storytelling animation aesthetic, school drama illustration, cinematic composition, NOT chibi, NOT Q-version',
@@ -342,12 +387,15 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
 
 export function normalizeArtStyle(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
+  if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
   if (STYLE_PROMPTS[key]) return key
   return DEFAULT_ART_STYLE
 }
 
 export function artStyleLabel(style?: string | null): string {
   const key = normalizeArtStyle(style)
+  const narrationOption = NARRATION_IMAGE_STYLE_OPTIONS.find(item => item.value === key)
+  if (narrationOption) return narrationOption.label
   return ART_STYLES.find(item => item.value === key)?.label || key
 }
 
@@ -358,6 +406,14 @@ export function artStylePrompt(style?: string | null, context: ArtStyleContext =
 
 export function isNarrationMinimalStyle(style?: string | null): boolean {
   return normalizeArtStyle(style) === NARRATION_MINIMAL_STYLE
+}
+
+export function isNarrationAnimeStyle(style?: string | null): boolean {
+  return normalizeArtStyle(style) === NARRATION_ANIME_STYLE
+}
+
+export function isNarrationStructuredStyle(style?: string | null): boolean {
+  return isNarrationMinimalStyle(style) || isNarrationAnimeStyle(style)
 }
 
 export const SCENE_STYLE_GUARD = [
@@ -1922,7 +1978,7 @@ export function shouldPreserveRawNarrationPrompt(raw?: string | null): boolean {
   return NARRATION_USE_RAW_LLM_PROMPTS && !!String(raw || '').trim()
 }
 
-/** 配图 prompt：素体模式强制黑白主人公约束 */
+/** 配图 prompt：七维结构化画风强制模板约束 */
 export function resolveNarrationImagePrompt(
   prompt?: string | null,
   style?: string | null,
@@ -1930,9 +1986,8 @@ export function resolveNarrationImagePrompt(
 ): string {
   const raw = String(prompt || '').trim()
   if (!raw) return ''
-  if (normalizeArtStyle(style) === NARRATION_MINIMAL_STYLE) {
-    return coerceMinimalLLMImagePrompt(raw)
-  }
+  if (isNarrationMinimalStyle(style)) return coerceMinimalLLMImagePrompt(raw)
+  if (isNarrationAnimeStyle(style)) return coerceAnimeLLMImagePrompt(raw, style)
   return raw
 }
 
@@ -1956,6 +2011,34 @@ export function normalizeMinimalTextureBracket(body?: string | null): string {
   }
 
   return NARRATION_MINIMAL_TEXTURE_LLM_HINT
+}
+
+/** 将【质感要求】规范为动漫短补充项 */
+export function normalizeAnimeTextureBracket(body?: string | null): string {
+  const trimmed = String(body || '').replace(/[，,]+$/g, '').trim()
+  if (!trimmed) return NARRATION_ANIME_TEXTURE_LLM_HINT
+  const isLongBlob =
+    trimmed.length > 55
+    || /现代高质量\s*2D\s*动漫/.test(trimmed)
+    || /赛璐璐平涂结合柔和渐变/.test(trimmed)
+  if (isLongBlob) return NARRATION_ANIME_TEXTURE_LLM_HINT
+  const hasEssentials = /无文字/.test(trimmed) && (/线稿|赛璐璐|渐变/.test(trimmed))
+  if (trimmed.length <= 48 && hasEssentials) return trimmed
+  return NARRATION_ANIME_TEXTURE_LLM_HINT
+}
+
+/** 将 LLM/旧库中的动漫配图 prompt 对齐七维模板 */
+export function coerceAnimeLLMImagePrompt(prompt?: string | null, style?: string | null): string {
+  let text = String(prompt || '').trim()
+  if (!text) return ''
+  if (!/【画风规格[：:]/.test(text) && /【(?:画面主体|年代场景)/.test(text)) {
+    text = `${formatNarrationStyleSpecBracket(undefined, style || NARRATION_ANIME_STYLE)}，${text}`
+  }
+  text = text.replace(
+    /【质感要求[：:]([^】]*)】/g,
+    (_, body) => `【质感要求：${normalizeAnimeTextureBracket(body)}】`,
+  )
+  return applyMinimalNoClothingGuard(text)
 }
 
 /** 配图 prompt 保留服装描述，仅做基础清洗 */

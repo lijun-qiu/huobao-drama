@@ -101,8 +101,10 @@ export const episodeAPI = {
   scenes: (id: number) => api.get(`/episodes/${id}/scenes`),
   storyboards: (id: number) => api.get(`/episodes/${id}/storyboards`),
   pipelineStatus: (id: number) => api.get(`/episodes/${id}/pipeline-status`),
-  narrationStoryboardBreakdown: (id: number, options?: { script?: string }) =>
-    api.post(`/episodes/${id}/narration-storyboard-breakdown`, options || {}),
+  narrationStoryboardBreakdown: (
+    id: number,
+    options?: { script?: string; text_model?: string; text_thinking?: boolean },
+  ) => api.post(`/episodes/${id}/narration-storyboard-breakdown`, options || {}),
   narrationScriptChat: (
     id: number,
     data: {

@@ -2,6 +2,7 @@ import { asc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import {
   coerceMinimalLLMImagePrompt,
+  resolveLLMImagePrompt,
   hasNarrationForbiddenStyleIssue,
   hasNarrationMultipleProtagonistIssue,
   hasNarrationPartialCloseupIssue,
@@ -11,6 +12,7 @@ import {
   hasNarrationSpecificYearIssue,
   hasNarrationUniversalPrefixIssue,
   isNarrationMinimalStyle,
+  isNarrationStructuredStyle,
   NARRATION_UNIVERSAL_SCENE_SUFFIX,
   VIOLENCE_IMAGE_DETECT_RE,
   sanitizeSceneImagePrompt,
@@ -66,6 +68,7 @@ export function auditNarrationImagePromptText(
   }
 
   const minimal = isNarrationMinimalStyle(style)
+  const structured = isNarrationStructuredStyle(style)
   const issues: NarrationPromptAuditIssue[] = []
 
   if (VIOLENCE_IMAGE_DETECT_RE.test(text)) {
@@ -77,7 +80,7 @@ export function auditNarrationImagePromptText(
     })
   }
 
-  if (minimal) {
+  if (structured) {
     if (!hasNarrationSixDimStructure(text)) {
       issues.push({
         code: 'missing_six_dim',
@@ -94,10 +97,17 @@ export function auditNarrationImagePromptText(
         severity: 'error',
       })
     }
-    if (hasNarrationUniversalPrefixIssue(text)) {
+    if (minimal && hasNarrationUniversalPrefixIssue(text)) {
       issues.push({
         code: 'missing_prefix',
         label: '缺少或偏离【画风规格】（16:9 + 素体规格）',
+        category: 'format',
+        severity: 'warn',
+      })
+    } else if (!minimal && !/【画风规格[：:][^】]*2D\s*动漫/.test(text) && !/赛璐璐/.test(text)) {
+      issues.push({
+        code: 'missing_anime_prefix',
+        label: '缺少或偏离【画风规格】（16:9 + 2D 动漫规格）',
         category: 'format',
         severity: 'warn',
       })
@@ -186,7 +196,7 @@ export function optimizeNarrationImagePromptText(
 ): string {
   const raw = String(prompt || '').trim()
   if (!raw) return ''
-  if (isNarrationMinimalStyle(style)) return coerceMinimalLLMImagePrompt(raw)
+  if (isNarrationStructuredStyle(style)) return resolveLLMImagePrompt(raw, style)
   return sanitizeSceneImagePrompt(raw)
 }
 

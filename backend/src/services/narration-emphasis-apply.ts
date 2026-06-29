@@ -354,6 +354,14 @@ async function markSentencesWithEmphasisLLM(
   return normalized
 }
 
+/** 旁白分镜：为已拆好的镜头句批量 LLM 标注 ** */
+export async function markStoryboardSentencesWithEmphasisLLM(
+  originals: string[],
+  options?: NarrationEmphasisLLMOptions,
+): Promise<string[]> {
+  return markSentencesWithEmphasisLLM(originals, options)
+}
+
 /** 剧本生成第二阶段：逐句 LLM 标注 **，不改字 */
 export async function applyNarrationScriptEmphasisWithLLM(
   script: string,

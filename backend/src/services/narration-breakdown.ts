@@ -19,6 +19,9 @@ import {
   splitTitleSentencesWithMeta,
 } from './narration-scene-detect.js'
 import { resolveSubtitleNarrationFromSentence, ensureSentenceEmphasisMark } from '../utils/subtitle-emphasis.js'
+import { resolveNarrationStoryboardTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
+import { buildStoryboardSentenceItemsWithLLM } from './narration-storyboard-llm.js'
+import { logTaskWarn } from '../utils/task-logger.js'
 
 const TITLE_PREFIX_RE = /^标题\s*[:：]\s*(.+)$/i
 const TITLE_ALT_PREFIX_RE = /^(?:片头(?:标题)?|开场标题)\s*[:：]\s*(.+)$/i
@@ -122,10 +125,14 @@ export function estimateNarrationDuration(sentence: string, isTitle = false) {
   return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
 }
 
-/** 旁白分镜：按句末标点拆 TTS 镜头（逗号处 ≤16 字合并），不处理配图段落与配图文案 */
+/** 旁白分镜：Qwen LLM 拆句 + ** 标注（失败回退规则拆句） */
 export async function breakdownNarrationStoryboards(
   episodeId: number,
   scriptOverride?: string,
+  options?: {
+    textModel?: string | null
+    textThinking?: boolean
+  },
 ) {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error('Episode not found')
@@ -134,11 +141,35 @@ export async function breakdownNarrationStoryboards(
   if (!script) throw new Error('请先填写解说文案')
 
   const { title, body } = parseNarrationScript(script)
-  const titleItems = title ? splitTitleSentencesWithMeta(title) : []
-  const sentenceItems = splitNarrationSentencesWithMeta(body)
-  if (!titleItems.length && !sentenceItems.length) throw new Error('未能从文案中拆分出有效句子')
-
   const titleVisualHook = title ? extractTitleHook(title) : null
+
+  let titleItems = title ? splitTitleSentencesWithMeta(title) : []
+  let sentenceItems = body.trim() ? splitNarrationSentencesWithMeta(body) : []
+  let emphasisSource: 'llm' | 'rules' = 'rules'
+
+  const textModel = resolveNarrationStoryboardTextModel(ep, options?.textModel)
+  const textThinking = resolveEpisodeTextThinking(ep, options?.textThinking)
+
+  try {
+    const llmItems = await buildStoryboardSentenceItemsWithLLM(title, body, {
+      textModel,
+      textThinking,
+      episodeTextModel: ep.textModel,
+      titleHook: titleVisualHook,
+    })
+    titleItems = llmItems.titleItems
+    sentenceItems = llmItems.sentenceItems
+    emphasisSource = 'llm'
+  } catch (err: unknown) {
+    logTaskWarn('NarrationBreakdown', 'storyboard-llm-fallback', {
+      episodeId,
+      error: String((err as Error)?.message || err || 'unknown'),
+    })
+    titleItems = title ? splitTitleSentencesWithMeta(title) : []
+    sentenceItems = body.trim() ? splitNarrationSentencesWithMeta(body) : []
+  }
+
+  if (!titleItems.length && !sentenceItems.length) throw new Error('未能从文案中拆分出有效句子')
   const episodeCharacters = getEpisodeVisualCharacters(episodeId, ep.dramaId)
 
   const ts = now()
@@ -235,6 +266,8 @@ export async function breakdownNarrationStoryboards(
     title_count: titleItems.length,
     title_hook: titleVisualHook,
     total_duration: totalDuration,
+    emphasis_source: emphasisSource,
+    text_model: textModel,
   }
 }
 

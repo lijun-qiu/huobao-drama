@@ -2,6 +2,7 @@ import {
   artStylePrompt,
   mergeStoryboardLinesForImagePrompt,
   isNarrationMinimalStyle,
+  isNarrationAnimeStyle,
   resolveNarrationImagePrompt,
   appendToNarrationBracket,
   NARRATION_USE_RAW_LLM_PROMPTS,
@@ -899,6 +900,21 @@ export function enrichNarrationPromptWithCharacters(
     }
     return appendToNarrationBracket(base, '剧情', addition)
   }
+  if (isNarrationAnimeStyle(style)) {
+    const hints = relevant.map(ch => {
+      const app = String(ch.appearance || ch.description || '').trim()
+      const label = formatCharacterDisplayName(ch)
+      return app ? `${label}（${app}）` : label
+    }).join('、')
+    const addition = `场景中出现角色：${hints}，须保持同一人生阶段外貌与服装一致`
+    if (/【左格/.test(base) && /【右格/.test(base)) {
+      return appendToNarrationBracket(appendToNarrationBracket(base, '左格', addition), '右格', addition)
+    }
+    if (/【画面主体[：:]/.test(base)) {
+      return appendToNarrationBracket(base, '画面主体', addition)
+    }
+    return `${base}，${addition}`
+  }
   const hints = relevant.map(ch => {
     const app = String(ch.appearance || ch.description || '').trim()
     const label = formatCharacterDisplayName(ch)
@@ -943,6 +959,7 @@ export function buildNarrationImageGeneratePayload(
   return {
     ...extra,
     prompt,
+    image_style: style,
     reference_images: referenceImages.length ? referenceImages : undefined,
   }
 }

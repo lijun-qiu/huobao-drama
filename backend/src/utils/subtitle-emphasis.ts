@@ -1,5 +1,5 @@
 export function resolveNarrationEmphasisMode(): 'off' | 'rules' | 'llm' | 'script' {
-  const mode = String(process.env.NARRATION_EMPHASIS_MODE || 'script').trim().toLowerCase()
+  const mode = String(process.env.NARRATION_EMPHASIS_MODE || 'llm').trim().toLowerCase()
   if (['off', '0', 'false', 'none'].includes(mode)) return 'off'
   if (['rules', 'rule'].includes(mode)) return 'rules'
   if (['llm'].includes(mode)) return 'llm'

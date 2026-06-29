@@ -23,6 +23,7 @@ import {
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel } from '../constants/text-models.js'
+import { resolveNarrationImageStyle } from '../constants/art-styles.js'
 import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration, parseOpeningPickedImages, buildOpeningPickedImagesZip, pickAndSaveOpeningImages } from '../services/ffmpeg-opening.js'
 import fs from 'fs'
 import { isTitleVideoProcessing, startTitleSegmentVideoGeneration } from '../services/ffmpeg-title-segment.js'
@@ -407,7 +408,7 @@ app.post('/:id/narration-script-emphasis', async (c) => {
   }
 })
 
-// POST /episodes/:id/narration-storyboard-breakdown — 旁白分镜（TTS 粒度，不含配图）
+// POST /episodes/:id/narration-storyboard-breakdown — 旁白分镜（Qwen 拆句 + ** 标注）
 app.post('/:id/narration-storyboard-breakdown', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const body = await c.req.json().catch(() => ({}))
@@ -416,7 +417,10 @@ app.post('/:id/narration-storyboard-breakdown', async (c) => {
 
   try {
     const script = String(body.script || '').trim()
-    const result = await breakdownNarrationStoryboards(episodeId, script || undefined)
+    const result = await breakdownNarrationStoryboards(episodeId, script || undefined, {
+      textModel: body.text_model ?? body.textModel,
+      textThinking: body.text_thinking ?? body.textThinking,
+    })
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)
@@ -484,10 +488,12 @@ app.post('/:id/narration-image-detect', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c)
 
-  let style = String(body.style || '').trim()
-  if (!style) {
+  let style = resolveNarrationImageStyle(body.style)
+  if (!String(body.style || '').trim()) {
     const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
-    style = drama?.style || 'comic'
+    if (drama?.style === 'narration-anime' || drama?.style === 'narration-minimal') {
+      style = resolveNarrationImageStyle(drama.style)
+    }
   }
 
   try {
@@ -526,10 +532,12 @@ app.post('/:id/narration-image-prompts', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c)
 
-  let style = String(body.style || '').trim()
-  if (!style) {
+  let style = resolveNarrationImageStyle(body.style)
+  if (!String(body.style || '').trim()) {
     const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
-    style = drama?.style || 'comic'
+    if (drama?.style === 'narration-anime' || drama?.style === 'narration-minimal') {
+      style = resolveNarrationImageStyle(drama.style)
+    }
   }
 
   try {
@@ -778,7 +786,10 @@ app.post('/:id/narration-breakdown', async (c) => {
 
   try {
     const script = String(body.script || '').trim()
-    const result = await breakdownNarrationStoryboards(episodeId, script || undefined)
+    const result = await breakdownNarrationStoryboards(episodeId, script || undefined, {
+      textModel: body.text_model ?? body.textModel,
+      textThinking: body.text_thinking ?? body.textThinking,
+    })
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)
