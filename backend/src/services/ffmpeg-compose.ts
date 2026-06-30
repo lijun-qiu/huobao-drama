@@ -20,7 +20,7 @@ import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta, resolveStoryboardImageAnchorShot, resolveStoryboardVisualSource, resolveStoryboardSubtitleNarration, sortStoryboardsByOrder } from './narration-image.js'
 import { deleteEpisodeAssetFileIfUnreferenced } from './storyboard-asset-replace.js'
 import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
-import { parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
+import { joinNarrationTtsParts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
 import { PAGE_FLIP_TRANSITION_SEC } from './ffmpeg-page-transition.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
@@ -1145,12 +1145,9 @@ export function buildComposeUnitMergedTtsText(
   for (const sb of members) {
     const parsed = parseDialogueForTTS(sb.dialogue)
     if (parsed.ignorable) continue
-    const marked = resolveStoryboardSubtitleNarration(sb)
-    const display = stripSubtitlePunctuationPreservingEmphasis(marked).replace(/\*\*/g, '').trim()
-    const text = display || parsed.pureText
-    if (text) parts.push(text)
+    if (parsed.pureText) parts.push(parsed.pureText)
   }
-  return parts.join('')
+  return joinNarrationTtsParts(parts)
 }
 
 /** 单元配音写入全部成员（同段共用一条音轨） */
@@ -1188,9 +1185,14 @@ export function propagateComposeUnitTts(
 }
 
 function membersShareSegmentTts(members: EpisodeStoryboardRow[]): boolean {
+  if (members.length <= 1) return false
+  const urls = members.map(m => m.ttsAudioUrl).filter(Boolean) as string[]
+  if (!urls.length) return false
+  const unique = new Set(urls)
+  // 各镜独立配音 → 合成时按句拼接音轨与字幕
+  if (unique.size === urls.length) return false
   const url = members[0]?.ttsAudioUrl
-  if (!url || members.length <= 1) return false
-  return members.every(m => m.ttsAudioUrl === url)
+  return !!url && members.every(m => m.ttsAudioUrl === url)
 }
 
 type SameImageGroupComposeContext = {

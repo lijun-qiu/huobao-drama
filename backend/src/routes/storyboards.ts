@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, created, now, badRequest } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
-import { generateTTS } from '../services/tts-generation.js'
+import { generateTTS, probeStoredAudioDuration } from '../services/tts-generation.js'
 import { findReusableTtsByText, narrationShotNeedsOwnTts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from '../services/narration-tts.js'
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta } from '../services/narration-image.js'
 import { buildComposeUnitMergedTtsText, findComposeUnitMembers, propagateComposeUnitTts } from '../services/ffmpeg-compose.js'
@@ -334,38 +334,74 @@ app.post('/:id/generate-tts', async (c) => {
         ? String(body?.local_voice || voiceId)
         : resolveEdgeVoice(body?.local_voice ? String(body.local_voice) : voiceId))
       : voiceId
-    const audioPath = await generateTTS({
-      text: pureDialogue,
-      voice: ttsVoice,
-      speed: ttsSpeed,
-      configId: localTts ? null : (ep?.audioConfigId || null),
-      localTts,
-      localTtsEngine: localTts ? localTtsEngine : undefined,
-      voiceboxInstruct,
-      voiceboxModelSize,
-    })
-  db.update(schema.storyboards)
-    .set({ ttsAudioUrl: audioPath, updatedAt: now() })
-    .where(eq(schema.storyboards.id, id))
-    .run()
 
-    if (unitTts && findComposeUnitMembers(id, episodeStoryboards).length > 1) {
-      propagateComposeUnitTts(id, episodeStoryboards, audioPath)
+    const unitMemberIds = unitTts ? findComposeUnitMembers(id, episodeStoryboards).map(m => m.id) : undefined
+
+    const runGeneration = async () => {
+      const audioPath = await generateTTS({
+        text: pureDialogue,
+        voice: ttsVoice,
+        speed: ttsSpeed,
+        configId: localTts ? null : (ep?.audioConfigId || null),
+        localTts,
+        localTtsEngine: localTts ? localTtsEngine : undefined,
+        voiceboxInstruct,
+        voiceboxModelSize,
+      })
+      const duration = await probeStoredAudioDuration(audioPath)
+      db.update(schema.storyboards)
+        .set({
+          ttsAudioUrl: audioPath,
+          ...(duration ? { duration } : {}),
+          updatedAt: now(),
+        })
+        .where(eq(schema.storyboards.id, id))
+        .run()
+
+      if (unitTts && unitMemberIds && unitMemberIds.length > 1) {
+        propagateComposeUnitTts(id, episodeStoryboards, audioPath)
+      }
+
+      logTaskSuccess('StoryboardAPI', 'generate-tts', {
+        storyboardId: id,
+        voiceId: ttsVoice,
+        path: audioPath,
+        textLength: pureDialogue.length,
+        duration,
+        localTts,
+        async: body?.async === true,
+      })
+      return { audioPath, duration }
     }
 
-    logTaskSuccess('StoryboardAPI', 'generate-tts', {
-      storyboardId: id,
-      voiceId: ttsVoice,
-      path: audioPath,
-      textLength: pureDialogue.length,
-      localTts,
-    })
+    if (body?.async === true) {
+      void runGeneration().catch((err: any) => {
+        logTaskError('StoryboardAPI', 'generate-tts', { storyboardId: id, voiceId: ttsVoice, error: err.message, async: true })
+      })
+      return success(c, {
+        status: 'processing',
+        storyboard_id: id,
+        voice_id: ttsVoice,
+        text: pureDialogue,
+        unit_tts: unitTts,
+        unit_member_ids: unitMemberIds,
+        local_tts: localTts,
+        local_tts_engine: localTts ? localTtsEngine : undefined,
+        tts_speed: ttsSpeed,
+        voicebox_instruct: voiceboxInstruct,
+        voicebox_model_size: voiceboxModelSize,
+        provider: localTts ? localTtsEngine : undefined,
+      })
+    }
+
+    const { audioPath, duration } = await runGeneration()
     return success(c, {
       tts_audio_url: audioPath,
       voice_id: ttsVoice,
       text: pureDialogue,
+      duration,
       unit_tts: unitTts,
-      unit_member_ids: unitTts ? findComposeUnitMembers(id, episodeStoryboards).map(m => m.id) : undefined,
+      unit_member_ids: unitMemberIds,
       local_tts: localTts,
       local_tts_engine: localTts ? localTtsEngine : undefined,
       tts_speed: ttsSpeed,

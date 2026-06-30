@@ -132,13 +132,20 @@ export async function breakdownNarrationStoryboards(
   options?: {
     textModel?: string | null
     textThinking?: boolean
+    onProgress?: (patch: { message: string; percent?: number; phase?: string }) => void
   },
 ) {
+  const report = (patch: { message: string; percent?: number; phase?: string }) => {
+    options?.onProgress?.(patch)
+  }
+
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error('Episode not found')
 
   const script = (scriptOverride || ep.scriptContent || ep.content || '').trim()
   if (!script) throw new Error('请先填写解说文案')
+
+  report({ message: '正在解析解说稿…', percent: 8, phase: 'reading' })
 
   const { title, body } = parseNarrationScript(script)
   const titleVisualHook = title ? extractTitleHook(title) : null
@@ -150,6 +157,8 @@ export async function breakdownNarrationStoryboards(
   const textModel = resolveNarrationStoryboardTextModel(ep, options?.textModel)
   const textThinking = resolveEpisodeTextThinking(ep, options?.textThinking)
 
+  report({ message: '正在 LLM 整稿拆镜并标注 ** 强调…', percent: 15, phase: 'llm' })
+
   try {
     const llmItems = await buildStoryboardSentenceItemsWithLLM(title, body, {
       textModel,
@@ -160,6 +169,7 @@ export async function breakdownNarrationStoryboards(
     titleItems = llmItems.titleItems
     sentenceItems = llmItems.sentenceItems
     emphasisSource = 'llm'
+    report({ message: `拆镜完成：片头 ${titleItems.length} 句、正文 ${sentenceItems.length} 句`, percent: 72, phase: 'llm' })
   } catch (err: unknown) {
     logTaskWarn('NarrationBreakdown', 'storyboard-llm-fallback', {
       episodeId,
@@ -167,10 +177,13 @@ export async function breakdownNarrationStoryboards(
     })
     titleItems = title ? splitTitleSentencesWithMeta(title) : []
     sentenceItems = body.trim() ? splitNarrationSentencesWithMeta(body) : []
+    report({ message: 'LLM 拆镜失败，使用规则拆句…', percent: 50, phase: 'fallback' })
   }
 
   if (!titleItems.length && !sentenceItems.length) throw new Error('未能从文案中拆分出有效句子')
   const episodeCharacters = getEpisodeVisualCharacters(episodeId, ep.dramaId)
+
+  report({ message: '正在写入镜头…', percent: 78, phase: 'saving' })
 
   const ts = now()
   const existingStoryboardIds = db.select().from(schema.storyboards)
@@ -259,6 +272,8 @@ export async function breakdownNarrationStoryboards(
     .set({ duration: Math.max(1, Math.ceil(totalDuration / 60)), updatedAt: ts })
     .where(eq(schema.episodes.id, episodeId))
     .run()
+
+  report({ message: `已保存 ${storyboardNumber} 镜`, percent: 100, phase: 'done' })
 
   return {
     count: storyboardNumber,

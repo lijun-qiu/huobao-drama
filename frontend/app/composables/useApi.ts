@@ -105,6 +105,76 @@ export const episodeAPI = {
     id: number,
     options?: { script?: string; text_model?: string; text_thinking?: boolean },
   ) => api.post(`/episodes/${id}/narration-storyboard-breakdown`, options || {}),
+  narrationStoryboardChatStream: async (
+    id: number,
+    data: {
+      messages: Array<{ role: 'user' | 'assistant'; content: string }>
+      text_model?: string
+      text_thinking?: boolean
+      action?: 'run'
+      script?: string
+    },
+    options?: {
+      signal?: AbortSignal
+      onDelta?: (content: string) => void
+      onThinking?: (content: string) => void
+      onStatus?: (content: string) => void
+      onProgress?: (payload: Record<string, unknown>) => void
+    },
+  ) => {
+    const resp = await fetch(`${BASE}/episodes/${id}/narration-storyboard-chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify({ ...data, stream: true }),
+      signal: options?.signal,
+    })
+
+    let result: {
+      reply: string
+      model?: string
+      text_thinking?: boolean
+      breakdown?: Record<string, unknown>
+    } | null = null
+    let streamError: Error | null = null
+
+    await readSseJsonEvents(resp, payload => {
+      if (payload.type === 'delta' && typeof payload.content === 'string') {
+        options?.onDelta?.(payload.content)
+        return
+      }
+      if (payload.type === 'thinking' && typeof payload.content === 'string') {
+        options?.onThinking?.(payload.content)
+        return
+      }
+      if (payload.type === 'status' && typeof payload.content === 'string') {
+        options?.onStatus?.(payload.content)
+        return
+      }
+      if (payload.type === 'storyboard_done') {
+        options?.onProgress?.(payload)
+        return
+      }
+      if (payload.type === 'error') {
+        streamError = new Error(String(payload.message || '生成失败'))
+        return
+      }
+      if (payload.type === 'done') {
+        result = {
+          reply: String(payload.reply || ''),
+          model: payload.model ? String(payload.model) : undefined,
+          text_thinking: payload.text_thinking as boolean | undefined,
+          breakdown: payload.breakdown as Record<string, unknown> | undefined,
+        }
+      }
+    }, options?.signal)
+
+    if (streamError) throw streamError
+    if (!result?.reply) throw new Error('AI 未返回内容')
+    return result
+  },
   narrationScriptChat: (
     id: number,
     data: {
@@ -201,6 +271,150 @@ export const episodeAPI = {
       text_thinking?: boolean
     },
   ) => api.post(`/episodes/${id}/narration-image-detect`, options || {}),
+  narrationImageDetectChatStream: async (
+    id: number,
+    data: {
+      messages: Array<{ role: 'user' | 'assistant'; content: string }>
+      text_model?: string
+      text_thinking?: boolean
+      action?: 'run'
+      style?: string
+      image_detect_mode?: 'paragraph' | 'conservative'
+      detect_batch_threshold?: number
+      detect_batch_size?: number
+    },
+    options?: {
+      signal?: AbortSignal
+      onDelta?: (content: string) => void
+      onThinking?: (content: string) => void
+      onStatus?: (content: string) => void
+      onProgress?: (payload: Record<string, unknown>) => void
+    },
+  ) => {
+    const resp = await fetch(`${BASE}/episodes/${id}/narration-image-detect-chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify({ ...data, stream: true }),
+      signal: options?.signal,
+    })
+
+    let result: {
+      reply: string
+      model?: string
+      text_thinking?: boolean
+      detect?: { summary?: string }
+    } | null = null
+    let streamError: Error | null = null
+
+    await readSseJsonEvents(resp, payload => {
+      if (payload.type === 'delta' && typeof payload.content === 'string') {
+        options?.onDelta?.(payload.content)
+        return
+      }
+      if (payload.type === 'thinking' && typeof payload.content === 'string') {
+        options?.onThinking?.(payload.content)
+        return
+      }
+      if (payload.type === 'status' && typeof payload.content === 'string') {
+        options?.onStatus?.(payload.content)
+        return
+      }
+      if (payload.type === 'detect_done') {
+        options?.onProgress?.(payload)
+        return
+      }
+      if (payload.type === 'error') {
+        streamError = new Error(String(payload.message || '生成失败'))
+        return
+      }
+      if (payload.type === 'done') {
+        result = {
+          reply: String(payload.reply || ''),
+          model: payload.model ? String(payload.model) : undefined,
+          text_thinking: payload.text_thinking as boolean | undefined,
+          detect: payload.detect as { summary?: string } | undefined,
+        }
+      }
+    }, options?.signal)
+
+    if (streamError) throw streamError
+    if (!result?.reply) throw new Error('AI 未返回内容')
+    return result
+  },
+  narrationImagePromptChatStream: async (
+    id: number,
+    data: {
+      messages: Array<{ role: 'user' | 'assistant'; content: string }>
+      text_model?: string
+      text_thinking?: boolean
+      action?: 'run' | 'retry_missing'
+      style?: string
+      prompt_batch_size?: number
+    },
+    options?: {
+      signal?: AbortSignal
+      onDelta?: (content: string) => void
+      onThinking?: (content: string) => void
+      onStatus?: (content: string) => void
+      onProgress?: (payload: Record<string, unknown>) => void
+    },
+  ) => {
+    const resp = await fetch(`${BASE}/episodes/${id}/narration-image-prompt-chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify({ ...data, stream: true }),
+      signal: options?.signal,
+    })
+
+    let result: {
+      reply: string
+      model?: string
+      text_thinking?: boolean
+      prompt?: { summary?: string }
+    } | null = null
+    let streamError: Error | null = null
+
+    await readSseJsonEvents(resp, payload => {
+      if (payload.type === 'delta' && typeof payload.content === 'string') {
+        options?.onDelta?.(payload.content)
+        return
+      }
+      if (payload.type === 'thinking' && typeof payload.content === 'string') {
+        options?.onThinking?.(payload.content)
+        return
+      }
+      if (payload.type === 'status' && typeof payload.content === 'string') {
+        options?.onStatus?.(payload.content)
+        return
+      }
+      if (payload.type === 'prompt_done') {
+        options?.onProgress?.(payload)
+        return
+      }
+      if (payload.type === 'error') {
+        streamError = new Error(String(payload.message || '生成失败'))
+        return
+      }
+      if (payload.type === 'done') {
+        result = {
+          reply: String(payload.reply || ''),
+          model: payload.model ? String(payload.model) : undefined,
+          text_thinking: payload.text_thinking as boolean | undefined,
+          prompt: payload.prompt as { summary?: string } | undefined,
+        }
+      }
+    }, options?.signal)
+
+    if (streamError) throw streamError
+    if (!result?.reply) throw new Error('AI 未返回内容')
+    return result
+  },
   narrationImagePrompts: (
     id: number,
     options?: {
@@ -275,7 +489,7 @@ export const episodeAPI = {
 export const storyboardAPI = {
   create: (data: any) => api.post('/storyboards', data),
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
-  generateTTS: (id: number, options?: { force?: boolean; local_tts?: boolean; local_tts_engine?: 'edge' | 'voicebox'; local_voice?: string; tts_speed?: number; voicebox_instruct?: string; voicebox_model_size?: '0.6B' | '1.7B'; unit_tts?: boolean; tts_text?: string }) =>
+  generateTTS: (id: number, options?: { force?: boolean; async?: boolean; local_tts?: boolean; local_tts_engine?: 'edge' | 'voicebox'; local_voice?: string; tts_speed?: number; voicebox_instruct?: string; voicebox_model_size?: '0.6B' | '1.7B'; unit_tts?: boolean; tts_text?: string }) =>
     api.post(`/storyboards/${id}/generate-tts`, options || {}),
   uploadTTS: (id: number, audioPath: string) =>
     api.post(`/storyboards/${id}/upload-tts`, { audio_path: audioPath }),

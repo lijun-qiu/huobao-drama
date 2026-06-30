@@ -23,6 +23,7 @@ import {
   createNarrationImageBreakdownProgressReporter,
   startNarrationImageBreakdownProgress,
   updateNarrationImageBreakdownProgress,
+  type NarrationImageBreakdownProgressCallback,
 } from './narration-image-breakdown-progress.js'
 import { loadEpisodeContinuityContext } from './episode-continuity.js'
 import { now } from '../utils/response.js'
@@ -131,6 +132,7 @@ export type NarrationImagePromptOptions = {
   testBatchIndex?: number
   textModel?: string | null
   textThinking?: boolean | null
+  onProgress?: NarrationImageBreakdownProgressCallback
 }
 
 function sliceParagraphBatchByIndex<T>(items: T[], batchSize: number, batchIndex: number): T[] {
@@ -145,7 +147,11 @@ async function runNarrationImagePromptGeneration(
   options?: NarrationImagePromptOptions & { retryMissing?: boolean },
 ) {
   startNarrationImageBreakdownProgress(episodeId)
-  const reportProgress = createNarrationImageBreakdownProgressReporter(episodeId)
+  const baseReportProgress = createNarrationImageBreakdownProgressReporter(episodeId)
+  const reportProgress: NarrationImageBreakdownProgressCallback = patch => {
+    baseReportProgress(patch)
+    options?.onProgress?.(patch)
+  }
   const promptBatchSize = resolveParagraphPromptBatchSize(options?.batchSize)
 
   try {
@@ -514,10 +520,15 @@ export async function detectNarrationImageAnchors(
     batchSize?: number
     textModel?: string | null
     textThinking?: boolean | null
+    onProgress?: NarrationImageBreakdownProgressCallback
   },
 ) {
   startNarrationImageBreakdownProgress(episodeId)
-  const reportProgress = createNarrationImageBreakdownProgressReporter(episodeId)
+  const baseReportProgress = createNarrationImageBreakdownProgressReporter(episodeId)
+  const reportProgress: NarrationImageBreakdownProgressCallback = patch => {
+    baseReportProgress(patch)
+    batchOptions?.onProgress?.(patch)
+  }
 
   try {
     const ctx = loadEpisodeStoryboardContext(episodeId, {

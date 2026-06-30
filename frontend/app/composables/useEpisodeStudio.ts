@@ -18,6 +18,7 @@ import {
   imageModelSupportsReferenceImages,
   resolveSceneContentForShot,
   extractNarrationSentence,
+  getNarrationShotDisplayText,
   DEFAULT_IMAGE_MODEL,
   DEFAULT_TEXT_MODEL,
   DEFAULT_NARRATION_SCRIPT_CHAT_MODEL,
@@ -47,11 +48,8 @@ import {
   getComposeUnitLeaders,
   getParagraphComposeMembers,
   getComposeUnitSubtitleLines,
-  getComposeUnitMergedTtsText,
   listNarrationTtsUnits,
-  buildNarrationTtsUnitViews,
   isNarrationTtsUnitLeader,
-  narrationTtsUnitReady,
   formatComposeTimecode,
   formatComposeUnitDuration,
   getComposeUnitShotRangeLabel,
@@ -70,6 +68,7 @@ import {
   narrationImagesReady,
   narrationTtsReady as narrationTtsAllReady,
   getNarrationShotOwnTts,
+  hasNarrationShotOwnTts,
   resolveNarrationEffectiveTts,
   parseNarrationImageMeta,
   sortStoryboards,
@@ -281,8 +280,55 @@ const imagePromptBatchSize = ref(6)
 const localRaw = ref(''), localScript = ref('')
 
 const SCRIPT_CHAT_WELCOME = '描述你想让观众体验的「一段人生」。默认第二人称「你」、语言亲民真实；完整稿 3000～10000 字。也可切「直接输入」粘贴自备稿。首行以「今天体验的人生剧本是，」开头；** 黄字强调在「旁白分镜」时由 Qwen 自动标注。'
+const SCRIPT_CHAT_STORAGE_PREFIX = 'huobao:narration-script-chat:'
+
+function defaultScriptChatMessages() {
+  return [{ role: 'assistant', content: SCRIPT_CHAT_WELCOME, local: true }]
+}
+
+function loadScriptChatMessagesFromStorage(episodeId: number) {
+  if (!episodeId || typeof sessionStorage === 'undefined') return null
+  try {
+    const raw = sessionStorage.getItem(`${SCRIPT_CHAT_STORAGE_PREFIX}${episodeId}`)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed) || !parsed.length) return null
+    return parsed.filter(
+      (m: { role?: string; content?: string }) =>
+        (m?.role === 'user' || m?.role === 'assistant') && typeof m.content === 'string',
+    )
+  } catch {
+    return null
+  }
+}
+
+function saveScriptChatMessagesToStorage(episodeId: number, messages: Array<{ role: string; content?: string; thinking?: string; local?: boolean }>) {
+  if (!episodeId || typeof sessionStorage === 'undefined') return
+  try {
+    const cleaned = messages.filter(m => {
+      if (m.local) return false
+      if (m.role === 'assistant' && !String(m.content || '').trim() && !String(m.thinking || '').trim()) return false
+      return true
+    })
+    const key = `${SCRIPT_CHAT_STORAGE_PREFIX}${episodeId}`
+    if (!cleaned.length) {
+      sessionStorage.removeItem(key)
+      return
+    }
+    sessionStorage.setItem(key, JSON.stringify(cleaned.map(({ role, content, thinking }) => ({ role, content, ...(thinking ? { thinking } : {}) }))))
+  } catch { /* ignore quota */ }
+}
+
+function restoreScriptChatForEpisode(episodeId: number) {
+  const stored = loadScriptChatMessagesFromStorage(episodeId)
+  scriptChatMessages.value = stored?.length
+    ? [...defaultScriptChatMessages(), ...stored]
+    : defaultScriptChatMessages()
+  scriptGenMode.value = 'chat'
+}
+
 const scriptGenMode = ref('chat')
-const scriptChatMessages = ref([{ role: 'assistant', content: SCRIPT_CHAT_WELCOME, local: true }])
+const scriptChatMessages = ref(defaultScriptChatMessages())
 const scriptChatInput = ref('')
 const scriptChatGenerating = ref(false)
 const scriptChatModel = ref(DEFAULT_NARRATION_SCRIPT_CHAT_MODEL)
@@ -295,6 +341,122 @@ const scriptChatQuickHints = [
   '把下面大纲扩成 3000～10000 字完整解说稿：职高辍学→进厂→摆摊→被骗',
   '语气更沉静、更亲民，补内心戏，扩写到 3000 字以上',
 ]
+
+const IMAGE_DETECT_CHAT_WELCOME = '我是配图换镜检测助手。可讨论哪些镜头需要单独配图；说「开始检测」或点下方快捷按钮，我会流式展示检测过程。检测完成后可继续多轮调整策略并重新检测。'
+const IMAGE_PROMPT_CHAT_WELCOME = '我是配图文案助手。需先完成换镜检测；说「开始生成文案」或点快捷按钮，我会流式展示六维文案生成过程。生成后可逐段讨论修改，或补全缺失文案。'
+const IMAGE_DETECT_CHAT_STORAGE_PREFIX = 'huobao:narration-image-detect-chat:'
+const IMAGE_PROMPT_CHAT_STORAGE_PREFIX = 'huobao:narration-image-prompt-chat:'
+
+function defaultImageDetectChatMessages() {
+  return [{ role: 'assistant', content: IMAGE_DETECT_CHAT_WELCOME, local: true }]
+}
+
+function defaultImagePromptChatMessages() {
+  return [{ role: 'assistant', content: IMAGE_PROMPT_CHAT_WELCOME, local: true }]
+}
+
+function loadImageChatMessagesFromStorage(prefix: string, episodeId: number) {
+  if (!episodeId || typeof sessionStorage === 'undefined') return null
+  try {
+    const raw = sessionStorage.getItem(`${prefix}${episodeId}`)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed) || !parsed.length) return null
+    return parsed.filter(
+      (m: { role?: string; content?: string }) =>
+        (m?.role === 'user' || m?.role === 'assistant') && typeof m.content === 'string',
+    )
+  } catch {
+    return null
+  }
+}
+
+function saveImageChatMessagesToStorage(
+  prefix: string,
+  episodeId: number,
+  messages: Array<{ role: string; content?: string; thinking?: string; local?: boolean }>,
+) {
+  if (!episodeId || typeof sessionStorage === 'undefined') return
+  try {
+    const cleaned = messages.filter(m => {
+      if (m.local) return false
+      if (m.role === 'assistant' && !String(m.content || '').trim() && !String(m.thinking || '').trim()) return false
+      return true
+    })
+    const key = `${prefix}${episodeId}`
+    if (!cleaned.length) {
+      sessionStorage.removeItem(key)
+      return
+    }
+    sessionStorage.setItem(key, JSON.stringify(cleaned.map(({ role, content, thinking }) => ({ role, content, ...(thinking ? { thinking } : {}) }))))
+  } catch { /* ignore quota */ }
+}
+
+function restoreImageDetectChatForEpisode(episodeId: number) {
+  const stored = loadImageChatMessagesFromStorage(IMAGE_DETECT_CHAT_STORAGE_PREFIX, episodeId)
+  imageDetectChatMessages.value = stored?.length
+    ? [...defaultImageDetectChatMessages(), ...stored]
+    : defaultImageDetectChatMessages()
+}
+
+function restoreImagePromptChatForEpisode(episodeId: number) {
+  const stored = loadImageChatMessagesFromStorage(IMAGE_PROMPT_CHAT_STORAGE_PREFIX, episodeId)
+  imagePromptChatMessages.value = stored?.length
+    ? [...defaultImagePromptChatMessages(), ...stored]
+    : defaultImagePromptChatMessages()
+}
+
+const imageWorkflowChatTab = ref('detect')
+const imageDetectChatMessages = ref(defaultImageDetectChatMessages())
+const imageDetectChatInput = ref('')
+const imageDetectChatGenerating = ref(false)
+const imageDetectChatScrollRef = ref(null)
+const imageDetectChatAbortController = ref(null)
+const imageDetectChatQuickHints = [
+  '开始检测配图',
+  '更保守一些，减少配图张数',
+  '片头和第一个场景切换处务必单独配图',
+  '重新检测，合并同一场景的连续镜头',
+]
+
+const imagePromptChatMessages = ref(defaultImagePromptChatMessages())
+const imagePromptChatInput = ref('')
+const imagePromptChatGenerating = ref(false)
+const imagePromptChatScrollRef = ref(null)
+const imagePromptChatAbortController = ref(null)
+const imagePromptChatQuickHints = [
+  '开始生成全部配图文案',
+  '补全缺失的配图文案',
+  '整体画风更偏八十年代市井纪实',
+  '第5段改成夜市全景，突出霓虹灯牌',
+]
+
+const STORYBOARD_CHAT_WELCOME = '我是旁白分镜助手。整稿拆镜：按句分镜、自动标注 ** 强调、片头单独处理。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程；完成后可继续多轮讨论并重新分镜。'
+const STORYBOARD_CHAT_STORAGE_PREFIX = 'huobao:narration-storyboard-chat:'
+
+function defaultStoryboardChatMessages() {
+  return [{ role: 'assistant', content: STORYBOARD_CHAT_WELCOME, local: true }]
+}
+
+function restoreStoryboardChatForEpisode(episodeId: number) {
+  const stored = loadImageChatMessagesFromStorage(STORYBOARD_CHAT_STORAGE_PREFIX, episodeId)
+  storyboardChatMessages.value = stored?.length
+    ? [...defaultStoryboardChatMessages(), ...stored]
+    : defaultStoryboardChatMessages()
+}
+
+const storyboardChatMessages = ref(defaultStoryboardChatMessages())
+const storyboardChatInput = ref('')
+const storyboardChatGenerating = ref(false)
+const storyboardChatScrollRef = ref(null)
+const storyboardChatAbortController = ref(null)
+const storyboardChatQuickHints = [
+  '开始分镜',
+  '片头按逗号拆成多镜',
+  '长句尽量合并，不要超过 20 字一镜',
+  '重新分镜，强调词再标明显一些',
+]
+
 const rawContent = computed(() => episode.value?.content || '')
 const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
 const epId = computed(() => episode.value?.id || 0)
@@ -694,7 +856,7 @@ async function generateCustomTts() {
 }
 
 function ttsGenerateOptions(force = false, sb = null) {
-  const opts = {}
+  const opts = { async: true }
   if (force) opts.force = true
   if (isNarrationMode.value && localTtsEnabled.value !== false) {
     opts.local_tts = true
@@ -710,10 +872,6 @@ function ttsGenerateOptions(force = false, sb = null) {
     // drama mode: never send local_tts
   } else {
     opts.local_tts = false
-  }
-  if (isNarrationMode.value && sb && isNarrationTtsUnitLeader(sb, sbs.value) && !isNarrationTitleShot(sb)) {
-    opts.unit_tts = true
-    opts.tts_text = getComposeUnitMergedTtsText(sb, sbs.value)
   }
   return opts
 }
@@ -950,10 +1108,13 @@ const pendingCharAppearanceIds = ref([])
 const pendingSceneImageIds = ref([])
 const pendingShotFrameKeys = ref([])
 const pendingNarrationShotIds = ref([])
+const pendingTtsShotIds = ref([])
+const ttsBatchActive = ref(false)
 const pendingShotScanIds = ref([])
 const pendingVideoIds = ref([])
 const pendingComposeIds = ref([])
 const PROD_SHOT_PAGE_SIZE = 24
+const NARRATION_SHOT_PAGE_SIZE = 6
 const SCRIPT_STORYBOARD_PAGE_SIZE = 24
 const COMPOSE_LIST_PAGE_SIZE = 8
 const DUBBING_LIST_PAGE_SIZE = 6
@@ -2228,7 +2389,18 @@ const narrationTtsUnitList = computed(() =>
   isNarrationMode.value ? listNarrationTtsUnits(sbs.value) : sbs.value.filter(s => hasDialogue(s)),
 )
 const dubbingUnitViews = computed(() => {
-  if (isNarrationMode.value) return buildNarrationTtsUnitViews(sbs.value)
+  if (isNarrationMode.value) {
+    return listNarrationTtsUnits(sbs.value).map(sb => ({
+      sb,
+      subtitleLines: [],
+      shotRangeLabel: `#${getNarrationShotDisplayNo(sb)}`,
+      durationLabel: formatComposeUnitDuration(sb, sbs.value),
+      mergedText: getDialogueText(sb) || '',
+      ready: hasNarrationShotOwnTts(sb),
+      statusLabel: hasNarrationShotOwnTts(sb) ? '已生成' : '待生成',
+      lineCount: 1,
+    }))
+  }
   return narrationTtsUnitList.value.map(sb => ({
     sb,
     subtitleLines: [],
@@ -2250,7 +2422,7 @@ const dubbingPageItems = computed(() => {
 })
 const ttsGeneratedCount = computed(() => {
   if (isNarrationMode.value) {
-    return narrationTtsUnitList.value.filter(sb => narrationTtsUnitReady(sbs.value, sb)).length
+    return narrationTtsUnitList.value.filter(sb => hasNarrationShotOwnTts(sb)).length
   }
   return sbs.value.filter(s => hasDialogue(s) && hasTTS(s)).length
 })
@@ -2480,13 +2652,16 @@ const shotsFiltered = computed(() => {
   }
   return list
 })
+const shotsListPageSize = computed(() =>
+  isNarrationMode.value ? NARRATION_SHOT_PAGE_SIZE : PROD_SHOT_PAGE_SIZE,
+)
 const shotsPageCount = computed(() =>
-  Math.max(1, Math.ceil(shotsFiltered.value.length / PROD_SHOT_PAGE_SIZE)),
+  Math.max(1, Math.ceil(shotsFiltered.value.length / shotsListPageSize.value)),
 )
 const shotsPageItems = computed(() => {
   const page = Math.min(Math.max(1, shotsListPage.value), shotsPageCount.value)
-  const start = (page - 1) * PROD_SHOT_PAGE_SIZE
-  return shotsFiltered.value.slice(start, start + PROD_SHOT_PAGE_SIZE)
+  const start = (page - 1) * shotsListPageSize.value
+  return shotsFiltered.value.slice(start, start + shotsListPageSize.value)
 })
 const scriptStoryboardPageCount = computed(() =>
   Math.max(1, Math.ceil(sbs.value.length / SCRIPT_STORYBOARD_PAGE_SIZE)),
@@ -3127,8 +3302,32 @@ const scriptSteps = computed(() => {
 
 watch(rawContent, v => {
   localRaw.value = v
-  if (v?.trim()) scriptGenMode.value = 'manual'
 }, { immediate: true })
+
+watch(scriptChatMessages, msgs => {
+  if (epId.value) saveScriptChatMessagesToStorage(epId.value, msgs)
+}, { deep: true })
+
+watch(imageDetectChatMessages, msgs => {
+  if (epId.value) saveImageChatMessagesToStorage(IMAGE_DETECT_CHAT_STORAGE_PREFIX, epId.value, msgs)
+}, { deep: true })
+
+watch(imagePromptChatMessages, msgs => {
+  if (epId.value) saveImageChatMessagesToStorage(IMAGE_PROMPT_CHAT_STORAGE_PREFIX, epId.value, msgs)
+}, { deep: true })
+
+watch(storyboardChatMessages, msgs => {
+  if (epId.value) saveImageChatMessagesToStorage(STORYBOARD_CHAT_STORAGE_PREFIX, epId.value, msgs)
+}, { deep: true })
+
+watch(epId, (id, prev) => {
+  if (id && id !== prev) {
+    restoreScriptChatForEpisode(id)
+    restoreImageDetectChatForEpisode(id)
+    restoreImagePromptChatForEpisode(id)
+    restoreStoryboardChatForEpisode(id)
+  }
+})
 watch(scriptContent, v => { localScript.value = v }, { immediate: true })
 
 async function refreshStoryboardsOnly() {
@@ -3324,6 +3523,10 @@ async function refresh() {
 
       if (isNarrationMode.value) {
         scriptStep.value = inferNarrationScriptStep(episode.value, sbs.value.length, visualChars.value.length)
+        restoreScriptChatForEpisode(episode.value.id)
+        restoreImageDetectChatForEpisode(episode.value.id)
+        restoreImagePromptChatForEpisode(episode.value.id)
+        restoreStoryboardChatForEpisode(episode.value.id)
         try { await ensureNarratorCharacter() } catch {}
       } else if (epHasSbs) scriptStep.value = 4
       else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
@@ -3400,7 +3603,10 @@ function scrollScriptChatToBottom() {
 
 function clearScriptChat() {
   if (scriptChatGenerating.value) scriptChatAbortController.value?.abort()
-  scriptChatMessages.value = [{ role: 'assistant', content: SCRIPT_CHAT_WELCOME, local: true }]
+  scriptChatMessages.value = defaultScriptChatMessages()
+  if (epId.value && typeof sessionStorage !== 'undefined') {
+    sessionStorage.removeItem(`${SCRIPT_CHAT_STORAGE_PREFIX}${epId.value}`)
+  }
   scriptChatInput.value = ''
 }
 
@@ -3505,6 +3711,322 @@ async function sendScriptChat() {
     scrollScriptChatToBottom()
   }
 }
+
+function scrollImageDetectChatToBottom() {
+  const el = imageDetectChatScrollRef.value
+  if (!el) return
+  el.scrollTop = el.scrollHeight
+}
+
+function scrollImagePromptChatToBottom() {
+  const el = imagePromptChatScrollRef.value
+  if (!el) return
+  el.scrollTop = el.scrollHeight
+}
+
+function clearImageDetectChat() {
+  if (imageDetectChatGenerating.value) imageDetectChatAbortController.value?.abort()
+  imageDetectChatMessages.value = defaultImageDetectChatMessages()
+  if (epId.value && typeof sessionStorage !== 'undefined') {
+    sessionStorage.removeItem(`${IMAGE_DETECT_CHAT_STORAGE_PREFIX}${epId.value}`)
+  }
+  imageDetectChatInput.value = ''
+}
+
+function clearImagePromptChat() {
+  if (imagePromptChatGenerating.value) imagePromptChatAbortController.value?.abort()
+  imagePromptChatMessages.value = defaultImagePromptChatMessages()
+  if (epId.value && typeof sessionStorage !== 'undefined') {
+    sessionStorage.removeItem(`${IMAGE_PROMPT_CHAT_STORAGE_PREFIX}${epId.value}`)
+  }
+  imagePromptChatInput.value = ''
+}
+
+function resolveImageDetectChatAction(text: string, explicit?: 'run' | null) {
+  if (explicit === 'run') return 'run' as const
+  if (/^(开始|执行|重新|再次).*(检测|换镜|配图)/.test(text)) return 'run' as const
+  return null
+}
+
+function resolveImagePromptChatAction(text: string, explicit?: 'run' | 'retry_missing' | null) {
+  if (explicit) return explicit
+  if (/补全.*(缺失|缺).*文案/.test(text)) return 'retry_missing' as const
+  if (/^(开始|执行|重新|再次).*(生成|写).*(文案|prompt|配图)/.test(text)) return 'run' as const
+  return null
+}
+
+async function sendImageDetectChat(explicitAction?: 'run') {
+  const text = imageDetectChatInput.value.trim()
+  const action = resolveImageDetectChatAction(text, explicitAction)
+  if (!text && !action) return
+  if (imageDetectChatGenerating.value || !epId.value) return
+
+  const userText = text || '开始检测配图'
+  imageDetectChatMessages.value.push({ role: 'user', content: userText })
+  imageDetectChatInput.value = ''
+  imageDetectChatGenerating.value = true
+  imageDetectChatMessages.value.push({
+    role: 'assistant',
+    content: '',
+    thinking: '',
+  })
+  const assistantIdx = imageDetectChatMessages.value.length - 1
+
+  const controller = new AbortController()
+  imageDetectChatAbortController.value = controller
+  await nextTick()
+  scrollImageDetectChatToBottom()
+
+  try {
+    const payloadMessages = imageDetectChatMessages.value
+      .filter(msg => !msg.local)
+      .slice(0, -1)
+      .map(({ role, content }) => ({ role, content }))
+
+    const result = await episodeAPI.narrationImageDetectChatStream(epId.value, {
+      messages: payloadMessages,
+      text_model: episodeTextModel.value,
+      text_thinking: episodeTextThinking.value,
+      action: action ?? undefined,
+      style: getNarrationImageStyle(),
+      image_detect_mode: imageDetectMode.value === 'conservative' ? 'conservative' : 'paragraph',
+      detect_batch_threshold: imageDetectBatchThreshold.value,
+      detect_batch_size: imageDetectBatchSize.value,
+    }, {
+      signal: controller.signal,
+      onThinking: thinking => {
+        imageDetectChatMessages.value[assistantIdx].thinking = thinking
+        scrollImageDetectChatToBottom()
+      },
+      onDelta: content => {
+        imageDetectChatMessages.value[assistantIdx].content = content
+        scrollImageDetectChatToBottom()
+      },
+      onStatus: content => {
+        imageDetectChatMessages.value[assistantIdx].statusText = content
+        scrollImageDetectChatToBottom()
+      },
+    })
+
+    if (result?.reply) {
+      const msg = imageDetectChatMessages.value[assistantIdx]
+      msg.content = result.reply
+    }
+
+    if (action === 'run') {
+      await refresh()
+      syncNarrationBreakdownImageCount()
+      const count = narrationDetectDisplayCount.value
+      persistNarrationBreakdownSummary({
+        ...narrationBreakdownSummary.value,
+        image_needed_count: count,
+        paragraph_count: count,
+        image_detect_at: Date.now(),
+        image_detect_source: 'llm',
+      })
+    }
+  } catch (e) {
+    const msg = imageDetectChatMessages.value[assistantIdx]
+    if (!msg?.content && !msg?.thinking && !msg?.statusText) {
+      imageDetectChatMessages.value.splice(assistantIdx, 1)
+    }
+    if (e.message !== '请求已取消') toast.error(e.message)
+  } finally {
+    imageDetectChatGenerating.value = false
+    imageDetectChatAbortController.value = null
+    await nextTick()
+    scrollImageDetectChatToBottom()
+  }
+}
+
+async function sendImagePromptChat(explicitAction?: 'run' | 'retry_missing') {
+  const text = imagePromptChatInput.value.trim()
+  const action = resolveImagePromptChatAction(text, explicitAction)
+  if (!text && !action) return
+  if (imagePromptChatGenerating.value || !epId.value) return
+
+  const userText = text || (action === 'retry_missing' ? '补全缺失配图文案' : '开始生成配图文案')
+  imagePromptChatMessages.value.push({ role: 'user', content: userText })
+  imagePromptChatInput.value = ''
+  imagePromptChatGenerating.value = true
+  imagePromptChatMessages.value.push({
+    role: 'assistant',
+    content: '',
+    thinking: '',
+  })
+  const assistantIdx = imagePromptChatMessages.value.length - 1
+
+  const controller = new AbortController()
+  imagePromptChatAbortController.value = controller
+  await nextTick()
+  scrollImagePromptChatToBottom()
+
+  try {
+    const payloadMessages = imagePromptChatMessages.value
+      .filter(msg => !msg.local)
+      .slice(0, -1)
+      .map(({ role, content }) => ({ role, content }))
+
+    const result = await episodeAPI.narrationImagePromptChatStream(epId.value, {
+      messages: payloadMessages,
+      text_model: episodeTextModel.value,
+      text_thinking: episodeTextThinking.value,
+      action: action ?? undefined,
+      style: getNarrationImageStyle(),
+      prompt_batch_size: imagePromptBatchSize.value,
+    }, {
+      signal: controller.signal,
+      onThinking: thinking => {
+        imagePromptChatMessages.value[assistantIdx].thinking = thinking
+        scrollImagePromptChatToBottom()
+      },
+      onDelta: content => {
+        imagePromptChatMessages.value[assistantIdx].content = content
+        scrollImagePromptChatToBottom()
+      },
+      onStatus: content => {
+        imagePromptChatMessages.value[assistantIdx].statusText = content
+        scrollImagePromptChatToBottom()
+      },
+    })
+
+    if (result?.reply) {
+      const msg = imagePromptChatMessages.value[assistantIdx]
+      msg.content = result.reply
+    }
+
+    if (action) {
+      await refresh()
+      syncNarrationBreakdownImageCount()
+      persistNarrationBreakdownSummary({
+        ...narrationBreakdownSummary.value,
+        prompts_generated: narrationPromptDisplayCount.value,
+        image_prompt_at: Date.now(),
+        image_prompt_source: 'llm_raw',
+      })
+    }
+  } catch (e) {
+    const msg = imagePromptChatMessages.value[assistantIdx]
+    if (!msg?.content && !msg?.thinking && !msg?.statusText) {
+      imagePromptChatMessages.value.splice(assistantIdx, 1)
+    }
+    if (e.message !== '请求已取消') toast.error(e.message)
+  } finally {
+    imagePromptChatGenerating.value = false
+    imagePromptChatAbortController.value = null
+    await nextTick()
+    scrollImagePromptChatToBottom()
+  }
+}
+
+function scrollStoryboardChatToBottom() {
+  const el = storyboardChatScrollRef.value
+  if (!el) return
+  el.scrollTop = el.scrollHeight
+}
+
+function clearStoryboardChat() {
+  if (storyboardChatGenerating.value) storyboardChatAbortController.value?.abort()
+  storyboardChatMessages.value = defaultStoryboardChatMessages()
+  if (epId.value && typeof sessionStorage !== 'undefined') {
+    sessionStorage.removeItem(`${STORYBOARD_CHAT_STORAGE_PREFIX}${epId.value}`)
+  }
+  storyboardChatInput.value = ''
+}
+
+function resolveStoryboardChatAction(text: string, explicit?: 'run' | null) {
+  if (explicit === 'run') return 'run' as const
+  if (/^(开始|执行|重新|再次).*(分镜|拆镜)/.test(text)) return 'run' as const
+  return null
+}
+
+async function sendStoryboardChat(explicitAction?: 'run') {
+  const text = storyboardChatInput.value.trim()
+  const action = resolveStoryboardChatAction(text, explicitAction)
+  if (!text && !action) return
+  if (storyboardChatGenerating.value || !epId.value) return
+
+  const userText = text || '开始分镜'
+  storyboardChatMessages.value.push({ role: 'user', content: userText })
+  storyboardChatInput.value = ''
+  storyboardChatGenerating.value = true
+  storyboardChatMessages.value.push({
+    role: 'assistant',
+    content: '',
+    thinking: '',
+  })
+  const assistantIdx = storyboardChatMessages.value.length - 1
+
+  const controller = new AbortController()
+  storyboardChatAbortController.value = controller
+  await nextTick()
+  scrollStoryboardChatToBottom()
+
+  try {
+    let script: string | undefined
+    if (action === 'run') {
+      script = await saveNarrationScript()
+    }
+
+    const payloadMessages = storyboardChatMessages.value
+      .filter(msg => !msg.local)
+      .slice(0, -1)
+      .map(({ role, content }) => ({ role, content }))
+
+    const result = await episodeAPI.narrationStoryboardChatStream(epId.value, {
+      messages: payloadMessages,
+      ...narrationTextModelParams(),
+      action: action ?? undefined,
+      script,
+    }, {
+      signal: controller.signal,
+      onThinking: thinking => {
+        storyboardChatMessages.value[assistantIdx].thinking = thinking
+        scrollStoryboardChatToBottom()
+      },
+      onDelta: content => {
+        storyboardChatMessages.value[assistantIdx].content = content
+        scrollStoryboardChatToBottom()
+      },
+      onStatus: content => {
+        storyboardChatMessages.value[assistantIdx].statusText = content
+        scrollStoryboardChatToBottom()
+      },
+    })
+
+    if (result?.reply) {
+      const msg = storyboardChatMessages.value[assistantIdx]
+      msg.content = result.reply
+    }
+
+    if (action === 'run') {
+      const res = result?.breakdown || {}
+      persistNarrationBreakdownSummary({
+        ...res,
+        storyboard_breakdown_at: Date.now(),
+      })
+      await refresh()
+      await ensureNarratorCharacter()
+    }
+  } catch (e) {
+    const msg = storyboardChatMessages.value[assistantIdx]
+    if (!msg?.content && !msg?.thinking && !msg?.statusText) {
+      storyboardChatMessages.value.splice(assistantIdx, 1)
+    }
+    if (e.message !== '请求已取消') toast.error(e.message)
+  } finally {
+    storyboardChatGenerating.value = false
+    storyboardChatAbortController.value = null
+    await nextTick()
+    scrollStoryboardChatToBottom()
+  }
+}
+
+watch(() => scriptStep.value, step => {
+  if (isNarrationMode.value && step === narrationStoryboardStep()) {
+    nextTick(() => scrollStoryboardChatToBottom())
+  }
+})
 
 watch(() => scriptStep.value, step => {
   if (isNarrationMode.value && step === narrationScriptChatStep()) {
@@ -4133,7 +4655,22 @@ async function genSample(id) { try { await characterAPI.voiceSample(id, epId.val
 async function addShot() { await storyboardAPI.create({ episode_id: epId.value, storyboard_number: sbs.value.length + 1, title: `镜头${sbs.value.length + 1}`, duration: 10 }); refresh() }
 
 function isBatchRunning(key) {
+  if (key === 'tts') return ttsBatchActive.value
   return batchRunning.value.has(key)
+}
+
+function isPendingTtsShot(id) {
+  return pendingTtsShotIds.value.includes(id)
+}
+
+function markTtsPending(id) {
+  if (!pendingTtsShotIds.value.includes(id)) {
+    pendingTtsShotIds.value = [...pendingTtsShotIds.value, id]
+  }
+}
+
+function unmarkTtsPending(id) {
+  pendingTtsShotIds.value = pendingTtsShotIds.value.filter(item => item !== id)
 }
 
 function tryBeginBatch(key, message) {
@@ -4180,7 +4717,7 @@ function getTtsBatchTargets(force = false) {
     ? narrationTtsUnitList.value
     : sbs.value.filter(sb => hasDialogue(sb))
   return list
-    .filter(sb => force || (isNarrationMode.value ? !narrationTtsUnitReady(sbs.value, sb) : !hasTTS(sb)))
+    .filter(sb => force || (isNarrationMode.value ? !hasNarrationShotOwnTts(sb) : !hasTTS(sb)))
     .sort((a, b) => (a.storyboard_number || a.storyboardNumber || 0) - (b.storyboard_number || b.storyboardNumber || 0))
 }
 
@@ -5254,14 +5791,45 @@ function getTTSUrl(sb) { return sb?.tts_audio_url || sb?.ttsAudioUrl || '' }
 function applyTtsResultToStoryboard(storyboardId, result) {
   const path = result?.tts_audio_url || result?.ttsAudioUrl
   if (!path) return
-  const rawIds = result?.unit_member_ids ?? result?.unitMemberIds
-  const memberIds = Array.isArray(rawIds) && rawIds.length ? rawIds : [storyboardId]
-  sbs.value = sbs.value.map(sb => {
-    if (!memberIds.includes(sb.id)) return sb
-    return { ...sb, tts_audio_url: path, ttsAudioUrl: path }
-  })
+  const duration = result?.duration
+  const updateShot = (sb) => {
+    if (!sb) return
+    sb.tts_audio_url = path
+    sb.ttsAudioUrl = path
+    if (Number.isFinite(duration) && duration > 0) sb.duration = duration
+  }
+  updateShot(sbs.value.find(sb => sb.id === storyboardId))
+  const memberIds = result?.unit_member_ids
+  if (Array.isArray(memberIds)) {
+    for (const mid of memberIds) {
+      if (mid === storyboardId) continue
+      updateShot(sbs.value.find(sb => sb.id === mid))
+    }
+  }
 }
-function hasNarrationShotOwnTts(sb) { return !!getNarrationShotOwnTts(sb) }
+
+async function watchTtsBatchResults(shotIds, options = { attempts: 90, delay: 2000 }) {
+  const pending = new Set(shotIds)
+  for (let i = 0; i < options.attempts && pending.size; i++) {
+    await sleep(i === 0 ? 800 : options.delay)
+    await refreshStoryboardsOnly()
+    for (const id of [...pending]) {
+      const sb = sbs.value.find(s => s.id === id)
+      if (!sb) {
+        pending.delete(id)
+        unmarkTtsPending(id)
+        continue
+      }
+      const ready = isNarrationMode.value ? hasNarrationShotOwnTts(sb) : hasTTS(sb)
+      if (ready) {
+        pending.delete(id)
+        unmarkTtsPending(id)
+      }
+    }
+  }
+  for (const id of pending) unmarkTtsPending(id)
+  return { completed: shotIds.length - pending.size, remaining: pending.size }
+}
 function hasEffectiveTTS(sb) {
   if (!isNarrationMode.value) return hasTTS(sb)
   return !!resolveNarrationEffectiveTts(sbs.value, sb).path
@@ -5272,9 +5840,7 @@ function getEffectiveTTSUrl(sb) {
 }
 function narrationTtsUnitStatusLabel(sb) {
   if (!isNarrationMode.value) return hasTTS(sb) ? '已生成' : '待生成'
-  if (narrationTtsUnitReady(sbs.value, sb)) return '已就绪'
-  const members = isNarrationTitleShot(sb) ? [sb] : getParagraphComposeMembers(sb, sbs.value)
-  if (members.length > 1) return '待生成（整段）'
+  if (hasNarrationShotOwnTts(sb)) return '已生成'
   return '待生成'
 }
 function narrationTtsStatusLabel(sb) {
@@ -5289,17 +5855,40 @@ function getDialogueSpeaker(sb) {
   return speaker
 }
 async function genShotTTS(sb, force = false) {
+  if (isPendingTtsShot(sb.id)) return
+  markTtsPending(sb.id)
+  const label = isNarrationMode.value
+    ? `#${getNarrationShotDisplayNo(sb)}`
+    : `#${sb.storyboard_number || sb.storyboardNumber || sb.id}`
   try {
     const res = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force, sb))
-    applyTtsResultToStoryboard(sb.id, res)
-    const provider = res?.provider || (localTtsEnabled.value ? localTtsEngine.value : 'api')
-    const mode = provider === 'edge' ? '（本地 Edge）' : provider === 'voicebox' ? '（Voicebox）' : '（付费 API）'
-    const label = isNarrationMode.value && !isNarrationTitleShot(sb)
-      ? getComposeUnitShotRangeLabel(sb, sbs.value)
-      : `#${sb.storyboard_number || sb.storyboardNumber || sb.id}`
-    toast.success(`${label} 配音已生成${mode}`)
-    await refreshStoryboardsOnly()
-  } catch (e) { toast.error(e.message) }
+    if (res?.tts_audio_url) {
+      applyTtsResultToStoryboard(sb.id, res)
+      const provider = res?.provider || (localTtsEnabled.value ? localTtsEngine.value : 'api')
+      const mode = provider === 'edge' ? '（本地 Edge）' : provider === 'voicebox' ? '（Voicebox）' : '（付费 API）'
+      toast.success(`${label} 配音已生成${mode}`)
+      unmarkTtsPending(sb.id)
+      return
+    }
+    if (res?.status === 'processing') {
+      toast.info(`${label} 配音后台生成中…`)
+      void watchTtsBatchResults([sb.id]).then(({ completed, remaining }) => {
+        if (completed) {
+          const provider = res?.provider || (localTtsEnabled.value ? localTtsEngine.value : 'api')
+          const mode = provider === 'edge' ? '（本地 Edge）' : provider === 'voicebox' ? '（Voicebox）' : '（付费 API）'
+          toast.success(`${label} 配音已生成${mode}`)
+        } else if (remaining) {
+          toast.warning(`${label} 配音超时，请稍后刷新或重试`)
+        }
+      })
+      return
+    }
+    unmarkTtsPending(sb.id)
+    toast.error('配音提交失败')
+  } catch (e) {
+    unmarkTtsPending(sb.id)
+    toast.error(e.message)
+  }
 }
 async function batchShotTTS() {
   const pending = getTtsBatchTargets(false)
@@ -5307,7 +5896,7 @@ async function batchShotTTS() {
     toast.info(ttsEligibleCount.value ? '所有镜头配音已就绪' : '当前没有可生成的对白或旁白')
     return
   }
-  await runBatchShotTTS(`配音生成中（剩余 ${pending.length} 段${localTtsEnabled.value ? ' · 并发' : ''}）…`, false)
+  void runBatchShotTTS(`配音生成中（剩余 ${pending.length} 段${localTtsEnabled.value ? ' · 后台' : ''}）…`, false)
 }
 
 async function batchShotTTSAll() {
@@ -5316,65 +5905,83 @@ async function batchShotTTSAll() {
     toast.info('当前没有可生成的对白或旁白')
     return
   }
-  await runBatchShotTTS(
-    `正在重新生成全部 ${targets.length} 段配音${localTtsEnabled.value ? ' · 并发' : ''}…`,
+  void runBatchShotTTS(
+    `正在重新生成全部 ${targets.length} 段配音${localTtsEnabled.value ? ' · 后台' : ''}…`,
     true,
   )
 }
 
 async function runBatchShotTTS(batchMessage, force) {
-  if (!tryBeginBatch('tts', batchMessage)) return
-  const concurrency = resolveTtsBatchConcurrency()
-  const engineLabel = localTtsEngine.value === 'voicebox' ? 'Voicebox' : 'Edge'
-  let totalSuccess = 0
-  let stallRounds = 0
+  if (ttsBatchActive.value) {
+    toast.warning('配音批量任务进行中')
+    return
+  }
+  const targets = getTtsBatchTargets(force)
+  if (!targets.length) return
+
+  ttsBatchActive.value = true
+  toast.info(batchMessage)
+
+  const shotIds = targets.map(sb => sb.id)
+  pendingTtsShotIds.value = [...new Set([...pendingTtsShotIds.value, ...shotIds])]
 
   try {
-    while (stallRounds < 3) {
-      const pending = getTtsBatchTargets(force)
-      if (!pending.length) break
+    const results = await mapWithConcurrency(targets, 6, async sb =>
+      storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force, sb)),
+    )
 
-      let roundSuccess = 0
-      await mapWithConcurrency(
-        pending,
-        concurrency,
-        async (sb) => {
-          const result = await storyboardAPI.generateTTS(sb.id, ttsGenerateOptions(force, sb))
-          applyTtsResultToStoryboard(sb.id, result)
-          roundSuccess++
-          totalSuccess++
-          return result
-        },
-      )
+    let submitFail = 0
+    let immediate = 0
 
-      // 「全部重新生成」只跑一轮，避免对已完成的镜头反复 force 重生成
-      if (force) break
+    results.forEach((result, index) => {
+      const sb = targets[index]
+      if (!sb) return
+      if (result.status === 'rejected') {
+        submitFail++
+        unmarkTtsPending(sb.id)
+        return
+      }
+      const res = result.value
+      if (res?.tts_audio_url) {
+        applyTtsResultToStoryboard(sb.id, res)
+        unmarkTtsPending(sb.id)
+        immediate++
+      } else if (res?.status !== 'processing') {
+        submitFail++
+        unmarkTtsPending(sb.id)
+      }
+    })
 
-      const remaining = getTtsBatchTargets(false).length
-      if (remaining === 0) break
-      if (roundSuccess === 0) stallRounds++
-      else stallRounds = 0
-      if (remaining > 0) await sleep(2000)
+    const stillPending = shotIds.filter(id => pendingTtsShotIds.value.includes(id))
+    const submitted = shotIds.length - submitFail
+
+    if (stillPending.length) {
+      if (submitted > 0) {
+        toast.success(`已提交 ${submitted} 段配音后台生成${immediate ? `（${immediate} 段已就绪）` : ''}`)
+      }
+      void watchTtsBatchResults(stillPending).then(({ completed, remaining }) => {
+        ttsBatchActive.value = false
+        if (remaining > 0) {
+          toast.warning(`配音完成 ${completed + immediate} 段，仍有 ${remaining} 段未完成`)
+        } else if (completed + immediate > 0) {
+          toast.success(`剩余配音已全部生成${localTtsEnabled.value ? `（本地 ${localTtsEngine.value === 'voicebox' ? 'Voicebox' : 'Edge'}）` : ''}`)
+        }
+      })
+      return
     }
 
-    await refreshStoryboardsOnly()
-
-    const remaining = getTtsBatchTargets(force).length
-    if (force) {
-      if (totalSuccess > 0) {
-        toast.success(`已重新生成 ${totalSuccess} 条配音${localTtsEnabled.value ? `（本地 ${engineLabel} · ${concurrency} 并发）` : ''}`)
-      }
-    } else if (remaining > 0) {
-      if (totalSuccess > 0) {
-        toast.warning(`已生成 ${totalSuccess} 条，仍有 ${remaining} 条未完成，请再点「生成剩余」`)
-      } else {
-        toast.error(`仍有 ${remaining} 条配音未完成，请再点「生成剩余」`)
-      }
-    } else if (totalSuccess > 0) {
-      toast.success(`剩余配音已全部生成${localTtsEnabled.value ? `（本地 ${engineLabel} · ${concurrency} 并发）` : ''}`)
+    ttsBatchActive.value = false
+    if (submitFail && !immediate) {
+      toast.error(`${submitFail} 段配音提交失败`)
+    } else if (immediate > 0) {
+      toast.success(force
+        ? `已重新生成 ${immediate} 条配音`
+        : `剩余配音已全部生成${localTtsEnabled.value ? `（本地 ${localTtsEngine.value === 'voicebox' ? 'Voicebox' : 'Edge'}）` : ''}`)
     }
-  } finally {
-    endBatch('tts')
+  } catch (e) {
+    ttsBatchActive.value = false
+    shotIds.forEach(unmarkTtsPending)
+    toast.error(e.message)
   }
 }
 
@@ -6663,6 +7270,7 @@ onMounted(async () => {
     NARRATION_PROMPT_COPY_BATCH_SIZE,
     OPENING_SUBTITLE_DEFAULT,
     OPENING_SUBTITLE_LEGACY,
+    NARRATION_SHOT_PAGE_SIZE,
     PROD_SHOT_PAGE_SIZE,
     SCRIPT_CHAT_WELCOME,
     SCRIPT_STORYBOARD_PAGE_SIZE,
@@ -6747,6 +7355,9 @@ onMounted(async () => {
     clearNarrationShotImage,
     clearNarrationSrtFiles,
     clearScriptChat,
+    clearImageDetectChat,
+    clearImagePromptChat,
+    clearStoryboardChat,
     clearUploadedEpisodeAudio,
     closeComposeVideoViewer,
     closeImageViewer,
@@ -6842,6 +7453,7 @@ onMounted(async () => {
     exportWatermarkAnimated,
     exportWatermarkText,
     extractNarrationSentence,
+    getNarrationShotDisplayText,
     extractScriptFromChat,
     failedComposeMessages,
     failedVideoMessages,
@@ -6972,7 +7584,18 @@ onMounted(async () => {
     imageConfigs,
     imageDetectBatchSize,
     imageDetectBatchThreshold,
+    imageDetectChatGenerating,
+    imageDetectChatInput,
+    imageDetectChatMessages,
+    imageDetectChatQuickHints,
+    imageDetectChatScrollRef,
     imageDetectMode,
+    imagePromptChatGenerating,
+    imagePromptChatInput,
+    imagePromptChatMessages,
+    imagePromptChatQuickHints,
+    imagePromptChatScrollRef,
+    imageWorkflowChatTab,
     imageModelOptions,
     imageModelSupportsReferenceImages,
     imagePromptBatchSize,
@@ -6991,6 +7614,7 @@ onMounted(async () => {
     isPendingCharRecognize,
     isPendingCompose,
     isPendingNarrationShot,
+    isPendingTtsShot,
     isPendingSceneImage,
     isPendingShotFrame,
     isPendingVideo,
@@ -7175,6 +7799,7 @@ onMounted(async () => {
     pendingComposeIds,
     pendingMergeKind,
     pendingNarrationShotIds,
+    pendingTtsShotIds,
     pendingSceneImageIds,
     pendingShotFrameKeys,
     pendingShotScanIds,
@@ -7278,12 +7903,18 @@ onMounted(async () => {
     scriptStoryboardPage,
     scriptStoryboardPageCount,
     scriptStoryboardPageItems,
+    scrollImageDetectChatToBottom,
+    scrollImagePromptChatToBottom,
     scrollScriptChatToBottom,
+    scrollStoryboardChatToBottom,
     selectGridHistory,
     selectedSb,
     selectedVoiceSupportsInstruct,
     selectedVoiceboxVoiceReady,
+    sendImageDetectChat,
+    sendImagePromptChat,
     sendScriptChat,
+    sendStoryboardChat,
     setEpisodeTextThinking,
     setNarrationShotLayout,
     setReferPreviousEpisode,
@@ -7299,6 +7930,7 @@ onMounted(async () => {
     shotsFiltered,
     shotsListFilter,
     shotsListPage,
+    shotsListPageSize,
     shotsPageCount,
     shotsPageItems,
     shotsPendingCount,
@@ -7335,6 +7967,11 @@ onMounted(async () => {
     storyboardDescUploadInputRef,
     storyboardDescUploadTarget,
     storyboardDisplayIndex,
+    storyboardChatGenerating,
+    storyboardChatInput,
+    storyboardChatMessages,
+    storyboardChatQuickHints,
+    storyboardChatScrollRef,
     storyboardStep,
     stripNarrationDialoguePrefix,
     stripRawEmphasis,
@@ -7387,6 +8024,7 @@ onMounted(async () => {
     trimNarrationPart,
     tryBeginBatch,
     ttsAssignedCount,
+    ttsBatchActive,
     ttsEligibleCount,
     ttsGenerateOptions,
     ttsGeneratedCount,

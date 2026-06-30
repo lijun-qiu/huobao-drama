@@ -10,6 +10,7 @@
         </div>
 
         <template v-else>
+          <div class="prod-shell">
           <div class="step-toolbar prod-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
@@ -582,8 +583,11 @@
                 <a :href="customTtsDownloadSrc" :download="customTtsDownloadName" class="btn btn-sm">下载音频</a>
               </div>
             </div>
+            <div class="narration-hint" style="margin-bottom:10px">
+              <strong>按句配音：</strong>每句分镜单独生成配音；合成视频时同一段配图内的多句会自动拼接，字幕按各句真实时长对齐。
+            </div>
             <div class="prod-section-bar">
-              <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 个配音段</span>
+              <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 句待配音</span>
               <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已就绪</span>
               <span v-if="localTtsEnabled" class="tag">{{ localTtsEngineLabel }} · {{ localTtsSpeedLabel }}{{ localVoiceboxModelSizeLabel ? ` · ${localVoiceboxModelSizeLabel}` : '' }}{{ localVoiceboxInstructLabel ? ` · ${localVoiceboxInstructLabel}` : '' }}</span>
               <span v-else class="tag">{{ lockedAudioConfigLabel }}</span>
@@ -595,11 +599,11 @@
                 >
                   {{ narrationAudioSplitting ? '裁剪中…' : `按文案裁剪（${uploadedEpisodeAudio.length} 段）` }}
                 </button>
-                <button class="btn btn-sm btn-primary" :disabled="isBatchRunning('tts') || !ttsPendingCount" @click="batchShotTTS">
+                <button class="btn btn-sm btn-primary" :disabled="ttsBatchActive || !ttsPendingCount" @click="batchShotTTS">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
-                  {{ isBatchRunning('tts') ? '生成中…' : '生成剩余' }}{{ ttsPendingCount ? ` (${ttsPendingCount})` : '' }}
+                  {{ ttsBatchActive ? '提交中…' : (pendingTtsShotIds.length ? `生成中 (${pendingTtsShotIds.length})` : '生成剩余') }}{{ !ttsBatchActive && !pendingTtsShotIds.length && ttsPendingCount ? ` (${ttsPendingCount})` : '' }}
                 </button>
-                <button class="btn btn-sm" :disabled="isBatchRunning('tts') || !ttsEligibleCount" @click="batchShotTTSAll">
+                <button class="btn btn-sm" :disabled="ttsBatchActive || !ttsEligibleCount" @click="batchShotTTSAll">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                   全部生成
                 </button>
@@ -607,7 +611,7 @@
                   v-if="ttsAssignedCount"
                   class="btn btn-sm"
                   title="清除本集全部镜头配音，删除文件并重置数据库"
-                  :disabled="narrationAssetClearing || isBatchRunning('tts')"
+                  :disabled="narrationAssetClearing || ttsBatchActive || pendingTtsShotIds.length"
                   @click="clearAllNarrationTts"
                 >
                   {{ narrationAssetClearing ? '清除中…' : `清除已有配音 (${ttsAssignedCount})` }}
@@ -636,7 +640,7 @@
                     <div class="dub-copy">
                     <div class="dub-title">
                       <span class="frame-num">{{ item.shotRangeLabel }}</span>
-                      <span class="frame-badge">{{ isNarrationTitleShot(item.sb) ? '片头' : `配音段 ${(dubbingListPage - 1) * DUBBING_LIST_PAGE_SIZE + i + 1}` }}</span>
+                      <span class="frame-badge">{{ isNarrationTitleShot(item.sb) ? '片头' : '旁白句' }}</span>
                     </div>
                     <ul v-if="!isNarrationTitleShot(item.sb) && item.subtitleLines.length > 1" class="compose-subtitle-lines dub-unit-lines">
                       <li v-for="line in item.subtitleLines" :key="line.index">
@@ -646,7 +650,7 @@
                     </ul>
                     <div v-else class="dub-desc">{{ item.mergedText || '未填写文本' }}</div>
                     </div>
-                    <span class="tag" :class="item.ready ? 'tag-success' : ''">{{ item.statusLabel }}</span>
+                    <span class="tag" :class="item.ready ? 'tag-success' : ''">{{ isPendingTtsShot(item.sb.id) ? '生成中' : item.statusLabel }}</span>
                   </div>
                 <div class="dub-meta">
                   <span class="dim">{{ item.lineCount }} 句</span>
@@ -656,9 +660,9 @@
                   <audio v-if="getEffectiveTTSUrl(item.sb)" :src="'/' + getEffectiveTTSUrl(item.sb)" controls preload="none" class="dub-audio" />
                   <div v-else class="dim" style="font-size:12px">尚未生成语音文件</div>
                   <div class="ml-auto flex gap-1">
-                    <button class="btn btn-sm" @click="triggerShotTtsUpload(item.sb.id)">上传 MP3</button>
-                    <button class="btn btn-sm" @click="genShotTTS(item.sb, hasNarrationShotOwnTts(item.sb))">
-                      {{ hasNarrationShotOwnTts(item.sb) ? '重新生成' : '生成配音' }}
+                    <button class="btn btn-sm" :disabled="isPendingTtsShot(item.sb.id)" @click="triggerShotTtsUpload(item.sb.id)">上传 MP3</button>
+                    <button class="btn btn-sm" :disabled="isPendingTtsShot(item.sb.id)" @click="genShotTTS(item.sb, hasNarrationShotOwnTts(item.sb))">
+                      {{ isPendingTtsShot(item.sb.id) ? '生成中' : (hasNarrationShotOwnTts(item.sb) ? '重新生成' : '生成配音') }}
                     </button>
                   </div>
                 </div>
@@ -793,180 +797,315 @@
           <!-- Sub: Shots (Narration) -->
           <div v-else-if="prodTab === 'shots' && isNarrationMode" class="prod-content">
             <div class="narration-hint">
-              <strong>配图策略：</strong>① 检测配图 → ② 生成纯 LLM 六维文案 → ③ 检查/优化配图文案 → 批量生成配图。卡片可「复用上一镜 / 下一镜」；同段 inherit 镜头合成时自动沿用。
+              <strong>配图策略：</strong>① AI 对话检测配图 → ② AI 对话生成六维文案 → ③ 检查/优化 → 批量生成配图。
             </div>
-            <div class="prod-image-model-bar detect-batch-config" style="margin-bottom:12px">
-              <span class="dim" style="font-size:12px">检测分批</span>
-              <label class="detect-batch-field">
-                超过
-                <input
-                  v-model.number="imageDetectBatchThreshold"
-                  type="number"
-                  min="0"
-                  max="500"
-                  step="1"
-                  class="detect-batch-input"
-                  title="镜头数超过该值时分批检测；0 表示始终单次调用"
-                />
-                镜
-              </label>
-              <label class="detect-batch-field">
-                每批
-                <input
-                  v-model.number="imageDetectBatchSize"
-                  type="number"
-                  min="10"
-                  max="200"
-                  step="1"
-                  class="detect-batch-input"
-                  title="分批时每批最多覆盖的镜头数"
-                />
-                镜
-              </label>
-              <span class="dim" style="font-size:11px">0=不分批</span>
-              <span class="dim" style="font-size:12px;margin-left:12px">配图文案</span>
-              <label class="detect-batch-field">
-                每批
-                <input
-                  v-model.number="imagePromptBatchSize"
-                  type="number"
-                  min="1"
-                  max="20"
-                  step="1"
-                  class="detect-batch-input"
-                  title="生成配图文案时每批最多段落数"
-                />
-                段
-              </label>
-              <BaseSelect
-                v-if="narrationPromptTestBatchOptions.length > 1"
-                :options="narrationPromptTestBatchOptions"
-                :model-value="narrationPromptTestBatchIndex"
-                placeholder="测试段批"
-                style="min-width:88px"
-                :title="`按每批 ${normalizedImagePromptBatchSize()} 段划分；测试仅生成所选段批`"
-                @update:model-value="narrationPromptTestBatchIndex = Number($event) || 1"
-              />
-              <button
-                class="btn btn-sm"
-                :disabled="narrationImageBreaking || !narrationPromptTestCanRun"
-                :title="narrationPromptTestPendingTitle"
-                @click="doNarrationImagePromptsTest"
-              >
-                <Loader2 v-if="narrationImageBreaking && narrationImagePromptTestActive" :size="11" class="animate-spin" />
-                测试生成
-              </button>
-              <button
-                class="btn btn-sm"
-                :disabled="narrationImageBreaking || narrationAssetClearing || !narrationPromptLiveCount"
-                title="清除本集全部配图锚点的配图文案（保留检测分段与 scene_content，不删配图文件）"
-                @click="clearAllNarrationImagePrompts"
-              >
-                {{ narrationAssetClearing ? '清除中…' : `清除文案 (${narrationPromptLiveCount})` }}
-              </button>
-            </div>
-            <div class="prod-image-model-bar" style="margin-bottom:12px">
-              <span class="dim" style="font-size:12px">画风风格</span>
-              <BaseSelect
-                :model-value="narrationImageStyle"
-                :options="narrationImageStyleOptions"
-                placeholder="选择配图画风"
-                style="min-width:120px"
-                title="配图生成专用画风，默认简体素人；与项目级画风独立"
-                @update:model-value="onNarrationImageStyleChange"
-              />
-              <span class="dim" style="font-size:12px">文本模型</span>
-              <BaseSelect
-                :model-value="episodeTextModel"
-                :options="textModelOptions"
-                placeholder="选择文本模型"
-                searchable
-                style="width:360px"
-                @update:model-value="onEpisodeTextModelChange"
-              />
-              <div v-if="episodeTextModelSupportsThinking" class="text-thinking-toggle">
-                <span class="dim" style="font-size:12px">思考模式</span>
-                <div class="prod-tabs text-thinking-tabs">
-                  <button
-                    type="button"
-                    class="prod-tab"
-                    :class="{ active: episodeTextThinking }"
-                    @click="setEpisodeTextThinking(true)"
-                  >开</button>
-                  <button
-                    type="button"
-                    class="prod-tab"
-                    :class="{ active: !episodeTextThinking }"
-                    @click="setEpisodeTextThinking(false)"
-                  >关</button>
+
+            <div class="image-workflow-chat-wrap">
+              <div class="prod-tabs image-workflow-chat-tabs">
+                <button
+                  type="button"
+                  class="prod-tab"
+                  :class="{ active: imageWorkflowChatTab === 'detect' }"
+                  :disabled="imageDetectChatGenerating || imagePromptChatGenerating"
+                  @click="imageWorkflowChatTab = 'detect'"
+                >
+                  ① 检测配图
+                  <span v-if="narrationDetectDisplayCount" class="btn-step-count">{{ narrationDetectDisplayCount }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="prod-tab"
+                  :class="{ active: imageWorkflowChatTab === 'prompts' }"
+                  :disabled="imageDetectChatGenerating || imagePromptChatGenerating"
+                  @click="imageWorkflowChatTab = 'prompts'"
+                >
+                  ② 生成文案
+                  <span v-if="narrationDetectDisplayCount" class="btn-step-count">{{ narrationPromptDisplayCount }}/{{ narrationDetectDisplayCount }}</span>
+                </button>
+              </div>
+
+              <!-- Detect chat -->
+              <div v-if="imageWorkflowChatTab === 'detect'" class="script-chat-panel script-chat-panel-full image-workflow-chat-panel">
+                <div class="script-chat-body">
+                  <div class="script-chat-toolbar">
+                    <span class="dim" style="font-size:12px">换镜检测 · AI 对话</span>
+                    <button type="button" class="btn btn-sm" :disabled="imageDetectChatGenerating" @click="clearImageDetectChat">清空对话</button>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-primary"
+                      :disabled="imageDetectChatGenerating || !sbs.length"
+                      @click="sendImageDetectChat('run')"
+                    >
+                      <Loader2 v-if="imageDetectChatGenerating" :size="11" class="animate-spin" />
+                      执行检测
+                    </button>
+                  </div>
+                  <div ref="imageDetectChatScrollRef" class="script-chat-messages">
+                    <div
+                      v-for="(msg, idx) in imageDetectChatMessages"
+                      :key="'detect-' + idx"
+                      :class="['script-chat-msg', msg.role === 'user' ? 'is-user' : 'is-assistant']"
+                    >
+                      <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
+                      <div class="script-chat-msg-text">
+                        <template v-if="msg.role === 'assistant' && imageDetectChatGenerating && idx === imageDetectChatMessages.length - 1 && !msg.content && !msg.thinking && !msg.statusText">
+                          <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
+                          <span class="dim">正在生成…</span>
+                        </template>
+                        <template v-else>
+                          <div v-if="msg.statusText" class="script-chat-status">{{ msg.statusText }}</div>
+                          <div v-if="msg.thinking" class="script-chat-thinking">
+                            <div class="script-chat-thinking-label">思考过程</div>
+                            <div class="script-chat-thinking-body">{{ msg.thinking }}</div>
+                          </div>
+                          <div v-if="msg.content" class="script-chat-reply">{{ msg.content }}</div>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="script-chat-hints">
+                    <button
+                      v-for="hint in imageDetectChatQuickHints"
+                      :key="hint"
+                      type="button"
+                      class="btn btn-sm"
+                      :disabled="imageDetectChatGenerating"
+                      @click="imageDetectChatInput = hint"
+                    >
+                      {{ hint }}
+                    </button>
+                  </div>
+                  <div class="script-chat-compose">
+                    <textarea
+                      v-model="imageDetectChatInput"
+                      class="script-chat-input"
+                      rows="2"
+                      placeholder="讨论配图策略，或输入「开始检测」…"
+                      :disabled="imageDetectChatGenerating"
+                      @keydown.enter.exact.prevent="sendImageDetectChat()"
+                    />
+                    <button
+                      type="button"
+                      class="btn btn-primary script-chat-send"
+                      :disabled="imageDetectChatGenerating || !imageDetectChatInput.trim()"
+                      @click="sendImageDetectChat()"
+                    >
+                      发送
+                    </button>
+                  </div>
                 </div>
               </div>
-              <span class="tag">配图分镜（三步）</span>
-              <button
-                class="btn btn-sm"
-                :disabled="narrationImageBreaking || !sbs.length"
-                title="LLM 判定哪些镜头需要配图及张数"
-                @click="doNarrationImageDetect"
-              >
-                <Loader2 v-if="narrationImageBreaking && narrationImageStep === 'detect'" :size="11" class="animate-spin" />
-                ① 检测配图
-                <span v-if="narrationDetectDisplayCount" class="btn-step-count">{{ narrationDetectDisplayCount }}</span>
-              </button>
-              <button
-                class="btn btn-sm"
-                :disabled="narrationImageBreaking || !sbs.length || !narrationDetectDisplayCount"
-                title="根据检测结果生成纯 LLM 六维配图文案（无清洗）"
-                @click="doNarrationImagePrompts"
-              >
-                <Loader2 v-if="narrationImageBreaking && narrationImageStep === 'prompts' && !narrationImagePromptTestActive" :size="11" class="animate-spin" />
-                ② 生成配图文案
-                <span v-if="narrationDetectDisplayCount" class="btn-step-count">{{ narrationPromptDisplayCount }}/{{ narrationDetectDisplayCount }}</span>
-              </button>
-              <button
-                class="btn btn-sm"
-                :disabled="narrationImageAuditing || !narrationNeedImageCount"
-                title="本地规则扫描血腥/服装/格式等问题，不修改"
-                @click="doNarrationImageAudit"
-              >
-                <Loader2 v-if="narrationImageAuditing" :size="11" class="animate-spin" />
-                ③ 检查文案
-              </button>
-              <button
-                class="btn btn-sm"
-                :disabled="narrationImageDescUploading || !sbs.length"
-                title="上传 .txt 配图描述：【#01】格式或逐行对应需配图镜头"
-                @click="triggerNarrationImageDescUpload"
-              >
-                <Loader2 v-if="narrationImageDescUploading" :size="11" class="animate-spin" />
-                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                上传分镜描述
-              </button>
-              <div class="narration-breakdown-actions">
+
+              <!-- Prompt chat -->
+              <div v-else class="script-chat-panel script-chat-panel-full image-workflow-chat-panel">
+                <div class="script-chat-body">
+                  <div class="script-chat-toolbar">
+                    <span class="dim" style="font-size:12px">六维文案 · AI 对话</span>
+                    <button type="button" class="btn btn-sm" :disabled="imagePromptChatGenerating" @click="clearImagePromptChat">清空对话</button>
+                    <button
+                      type="button"
+                      class="btn btn-sm"
+                      :disabled="imagePromptChatGenerating || !narrationDetectDisplayCount"
+                      @click="sendImagePromptChat('retry_missing')"
+                    >
+                      补全缺失 ({{ narrationMissingPromptCount }})
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-primary"
+                      :disabled="imagePromptChatGenerating || !narrationDetectDisplayCount"
+                      @click="sendImagePromptChat('run')"
+                    >
+                      <Loader2 v-if="imagePromptChatGenerating" :size="11" class="animate-spin" />
+                      执行生成
+                    </button>
+                  </div>
+                  <div ref="imagePromptChatScrollRef" class="script-chat-messages">
+                    <div
+                      v-for="(msg, idx) in imagePromptChatMessages"
+                      :key="'prompt-' + idx"
+                      :class="['script-chat-msg', msg.role === 'user' ? 'is-user' : 'is-assistant']"
+                    >
+                      <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
+                      <div class="script-chat-msg-text">
+                        <template v-if="msg.role === 'assistant' && imagePromptChatGenerating && idx === imagePromptChatMessages.length - 1 && !msg.content && !msg.thinking && !msg.statusText">
+                          <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
+                          <span class="dim">正在生成…</span>
+                        </template>
+                        <template v-else>
+                          <div v-if="msg.statusText" class="script-chat-status">{{ msg.statusText }}</div>
+                          <div v-if="msg.thinking" class="script-chat-thinking">
+                            <div class="script-chat-thinking-label">思考过程</div>
+                            <div class="script-chat-thinking-body">{{ msg.thinking }}</div>
+                          </div>
+                          <div v-if="msg.content" class="script-chat-reply">{{ msg.content }}</div>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="script-chat-hints">
+                    <button
+                      v-for="hint in imagePromptChatQuickHints"
+                      :key="hint"
+                      type="button"
+                      class="btn btn-sm"
+                      :disabled="imagePromptChatGenerating"
+                      @click="imagePromptChatInput = hint"
+                    >
+                      {{ hint }}
+                    </button>
+                  </div>
+                  <div class="script-chat-compose">
+                    <textarea
+                      v-model="imagePromptChatInput"
+                      class="script-chat-input"
+                      rows="2"
+                      placeholder="讨论或调整配图文案，或输入「开始生成文案」…"
+                      :disabled="imagePromptChatGenerating"
+                      @keydown.enter.exact.prevent="sendImagePromptChat()"
+                    />
+                    <button
+                      type="button"
+                      class="btn btn-primary script-chat-send"
+                      :disabled="imagePromptChatGenerating || !imagePromptChatInput.trim()"
+                      @click="sendImagePromptChat()"
+                    >
+                      发送
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="image-workflow-config">
+              <div class="prod-image-model-bar detect-batch-config">
+                <span class="dim" style="font-size:12px">检测分批</span>
+                <label class="detect-batch-field">
+                  超过
+                  <input
+                    v-model.number="imageDetectBatchThreshold"
+                    type="number"
+                    min="0"
+                    max="500"
+                    step="1"
+                    class="detect-batch-input"
+                    title="镜头数超过该值时分批检测；0 表示始终单次调用"
+                  />
+                  镜
+                </label>
+                <label class="detect-batch-field">
+                  每批
+                  <input
+                    v-model.number="imageDetectBatchSize"
+                    type="number"
+                    min="10"
+                    max="200"
+                    step="1"
+                    class="detect-batch-input"
+                    title="分批时每批最多覆盖的镜头数"
+                  />
+                  镜
+                </label>
+                <span class="dim" style="font-size:11px">0=不分批</span>
+                <span class="dim" style="font-size:12px;margin-left:12px">配图文案</span>
+                <label class="detect-batch-field">
+                  每批
+                  <input
+                    v-model.number="imagePromptBatchSize"
+                    type="number"
+                    min="1"
+                    max="20"
+                    step="1"
+                    class="detect-batch-input"
+                    title="生成配图文案时每批最多段落数"
+                  />
+                  段
+                </label>
+                <BaseSelect
+                  v-if="narrationPromptTestBatchOptions.length > 1"
+                  :options="narrationPromptTestBatchOptions"
+                  :model-value="narrationPromptTestBatchIndex"
+                  placeholder="测试段批"
+                  style="min-width:88px"
+                  :title="`按每批 ${normalizedImagePromptBatchSize()} 段划分；测试仅生成所选段批`"
+                  @update:model-value="narrationPromptTestBatchIndex = Number($event) || 1"
+                />
                 <button
-                  v-if="narrationMissingPromptCount"
-                  class="btn btn-sm btn-retry-missing-prompts"
-                  :disabled="narrationImageBreaking"
-                  title="仅对缺配图文案的锚点镜头重新调用 LLM（不重新检测）"
-                  @click="doRetryMissingNarrationImagePrompts"
+                  class="btn btn-sm"
+                  :disabled="narrationImageBreaking || !narrationPromptTestCanRun"
+                  :title="narrationPromptTestPendingTitle"
+                  @click="doNarrationImagePromptsTest"
                 >
-                  <Loader2 v-if="narrationImageBreaking" :size="11" class="animate-spin" />
-                  补全缺失文案 ({{ narrationMissingPromptCount }})
+                  <Loader2 v-if="narrationImageBreaking && narrationImagePromptTestActive" :size="11" class="animate-spin" />
+                  测试生成
+                </button>
+                <button
+                  class="btn btn-sm"
+                  :disabled="narrationImageBreaking || narrationAssetClearing || !narrationPromptLiveCount"
+                  title="清除本集全部配图锚点的配图文案（保留检测分段与 scene_content，不删配图文件）"
+                  @click="clearAllNarrationImagePrompts"
+                >
+                  {{ narrationAssetClearing ? '清除中…' : `清除文案 (${narrationPromptLiveCount})` }}
+                </button>
+              </div>
+              <div class="prod-image-model-bar">
+                <span class="dim" style="font-size:12px">画风风格</span>
+                <BaseSelect
+                  :model-value="narrationImageStyle"
+                  :options="narrationImageStyleOptions"
+                  placeholder="选择配图画风"
+                  style="min-width:120px"
+                  title="配图生成专用画风，默认简体素人；与项目级画风独立"
+                  @update:model-value="onNarrationImageStyleChange"
+                />
+                <span class="dim" style="font-size:12px">文本模型</span>
+                <BaseSelect
+                  :model-value="episodeTextModel"
+                  :options="textModelOptions"
+                  placeholder="选择文本模型"
+                  searchable
+                  style="width:360px"
+                  @update:model-value="onEpisodeTextModelChange"
+                />
+                <div v-if="episodeTextModelSupportsThinking" class="text-thinking-toggle">
+                  <span class="dim" style="font-size:12px">思考模式</span>
+                  <div class="prod-tabs text-thinking-tabs">
+                    <button
+                      type="button"
+                      class="prod-tab"
+                      :class="{ active: episodeTextThinking }"
+                      @click="setEpisodeTextThinking(true)"
+                    >开</button>
+                    <button
+                      type="button"
+                      class="prod-tab"
+                      :class="{ active: !episodeTextThinking }"
+                      @click="setEpisodeTextThinking(false)"
+                    >关</button>
+                  </div>
+                </div>
+                <button
+                  class="btn btn-sm"
+                  :disabled="narrationImageAuditing || !narrationNeedImageCount"
+                  title="本地规则扫描血腥/服装/格式等问题，不修改"
+                  @click="doNarrationImageAudit"
+                >
+                  <Loader2 v-if="narrationImageAuditing" :size="11" class="animate-spin" />
+                  ③ 检查文案
+                </button>
+                <button
+                  class="btn btn-sm"
+                  :disabled="narrationImageDescUploading || !sbs.length"
+                  title="上传 .txt 配图描述：【#01】格式或逐行对应需配图镜头"
+                  @click="triggerNarrationImageDescUpload"
+                >
+                  <Loader2 v-if="narrationImageDescUploading" :size="11" class="animate-spin" />
+                  <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  上传分镜描述
                 </button>
               </div>
             </div>
-            <div
-              v-if="narrationImageBreaking"
-              class="progress-wrap"
-              style="margin-bottom:12px"
-            >
-              <div class="progress-head">
-                <span class="progress-label">{{ narrationImageBreakdownProgressMessage }}</span>
-                <span class="progress-val">{{ narrationImageBreakdownProgressPercent }}%</span>
-              </div>
-              <div class="progress-track">
-                <div class="progress-fill" :style="{ width: narrationImageBreakdownProgressPercent + '%' }"></div>
-              </div>
-            </div>
+
             <div v-if="narrationImageAuditPanel" class="narration-breakdown-panel" style="margin-bottom:12px">
               <div class="narration-breakdown-head">
                 <div>
@@ -1115,7 +1254,7 @@
                 </button>
               </div>
             </div>
-            <div v-if="sbs.length > PROD_SHOT_PAGE_SIZE" class="prod-pagination">
+            <div v-if="sbs.length > NARRATION_SHOT_PAGE_SIZE" class="prod-pagination">
               <select v-model="shotsListFilter" class="input input-sm prod-page-filter">
                 <option value="all">全部 {{ sbs.length }}</option>
                 <option value="pending">待生成 {{ narrationImagesPendingCount }}</option>
@@ -1125,7 +1264,7 @@
                 <option value="inherit">沿用 {{ sbs.length - narrationNeedImageCount }}</option>
               </select>
               <button class="btn btn-sm" :disabled="shotsListPage <= 1" @click="shotsListPage -= 1">上一页</button>
-              <span class="dim prod-page-indicator">{{ shotsListPage }} / {{ shotsPageCount }} · 每页 {{ PROD_SHOT_PAGE_SIZE }}</span>
+              <span class="dim prod-page-indicator">{{ shotsListPage }} / {{ shotsPageCount }} · 每页 {{ NARRATION_SHOT_PAGE_SIZE }}</span>
               <button class="btn btn-sm" :disabled="shotsListPage >= shotsPageCount" @click="shotsListPage += 1">下一页</button>
             </div>
             <div class="prod-grid">
@@ -1151,7 +1290,8 @@
                   <span v-else-if="!narrationShotNeedsOwnImage(sb)" class="prod-overlay-badge">沿用</span>
                 </div>
                 <div class="prod-info">
-                  <div class="prod-desc truncate">{{ extractNarrationSentence(sb) || '—' }}</div>
+                  <div class="prod-narration-label dim">旁白</div>
+                  <div class="prod-desc prod-narration-text">{{ getNarrationShotDisplayText(sb, sbs) || '—' }}</div>
                   <div class="prod-meta-line dim" style="font-size:11px">{{ narrationShotImageLabel(sb) }}</div>
                   <label v-if="narrationShotNeedsOwnImage(sb)" class="narration-shot-prompt-field" @click.stop>
                     <div class="narration-shot-prompt-head">
@@ -1757,6 +1897,7 @@
           </div>
 
           <!-- Production Navigator -->
+          </div>
         </template>
 </div>
 </template>

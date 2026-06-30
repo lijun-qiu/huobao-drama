@@ -37,6 +37,9 @@ import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 import { splitNarrationAudioForEpisode, transcribeNarrationAudioFiles } from '../services/narration-audio-split.js'
 import { importNarrationImageDesc, importNarrationStoryboardDesc } from '../services/storyboard-desc-import.js'
 import { chatNarrationScript, emphasizeNarrationScriptDraft, streamChatNarrationScript } from '../services/narration-script-chat.js'
+import { streamNarrationImageDetectChat } from '../services/narration-image-detect-chat.js'
+import { streamNarrationImagePromptChat } from '../services/narration-image-prompt-chat.js'
+import { streamNarrationStoryboardChat } from '../services/narration-storyboard-chat.js'
 
 const app = new Hono()
 
@@ -427,6 +430,28 @@ app.post('/:id/narration-storyboard-breakdown', async (c) => {
   }
 })
 
+// POST /episodes/:id/narration-storyboard-chat — 旁白分镜多轮对话（SSE）
+app.post('/:id/narration-storyboard-chat', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const messages = parseImageChatMessages(body)
+  const chatParams = {
+    episodeId,
+    messages,
+    textModel: body.text_model ?? body.textModel,
+    textThinking: resolveEpisodeTextThinking(ep, body.text_thinking ?? body.textThinking),
+    action: body.action === 'run' ? 'run' as const : null,
+    script: typeof body.script === 'string' ? body.script : undefined,
+  }
+
+  return imageChatSseResponse(send =>
+    streamNarrationStoryboardChat(chatParams, send, c.req.raw.signal),
+  )
+})
+
 // POST /episodes/:id/import-narration-storyboard-desc — 上传旁白分镜描述
 app.post('/:id/import-narration-storyboard-desc', async (c) => {
   const episodeId = Number(c.req.param('id'))
@@ -572,6 +597,96 @@ app.post('/:id/narration-image-prompts', async (c) => {
     releaseNarrationImageBreakdownJob(episodeId)
     return badRequest(c, err.message)
   }
+})
+
+function parseImageChatMessages(body: Record<string, unknown>) {
+  const rawMessages = Array.isArray(body.messages) ? body.messages : []
+  return rawMessages
+    .map((m: { role?: string; content?: string }) => ({
+      role: m?.role === 'assistant' ? 'assistant' as const : 'user' as const,
+      content: String(m?.content || ''),
+    }))
+    .filter((m: { content: string }) => m.content.trim())
+}
+
+function imageChatSseResponse(handler: (send: (payload: Record<string, unknown>) => void) => Promise<Record<string, unknown>>) {
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (payload: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+      }
+      try {
+        const result = await handler(send)
+        send({ type: 'done', ...result })
+        controller.close()
+      } catch (err: any) {
+        send({ type: 'error', message: String(err?.message || err || '生成失败') })
+        controller.close()
+      }
+    },
+  })
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    },
+  })
+}
+
+// POST /episodes/:id/narration-image-detect-chat — 配图换镜检测多轮对话（SSE）
+app.post('/:id/narration-image-detect-chat', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const messages = parseImageChatMessages(body)
+  const chatParams = {
+    episodeId,
+    messages,
+    textModel: body.text_model ?? body.textModel,
+    textThinking: resolveEpisodeTextThinking(ep, body.text_thinking ?? body.textThinking),
+    action: body.action === 'run' ? 'run' as const : null,
+    style: body.style,
+    imageDetectMode: body.image_detect_mode === 'conservative' ? 'conservative' as const : 'paragraph' as const,
+    detectBatchThreshold: typeof body.detect_batch_threshold === 'number' ? body.detect_batch_threshold : undefined,
+    detectBatchSize: typeof body.detect_batch_size === 'number' ? body.detect_batch_size : undefined,
+  }
+
+  return imageChatSseResponse(send =>
+    streamNarrationImageDetectChat(chatParams, send, c.req.raw.signal),
+  )
+})
+
+// POST /episodes/:id/narration-image-prompt-chat — 配图文案多轮对话（SSE）
+app.post('/:id/narration-image-prompt-chat', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const messages = parseImageChatMessages(body)
+  const action = body.action === 'retry_missing'
+    ? 'retry_missing' as const
+    : body.action === 'run'
+      ? 'run' as const
+      : null
+
+  const chatParams = {
+    episodeId,
+    messages,
+    textModel: body.text_model ?? body.textModel,
+    textThinking: resolveEpisodeTextThinking(ep, body.text_thinking ?? body.textThinking),
+    action,
+    style: body.style,
+    promptBatchSize: typeof body.prompt_batch_size === 'number' ? body.prompt_batch_size : undefined,
+  }
+
+  return imageChatSseResponse(send =>
+    streamNarrationImagePromptChat(chatParams, send, c.req.raw.signal),
+  )
 })
 
 // GET /episodes/:id/narration-image-audit — ③ 扫描配图文案问题（不修改）

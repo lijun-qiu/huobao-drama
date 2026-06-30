@@ -41,6 +41,16 @@ export function normalizeTtsText(text: string) {
   return text.replace(/\s/g, '').trim()
 }
 
+/** 多镜合并配音：句间插入逗号，避免无标点长句导致克隆 TTS 停顿混乱 */
+export function joinNarrationTtsParts(parts: string[]): string {
+  return parts
+    .map(s => stripEmphasisMarkers(String(s || '')).trim())
+    .filter(Boolean)
+    .map(s => s.replace(/[，,、；;。！？!?…—\-~～\s]+$/g, '').trim())
+    .filter(Boolean)
+    .join('，')
+}
+
 type TtsSb = {
   id: number
   storyboardNumber: number

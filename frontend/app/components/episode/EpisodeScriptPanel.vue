@@ -196,6 +196,9 @@
               </div>
             </div>
             <div class="toolbar-right">
+              <button type="button" class="btn btn-sm" @click="goSubStep('script:chat')">
+                返回 AI 对话
+              </button>
               <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
               <button
                 v-if="rawHasEmphasis"
@@ -494,13 +497,14 @@
         </div>
 
         <!-- Storyboard -->
-        <div v-else-if="scriptStep === storyboardStep" class="step-editor">
+        <div v-else-if="scriptStep === storyboardStep" class="step-editor" :class="{ 'script-chat-step': isNarrationMode && !sbs.length, 'narration-storyboard-step': isNarrationMode }">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
                 <span class="step-num">{{ isNarrationMode ? '03' : '05' }}</span>
                 <span class="step-name">{{ isNarrationMode ? '旁白分镜' : '分镜列表' }}</span>
               </div>
+              <span v-if="isNarrationMode" class="dim" style="font-size:12px;margin-left:8px">AI 对话 · 整稿拆镜</span>
             </div>
             <div class="toolbar-right">
               <span v-if="sbs.length" class="char-count">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
@@ -512,24 +516,114 @@
                 <span class="locked-config">视频模型 · {{ lockedVideoConfigLabel }}</span>
               </template>
               <template v-if="isNarrationMode">
-                <span class="tag dim" style="font-size:11px">旁白 TTS 分镜</span>
+                <button
+                  class="btn btn-sm"
+                  :disabled="narrationStoryboardDescUploading || storyboardChatGenerating"
+                  title="上传 .txt 分镜描述：全文案按规则拆分，或【#01】格式逐镜填充"
+                  @click="triggerNarrationStoryboardDescUpload"
+                >
+                  <Loader2 v-if="narrationStoryboardDescUploading" :size="11" class="animate-spin" />
+                  <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  上传分镜描述
+                </button>
               </template>
-              <button
-                v-if="isNarrationMode"
-                class="btn btn-sm"
-                :disabled="narrationStoryboardDescUploading || narrationBreaking"
-                title="上传 .txt 分镜描述：全文案按规则拆分，或【#01】格式逐镜填充"
-                @click="triggerNarrationStoryboardDescUpload"
-              >
-                <Loader2 v-if="narrationStoryboardDescUploading" :size="11" class="animate-spin" />
-                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                上传分镜描述
-              </button>
-              <button class="btn btn-sm" :disabled="rn || narrationBreaking" @click="isNarrationMode ? doNarrationBreakdown() : doBreakdown()">
-                <Loader2 v-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" :size="11" class="animate-spin" />
+              <button v-if="!isNarrationMode" class="btn btn-sm" :disabled="rn || narrationBreaking" @click="doBreakdown()">
+                <Loader2 v-if="rn && rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                {{ sbs.length ? '重新分镜' : (isNarrationMode ? '旁白分镜' : 'AI 拆解分镜') }}
+                {{ sbs.length ? '重新分镜' : 'AI 拆解分镜' }}
               </button>
+            </div>
+          </div>
+
+          <div v-if="isNarrationMode" class="script-chat-panel script-chat-panel-full storyboard-chat-panel">
+            <div class="script-chat-body">
+              <div class="script-chat-toolbar">
+                <span class="dim" style="font-size:12px">文本模型</span>
+                <BaseSelect
+                  :model-value="episodeTextModel"
+                  :options="textModelOptions"
+                  placeholder="选择模型"
+                  searchable
+                  style="width:280px"
+                  @update:model-value="onEpisodeTextModelChange"
+                />
+                <div v-if="episodeTextModelSupportsThinking" class="text-thinking-toggle">
+                  <span class="dim" style="font-size:12px">思考</span>
+                  <div class="prod-tabs text-thinking-tabs">
+                    <button type="button" class="prod-tab" :class="{ active: episodeTextThinking }" @click="setEpisodeTextThinking(true)">开</button>
+                    <button type="button" class="prod-tab" :class="{ active: !episodeTextThinking }" @click="setEpisodeTextThinking(false)">关</button>
+                  </div>
+                </div>
+                <button type="button" class="btn btn-sm" :disabled="storyboardChatGenerating" @click="clearStoryboardChat">清空对话</button>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-primary"
+                  :disabled="storyboardChatGenerating"
+                  @click="sendStoryboardChat('run')"
+                >
+                  <Loader2 v-if="storyboardChatGenerating" :size="11" class="animate-spin" />
+                  {{ sbs.length ? '重新分镜' : '执行拆镜' }}
+                </button>
+              </div>
+              <div ref="storyboardChatScrollRef" class="script-chat-messages">
+                <div
+                  v-for="(msg, idx) in storyboardChatMessages"
+                  :key="'sb-' + idx"
+                  :class="['script-chat-msg', msg.role === 'user' ? 'is-user' : 'is-assistant']"
+                >
+                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
+                  <div class="script-chat-msg-text">
+                    <template v-if="msg.role === 'assistant' && storyboardChatGenerating && idx === storyboardChatMessages.length - 1 && !msg.content && !msg.thinking && !msg.statusText">
+                      <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
+                      <span class="dim">{{ episodeTextThinking ? '等待思考…' : '正在生成…' }}</span>
+                    </template>
+                    <template v-else>
+                      <div v-if="msg.statusText" class="script-chat-status">{{ msg.statusText }}</div>
+                      <div v-if="msg.thinking" class="script-chat-thinking">
+                        <div class="script-chat-thinking-label">思考过程</div>
+                        <div class="script-chat-thinking-body">{{ msg.thinking }}</div>
+                      </div>
+                      <div v-if="msg.content" class="script-chat-reply">{{ msg.content }}</div>
+                      <div
+                        v-else-if="msg.role === 'assistant' && storyboardChatGenerating && idx === storyboardChatMessages.length - 1 && msg.thinking"
+                        class="dim script-chat-writing-hint"
+                      >
+                        正在写回复…
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+              <div class="script-chat-hints">
+                <button
+                  v-for="hint in storyboardChatQuickHints"
+                  :key="hint"
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="storyboardChatGenerating"
+                  @click="storyboardChatInput = hint"
+                >
+                  {{ hint }}
+                </button>
+              </div>
+              <div class="script-chat-compose">
+                <textarea
+                  v-model="storyboardChatInput"
+                  class="script-chat-input"
+                  rows="2"
+                  placeholder="讨论拆镜粒度、片头处理，或输入「开始分镜」…"
+                  :disabled="storyboardChatGenerating"
+                  @keydown.enter.exact.prevent="sendStoryboardChat()"
+                />
+                <button
+                  type="button"
+                  class="btn btn-primary script-chat-send"
+                  :disabled="storyboardChatGenerating || !storyboardChatInput.trim()"
+                  @click="sendStoryboardChat()"
+                >
+                  发送
+                </button>
+              </div>
             </div>
           </div>
 
@@ -853,37 +947,24 @@
             </div>
           </div>
 
-          <div v-else-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" class="step-loading">
+          <div v-else-if="!isNarrationMode && ((rn && rt === 'storyboard_breaker') || narrationBreaking)" class="step-loading">
             <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
-            <div class="loading-text">{{ isNarrationMode ? '正在整稿拆镜并标注字幕强调…' : '正在拆解分镜并生成提示词...' }}</div>
+            <div class="loading-text">正在拆解分镜并生成提示词...</div>
           </div>
 
-          <div v-else class="step-empty">
+          <div v-else-if="!isNarrationMode" class="step-empty">
             <div class="empty-visual">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">
                 <rect x="2" y="2" width="20" height="20" rx="2.5"/><line x1="7" y1="8" x2="7" y2="16"/><line x1="10" y1="8" x2="10" y2="16"/><line x1="13" y1="8" x2="13" y2="16"/>
               </svg>
             </div>
-            <div class="empty-title">{{ isNarrationMode ? '将解说文案拆解为旁白镜头' : '将剧本拆解为分镜序列' }}</div>
-            <div class="empty-desc">{{ isNarrationMode ? '整稿一次交给 LLM 拆镜（句末标点断句、长句按逗号合并），并自动标注 ** 强调词；片头写「标题：」或「今天体验的人生剧本是…」' : 'AI 自动分析剧本，生成镜头列表和视频提示词' }}</div>
-            <div v-if="!isNarrationMode" class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
-            <div v-if="isNarrationMode" class="narration-hint" style="margin:10px 0">
-              <strong>旁白分镜：</strong>按句拆分便于编辑；<strong>配音与镜头合成</strong>按场景段（同配图段合并为一段配音、一条成片）。<code>**强调词**</code> 在剧本生成时用 ** 包裹。
-            </div>
-            <div v-if="isNarrationMode" style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
-              <span class="tag">旁白 TTS 分镜</span>
-            </div>
-            <div v-if="isNarrationMode" class="step-empty-actions" style="margin-bottom:10px">
-              <button class="btn" :disabled="narrationStoryboardDescUploading || narrationBreaking" @click="triggerNarrationStoryboardDescUpload">
-                <Loader2 v-if="narrationStoryboardDescUploading" :size="13" class="animate-spin" />
-                <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                上传分镜描述
-              </button>
-            </div>
-            <button class="btn btn-primary" :disabled="narrationBreaking" @click="isNarrationMode ? doNarrationBreakdown() : doBreakdown()">
-              <Loader2 v-if="(rn && rt === 'storyboard_breaker') || narrationBreaking" :size="13" class="animate-spin" />
+            <div class="empty-title">将剧本拆解为分镜序列</div>
+            <div class="empty-desc">AI 自动分析剧本，生成镜头列表和视频提示词</div>
+            <div class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
+            <button class="btn btn-primary" :disabled="narrationBreaking" @click="doBreakdown()">
+              <Loader2 v-if="rn && rt === 'storyboard_breaker'" :size="13" class="animate-spin" />
               <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-              {{ isNarrationMode ? (sbs.length ? '重新分镜' : '旁白分镜') : 'AI 拆解分镜' }}
+              AI 拆解分镜
             </button>
           </div>
         </div>

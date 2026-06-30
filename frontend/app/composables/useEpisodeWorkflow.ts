@@ -435,6 +435,16 @@ export function stripSubtitleEmphasis(text: string): string {
   return String(text || '').replace(/\*\*/g, '').trim()
 }
 
+/** 多镜合并配音：句间加逗号，给 TTS 自然停顿提示 */
+export function joinNarrationTtsParts(parts: string[]): string {
+  return parts
+    .map(s => stripSubtitleEmphasis(s))
+    .filter(Boolean)
+    .map(s => s.replace(/[，,、；;。！？!?…—\-~～\s]+$/g, '').trim())
+    .filter(Boolean)
+    .join('，')
+}
+
 export function estimateStoryboardDurationSec(sb: any): number {
   const stored = Number(sb?.duration)
   if (Number.isFinite(stored) && stored > 0) return stored
@@ -462,7 +472,10 @@ export function buildComposeUnitSubtitleLines(members: any[]): ComposeUnitSubtit
     const marked = resolveStoryboardSubtitleNarration(member)
     const displayText = stripSubtitleEmphasis(marked)
     if (!displayText) continue
-    const durationSec = estimateStoryboardDurationSec(member)
+    const stored = Number(member?.duration)
+    const durationSec = Number.isFinite(stored) && stored > 0
+      ? stored
+      : estimateStoryboardDurationSec(member)
     const startSec = offsetSec
     const endSec = offsetSec + durationSec
     lines.push({
@@ -508,21 +521,18 @@ export function getComposeUnitShotRangeLabel(sb: any, storyboards: any[]): strin
 }
 
 export function getComposeUnitMergedTtsText(sb: any, storyboards: any[]): string {
-  const lines = getComposeUnitSubtitleLines(sb, storyboards)
-  if (!lines.length) return resolveStoryboardSubtitleNarration(sb).replace(/\*\*/g, '').trim()
-  return lines.map(line => line.displayText).join('')
+  const members = getParagraphComposeMembers(sb, storyboards)
+  const parts = members
+    .map((member: any) => extractNarrationSentence(member))
+    .filter(Boolean)
+  if (!parts.length) return stripSubtitleEmphasis(resolveStoryboardSubtitleNarration(sb))
+  return joinNarrationTtsParts(parts)
 }
 
-/** 配音列表：片头逐镜 + 正文按合成单元（一段一配音） */
+/** 配音列表：片头 + 正文每句一镜（按句配音，合成时再拼段落） */
 export function listNarrationTtsUnits(storyboards: any[]) {
   const ordered = sortStoryboards(storyboards)
-  const leaderIds = new Set(getComposeUnitLeaders(storyboards).map(item => item.id))
-  return ordered.filter(sb => {
-    const dialogue = String(sb?.dialogue || '').trim()
-    if (!dialogue) return false
-    if (isNarrationTitleShot(sb)) return true
-    return leaderIds.has(sb.id)
-  })
+  return ordered.filter(sb => String(sb?.dialogue || '').trim())
 }
 
 export type NarrationTtsUnitViewItem = {
@@ -561,7 +571,7 @@ export function buildNarrationTtsUnitViews(storyboards: any[]): NarrationTtsUnit
     const members = isNarrationTitleShot(sb) ? [sb] : resolveParagraphComposeMembers(sb, groups)
     const subtitleLines = buildComposeUnitSubtitleLines(members)
     const mergedText = subtitleLines.length
-      ? subtitleLines.map(line => line.displayText).join('')
+      ? joinNarrationTtsParts(subtitleLines.map(line => line.displayText))
       : stripSubtitleEmphasis(resolveStoryboardSubtitleNarration(sb))
 
     let shotRangeLabel: string
@@ -578,8 +588,11 @@ export function buildNarrationTtsUnitViews(storyboards: any[]): NarrationTtsUnit
     const totalSec = subtitleLines.length
       ? subtitleLines[subtitleLines.length - 1].endSec
       : estimateStoryboardDurationSec(sb)
-    const ready = members.every(member => hasEffectiveNarrationTts(storyboards, member))
-    const statusLabel = ready ? '已就绪' : (members.length > 1 ? '待生成（整段）' : '待生成')
+    const ready = members.every(member => hasNarrationShotOwnTts(member))
+    const pendingCount = members.filter(member => !hasNarrationShotOwnTts(member)).length
+    const statusLabel = ready
+      ? '已就绪'
+      : (members.length > 1 ? `待生成 ${pendingCount}/${members.length} 句` : '待生成')
 
     return {
       sb,
@@ -800,6 +813,24 @@ export function resolveSceneContentForShot(storyboards: any[], sb: any): string 
   const last = sentences[sentences.length - 1]
   if (sentences.length === 2) return `${first}。${last}`
   return `${first}。${sentences.slice(1, -1).join('，')}。${last}`
+}
+
+/** 配图模块展示用：优先 scene_content / narration_lines，完整旁白不截断 */
+export function getNarrationShotDisplayText(sb: any, storyboards?: any[]): string {
+  const meta = parseNarrationImageMeta(sb)
+  const scene = String(meta.scene_content || '').trim()
+  if (scene) return scene
+  const lines = meta.image_narration_lines?.length
+    ? meta.image_narration_lines
+    : meta.narration_lines?.length
+      ? meta.narration_lines
+      : null
+  if (lines?.length) return lines.join('\n')
+  if (storyboards?.length && meta.narration_image_mode === 'new') {
+    const resolved = resolveSceneContentForShot(storyboards, sb).trim()
+    if (resolved) return resolved
+  }
+  return extractNarrationSentence(sb)
 }
 
 export function collectBodyNarrationLines(storyboards: any[]): string[] {
@@ -1159,6 +1190,10 @@ export function getNarrationShotOwnTts(sb: any) {
   return sb?.tts_audio_url || sb?.ttsAudioUrl || null
 }
 
+export function hasNarrationShotOwnTts(sb: any) {
+  return !!getNarrationShotOwnTts(sb)
+}
+
 export function resolveNarrationTtsMode(meta: ReturnType<typeof parseNarrationImageMeta>) {
   if (meta.narration_tts_mode) return meta.narration_tts_mode
   if (meta.narration_shot_type === 'title') return 'new'
@@ -1211,7 +1246,7 @@ export function narrationShotTtsReady(storyboards: any[], sb: any) {
 
 export function narrationTtsReady(storyboards: any[]) {
   if (!storyboards.length) return false
-  return listNarrationTtsUnits(storyboards).every(sb => narrationTtsUnitReady(storyboards, sb))
+  return listNarrationTtsUnits(storyboards).every(sb => hasNarrationShotOwnTts(sb))
 }
 
 export function workflowStepTotal(mode: ProductionMode) {
@@ -1365,8 +1400,8 @@ export function resolveActiveSubStepKey(
   return 'script:storyboard'
 }
 
-export function inferNarrationScriptStep(ep: any, sbsCount: number, _charsCount: number) {
+export function inferNarrationScriptStep(_ep: any, sbsCount: number, _charsCount: number) {
   if (sbsCount > 0) return narrationStoryboardStep()
-  if (ep?.content || ep?.script_content || ep?.scriptContent) return narrationRawContentStep()
+  // 已有文案也默认进入「剧本生成」对话，便于多轮修改；文案编辑走侧栏「文案输入」
   return narrationScriptChatStep()
 }

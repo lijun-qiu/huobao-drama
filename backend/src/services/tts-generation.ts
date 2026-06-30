@@ -12,6 +12,8 @@ import { generateEdgeTTS } from './edge-tts-local.js'
 import { generateVoiceboxTTS, resolveVoiceboxProfileId, type VoiceboxModelSize } from './voicebox-tts.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, redactUrl } from '../utils/task-logger.js'
 import { applyTtsSpeedToAudioFile, resolveTtsSpeed } from '../utils/tts-speed.js'
+import { getAbsolutePath } from '../utils/storage.js'
+import ffmpeg from 'fluent-ffmpeg'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -27,6 +29,25 @@ interface TTSParams {
   localTtsEngine?: 'edge' | 'voicebox'
   voiceboxInstruct?: string | null
   voiceboxModelSize?: VoiceboxModelSize | null
+}
+
+/** 探测已落盘配音时长（秒），失败返回 null */
+export async function probeStoredAudioDuration(relativePath: string): Promise<number | null> {
+  const rel = String(relativePath || '').trim().replace(/^\/+/, '')
+  if (!rel) return null
+  try {
+    const abs = getAbsolutePath(rel)
+    if (!fs.existsSync(abs)) return null
+    const duration = await new Promise<number>((resolve, reject) => {
+      ffmpeg.ffprobe(abs, (err, data) => {
+        if (err) reject(err)
+        else resolve(Math.max(0.1, Number(data.format?.duration) || 0))
+      })
+    })
+    return Number.isFinite(duration) && duration > 0 ? duration : null
+  } catch {
+    return null
+  }
 }
 
 /**
