@@ -510,6 +510,19 @@ export const uploadAPI = {
     }
     return json.data ?? json
   },
+  shotImagesBatch: async (items: { file: File; storyboardId: number }[]) => {
+    const form = new FormData()
+    for (const item of items) {
+      form.append('files', item.file)
+    }
+    form.append('storyboard_ids', JSON.stringify(items.map(item => item.storyboardId)))
+    const resp = await fetch(`${BASE}/upload/shot-images-batch`, { method: 'POST', body: form })
+    const json = await resp.json()
+    if (!resp.ok || (json.code && json.code >= 400)) {
+      throw new Error(json.message || `${resp.status}`)
+    }
+    return json.data ?? json
+  },
   audio: async (file: File) => {
     const form = new FormData()
     form.append('file', file)

@@ -1225,8 +1225,17 @@
                 <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="copyNarrationShotPromptsBatch">
                   {{ narrationCopyBatchOptions.length > 1 ? `复制描述词 (${narrationCopyBatchOptions.find(o => o.value === narrationCopyBatchIndex)?.label || '#01-#10'})` : `一键复制描述词（${narrationNeedImageCount}）` }}
                 </button>
-                <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerAllShotImageUpload">一键上传全部（{{ narrationNeedImageCount }}）</button>
-                <button class="btn btn-sm" :disabled="!narrationNeedImageCount" @click="triggerShotFolderUpload" title="文件夹上传：1.png→第1镜、2.png→第2镜…（可用 backend/scripts/准备配图文件夹.bat 按修改时间重命名）">文件夹上传</button>
+                <button class="btn btn-sm" :disabled="!narrationNeedImageCount || shotImageUploadProcessing" @click="triggerAllShotImageUpload">
+                  {{ shotImageUploadProcessing ? `上传中 ${shotImageUploadProgress.done}/${shotImageUploadProgress.total}` : `一键上传全部（${narrationNeedImageCount}）` }}
+                </button>
+                <button
+                  class="btn btn-sm"
+                  :disabled="!narrationNeedImageCount || shotImageUploadProcessing"
+                  title="文件夹上传：1.png→第1镜、2.png→第2镜…（可用 backend/scripts/准备配图文件夹.bat 按修改时间重命名）"
+                  @click="triggerShotFolderUpload"
+                >
+                  {{ shotImageUploadProcessing ? `上传中 ${shotImageUploadProgress.done}/${shotImageUploadProgress.total}` : '文件夹上传' }}
+                </button>
                 <button
                   class="btn btn-sm"
                   :disabled="!narrationCropImageCount || narrationCropWatermarkProcessing"

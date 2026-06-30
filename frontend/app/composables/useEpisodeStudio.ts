@@ -673,6 +673,8 @@ const bgmUploadInput = ref(null)
 const narrationAssetClearing = ref(false)
 const narrationCropWatermarkProcessing = ref(false)
 const narrationRestoreWatermarkProcessing = ref(false)
+const shotImageUploadProcessing = ref(false)
+const shotImageUploadProgress = ref({ done: 0, total: 0 })
 const bgmDescGenerating = ref(false)
 const bgmDesc = ref('')
 const bgmTargetSbId = ref(null)
@@ -5157,12 +5159,15 @@ async function applyShotUploadedImage(sbId, path) {
     })
   }
   await storyboardAPI.update(sbId, updates)
+  syncShotUploadedImageLocal(sbId, path, updates.reference_images)
+}
+
+function syncShotUploadedImageLocal(sbId, path, referenceImages) {
   const row = sbs.value.find(item => item.id === sbId)
-  if (row) {
-    row.composed_image = path
-    row.composedImage = path
-    if (updates.reference_images) row.reference_images = updates.reference_images
-  }
+  if (!row) return
+  row.composed_image = path
+  row.composedImage = path
+  if (referenceImages) row.reference_images = referenceImages
 }
 
 async function scanNarrationShotImage(sb) {
@@ -5403,7 +5408,51 @@ function resolveImageUploadPairs(files, target) {
   }
 }
 
+const SHOT_IMAGE_UPLOAD_BATCH_SIZE = 8
+
+async function processShotImageUploadPairs(pairs) {
+  let ok = 0
+  const failed = []
+  shotImageUploadProcessing.value = true
+  shotImageUploadProgress.value = { done: 0, total: pairs.length }
+  try {
+    for (let i = 0; i < pairs.length; i += SHOT_IMAGE_UPLOAD_BATCH_SIZE) {
+      const chunk = pairs.slice(i, i + SHOT_IMAGE_UPLOAD_BATCH_SIZE)
+      const res = await uploadAPI.shotImagesBatch(chunk.map(({ file, id }) => ({ file, storyboardId: id })))
+      for (const item of res?.results || []) {
+        const sbId = item.storyboard_id ?? item.storyboardId
+        if (item.ok && item.path) {
+          syncShotUploadedImageLocal(sbId, item.path, item.reference_images)
+          ok++
+        } else {
+          const pair = chunk.find(p => p.id === sbId)
+          const sb = sbs.value.find(row => row.id === sbId)
+          failed.push({
+            id: sbId,
+            label: sb ? `#${getNarrationShotDisplayNo(sb)}` : `#${sbId}`,
+            fileName: pair?.file?.name || '—',
+            error: item.error || '上传失败',
+          })
+        }
+      }
+      shotImageUploadProgress.value = {
+        done: Math.min(i + chunk.length, pairs.length),
+        total: pairs.length,
+      }
+    }
+    await refresh()
+    return { ok, failed }
+  } finally {
+    shotImageUploadProcessing.value = false
+    shotImageUploadProgress.value = { done: 0, total: 0 }
+  }
+}
+
 async function processImageUploadPairs(pairs, target) {
+  if (target.kind === 'shot-batch' && pairs.length) {
+    return processShotImageUploadPairs(pairs)
+  }
+
   let ok = 0
   const failed = []
   for (const { file, id } of pairs) {
@@ -7922,6 +7971,8 @@ onMounted(async () => {
     shotAngles,
     shotEditor,
     shotFolderUploadInputRef,
+    shotImageUploadProcessing,
+    shotImageUploadProgress,
     shotImgCount,
     shotMovements,
     shotTypes,
