@@ -1616,40 +1616,48 @@
               <div class="empty-desc">先在分镜里填写“角色名：台词”或“旁白：文案”，这里就会出现待生成的语音镜头。</div>
             </div>
 
-            <div v-else class="dub-grid">
-                <div v-for="(sb, i) in narrationTtsUnitList" :key="sb.id" class="card dub-card">
+            <template v-else>
+              <div v-if="dubbingUnitViews.length > DUBBING_LIST_PAGE_SIZE" class="prod-pagination">
+                <button class="btn btn-sm" :disabled="dubbingListPage <= 1" @click="dubbingListPage -= 1">上一页</button>
+                <span class="dim prod-page-indicator">{{ dubbingListPage }} / {{ dubbingPageCount }} · 每页 {{ DUBBING_LIST_PAGE_SIZE }}</span>
+                <button class="btn btn-sm" :disabled="dubbingListPage >= dubbingPageCount" @click="dubbingListPage += 1">下一页</button>
+              </div>
+
+              <div class="dub-grid">
+                <div v-for="(item, i) in dubbingPageItems" :key="item.sb.id" class="card dub-card">
                   <div class="dub-head">
                     <div class="dub-copy">
                     <div class="dub-title">
-                      <span class="frame-num">{{ isNarrationTitleShot(sb) ? `#${getNarrationShotDisplayNo(sb)}` : getComposeUnitShotRangeLabel(sb, sbs) }}</span>
-                      <span class="frame-badge">{{ isNarrationTitleShot(sb) ? '片头' : `配音段 ${i + 1}` }}</span>
+                      <span class="frame-num">{{ item.shotRangeLabel }}</span>
+                      <span class="frame-badge">{{ isNarrationTitleShot(item.sb) ? '片头' : `配音段 ${(dubbingListPage - 1) * DUBBING_LIST_PAGE_SIZE + i + 1}` }}</span>
                     </div>
-                    <ul v-if="!isNarrationTitleShot(sb) && getComposeUnitSubtitleLines(sb, sbs).length > 1" class="compose-subtitle-lines dub-unit-lines">
-                      <li v-for="line in getComposeUnitSubtitleLines(sb, sbs)" :key="line.index">
+                    <ul v-if="!isNarrationTitleShot(item.sb) && item.subtitleLines.length > 1" class="compose-subtitle-lines dub-unit-lines">
+                      <li v-for="line in item.subtitleLines" :key="line.index">
                         <span class="compose-subtitle-time">#{{ line.shotNo }}</span>
                         <span class="compose-subtitle-text">{{ line.displayText }}</span>
                       </li>
                     </ul>
-                    <div v-else class="dub-desc">{{ getComposeUnitMergedTtsText(sb, sbs) || getDialogueText(sb) || '未填写文本' }}</div>
+                    <div v-else class="dub-desc">{{ item.mergedText || '未填写文本' }}</div>
                     </div>
-                    <span class="tag" :class="narrationTtsUnitReady(sbs, sb) ? 'tag-success' : ''">{{ narrationTtsUnitStatusLabel(sb) }}</span>
+                    <span class="tag" :class="item.ready ? 'tag-success' : ''">{{ item.statusLabel }}</span>
                   </div>
                 <div class="dub-meta">
-                  <span class="dim">{{ getComposeUnitSubtitleLines(sb, sbs).length || 1 }} 句</span>
-                  <span class="dim">约 {{ formatComposeUnitDuration(sb, sbs) }}</span>
+                  <span class="dim">{{ item.lineCount }} 句</span>
+                  <span class="dim">约 {{ item.durationLabel }}</span>
                 </div>
                 <div class="dub-foot">
-                  <audio v-if="getEffectiveTTSUrl(sb)" :src="'/' + getEffectiveTTSUrl(sb)" controls preload="none" class="dub-audio" />
+                  <audio v-if="getEffectiveTTSUrl(item.sb)" :src="'/' + getEffectiveTTSUrl(item.sb)" controls preload="none" class="dub-audio" />
                   <div v-else class="dim" style="font-size:12px">尚未生成语音文件</div>
                   <div class="ml-auto flex gap-1">
-                    <button class="btn btn-sm" @click="triggerShotTtsUpload(sb.id)">上传 MP3</button>
-                    <button class="btn btn-sm" @click="genShotTTS(sb, hasNarrationShotOwnTts(sb))">
-                      {{ hasNarrationShotOwnTts(sb) ? '重新生成' : '生成配音' }}
+                    <button class="btn btn-sm" @click="triggerShotTtsUpload(item.sb.id)">上传 MP3</button>
+                    <button class="btn btn-sm" @click="genShotTTS(item.sb, hasNarrationShotOwnTts(item.sb))">
+                      {{ hasNarrationShotOwnTts(item.sb) ? '重新生成' : '生成配音' }}
                     </button>
                   </div>
                 </div>
               </div>
-            </div>
+              </div>
+            </template>
           </div>
 
           <!-- Sub: BGM -->
@@ -3577,6 +3585,7 @@ import {
   getComposeUnitSubtitleLines,
   getComposeUnitMergedTtsText,
   listNarrationTtsUnits,
+  buildNarrationTtsUnitViews,
   isNarrationTtsUnitLeader,
   narrationTtsUnitReady,
   formatComposeTimecode,
@@ -4478,8 +4487,10 @@ const pendingVideoIds = ref([])
 const pendingComposeIds = ref([])
 const PROD_SHOT_PAGE_SIZE = 24
 const COMPOSE_LIST_PAGE_SIZE = 8
+const DUBBING_LIST_PAGE_SIZE = 6
 const composeListPage = ref(1)
 const composeListFilter = ref('all')
+const dubbingListPage = ref(1)
 const shotsListPage = ref(1)
 const shotsListFilter = ref('all')
 const composeVideoViewer = ref({ open: false, src: '', title: '' })
@@ -5746,6 +5757,27 @@ const ttsEligibleCount = computed(() =>
 const narrationTtsUnitList = computed(() =>
   isNarrationMode.value ? listNarrationTtsUnits(sbs.value) : sbs.value.filter(s => hasDialogue(s)),
 )
+const dubbingUnitViews = computed(() => {
+  if (isNarrationMode.value) return buildNarrationTtsUnitViews(sbs.value)
+  return narrationTtsUnitList.value.map(sb => ({
+    sb,
+    subtitleLines: [],
+    shotRangeLabel: `#${sb.storyboard_number || sb.storyboardNumber || sb.id}`,
+    durationLabel: formatComposeUnitDuration(sb, sbs.value),
+    mergedText: getDialogueText(sb) || '',
+    ready: hasTTS(sb),
+    statusLabel: hasTTS(sb) ? '已生成' : '待生成',
+    lineCount: 1,
+  }))
+})
+const dubbingPageCount = computed(() =>
+  Math.max(1, Math.ceil(dubbingUnitViews.value.length / DUBBING_LIST_PAGE_SIZE)),
+)
+const dubbingPageItems = computed(() => {
+  const page = Math.min(Math.max(1, dubbingListPage.value), dubbingPageCount.value)
+  const start = (page - 1) * DUBBING_LIST_PAGE_SIZE
+  return dubbingUnitViews.value.slice(start, start + DUBBING_LIST_PAGE_SIZE)
+})
 const ttsGeneratedCount = computed(() => {
   if (isNarrationMode.value) {
     return narrationTtsUnitList.value.filter(sb => narrationTtsUnitReady(sbs.value, sb)).length
@@ -10102,6 +10134,10 @@ watch(prodTab, (tab, prev) => {
     shotsListFilter.value = 'all'
     shotsListPage.value = 1
   }
+  if (tab === 'dubbing') dubbingListPage.value = 1
+})
+watch(dubbingPageCount, (count) => {
+  if (dubbingListPage.value > count) dubbingListPage.value = count
 })
 watch([shotsListFilter, () => sbs.value.length], () => { shotsListPage.value = 1 })
 watch(shotsPageCount, (count) => {

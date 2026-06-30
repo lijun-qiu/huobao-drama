@@ -412,7 +412,14 @@ export function buildComposeUnitGroups(storyboards: any[]) {
 export const buildParagraphComposeGroups = buildComposeUnitGroups
 
 export function getParagraphComposeMembers(sb: any, storyboards: any[]) {
-  const group = buildComposeUnitGroups(storyboards).find(g => g.members.some(m => m.id === sb.id))
+  return resolveParagraphComposeMembers(sb, buildComposeUnitGroups(storyboards))
+}
+
+export function resolveParagraphComposeMembers(
+  sb: any,
+  groups: { members: any[] }[],
+) {
+  const group = groups.find(g => g.members.some(m => m.id === sb.id))
   return group?.members ?? [sb]
 }
 
@@ -447,8 +454,7 @@ export type ComposeUnitSubtitleLine = {
 }
 
 /** 合成单元内各句字幕与时间轴（与 group compose 顺序一致） */
-export function getComposeUnitSubtitleLines(sb: any, storyboards: any[]): ComposeUnitSubtitleLine[] {
-  const members = getParagraphComposeMembers(sb, storyboards)
+export function buildComposeUnitSubtitleLines(members: any[]): ComposeUnitSubtitleLine[] {
   let offsetSec = 0
   const lines: ComposeUnitSubtitleLine[] = []
   for (let idx = 0; idx < members.length; idx++) {
@@ -470,6 +476,10 @@ export function getComposeUnitSubtitleLines(sb: any, storyboards: any[]): Compos
     offsetSec = endSec
   }
   return lines
+}
+
+export function getComposeUnitSubtitleLines(sb: any, storyboards: any[]): ComposeUnitSubtitleLine[] {
+  return buildComposeUnitSubtitleLines(getParagraphComposeMembers(sb, storyboards))
 }
 
 export function getComposeUnitTotalDurationSec(sb: any, storyboards: any[]): number {
@@ -512,6 +522,75 @@ export function listNarrationTtsUnits(storyboards: any[]) {
     if (!dialogue) return false
     if (isNarrationTitleShot(sb)) return true
     return leaderIds.has(sb.id)
+  })
+}
+
+export type NarrationTtsUnitViewItem = {
+  sb: any
+  subtitleLines: ComposeUnitSubtitleLine[]
+  shotRangeLabel: string
+  durationLabel: string
+  mergedText: string
+  ready: boolean
+  statusLabel: string
+  lineCount: number
+}
+
+/** 配音页卡片视图：一次 buildComposeUnitGroups，避免模板内重复 O(n²) 计算 */
+export function buildNarrationTtsUnitViews(storyboards: any[]): NarrationTtsUnitViewItem[] {
+  const groups = buildComposeUnitGroups(storyboards)
+  const leaderIds = new Set(
+    groups
+      .map(g => g.members[0])
+      .filter(leader => {
+        if (!isComposeScopeStoryboard(leader, storyboards)) return false
+        const anchor = resolveNarrationImageAnchorShot(storyboards, leader)
+        return !isNarrationTitleShot(anchor)
+      })
+      .map(leader => leader.id),
+  )
+  const ordered = sortStoryboards(storyboards)
+  const units = ordered.filter(sb => {
+    const dialogue = String(sb?.dialogue || '').trim()
+    if (!dialogue) return false
+    if (isNarrationTitleShot(sb)) return true
+    return leaderIds.has(sb.id)
+  })
+
+  return units.map(sb => {
+    const members = isNarrationTitleShot(sb) ? [sb] : resolveParagraphComposeMembers(sb, groups)
+    const subtitleLines = buildComposeUnitSubtitleLines(members)
+    const mergedText = subtitleLines.length
+      ? subtitleLines.map(line => line.displayText).join('')
+      : stripSubtitleEmphasis(resolveStoryboardSubtitleNarration(sb))
+
+    let shotRangeLabel: string
+    if (isNarrationTitleShot(sb)) {
+      shotRangeLabel = `#${getNarrationShotDisplayNo(sb)}`
+    } else if (!members.length) {
+      shotRangeLabel = '#??'
+    } else if (members.length <= 1) {
+      shotRangeLabel = `#${getNarrationShotDisplayNo(members[0])}`
+    } else {
+      shotRangeLabel = `#${getNarrationShotDisplayNo(members[0])}-#${getNarrationShotDisplayNo(members[members.length - 1])}`
+    }
+
+    const totalSec = subtitleLines.length
+      ? subtitleLines[subtitleLines.length - 1].endSec
+      : estimateStoryboardDurationSec(sb)
+    const ready = members.every(member => hasEffectiveNarrationTts(storyboards, member))
+    const statusLabel = ready ? '已就绪' : (members.length > 1 ? '待生成（整段）' : '待生成')
+
+    return {
+      sb,
+      subtitleLines,
+      shotRangeLabel,
+      durationLabel: formatComposeTimecode(totalSec),
+      mergedText,
+      ready,
+      statusLabel,
+      lineCount: subtitleLines.length || 1,
+    }
   })
 }
 
