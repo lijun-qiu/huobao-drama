@@ -222,7 +222,7 @@
           />
           <div class="narration-hint" style="margin-top:12px">
             <template v-if="isMotionComicMode">
-              <strong>漫画解说稿格式：</strong>首行「本期故事：…」；一句一行（8～18字），段间空行换场景；对话嵌入叙述；分镜后一句一图，合成智能运镜。
+              <strong>漫画解说稿格式：</strong>首行「本期故事：…」；一句一行（8～18字），段间空行换场景；对话嵌入叙述；分镜后 1～3 句一图，同图整段一种运镜。
             </template>
             <template v-else>
               <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。

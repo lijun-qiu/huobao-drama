@@ -395,7 +395,7 @@ const scriptChatQuickHints = computed(() => isMotionComicMode.value
   ])
 
 const IMAGE_DETECT_CHAT_WELCOME = computed(() => isMotionComicMode.value
-  ? '我是漫画配图换镜检测助手。可讨论哪些镜头需要单独漫画配图（一句一图、动态构图）；说「开始检测」或点快捷按钮，我会流式展示检测过程。'
+  ? '我是漫画配图换镜检测助手。可讨论哪些镜头需要单独漫画配图（1～3 句一段一图、整段一种运镜）；说「开始检测」或点快捷按钮，我会流式展示检测过程。'
   : '我是配图换镜检测助手。可讨论哪些镜头需要单独配图；说「开始检测」或点下方快捷按钮，我会流式展示检测过程。检测完成后可继续多轮调整策略并重新检测。')
 const IMAGE_PROMPT_CHAT_WELCOME = computed(() => isMotionComicMode.value
   ? '我是漫画配图文案助手。须先完成换镜检测；说「开始生成文案」或点快捷按钮，我会流式展示六维漫画 prompt 生成过程。主要配角须写定妆外貌。'
@@ -488,7 +488,7 @@ const imagePromptChatQuickHints = [
 ]
 
 const STORYBOARD_CHAT_WELCOME = computed(() => isMotionComicMode.value
-  ? '我是旁白分镜助手。整稿按句拆镜、自动标注 ** 强调、片头单独处理；配图一句一图，合成智能运镜。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程。'
+  ? '我是旁白分镜助手。整稿按句拆镜、自动标注 ** 强调、片头单独处理；配图 1～3 句一段一图，同图整段一种运镜。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程。'
   : '我是旁白分镜助手。整稿拆镜：按句分镜、自动标注 ** 强调、片头单独处理。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程；完成后可继续多轮讨论并重新分镜。')
 const STORYBOARD_CHAT_STORAGE_PREFIX = 'huobao:narration-storyboard-chat:'
 

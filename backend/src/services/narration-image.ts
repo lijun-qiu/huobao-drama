@@ -45,6 +45,8 @@ export interface NarrationImageMeta {
   motion_tier?: string
   /** 漫画动态漫：合成镜头运动（zoom_in / pan_lr / diptych_sweep 等） */
   camera_kind?: string
+  /** 漫画解说：合成场景特效（portal_open / lightning / memory_sepia 等） */
+  vfx_kind?: string
   /** 漫画动态漫：一体化分镜 — 表情与肢体 */
   expression_action?: string
   /** 漫画动态漫：一体化分镜 — 场景背景 */

@@ -4,7 +4,7 @@ import {
   motionComicShotDescription,
   type MotionComicStoryboardShot,
 } from '../constants/motion-comic.js'
-import { buildMotionComicStoryboardMetaFromShot } from './motion-comic-meta.js'
+import { buildMotionComicStoryboardMetaFromShot, buildMotionComicSegmentMotionMeta } from './motion-comic-meta.js'
 import { buildMotionComicStoryboardShotsWithLLM } from './motion-comic-storyboard-llm.js'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
@@ -150,6 +150,15 @@ function insertMotionComicStoryboardShot(
   const isTitle = options.isTitle ?? shot.speaker === '剧中'
   const duration = estimateNarrationDuration(dialogue.replace(/^[^：:]+[:：]\s*/, ''), isTitle)
   const description = motionComicShotDescription(shot)
+  const motionMeta = buildMotionComicSegmentMotionMeta(
+    [`${shot.dialogue} ${shot.expression_action}`.trim()],
+    options.paragraphIndex ?? options.bodyIndex ?? storyboardNumber,
+    {
+      movement: shot.movement,
+      shotType: shot.shot_type,
+      expressionAction: shot.expression_action,
+    },
+  )
 
   const res = db.insert(schema.storyboards).values({
     episodeId,
@@ -172,10 +181,10 @@ function insertMotionComicStoryboardShot(
           title_full: options.titleFull,
         }
         : {}),
-    }),
-    shotType: shot.shot_type,
+    }, options.bodyIndex ?? storyboardNumber),
+    shotType: motionMeta.shotType,
     angle: shot.angle,
-    movement: shot.movement,
+    movement: motionMeta.movement,
     duration,
     createdAt: ts,
     updatedAt: ts,

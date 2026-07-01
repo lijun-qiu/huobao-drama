@@ -25,13 +25,13 @@ export const MOTION_COMIC_IMAGE_STYLE_OPTIONS = [
   { value: MOTION_COMIC_STYLE, label: '漫画解说' },
 ] as const
 
-/** 漫画解说：每张配图覆盖 1 镜（一句一图，便于运镜与快切） */
+/** 漫画解说：每张配图覆盖 1～3 镜（一段一图，整段一种运镜） */
 export const MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS = 1
-export const MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS = 1
+export const MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS = 3
 
-/** 漫画解说：配图锚点占镜头数比例（一句一图 ≈ 全镜配图） */
-export const MOTION_COMIC_IMAGE_DETECT_MIN_STORYBOARD_RATIO = 0.85
-export const MOTION_COMIC_IMAGE_DETECT_MAX_STORYBOARD_RATIO = 1.0
+/** 漫画解说：配图锚点占镜头数比例 */
+export const MOTION_COMIC_IMAGE_DETECT_MIN_STORYBOARD_RATIO = 0.35
+export const MOTION_COMIC_IMAGE_DETECT_MAX_STORYBOARD_RATIO = 0.55
 
 /** 项目级动效预设（写入 dramas.metadata） */
 export interface MotionComicPreset {
@@ -49,7 +49,7 @@ export interface MotionComicPreset {
 export const DEFAULT_MOTION_COMIC_PRESET: Required<MotionComicPreset> = {
   motion_preset: 'light',
   camera: {
-    zoom_step: 0.03,
+    zoom_step: 0.06,
     enable_pan: true,
     pan_alternate: true,
   },
@@ -117,7 +117,7 @@ export const MOTION_COMIC_ACTION_LLM_RULE =
 
 /** 一句一图 + 运镜合成：画面须具动态瞬间与层次，避免静态站桩 */
 export const MOTION_COMIC_DYNAMIC_IMAGE_LLM_RULE = [
-  '【一句一图·动态瞬间】每条 prompt 只对应 narration_lines 中一句旁白，须写出该句最具视觉冲击力的单一瞬间，禁止把多句剧情揉进一张图。',
+  '【一段一图·动态瞬间】每条 prompt 对应一个配图段（narration_lines 可含 1～3 句），须写出该段最具视觉冲击力的单一瞬间，禁止把无关剧情揉进一张图。',
   '【运镜友好构图】画面留前中后景层次（前景道具/中景主体/背景环境），主体姿态与肢体方向明确，便于后续推近/拉远/横移/上下运镜；避免主体贴边、画面过满。',
   '【动态表现】优先写可见动作、表情变化、物体互动、速度线/冲击线/气流线；情绪镜写夸张表情与肢体语言；建立镜写环境纵深与空间关系。',
   '【镜头视角多样化】相邻配图段宜交替使用中景/近景/特写/略俯/略仰，避免连续多镜同一景别同一站桩姿势。',
@@ -203,6 +203,59 @@ export type MotionComicCameraKind =
   | 'action_push'
   | 'diptych_sweep'
 
+/** 合成阶段场景特效（FFmpeg 滤镜，按旁白/画面语义推断） */
+export type MotionComicVfxKind =
+  | 'none'
+  | 'portal_open'
+  | 'portal_enter'
+  | 'explosion_flash'
+  | 'lightning'
+  | 'screen_shake'
+  | 'fade_from_black'
+  | 'fade_to_black'
+  | 'memory_sepia'
+  | 'time_stop'
+  | 'cold_tint'
+  | 'warm_glow'
+  | 'horror_dark'
+  | 'dream_blur'
+  | 'rain_mist'
+  | 'rain_particles'
+  | 'snow_particles'
+  | 'fire_sparks'
+  | 'dust_float'
+  | 'wind_sand'
+  | 'film_grain'
+  | 'glitch'
+  | 'heartbeat'
+  | 'blood_splash'
+  | 'star_twinkle'
+  | 'fog_heavy'
+  | 'underwater'
+  | 'sunbeam'
+  | 'moonlight'
+  | 'petals_fall'
+  | 'leaves_fall'
+  | 'confetti'
+  | 'focus_blur'
+  | 'black_white'
+  | 'gold_shimmer'
+  | 'poison_mist'
+  | 'frost_spread'
+  | 'sword_flash'
+  | 'teleport_flash'
+  | 'shadow_creep'
+  | 'vhs_retro'
+  | 'bubble_rise'
+  | 'ink_spread'
+  | 'mirror_ripple'
+  | 'night_vision'
+  | 'speed_lines'
+  | 'magic_sparkle'
+  | 'smoke_fade'
+  | 'impact_hit'
+  | 'awaken_power'
+
 export function inferMotionComicShotRole(sentence: string): MotionComicShotRole {
   const t = String(sentence || '').trim()
   if (!t) return 'normal'
@@ -237,6 +290,62 @@ export type MotionComicCameraResolveOptions = {
   shotText?: string | null
   isDiptych?: boolean
   pageIndex?: number
+  /** 正文镜序号（0 起），用于无关键词时的运镜多样化 */
+  shotIndex?: number
+}
+
+/** 无明确语义信号时轮换的运镜池（相邻镜尽量不重复） */
+const MOTION_COMIC_VARIETY_PALETTE: MotionComicCameraKind[] = [
+  'zoom_in',
+  'pan_tb',
+  'pan_bt',
+  'pan_lr',
+  'pan_rl',
+  'zoom_out',
+  'drift',
+]
+
+function pickVarietyCameraKind(text: string, shotIndex: number): MotionComicCameraKind {
+  let hash = Math.max(0, shotIndex) * 131
+  const sample = String(text || '').replace(/\s/g, '').slice(0, 48)
+  for (let i = 0; i < sample.length; i++) {
+    hash = (hash + sample.charCodeAt(i) * (i + 3)) % 10007
+  }
+  return MOTION_COMIC_VARIETY_PALETTE[hash % MOTION_COMIC_VARIETY_PALETTE.length]
+}
+
+export function motionComicCameraKindToMovementLabel(kind: MotionComicCameraKind): string {
+  switch (kind) {
+    case 'zoom_out': return '拉镜'
+    case 'pan_lr': return '横移'
+    case 'pan_rl': return '右向左'
+    case 'pan_tb': return '上向下'
+    case 'pan_bt': return '下向上'
+    case 'drift': return '微移'
+    case 'shock_push':
+    case 'action_push':
+    case 'zoom_in':
+    default:
+      return '推镜'
+  }
+}
+
+export function motionComicCameraKindToShotType(kind: MotionComicCameraKind): string {
+  switch (kind) {
+    case 'zoom_in':
+    case 'shock_push':
+    case 'action_push':
+      return '近景'
+    case 'zoom_out':
+      return '全景'
+    case 'pan_tb':
+    case 'pan_bt':
+      return '中景'
+    case 'drift':
+      return '中近景'
+    default:
+      return '中景'
+  }
 }
 
 /** 从 movement / 景别 / 旁白句推断运镜（非机械交替） */
@@ -248,6 +357,7 @@ export function resolveMotionComicCameraKind(
   const shotType = String(options?.shotType || '').trim()
   const text = String(options?.shotText || '').trim()
   const pageIndex = options?.pageIndex ?? 0
+  const shotIndex = options?.shotIndex ?? 0
 
   if (movement && movement !== '固定') {
     if (/推镜|推近|推/.test(movement)) return 'zoom_in'
@@ -256,28 +366,30 @@ export function resolveMotionComicCameraKind(
     if (/横移|左移|右移|跟镜|移镜|左→右|左向右/.test(movement)) return 'pan_lr'
     if (/下向上|从下到上|升|仰/.test(movement)) return 'pan_bt'
     if (/上向下|从上到下|俯|降/.test(movement)) return 'pan_tb'
+    if (/微移|漂移/.test(movement)) return 'drift'
   }
 
   if (/特写|近景|大特写/.test(shotType)) return 'zoom_in'
   if (/全景|远景|大全景|建立/.test(shotType)) return 'zoom_out'
 
   if (/特写|近景|眼神|目光|表情|眉心|眼睛|脸庞|脸部|手指|手心|愣|震惊|懵|怒|哭/.test(text)) {
-    return 'zoom_in'
+    return 'shock_push'
   }
   if (/全景|远景|整条|整条街|整个|演武场|街道|环境|场面|弟子围|人群|围观|来到|走进|进入/.test(text)) {
     return 'zoom_out'
   }
-  if (/走过|路过|离开|返回|沿着|穿过|侧|横|左右|追|赶|跑向/.test(text)) {
+  if (/走过|路过|离开|返回|沿着|穿过|侧|横|左右|追|赶|跑向|奔|冲/.test(text)) {
     return pageIndex % 2 === 0 ? 'pan_lr' : 'pan_rl'
   }
   if (/抬头|向上|仰望|跳起|站起|升起|电梯上/.test(text)) return 'pan_bt'
   if (/低头|向下|俯|落下|跪|跌倒|摔倒|蹲下/.test(text)) return 'pan_tb'
 
-  if (role === 'reaction' || role === 'dialogue') return 'zoom_in'
+  if (role === 'reaction') return 'shock_push'
+  if (role === 'dialogue') return 'drift'
   if (role === 'establishing' || role === 'atmosphere') return 'zoom_out'
-  if (role === 'action') return 'zoom_in'
+  if (role === 'action') return 'action_push'
 
-  return 'zoom_in'
+  return pickVarietyCameraKind(text, shotIndex)
 }
 
 /** 漫画解说：配图段由换镜检测决定，不按镜型强制独立配图 */
@@ -445,7 +557,7 @@ export const MOTION_COMIC_STORYBOARD_CHAT_SYSTEM = [
   '- 正文：按句拆镜，句末标点必拆；逗号/顿号仅当相邻合计超过约 16 字才拆。',
   '- 自动为关键词标注 ** 强调（黄字字幕）；用户稿中已有 ** 则保留。',
   '- 每镜一条旁白台词，时长按字数估算，便于一句一镜配音。',
-  '- 配图策略：一句旁白一图（每镜独立漫画插画），场景/动作/情绪变化即换图；换图处硬切，不用云朵转场',
+  '- 配图策略：1～3 句共用一张漫画插画（一段一图）；换图处硬切；**同一张图整段只用一种运镜**',
   '- 单镜运镜：根据旁白句/景别/运镜字段推断（特写→推近，全景→拉远，位移→横移，可上下浏览）',
   '',
   '【职责】',
@@ -461,7 +573,7 @@ export function buildMotionComicStoryboardLLMSystem(): string {
   return [
     '你是漫画解说分镜导演。输入整篇解说稿，按句拆成旁白镜头序列。',
     '每镜一条旁白台词，自动标注 emphasis_word；片头 hook 写入 title_shots，speaker=剧中。',
-    '配图节奏：一句一图，每镜独立漫画插画；合成按句智能运镜（推/拉/横移/上下）。',
+    '配图节奏：1～3 句一图（一段一图）；合成时**每张图整段一种运镜**，同图多句共享该运镜。',
     '只输出 JSON：',
     '{"title_shots":[{"speaker":"剧中","dialogue":"本期故事：…","emphasis_word":""}],"shots":[{"speaker":"旁白","dialogue":"…","emphasis_word":""}]}',
     '无片头时 title_shots=[]。不要 markdown，不要解释。',
@@ -490,11 +602,11 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
   hasDiptych?: boolean
 }): string {
   return [
-    '你是漫画解说分镜美术指导。每个配图段通常只含一句旁白，须为该句写一张动态感强、层次丰富的中文 image_prompt。',
+    '你是漫画解说分镜美术指导。每个配图段含 1～3 句旁白，须为该段写一张动态感强、层次丰富的中文 image_prompt。',
     MOTION_COMIC_SIX_DIM_LLM_RULE,
     MOTION_COMIC_ACTION_LLM_RULE,
     MOTION_COMIC_DYNAMIC_IMAGE_LLM_RULE,
-    '分析须结合 full_narration 与 prior_narration 丰富场景与动作，但以 narration_lines 该句为唯一叙事锚点。',
+    '分析须结合 full_narration 与 prior_narration 丰富场景与动作，以 narration_lines 整段为叙事锚点。',
     'layout=single：单张完整漫画插画，禁止 grid/collage/multi-panel（diptych 除外）。',
     options?.hasDiptych ? 'layout=diptych：【左格】【右格】各写完整六维，适合动作前后对比。' : '',
     options?.hasCharacters ? `characters 提供外貌，写入【画面主体】。${MOTION_COMIC_MAJOR_SUPPORTING_LLM_RULE}` : MOTION_COMIC_CROWD_LLM_RULE,
@@ -504,39 +616,36 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
   ].filter(Boolean).join('\n')
 }
 
-/** 漫画解说：配图换镜检测（一句一图、高密度快切） */
+/** 漫画解说：配图换镜检测（1～3 句一图，一段一运镜） */
 export function buildMotionComicImageDetectLLMSystem(
   mode: 'paragraph' | 'conservative' | 'balanced' = 'paragraph',
 ): string {
   const conservativeExtra = mode === 'conservative'
-    ? '\n\n# 保守模式补充\n仍遵守一句一图：只有与上一句完全同一静止画面、同一姿态、同一焦点时才标 false；有任何动作/表情/物件/构图差异一律标 true。'
+    ? '\n\n# 保守模式补充\n仍遵守 1～3 句一图：只有与上一段完全同一静止画面时才标 false。'
     : ''
 
   return `# Role
-你是漫画解说视频的分镜导演。你的任务是为旁白脚本规划**高密度漫画配图**（一句一图快切 + 运镜合成）。
+你是漫画解说视频的分镜导演。你的任务是为旁白脚本规划**配图段**（1～3 句共用一张漫画插画）。
 
 # Goal
 分析每一句旁白，判断是否需要新配图。**本步骤仅输出 needs_image，不写配图文案**。
 
 # Input
-JSON 含 \`sentences\`（检测单元）、\`storyboard_count\`、\`minimum_true_count\` / \`maximum_true_count\`（约 85%～100%）、\`min_shots_per_image\` / \`max_shots_per_image\`（均为 1，**一句一图**）。
+JSON 含 \`sentences\`、\`min_shots_per_image\` / \`max_shots_per_image\`（1～3，**一段一图**）。
 
 # Critical Rules
-1. **默认标 true（新配图）**：漫画解说追求快切与运镜，**每一句旁白原则上各需一张独立漫画插画**。
-2. **仅以下情况标 false**：本句与上一句**完全共用同一静止画面**——同一空间、同一主体姿态、同一核心动作瞬间，换图毫无必要。
-3. **以下必须标 true**（任一命中即 true）：
-   - 场景/时间/地点切换
-   - 主体/焦点/物件变化
-   - 动作、姿态、表情、互动更新
-   - 情绪节拍转折（震惊/愤怒/崩溃等）
-   - 运镜需要新构图（特写↔全景、人物位移等）
-4. **配图段长度（硬性）**：每段 **恰好 1 镜**（min=max=1）。禁止多句共用一图。
-5. **配图密度**：全篇 true 数量须在 minimum～maximum 之间（约 85%～100%）。
+1. **默认按段换图**：场景/动作/情绪/焦点变化 → 新配图段起点标 true。
+2. **同段延续标 false**：1～3 句共用同一画面、同一配图段内后续句标 false。
+3. **配图段长度（硬性）**：每段 **1～3 镜**（min～max）。
+4. **配图密度**：true 数量在 minimum～maximum 之间。
+
+# 运镜说明（供理解，非本步输出）
+每张配图段在合成时使用**一种**运镜（推/拉/横移/上下等），同段多句共享，不会句句换运镜。
 
 # Workflow
-1. 通读 full_narration 把握节奏。
-2. 逐句判定；有疑问时**优先标 true**（宁多勿少，保证画面丰富）。
-3. 验证：每段 1 镜；true 数量在区间内。
+1. 通读 full_narration。
+2. 逐句判定 needs_image；同段仅首句 true。
+3. 验证：每段 1～3 镜；true 数量在区间内。
 
 # Output
 \`\`\`json

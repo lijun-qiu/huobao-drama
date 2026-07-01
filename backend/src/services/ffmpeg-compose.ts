@@ -24,7 +24,7 @@ import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
 import { parseProductionMode, isMotionComicMode } from '../constants/production-mode.js'
 import { parseMotionComicPreset } from '../constants/motion-comic.js'
 import { resolveMotionComicComposeOptions } from './motion-comic-meta.js'
-import { buildMotionComicComposeFilter } from './motion-comic-camera.js'
+import { buildMotionComicComposeFilter, resolveMotionComicMotionScale } from './motion-comic-camera.js'
 import { joinNarrationTtsParts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
 import { PAGE_FLIP_TRANSITION_SEC } from './ffmpeg-page-transition.js'
@@ -840,80 +840,15 @@ async function concatAudioFiles(audioPaths: string[], outputPath: string): Promi
   }
 }
 
-async function concatVideoFiles(videoPaths: string[], outputPath: string): Promise<void> {
-  if (videoPaths.length === 1) {
-    fs.copyFileSync(videoPaths[0], outputPath)
-    return
-  }
-
-  const listPath = path.join(os.tmpdir(), `huobao-${uuid()}.txt`)
-  const listContent = videoPaths.map(p => `file '${escapeConcatMediaPath(p)}'`).join('\n')
-  fs.writeFileSync(listPath, listContent, 'utf-8')
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg()
-        .input(listPath)
-        .inputOptions(['-f', 'concat', '-safe', '0'])
-        .outputOptions([
-          '-fflags', '+genpts',
-          '-c:v', 'libx264',
-          '-preset', 'fast',
-          '-crf', '23',
-          '-pix_fmt', 'yuv420p',
-          '-an',
-          '-movflags', '+faststart',
-        ])
-        .output(outputPath)
-        .on('end', () => resolve())
-        .on('error', (err) => reject(err))
-        .run()
-    })
-  } finally {
-    if (fs.existsSync(listPath)) fs.unlinkSync(listPath)
-  }
-}
-
-async function renderImageMotionClip(
-  imageAbsPath: string,
-  durationSec: number,
-  videoFilter: string,
-  outputPath: string,
-  episodeId: number,
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    throwIfComposeCancelled(episodeId)
-    const videoChain = `[0:v]${videoFilter}[vout]`
-    let cmd = ffmpeg()
-      .input(imageAbsPath)
-      .inputOptions(['-loop', '1'])
-      .complexFilter(videoChain)
-      .outputOptions([
-        '-t', fmtComposeFilterSec(durationSec),
-        '-map', '[vout]',
-        '-an',
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '23',
-        '-g', '1',
-        '-keyint_min', '1',
-        '-tune', 'stillimage',
-        '-pix_fmt', 'yuv420p',
-        '-r', '25',
-        '-vsync', 'cfr',
-      ])
-      .output(outputPath)
-    attachComposeCommand(episodeId, cmd)
-    cmd
-      .on('end', () => resolve())
-      .on('error', (err) => reject(toComposeError(episodeId, err)))
-      .run()
-  })
-}
-
 type GroupMotionComicOptions = {
   motionPreset: ReturnType<typeof parseMotionComicPreset>
   pageIndex: number
+}
+
+function resolveComposeShotIndex(sb: typeof schema.storyboards.$inferSelect): number {
+  const meta = parseNarrationImageMeta(sb.referenceImages)
+  if (typeof meta.body_sentence_index === 'number') return meta.body_sentence_index
+  return Math.max(0, (sb.storyboardNumber ?? 1) - 1)
 }
 
 /** 同配图多句：一次渲染，避免句间切换时背景跳动 */
@@ -1106,59 +1041,50 @@ export async function renderSameImageGroupSegment(
 
   let videoInputPath = imageAbsPath
   let videoInputIsLoopedImage = true
-  const motionClipTemps: string[] = []
-  let motionVideoTemp: string | null = null
-
-  if (motionComic) {
-    const shotCount = memberRows.length
-    const cameraKinds: string[] = []
-    for (let i = 0; i < memberRows.length; i++) {
-      const row = memberRows[i]
-      const sb = orderedStoryboards[i]
-      const shotText = [
-        row.description,
-        String(row.dialogue || sb.dialogue || '').replace(/^(旁白|剧中)[：:]\s*/, ''),
-      ].filter(Boolean).join(' ')
-      const motionOpts = resolveMotionComicComposeOptions(row.referenceImages, {
-        pageIndex: motionComic.pageIndex,
-        movement: row.movement,
-        shotType: row.shotType,
-        shotText,
-      })
-      cameraKinds.push(motionOpts.cameraKind ?? 'zoom_in')
-      const clipPath = path.join(tempDir, `${uuid()}.mp4`)
-      const filter = buildMotionComicComposeFilter(motionOpts.tier ?? 'static', shotDurationsSec[i], {
-        zoomStep: motionComic.motionPreset.camera?.zoom_step,
-        enablePan: motionComic.motionPreset.camera?.enable_pan,
-        pageIndex: motionComic.pageIndex,
-        shotIndexInGroup: i,
-        shotCountInGroup: shotCount,
-        cameraKind: motionOpts.cameraKind,
-        shotRole: motionOpts.shotRole,
-        isDiptych: motionOpts.isDiptych,
-      })
-      await renderImageMotionClip(imageAbsPath, shotDurationsSec[i], filter, clipPath, episodeId)
-      motionClipTemps.push(clipPath)
-    }
-    motionVideoTemp = path.join(tempDir, `${uuid()}.mp4`)
-    await concatVideoFiles(motionClipTemps, motionVideoTemp)
-    for (const clipPath of motionClipTemps) {
-      if (fs.existsSync(clipPath)) fs.unlinkSync(clipPath)
-    }
-    videoInputPath = motionVideoTemp
-    videoInputIsLoopedImage = false
-    logTaskProgress('ComposeTask', 'motion-comic-group-clips', {
-      episodeId,
-      pageIndex: motionComic.pageIndex,
-      shotCount,
-      cameraKinds,
-    })
-  }
 
   await new Promise<void>((resolve, reject) => {
     throwIfComposeCancelled(episodeId)
     const filters: string[] = []
-    if (!motionComic) {
+    if (motionComic) {
+      const anchorRow = memberRows[0]
+      const anchorMeta = parseNarrationImageMeta(anchorRow.referenceImages)
+      const shotCount = memberRows.length
+      const segmentText = anchorMeta.narration_lines?.length
+        ? anchorMeta.narration_lines.join(' ')
+        : memberRows.map(row => [
+          row.description,
+          String(row.dialogue || '').replace(/^(旁白|剧中)[：:]\s*/, ''),
+        ].filter(Boolean).join(' ')).filter(Boolean).join(' ')
+      const motionOpts = resolveMotionComicComposeOptions(anchorRow.referenceImages, {
+        pageIndex: motionComic.pageIndex,
+        movement: anchorRow.movement,
+        shotType: anchorRow.shotType,
+        shotText: segmentText,
+        shotIndex: typeof anchorMeta.paragraph_index === 'number' ? anchorMeta.paragraph_index : motionComic.pageIndex,
+      })
+      const motionScale = resolveMotionComicMotionScale(1, contentDuration)
+      filters.push(buildMotionComicComposeFilter(motionOpts.tier ?? 'static', contentDuration, {
+        zoomStep: motionComic.motionPreset.camera?.zoom_step,
+        enablePan: motionComic.motionPreset.camera?.enable_pan,
+        pageIndex: motionComic.pageIndex,
+        shotIndexInGroup: 0,
+        shotCountInGroup: 1,
+        motionScale,
+        cameraKind: motionOpts.cameraKind,
+        shotRole: motionOpts.shotRole,
+        isDiptych: motionOpts.isDiptych,
+        vfxKind: motionOpts.vfxKind,
+      }))
+      logTaskProgress('ComposeTask', 'motion-comic-group-segment', {
+        episodeId,
+        pageIndex: motionComic.pageIndex,
+        sentenceCount: shotCount,
+        cameraKind: motionOpts.cameraKind,
+        vfxKind: motionOpts.vfxKind,
+        motionScale,
+        contentDuration,
+      })
+    } else {
       filters.push(buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount))
     }
     appendComposeVideoPostFilters(
@@ -1212,7 +1138,6 @@ export async function renderSameImageGroupSegment(
 
   if (fs.existsSync(mergedAudioPath)) fs.unlinkSync(mergedAudioPath)
   if (fs.existsSync(subtitlePath)) fs.unlinkSync(subtitlePath)
-  if (motionVideoTemp && fs.existsSync(motionVideoTemp)) fs.unlinkSync(motionVideoTemp)
   for (const tempAudio of alignedAudioTemps) {
     if (fs.existsSync(tempAudio)) fs.unlinkSync(tempAudio)
   }
@@ -1757,6 +1682,9 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
         const visualGroupInfo = useTitleDynamic
           ? undefined
           : getVisualGroupInfo(storyboardId, episodeStoryboards)
+        let motionComicCameraKind: string | undefined
+        let motionComicVfxKind: string | undefined
+        let shotCountInGroup = 1
         if (useTitleDynamic) {
           filters.push(buildTitleShotMotionFilter(clipDuration, titleGroupInfo!.shotIndexInGroup))
         } else if (motionComicMode) {
@@ -1766,26 +1694,35 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
           const visualGroup = groupIdx >= 0
             ? visualGroups.find(g => groupIdx >= g.start && groupIdx <= g.end)
             : undefined
-          const shotCountInGroup = visualGroup ? visualGroup.end - visualGroup.start + 1 : 1
-          const shotText = [
-            sb.description,
-            String(sb.dialogue || '').replace(/^(旁白|剧中)[：:]\s*/, ''),
-          ].filter(Boolean).join(' ')
+          shotCountInGroup = visualGroup ? visualGroup.end - visualGroup.start + 1 : 1
+          const sbMeta = parseNarrationImageMeta(sb.referenceImages)
+          const shotText = sbMeta.narration_lines?.length
+            ? sbMeta.narration_lines.join(' ')
+            : [
+              sb.description,
+              String(sb.dialogue || '').replace(/^(旁白|剧中)[：:]\s*/, ''),
+            ].filter(Boolean).join(' ')
           const motionOpts = resolveMotionComicComposeOptions(sb.referenceImages, {
             pageIndex: visualGroupInfo?.pageIndex,
             movement: sb.movement,
             shotType: sb.shotType,
             shotText,
+            shotIndex: typeof sbMeta.paragraph_index === 'number' ? sbMeta.paragraph_index : visualGroupInfo?.pageIndex,
           })
+          motionComicCameraKind = motionOpts.cameraKind
+          motionComicVfxKind = motionOpts.vfxKind
+          const motionScale = resolveMotionComicMotionScale(1, clipDuration)
           filters.push(buildMotionComicComposeFilter(motionOpts.tier ?? 'static', clipDuration, {
             zoomStep: motionPreset.camera?.zoom_step,
             enablePan: motionPreset.camera?.enable_pan,
             pageIndex: visualGroupInfo?.pageIndex,
-            shotIndexInGroup: visualGroupInfo?.shotIndexInGroup,
-            shotCountInGroup,
+            shotIndexInGroup: 0,
+            shotCountInGroup: 1,
+            motionScale,
             cameraKind: motionOpts.cameraKind,
             shotRole: motionOpts.shotRole,
             isDiptych: motionOpts.isDiptych,
+            vfxKind: motionOpts.vfxKind,
           }))
         } else {
           filters.push(buildShotZoomMotionFilter(visualGroupInfo!, clipDuration))
@@ -1799,6 +1736,12 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
           titleDynamic: useTitleDynamic,
           titleGroupInfo,
           visualGroupInfo,
+          motionComicCameraKind: motionComicMode && !useTitleDynamic ? motionComicCameraKind : undefined,
+          motionComicVfxKind: motionComicMode && !useTitleDynamic ? motionComicVfxKind : undefined,
+          motionComicShotCountInGroup: motionComicMode && !useTitleDynamic ? shotCountInGroup : undefined,
+          motionComicMotionScale: motionComicMode && !useTitleDynamic
+            ? resolveMotionComicMotionScale(1, clipDuration)
+            : undefined,
         })
       } else {
         cmd = cmd.input(visual!.path)

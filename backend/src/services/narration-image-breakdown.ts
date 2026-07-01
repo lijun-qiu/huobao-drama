@@ -6,6 +6,7 @@ import {
   buildNarrationImageMeta,
   parseNarrationImageMeta,
   summarizeSceneMainContent,
+  isStoryboardTitleShot,
 } from './narration-image.js'
 import {
   getEpisodeVisualCharacters,
@@ -26,6 +27,8 @@ import {
   type NarrationImageBreakdownProgressCallback,
 } from './narration-image-breakdown-progress.js'
 import { loadEpisodeContinuityContext } from './episode-continuity.js'
+import { isMotionComicMode, parseProductionMode } from '../constants/production-mode.js'
+import { buildMotionComicAnchorMotionMeta, buildMotionComicSegmentMotionMeta } from './motion-comic-meta.js'
 import { now } from '../utils/response.js'
 import { applySubtitleLinesToStoryboards } from './narration-emphasis-apply.js'
 
@@ -48,10 +51,45 @@ function preserveShotMeta(existing: ReturnType<typeof parseNarrationImageMeta>) 
   if (existing.shot_role) extra.shot_role = existing.shot_role
   if (existing.motion_tier) extra.motion_tier = existing.motion_tier
   if (existing.camera_kind) extra.camera_kind = existing.camera_kind
+  if (existing.vfx_kind) extra.vfx_kind = existing.vfx_kind
   if (existing.paragraph_layout) extra.paragraph_layout = existing.paragraph_layout
   if (existing.expression_action) extra.expression_action = existing.expression_action
   if (existing.scene_background) extra.scene_background = existing.scene_background
   return extra
+}
+
+function buildParagraphMotionMetaMap(
+  paragraphs: NarrationParagraph[],
+  orderedStoryboards: typeof schema.storyboards.$inferSelect[],
+): Map<number, ReturnType<typeof buildMotionComicSegmentMotionMeta>> {
+  const map = new Map<number, ReturnType<typeof buildMotionComicSegmentMotionMeta>>()
+  for (const para of paragraphs) {
+    const anchorSb = orderedStoryboards[para.startIndex]
+    if (!anchorSb || isStoryboardTitleShot(anchorSb)) continue
+    const motionMeta = buildMotionComicSegmentMotionMeta(para.sentences, para.index, {
+      movement: anchorSb.movement,
+      shotType: anchorSb.shotType,
+      sceneContent: para.sceneDescription,
+    })
+    for (let i = para.startIndex; i <= para.endIndex; i++) {
+      map.set(i, motionMeta)
+    }
+  }
+  return map
+}
+
+function mergeMotionMetaIntoReferenceImages(
+  imageMode: 'new' | 'inherit',
+  base: Record<string, unknown>,
+  motionMeta: ReturnType<typeof buildMotionComicAnchorMotionMeta>,
+) {
+  return buildNarrationImageMeta(imageMode, {
+    ...base,
+    shot_role: motionMeta.shot_role,
+    motion_tier: motionMeta.motion_tier,
+    camera_kind: motionMeta.camera_kind,
+    vfx_kind: motionMeta.vfx_kind,
+  })
 }
 
 function resolveDetectImageMode(isParagraphAnchor: boolean): 'new' | 'inherit' {
@@ -367,8 +405,13 @@ function loadEpisodeStoryboardContext(
     }
   })
 
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  const motionComicMode = isMotionComicMode(parseProductionMode(drama?.metadata))
+
   return {
     ep,
+    drama,
+    motionComicMode,
     orderedStoryboards,
     sentenceItems,
     allSentences: sentenceItems.map(item => item.sentence),
@@ -385,8 +428,12 @@ function saveDetectResults(
   sentenceItems: NarrationSentenceItem[],
   paragraphs: NarrationParagraph[],
   paragraphMetaByAnchor: Map<number, { content: string; layout: 'single' | 'diptych' }>,
+  motionComicMode = false,
 ) {
   const ts = now()
+  const paragraphMotionMap = motionComicMode
+    ? buildParagraphMotionMetaMap(paragraphs, orderedStoryboards)
+    : new Map()
   orderedStoryboards.forEach((sb, index) => {
     const paraInfo = paragraphMetaByAnchor.get(index)
     const isParagraphAnchor = !!paraInfo
@@ -395,22 +442,27 @@ function saveDetectResults(
     const shotMeta = preserveShotMeta(existing)
     const imageMode = resolveDetectImageMode(isParagraphAnchor)
     const paragraphLayout = para?.layout || existing.paragraph_layout || 'single'
+    const motionMeta = paragraphMotionMap.get(index) ?? null
+    const refBase = {
+      ...shotMeta,
+      narration_tts_mode: isParagraphAnchor ? 'new' : 'inherit',
+      script_paragraph_index: existing.script_paragraph_index ?? sentenceItems[index]?.paragraphIndex,
+      scene_content: paraInfo?.content,
+      narration_lines: para?.sentences,
+      image_narration_lines: para ? mergeStoryboardLinesForImagePrompt(para.sentences) : undefined,
+      paragraph_index: para?.index,
+      paragraph_layout: paragraphLayout,
+      image_prompt_source: undefined,
+      image_prompt_llm_raw: undefined,
+    }
 
     db.update(schema.storyboards)
       .set({
         imagePrompt: null,
-        referenceImages: buildNarrationImageMeta(imageMode, {
-          ...shotMeta,
-          narration_tts_mode: isParagraphAnchor ? 'new' : 'inherit',
-          script_paragraph_index: existing.script_paragraph_index ?? sentenceItems[index]?.paragraphIndex,
-          scene_content: paraInfo?.content,
-          narration_lines: para?.sentences,
-          image_narration_lines: para ? mergeStoryboardLinesForImagePrompt(para.sentences) : undefined,
-          paragraph_index: para?.index,
-          paragraph_layout: paragraphLayout,
-          image_prompt_source: undefined,
-          image_prompt_llm_raw: undefined,
-        }),
+        referenceImages: motionMeta
+          ? mergeMotionMetaIntoReferenceImages(imageMode, refBase, motionMeta)
+          : buildNarrationImageMeta(imageMode, refBase),
+        ...(motionMeta ? { movement: motionMeta.movement, shotType: motionMeta.shotType } : {}),
         updatedAt: ts,
       })
       .where(eq(schema.storyboards.id, sb.id))
@@ -474,6 +526,9 @@ function savePromptResults(
   paragraphPromptByAnchor: Map<number, { content: string; prompt: string; layout: 'single' | 'diptych' }>,
 ) {
   const ts = now()
+  const paragraphMotionMap = ctx.motionComicMode
+    ? buildParagraphMotionMetaMap(paragraphs, ctx.orderedStoryboards)
+    : new Map()
   ctx.orderedStoryboards.forEach((sb, index) => {
     const paraInfo = paragraphPromptByAnchor.get(index)
     const isParagraphAnchor = !!paraInfo
@@ -481,24 +536,30 @@ function savePromptResults(
     const existing = parseNarrationImageMeta(sb.referenceImages)
     const sentence = storyboardNarrationSentence(sb)
     const shotMeta = preserveShotMeta(existing)
+    const motionMeta = paragraphMotionMap.get(index) ?? null
+    const imageMode = isParagraphAnchor ? 'new' : 'inherit'
+    const refBase = {
+      ...shotMeta,
+      narration_tts_mode: isParagraphAnchor ? 'new' : 'inherit',
+      script_paragraph_index: existing.script_paragraph_index ?? ctx.sentenceItems[index]?.paragraphIndex,
+      scene_content: paraInfo?.content ?? existing.scene_content,
+      narration_lines: para?.sentences ?? existing.narration_lines,
+      image_narration_lines: para
+        ? mergeStoryboardLinesForImagePrompt(para.sentences)
+        : existing.image_narration_lines,
+      paragraph_index: para?.index ?? existing.paragraph_index,
+      paragraph_layout: para?.layout || existing.paragraph_layout || 'single',
+      image_prompt_source: isParagraphAnchor ? 'llm_raw' : existing.image_prompt_source,
+      image_prompt_llm_raw: isParagraphAnchor ? (paraInfo?.prompt || undefined) : existing.image_prompt_llm_raw,
+    }
 
     db.update(schema.storyboards)
       .set({
         imagePrompt: isParagraphAnchor ? (paraInfo?.prompt || null) : null,
-        referenceImages: buildNarrationImageMeta(isParagraphAnchor ? 'new' : 'inherit', {
-          ...shotMeta,
-          narration_tts_mode: isParagraphAnchor ? 'new' : 'inherit',
-          script_paragraph_index: existing.script_paragraph_index ?? ctx.sentenceItems[index]?.paragraphIndex,
-          scene_content: paraInfo?.content ?? existing.scene_content,
-          narration_lines: para?.sentences ?? existing.narration_lines,
-          image_narration_lines: para
-            ? mergeStoryboardLinesForImagePrompt(para.sentences)
-            : existing.image_narration_lines,
-          paragraph_index: para?.index ?? existing.paragraph_index,
-          paragraph_layout: para?.layout || existing.paragraph_layout || 'single',
-          image_prompt_source: isParagraphAnchor ? 'llm_raw' : existing.image_prompt_source,
-          image_prompt_llm_raw: isParagraphAnchor ? (paraInfo?.prompt || undefined) : existing.image_prompt_llm_raw,
-        }),
+        referenceImages: motionMeta
+          ? mergeMotionMetaIntoReferenceImages(imageMode, refBase, motionMeta)
+          : buildNarrationImageMeta(imageMode, refBase),
+        ...(motionMeta ? { movement: motionMeta.movement, shotType: motionMeta.shotType } : {}),
         updatedAt: ts,
       })
       .where(eq(schema.storyboards.id, sb.id))
@@ -574,7 +635,7 @@ export async function detectNarrationImageAnchors(
       })
     })
 
-    saveDetectResults(episodeId, ctx.orderedStoryboards, ctx.sentenceItems, paragraphs, paragraphMetaByAnchor)
+    saveDetectResults(episodeId, ctx.orderedStoryboards, ctx.sentenceItems, paragraphs, paragraphMetaByAnchor, ctx.motionComicMode)
 
     const firstTitleMeta = ctx.orderedStoryboards
       .map(sb => parseNarrationImageMeta(sb.referenceImages))

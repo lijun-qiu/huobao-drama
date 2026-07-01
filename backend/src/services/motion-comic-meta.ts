@@ -3,10 +3,13 @@ import type {
   MotionComicMotionTier,
   MotionComicShotRole,
   MotionComicStoryboardShot,
+  MotionComicVfxKind,
 } from '../constants/motion-comic.js'
 import {
   inferMotionComicMotionTier,
   inferMotionComicShotRole,
+  motionComicCameraKindToMovementLabel,
+  motionComicCameraKindToShotType,
   motionComicShotNeedsDiptych,
   motionComicShotNeedsOwnImage,
   resolveMotionComicCameraKind,
@@ -15,11 +18,13 @@ import type { NarrationImageMeta, ParagraphLayout } from './narration-image.js'
 import { parseNarrationImageMeta, buildNarrationImageMeta } from './narration-image.js'
 import type { NarrationParagraph } from './narration-paragraph.js'
 import type { MotionCameraOptions } from './motion-comic-camera.js'
+import { resolveMotionComicVfxKind } from './motion-comic-vfx.js'
 
 export type MotionComicImageMeta = NarrationImageMeta & {
   shot_role?: MotionComicShotRole
   motion_tier?: MotionComicMotionTier
   camera_kind?: MotionComicCameraKind
+  vfx_kind?: MotionComicVfxKind
 }
 
 function resolveShotRole(
@@ -36,6 +41,8 @@ function buildMotionComicVisualMeta(
   movement?: string | null,
   pageIndex = 0,
   shotType?: string | null,
+  shotText?: string | null,
+  shotIndex = 0,
 ): Pick<MotionComicImageMeta, 'shot_role' | 'motion_tier' | 'paragraph_layout' | 'camera_kind'> {
   return {
     shot_role: role,
@@ -44,10 +51,83 @@ function buildMotionComicVisualMeta(
     camera_kind: resolveMotionComicCameraKind(role, {
       movement,
       shotType,
-      shotText: expressionAction,
+      shotText: shotText ?? expressionAction,
       pageIndex,
+      shotIndex,
     }),
   }
+}
+
+export type MotionComicAnchorMotionMeta = {
+  shot_role: MotionComicShotRole
+  motion_tier: MotionComicMotionTier
+  camera_kind: MotionComicCameraKind
+  vfx_kind: MotionComicVfxKind
+  movement: string
+  shotType: string
+}
+
+/** 为配图段（1～3 句）推断运镜，整段共用一种 camera_kind */
+export function buildMotionComicSegmentMotionMeta(
+  sentences: string[],
+  paragraphIndex: number,
+  options?: {
+    movement?: string | null
+    shotType?: string | null
+    expressionAction?: string | null
+    sceneBackground?: string | null
+    sceneContent?: string | null
+  },
+): MotionComicAnchorMotionMeta {
+  const shotText = [
+    options?.expressionAction,
+    options?.sceneBackground,
+    options?.sceneContent,
+    ...sentences.map(s => String(s || '').trim()).filter(Boolean),
+  ].filter(Boolean).join(' ')
+  const role = inferMotionComicShotRole(shotText)
+  const movementExplicit = String(options?.movement || '').trim()
+  const useExplicitMovement = movementExplicit && movementExplicit !== '固定'
+  const cameraKind = resolveMotionComicCameraKind(role, {
+    movement: options?.movement,
+    shotType: options?.shotType,
+    shotText,
+    pageIndex: paragraphIndex,
+    shotIndex: paragraphIndex,
+  })
+  const vfxKind = resolveMotionComicVfxKind(shotText, {
+    expressionAction: options?.expressionAction,
+    sceneBackground: options?.sceneBackground,
+    sceneContent: options?.sceneContent,
+  })
+  return {
+    shot_role: role,
+    motion_tier: inferMotionComicMotionTier(role),
+    camera_kind: cameraKind,
+    vfx_kind: vfxKind,
+    movement: useExplicitMovement ? movementExplicit : motionComicCameraKindToMovementLabel(cameraKind),
+    shotType: options?.shotType && options.shotType !== '中景'
+      ? options.shotType
+      : motionComicCameraKindToShotType(cameraKind),
+  }
+}
+
+/** @deprecated 使用 buildMotionComicSegmentMotionMeta（整段一句或多句） */
+export function buildMotionComicAnchorMotionMeta(
+  sentence: string,
+  shotIndex: number,
+  options?: {
+    movement?: string | null
+    shotType?: string | null
+    expressionAction?: string | null
+    pageIndex?: number
+  },
+): MotionComicAnchorMotionMeta {
+  return buildMotionComicSegmentMotionMeta(
+    [sentence],
+    options?.pageIndex ?? shotIndex,
+    options,
+  )
 }
 
 export function parseMotionComicImageMeta(referenceImages?: string | null): MotionComicImageMeta {
@@ -60,6 +140,7 @@ export function parseMotionComicImageMeta(referenceImages?: string | null): Moti
       shot_role: parsed.shot_role as MotionComicShotRole | undefined,
       motion_tier: parsed.motion_tier as MotionComicMotionTier | undefined,
       camera_kind: (parsed.camera_kind ?? base.camera_kind) as MotionComicCameraKind | undefined,
+      vfx_kind: (parsed.vfx_kind ?? base.vfx_kind) as MotionComicVfxKind | undefined,
     }
   } catch {
     return base as MotionComicImageMeta
@@ -83,13 +164,34 @@ export function buildMotionComicStoryboardMeta(
 export function buildMotionComicStoryboardMetaFromShot(
   shot: MotionComicStoryboardShot,
   extra?: Partial<Omit<MotionComicImageMeta, 'narration_image_mode' | 'shot_role' | 'motion_tier' | 'paragraph_layout' | 'camera_kind'>>,
+  shotIndex = 0,
 ): string {
   const role = resolveShotRole(shot.shot_role, `${shot.dialogue} ${shot.expression_action}`)
-  const visual = buildMotionComicVisualMeta(role, shot.expression_action, shot.movement)
+  const shotText = `${shot.dialogue} ${shot.expression_action} ${shot.background || ''}`.trim()
+  const visual = buildMotionComicVisualMeta(
+    role,
+    shot.expression_action,
+    shot.movement,
+    extra?.paragraph_index ?? 0,
+    shot.shot_type,
+    shotText,
+    shotIndex,
+  )
+  const segmentMeta = buildMotionComicSegmentMotionMeta(
+    [shot.dialogue],
+    extra?.paragraph_index ?? shotIndex,
+    {
+      movement: shot.movement,
+      shotType: shot.shot_type,
+      expressionAction: shot.expression_action,
+      sceneBackground: shot.background,
+    },
+  )
   const imageMode = motionComicShotNeedsOwnImage(role) ? 'new' as const : 'inherit' as const
   return buildNarrationImageMeta(imageMode, {
     ...extra,
     ...visual,
+    vfx_kind: segmentMeta.vfx_kind,
     narration_tts_mode: extra?.narration_tts_mode ?? 'new',
     expression_action: shot.expression_action,
     scene_background: shot.background,
@@ -118,6 +220,7 @@ export function resolveMotionComicComposeOptions(
     movement?: string | null
     shotType?: string | null
     shotText?: string | null
+    shotIndex?: number
   },
 ): MotionCameraOptions {
   const meta = parseMotionComicImageMeta(referenceImages)
@@ -126,22 +229,40 @@ export function resolveMotionComicComposeOptions(
   const isDiptych = meta.paragraph_layout === 'diptych'
     || (role ? motionComicShotNeedsDiptych(role, meta.expression_action, options?.movement) : false)
   const pageIndex = options?.pageIndex
+  const shotIndex = options?.shotIndex
+    ?? (typeof meta.body_sentence_index === 'number' ? meta.body_sentence_index : 0)
 
   let cameraKind: MotionComicCameraKind
   if (isDiptych) {
     cameraKind = 'diptych_sweep'
-  } else {
+  } else if (meta.camera_kind) {
+    // 配图段锚点已锁定运镜 → 同图多句整段共用，不因单句重算
     cameraKind = meta.camera_kind
-      ?? resolveMotionComicCameraKind(role, {
-        movement: options?.movement,
-        shotType: options?.shotType,
-        shotText: options?.shotText ?? meta.expression_action,
-        pageIndex,
-      })
+  } else {
+    cameraKind = resolveMotionComicCameraKind(role, {
+      movement: options?.movement,
+      shotType: options?.shotType,
+      shotText: options?.shotText ?? meta.expression_action,
+      pageIndex,
+      shotIndex: typeof meta.paragraph_index === 'number' ? meta.paragraph_index : shotIndex,
+    })
+  }
+
+  const shotText = String(options?.shotText || meta.expression_action || '').trim()
+  let vfxKind: MotionComicVfxKind
+  if (meta.vfx_kind) {
+    vfxKind = meta.vfx_kind
+  } else {
+    vfxKind = resolveMotionComicVfxKind(shotText, {
+      expressionAction: meta.expression_action,
+      sceneBackground: meta.scene_background,
+      sceneContent: meta.scene_content,
+    })
   }
 
   return {
     cameraKind,
+    vfxKind,
     shotRole: role,
     isDiptych,
     pageIndex,
