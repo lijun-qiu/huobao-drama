@@ -79,7 +79,7 @@ export function resolveSubtitleNarrationFromSentence(sentence: string): string |
 
 /** 旁白字幕强调：分镜 dialogue 中用 **词** 标记，合成时黄色并加大字号 */
 
-export const NARRATION_SUBTITLE_FONT_SIZE = 65
+export const NARRATION_SUBTITLE_FONT_SIZE = 50
 export const NARRATION_EMPHASIS_FONT_DELTA = 5
 export const NARRATION_EMPHASIS_FONT_SIZE = NARRATION_SUBTITLE_FONT_SIZE + NARRATION_EMPHASIS_FONT_DELTA
 export const NARRATION_SUBTITLE_PLAY_RES_X = 1280
