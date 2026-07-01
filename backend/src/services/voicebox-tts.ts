@@ -14,6 +14,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const VOICEBOX_BASE_URL = (process.env.VOICEBOX_BASE_URL || 'http://127.0.0.1:17493').replace(/\/$/, '')
 const VOICEBOX_TIMEOUT_MS = Number(process.env.VOICEBOX_TIMEOUT_MS || 600_000)
+const VOICEBOX_HEALTH_TIMEOUT_MS = Number(process.env.VOICEBOX_HEALTH_TIMEOUT_MS || 15_000)
 const VOICEBOX_CONCURRENCY = Math.max(1, Number(process.env.VOICEBOX_CONCURRENCY || 3))
 
 export interface VoiceboxProfile {
@@ -152,7 +153,7 @@ function voiceboxUrl(pathname: string) {
 export async function checkVoiceboxHealth(): Promise<VoiceboxHealth> {
   try {
     const resp = await fetch(voiceboxUrl('/health'), {
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(VOICEBOX_HEALTH_TIMEOUT_MS),
     })
     if (!resp.ok) {
       return { ok: false, error: `HTTP ${resp.status}` }
@@ -351,6 +352,11 @@ export async function generateVoiceboxTTS(
   if (!trimmed) throw new Error('配音文本为空')
   const profile = (profileId || '').trim()
   if (!profile) throw new Error('未选择 Voicebox 音色')
+
+  const health = await checkVoiceboxHealth()
+  if (!health.ok) {
+    throw new Error(health.error || 'Voicebox 未运行或无法连接，请启动 Voicebox 或改用 Edge TTS')
+  }
 
   const resolvedProfileId = await resolveVoiceboxProfileId(profile)
   let lang = (language || '').trim()

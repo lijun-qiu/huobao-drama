@@ -1,3 +1,17 @@
+import {
+  MOTION_COMIC_STYLE,
+  isMotionComicStyle,
+  motionComicStylePrompt,
+  buildMotionComicParagraphImagePromptLLMSystem,
+  buildMotionComicTitleImagePromptLLMSystem,
+  buildMotionComicImageDetectLLMSystem,
+  formatMotionComicStyleSpecBracket,
+  MOTION_COMIC_SCENE_SUFFIX,
+  MOTION_COMIC_SCENE_BODY_EXAMPLE,
+  MOTION_COMIC_STYLE_SPEC,
+  MOTION_COMIC_NEGATIVE_PROMPT,
+} from './motion-comic.js'
+
 export type ArtStyleContext = 'scene' | 'diptych' | 'title' | 'portrait' | 'agent'
 
 export const DEFAULT_ART_STYLE = 'short-drama'
@@ -8,6 +22,16 @@ export const NARRATION_MINIMAL_STYLE = 'narration-minimal'
 /** 解说配图动漫风格（正常头身比 2D 动漫，七维结构与素体相同） */
 export const NARRATION_ANIME_STYLE = 'narration-anime'
 
+/** 漫画解说（条漫平涂 + 上下运镜，独立于素体解说） */
+export {
+  MOTION_COMIC_STYLE,
+  isMotionComicStyle,
+  motionComicStylePrompt,
+  buildMotionComicParagraphImagePromptLLMSystem,
+  buildMotionComicTitleImagePromptLLMSystem,
+  MOTION_COMIC_NEGATIVE_PROMPT,
+} from './motion-comic.js'
+
 /** 解说配图可选画风（独立于项目 drama.style） */
 export const NARRATION_IMAGE_STYLE_OPTIONS = [
   { value: NARRATION_MINIMAL_STYLE, label: '简体素人' },
@@ -17,6 +41,7 @@ export const NARRATION_IMAGE_STYLE_OPTIONS = [
 export function resolveNarrationImageStyle(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
+  if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
   return NARRATION_MINIMAL_STYLE
 }
 
@@ -364,6 +389,7 @@ export const NARRATION_ANIME_TEXTURE_LLM_HINT =
 export function getNarrationStyleSpecBody(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
   if (key === NARRATION_ANIME_STYLE) return NARRATION_ANIME_STYLE_SPEC_BODY
+  if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE_SPEC
   return NARRATION_UNIVERSAL_STYLE_SPEC_BODY
 }
 
@@ -721,6 +747,13 @@ export function buildNarrationParagraphImagePromptLLMSystem(
 ): string {
   const minimal = isNarrationMinimalStyle(style)
   const anime = isNarrationAnimeStyle(style)
+  const motionComic = isMotionComicStyle(style)
+  if (motionComic) {
+    return buildMotionComicParagraphImagePromptLLMSystem({
+      hasCharacters: options?.hasCharacters,
+      hasDiptych: options?.hasDiptych,
+    })
+  }
   const structured = minimal || anime
   const violenceRule = `${NARRATION_VIOLENCE_CONTENT_LLM_RULE}；${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`
 
@@ -785,6 +818,9 @@ export function buildNarrationImageDetectLLMSystem(
   style?: string | null,
   mode: 'paragraph' | 'conservative' | 'balanced' = 'paragraph',
 ): string {
+  if (isMotionComicStyle(style)) {
+    return buildMotionComicImageDetectLLMSystem(mode)
+  }
   void style
   const conservativeExtra = mode === 'conservative'
     ? '\n\n# 保守模式补充\n标 true 的门槛可略高，但 **仍遵守「仅同画面可复用才 false」**：只有确信上一张图无需改动即可表达本单元时才标 false；有任何可视差异一律标 true。'
@@ -897,6 +933,9 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
       '只输出 JSON，不要解释。',
     ].join('\n')
   }
+  if (isMotionComicStyle(style)) {
+    return buildMotionComicTitleImagePromptLLMSystem()
+  }
   return [
     '你是影视解说分镜美术指导，根据整集解说全文为片头标题图写 AI 文生图用的 image_prompt。',
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
@@ -966,6 +1005,11 @@ export const ART_STYLES = [
     description: '现代 2D 动漫插画，清晰线稿、赛璐璐+柔和渐变，正常头身比，表情夸张',
   },
   {
+    value: MOTION_COMIC_STYLE,
+    label: '漫画解说（条漫平涂）',
+    description: '国漫条漫风，粗线平涂，静图快切+动效，适合逆袭/打斗短剧',
+  },
+  {
     value: 'webtoon',
     label: '解说条漫（Q版夸张）',
     description: '粗黑线描、平涂赛璐璐、Q 版比例，偏夸张表情包感',
@@ -1024,6 +1068,13 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
     portrait: '2D Chinese Douyin scripted drama animation style, thin clean anime line art, flat soft cel shading, bright even lighting, normal young adult body proportions, TV anime character design reference sheet, plain light gray background, NOT painterly, NOT semi-realistic, NOT digital painting portrait, NOT chibi, NOT thick comic outlines, NOT concept art poster',
     agent: 'Chinese short drama 2D animation style, normal body proportions, clean line art, soft cel shading, NOT chibi',
   },
+  [MOTION_COMIC_STYLE]: {
+    scene: motionComicStylePrompt('scene'),
+    diptych: motionComicStylePrompt('diptych'),
+    title: motionComicStylePrompt('title'),
+    portrait: motionComicStylePrompt('portrait'),
+    agent: motionComicStylePrompt('agent'),
+  },
   webtoon: {
     scene: 'modern Chinese webtoon animation style, semi-chibi stylized characters, bold black outlines, cel-shaded flat colors, expressive exaggerated faces, vibrant saturated colors, manhua illustration, cinematic composition',
     diptych: 'modern Chinese webtoon animation style, semi-chibi stylized characters, bold black outlines, cel-shaded flat colors, expressive faces, manhua illustration, cinematic composition',
@@ -1078,6 +1129,7 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
 export function normalizeArtStyle(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
+  if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
   if (STYLE_PROMPTS[key]) return key
   return DEFAULT_ART_STYLE
 }
@@ -1102,8 +1154,9 @@ export function isNarrationAnimeStyle(style?: string | null): boolean {
   return normalizeArtStyle(style) === NARRATION_ANIME_STYLE
 }
 
+
 export function isNarrationStructuredStyle(style?: string | null): boolean {
-  return isNarrationMinimalStyle(style) || isNarrationAnimeStyle(style)
+  return isNarrationMinimalStyle(style) || isNarrationAnimeStyle(style) || isMotionComicStyle(style)
 }
 
 export const SCENE_STYLE_GUARD = [
@@ -2250,6 +2303,26 @@ export function compileNarrationImageGenerationBundle(
   const camera = extractNarrationPromptBracketContents(text, '镜头视角')[0] ?? ''
   const styleSpecRaw = resolveNarrationStyleSpecFromPrompt(text, style)
   const anime = isNarrationAnimeStyle(style) || isNarrationAnimeStyleSpecText(styleSpecRaw)
+  const motionComic = isMotionComicStyle(style)
+
+  if (motionComic) {
+    const visualCoreParts = [
+      styleSpecRaw || MOTION_COMIC_STYLE_SPEC,
+      subject,
+      era,
+      action,
+      lighting,
+      camera,
+    ]
+    const prompt = tidyAppearancePunctuation([
+      visualCoreParts.filter(Boolean).join('，'),
+      MOTION_COMIC_SCENE_SUFFIX,
+    ].join('，'))
+    return {
+      prompt,
+      negativePrompt: mergeNarrationImageNegativePrompts(MOTION_COMIC_NEGATIVE_PROMPT),
+    }
+  }
 
   if (anime) {
     const visualCoreParts = [
@@ -3983,5 +4056,8 @@ export function resolveLLMImagePrompt(
   if (!raw) return ''
   if (isNarrationMinimalStyle(style)) return coerceMinimalLLMImagePrompt(raw)
   if (isNarrationAnimeStyle(style)) return coerceAnimeLLMImagePrompt(raw, style)
+  if (isMotionComicStyle(style) && hasNarrationSixDimStructure(raw)) {
+    return ensureNarrationStyleSpecDim(raw, style)
+  }
   return raw
 }

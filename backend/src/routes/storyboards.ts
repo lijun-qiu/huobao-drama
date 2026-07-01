@@ -8,19 +8,48 @@ import { findReusableTtsByText, narrationShotNeedsOwnTts, parseDialogueForTTS, r
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta } from '../services/narration-image.js'
 import { buildComposeUnitMergedTtsText, findComposeUnitMembers, propagateComposeUnitTts } from '../services/ffmpeg-compose.js'
 import { formatCharacterDisplayName, resolveStoryboardCharacterIdsForShot } from '../services/narration-characters.js'
-import { resolveEdgeVoice } from '../services/edge-tts-local.js'
+import { DEFAULT_EDGE_VOICE, resolveEdgeVoice } from '../services/edge-tts-local.js'
+import { findCharacterVoiceMeta, isEdgeVoiceId, mapLocalVoiceToEdge, resolveStoryboardLocalTtsInput, type LocalTtsEngine } from '../services/local-tts-resolve.js'
+import { checkVoiceboxHealth, resolveVoiceboxProfileId } from '../services/voicebox-tts.js'
 import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.js'
 import {
   purgeStoryboardTtsBeforeRegenerate,
   replaceStoryboardAssetOnUpdate,
 } from '../services/storyboard-asset-replace.js'
-import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 import { scanNarrationStoryboardImage } from '../services/narration-image-scan.js'
 
 const app = new Hono()
+
+async function generateStoryboardTtsAudio(
+  params: Parameters<typeof generateTTS>[0],
+  options?: { edgeFallbackVoice?: string | null },
+) {
+  try {
+    return await generateTTS(params)
+  } catch (err: any) {
+    if (!params.localTts || params.localTtsEngine !== 'voicebox') throw err
+    const fallbackVoice = resolveEdgeVoice(
+      options?.edgeFallbackVoice && isEdgeVoiceId(options.edgeFallbackVoice)
+        ? options.edgeFallbackVoice
+        : DEFAULT_EDGE_VOICE,
+    )
+    logTaskWarn('StoryboardAPI', 'voicebox-fallback-edge', {
+      error: err.message,
+      fallbackVoice,
+    })
+    return generateTTS({
+      ...params,
+      voice: fallbackVoice,
+      localTtsEngine: 'edge',
+      voiceboxInstruct: undefined,
+      voiceboxModelSize: undefined,
+    })
+  }
+}
 
 function normalizeStoryboardImagePrompt(prompt: unknown): string {
   return String(prompt || '').trim()
@@ -259,8 +288,9 @@ app.post('/:id/generate-tts', async (c) => {
   const isTitleShot = isStoryboardTitleShot(sb)
 
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  let chars: Array<{ name: string; voiceStyle?: string | null; voiceProvider?: string | null }> = []
   if (ep) {
-    const chars = db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId)).all()
+    chars = db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId)).all()
     voiceId = resolveNarrationVoiceId(speaker, chars, { isTitleShot: !!isTitleShot })
   }
 
@@ -329,25 +359,71 @@ app.post('/:id/generate-tts', async (c) => {
 
   try {
     purgeStoryboardTtsBeforeRegenerate(id, sb)
-    const ttsVoice = localTts
-      ? (localTtsEngine === 'voicebox'
-        ? String(body?.local_voice || voiceId)
-        : resolveEdgeVoice(body?.local_voice ? String(body.local_voice) : voiceId))
-      : voiceId
+    const requestedEngine: LocalTtsEngine = localTtsEngine === 'voicebox' ? 'voicebox' : 'edge'
+    let voiceboxHealthy = requestedEngine === 'voicebox'
+    if (voiceboxHealthy) {
+      const health = await checkVoiceboxHealth()
+      voiceboxHealthy = !!health.ok
+      if (!voiceboxHealthy) {
+        logTaskWarn('StoryboardAPI', 'voicebox-unavailable', {
+          storyboardId: id,
+          error: health.error,
+        })
+      }
+    }
+
+    let ttsEngine = requestedEngine
+    let ttsVoice = voiceId
+    let ttsSpeakerName = speaker
+    let usedCharacterVoice = false
+    let edgeFallbackVoice: string | null = null
+    if (localTts) {
+      const preferSpeakerVoice = body?.use_speaker_voice === true || body?.useSpeakerVoice === true
+      const fallbackVoice = String(body?.local_voice ?? body?.localVoice ?? '').trim() || undefined
+      const localInput = resolveStoryboardLocalTtsInput(speaker, chars, {
+        isTitleShot: !!isTitleShot,
+        fallbackEngine: requestedEngine,
+        fallbackVoice,
+        preferSpeakerVoice,
+        forceEngine: requestedEngine,
+        allowVoicebox: voiceboxHealthy,
+      })
+      ttsEngine = localInput.engine
+      ttsSpeakerName = localInput.speakerName
+      usedCharacterVoice = localInput.usedCharacterVoice
+      if (localInput.engine === 'edge' || isEdgeVoiceId(localInput.voiceInput)) {
+        edgeFallbackVoice = localInput.voiceInput
+      } else if (fallbackVoice && isEdgeVoiceId(fallbackVoice)) {
+        edgeFallbackVoice = fallbackVoice
+      } else if (ttsEngine === 'edge') {
+        edgeFallbackVoice = mapLocalVoiceToEdge(
+          findCharacterVoiceMeta(speaker, chars, { isTitleShot: !!isTitleShot }),
+          fallbackVoice,
+        )
+      }
+      ttsVoice = ttsEngine === 'voicebox'
+        ? await resolveVoiceboxProfileId(localInput.voiceInput)
+        : localInput.voiceInput
+    }
 
     const unitMemberIds = unitTts ? findComposeUnitMembers(id, episodeStoryboards).map(m => m.id) : undefined
+    const useAsync = localTts ? false : body?.async === true
 
     const runGeneration = async () => {
-      const audioPath = await generateTTS({
+      const audioPath = await generateStoryboardTtsAudio({
         text: pureDialogue,
         voice: ttsVoice,
         speed: ttsSpeed,
         configId: localTts ? null : (ep?.audioConfigId || null),
         localTts,
-        localTtsEngine: localTts ? localTtsEngine : undefined,
-        voiceboxInstruct,
-        voiceboxModelSize,
-      })
+        localTtsEngine: localTts ? (ttsEngine as LocalTtsEngine) : undefined,
+        voiceboxInstruct: localTts && ttsEngine === 'voicebox'
+          ? voiceboxInstruct
+          : undefined,
+        voiceboxModelSize: localTts && ttsEngine === 'voicebox'
+          ? voiceboxModelSize
+          : undefined,
+      }, { edgeFallbackVoice })
       const duration = await probeStoredAudioDuration(audioPath)
       db.update(schema.storyboards)
         .set({
@@ -365,16 +441,18 @@ app.post('/:id/generate-tts', async (c) => {
       logTaskSuccess('StoryboardAPI', 'generate-tts', {
         storyboardId: id,
         voiceId: ttsVoice,
+        speaker: ttsSpeakerName,
+        usedCharacterVoice,
         path: audioPath,
         textLength: pureDialogue.length,
         duration,
         localTts,
-        async: body?.async === true,
+        async: useAsync,
       })
       return { audioPath, duration }
     }
 
-    if (body?.async === true) {
+    if (useAsync) {
       void runGeneration().catch((err: any) => {
         logTaskError('StoryboardAPI', 'generate-tts', { storyboardId: id, voiceId: ttsVoice, error: err.message, async: true })
       })
@@ -382,15 +460,17 @@ app.post('/:id/generate-tts', async (c) => {
         status: 'processing',
         storyboard_id: id,
         voice_id: ttsVoice,
+        speaker: ttsSpeakerName,
+        used_character_voice: usedCharacterVoice,
         text: pureDialogue,
         unit_tts: unitTts,
         unit_member_ids: unitMemberIds,
         local_tts: localTts,
-        local_tts_engine: localTts ? localTtsEngine : undefined,
+        local_tts_engine: localTts ? ttsEngine : undefined,
         tts_speed: ttsSpeed,
         voicebox_instruct: voiceboxInstruct,
         voicebox_model_size: voiceboxModelSize,
-        provider: localTts ? localTtsEngine : undefined,
+        provider: localTts ? ttsEngine : undefined,
       })
     }
 
@@ -398,16 +478,18 @@ app.post('/:id/generate-tts', async (c) => {
     return success(c, {
       tts_audio_url: audioPath,
       voice_id: ttsVoice,
+      speaker: ttsSpeakerName,
+      used_character_voice: usedCharacterVoice,
       text: pureDialogue,
       duration,
       unit_tts: unitTts,
       unit_member_ids: unitMemberIds,
       local_tts: localTts,
-      local_tts_engine: localTts ? localTtsEngine : undefined,
+      local_tts_engine: localTts ? ttsEngine : undefined,
       tts_speed: ttsSpeed,
       voicebox_instruct: voiceboxInstruct,
       voicebox_model_size: voiceboxModelSize,
-      provider: localTts ? localTtsEngine : undefined,
+      provider: localTts ? ttsEngine : undefined,
     })
   } catch (err: any) {
     logTaskError('StoryboardAPI', 'generate-tts', { storyboardId: id, voiceId, error: err.message })

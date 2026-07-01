@@ -8,6 +8,11 @@ export const NARRATION_MINIMAL_STYLE = 'narration-minimal'
 /** 解说配图动漫风格（正常头身比 2D 动漫，七维结构与素体相同） */
 export const NARRATION_ANIME_STYLE = 'narration-anime'
 
+/** 漫画解说（条漫平涂 + 上下运镜） */
+export const MOTION_COMIC_STYLE = 'motion-comic'
+
+export const MOTION_COMIC_DEFAULT_STYLE = MOTION_COMIC_STYLE
+
 /** 解说配图可选画风（独立于项目 drama.style） */
 export const NARRATION_IMAGE_STYLE_OPTIONS = [
   { value: NARRATION_MINIMAL_STYLE, label: '简体素人' },
@@ -17,6 +22,7 @@ export const NARRATION_IMAGE_STYLE_OPTIONS = [
 export function resolveNarrationImageStyle(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
+  if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
   return NARRATION_MINIMAL_STYLE
 }
 
@@ -276,6 +282,11 @@ export const ART_STYLES = [
     description: '现代 2D 动漫插画，清晰线稿、赛璐璐+柔和渐变，正常头身比，表情夸张',
   },
   {
+    value: MOTION_COMIC_STYLE,
+    label: '漫画解说（条漫平涂）',
+    description: '国漫条漫风，粗线平涂，静图快切+打斗动效，适合逆袭/短剧',
+  },
+  {
     value: 'webtoon',
     label: '解说条漫（Q版夸张）',
     description: '粗黑线描、平涂赛璐璐、Q 版比例，偏夸张表情包感',
@@ -326,6 +337,13 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
     title: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【片头背景场景】，【主题氛围】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【场景：浅灰纯色背景，单人全身动漫人物定妆参考图】，【剧情：正常头身比，清晰线稿，人生阶段与动作姿态】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     agent: `${NARRATION_ANIME_STYLE_SPEC_BODY}，禁止Q版三头身、3D渲染、真人照片`,
+  },
+  [MOTION_COMIC_STYLE]: {
+    scene: 'modern Chinese webtoon comic style, bold black outlines, flat cel-shaded colors, normal body proportions, expressive exaggerated faces, manhua illustration, dynamic action lines for fight scenes, cinematic composition, NOT chibi, NOT 3D',
+    diptych: 'modern Chinese webtoon comic style, horizontal two-panel before/after action, bold outlines, flat cel colors, normal proportions, manhua illustration',
+    title: 'modern Chinese webtoon comic style, atmospheric background, bold outlines, dramatic lighting, no text',
+    portrait: 'modern Chinese webtoon comic character reference, bold black outlines, flat cel colors, normal body proportions, 16:9 widescreen horizontal framing, plain light gray background',
+    agent: 'modern Chinese webtoon comic style, bold outlines, flat cel colors, expressive faces, action lines allowed, NOT chibi',
   },
   'short-drama': {
     scene: 'Chinese short drama 2D animation style, normal realistic body proportions, clean consistent line art, soft cel shading, expressive anime faces, Douyin storytelling animation aesthetic, school drama illustration, cinematic composition, NOT chibi, NOT Q-version',
@@ -388,6 +406,7 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
 export function normalizeArtStyle(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
+  if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
   if (STYLE_PROMPTS[key]) return key
   return DEFAULT_ART_STYLE
 }
@@ -412,8 +431,12 @@ export function isNarrationAnimeStyle(style?: string | null): boolean {
   return normalizeArtStyle(style) === NARRATION_ANIME_STYLE
 }
 
+export function isMotionComicStyle(style?: string | null): boolean {
+  return normalizeArtStyle(style) === MOTION_COMIC_STYLE
+}
+
 export function isNarrationStructuredStyle(style?: string | null): boolean {
-  return isNarrationMinimalStyle(style) || isNarrationAnimeStyle(style)
+  return isNarrationMinimalStyle(style) || isNarrationAnimeStyle(style) || isMotionComicStyle(style)
 }
 
 export const SCENE_STYLE_GUARD = [

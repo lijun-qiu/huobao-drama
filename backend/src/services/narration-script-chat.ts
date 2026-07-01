@@ -1,7 +1,6 @@
-/**
- * 体验人生解说稿 — 多轮聊天生成纯文稿（** 强调在旁白分镜步骤由 Qwen 完成）
- */
 import { eq } from 'drizzle-orm'
+import { parseProductionMode, isMotionComicMode } from '../constants/production-mode.js'
+import { MOTION_COMIC_SCRIPT_CHAT_SYSTEM } from '../constants/motion-comic.js'
 import { db, schema } from '../db/index.js'
 import { resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel } from '../constants/text-models.js'
 import { ensureScriptEmphasisInBody } from '../utils/subtitle-emphasis.js'
@@ -59,6 +58,16 @@ const NARRATION_SCRIPT_CHAT_SYSTEM = [
   '用户要求修改时，输出修改后的完整稿或明确说明改动了哪段；若仅改人称，须整稿统一处理。',
   '闲聊、选题讨论时可正常对话，不必强行输出整稿。',
 ].join('\n')
+
+function resolveScriptChatSystem(episodeId: number): string {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return NARRATION_SCRIPT_CHAT_SYSTEM
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  if (isMotionComicMode(parseProductionMode(drama?.metadata))) {
+    return MOTION_COMIC_SCRIPT_CHAT_SYSTEM
+  }
+  return NARRATION_SCRIPT_CHAT_SYSTEM
+}
 
 /** 完整稿篇幅：下限 3000 字，上限 10000 字 */
 export const NARRATION_SCRIPT_MIN_CHARS = 3_000
@@ -143,11 +152,12 @@ function buildNarrationScriptChatMessages(params: {
   const textModel = resolveNarrationScriptChatTextModel(params.textModel)
   const textThinking = resolveEpisodeTextThinking(ep, params.textThinking)
   const context = buildEpisodeContext(params.episodeId)
+  const systemPrompt = resolveScriptChatSystem(params.episodeId)
 
   const apiMessages: TextChatMessage[] = [
     {
       role: 'system',
-      content: context ? `${NARRATION_SCRIPT_CHAT_SYSTEM}\n\n${context}` : NARRATION_SCRIPT_CHAT_SYSTEM,
+      content: context ? `${systemPrompt}\n\n${context}` : systemPrompt,
     },
     ...turns,
   ]

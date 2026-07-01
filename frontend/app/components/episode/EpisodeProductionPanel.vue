@@ -108,10 +108,63 @@
 
           <!-- Sub: Narrator Voice (narration mode) -->
           <div v-if="prodTab === 'voice'" class="prod-content">
-            <div class="narration-hint">
+            <div v-if="isMotionComicMode" class="narration-hint">
+              <strong>多角色本地配音：</strong>优先使用 Voicebox 的 <strong>Kokoro</strong> 中文音色，不够时自动补 <strong>Edge TTS</strong>。分配完成后在「生成配音」勾选本地配音，系统会按分镜说话人自动选音色。
+            </div>
+            <div v-else class="narration-hint">
               <strong>旁白音色：</strong>使用 MiniMax 等 API 时需在此选择旁白音色。若已在「生成配音」勾选<strong>本地配音（Edge TTS）</strong>，可直接跳过本步。
             </div>
-            <div class="card" style="padding:16px;max-width:520px">
+
+            <template v-if="isMotionComicMode">
+              <div class="prod-section-bar" style="margin-bottom:12px">
+                <span class="dim" style="font-size:12px">{{ charsVoiced }}/{{ motionComicVoiceChars.length }} 已分配</span>
+                <span class="tag">Kokoro 优先 · Edge 补位</span>
+                <div class="ml-auto flex gap-1">
+                  <button class="btn btn-sm btn-primary" :disabled="localVoiceAssigning || !motionComicVoiceChars.length" @click="assignLocalCharacterVoices(false)">
+                    {{ localVoiceAssigning ? '分配中…' : '自动分配音色' }}
+                  </button>
+                  <button class="btn btn-sm" :disabled="localVoiceAssigning || !charsVoiced" @click="assignLocalCharacterVoices(true)">
+                    重新分配
+                  </button>
+                </div>
+              </div>
+              <div v-if="!motionComicVoiceChars.length" class="step-empty" style="min-height:220px">
+                <div class="empty-title">暂无角色</div>
+                <div class="empty-desc">请先在「定妆参考」提取角色，或手动添加后再分配音色。</div>
+              </div>
+              <div v-else class="voice-grid">
+                <div v-for="c in motionComicVoiceChars" :key="c.id" class="card voice-card">
+                  <div class="voice-card-head">
+                    <div class="voice-char">
+                      <div class="char-avatar lg">{{ c.name?.[0] || '?' }}</div>
+                      <div class="voice-name">
+                        <div class="voice-name-row">
+                          <div class="extract-name">{{ c.name }}</div>
+                          <span class="tag" :class="(c.voice_style || c.voiceStyle) ? 'tag-success' : ''">{{ (c.voice_style || c.voiceStyle) ? '已分配' : '待分配' }}</span>
+                        </div>
+                        <div class="extract-meta">{{ c.role || '角色' }}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <label class="field" style="margin-top:10px">
+                    <span class="field-label">本地音色</span>
+                    <BaseSelect
+                      :model-value="c.voice_style || c.voiceStyle || ''"
+                      :options="localCastVoiceSelectOptions"
+                      placeholder="选择 Kokoro / Edge 音色"
+                      searchable
+                      style="width:100%"
+                      @update:model-value="updateCharVoice(c.id, $event)"
+                    />
+                  </label>
+                  <div v-if="c.voice_style || c.voiceStyle" class="dim" style="font-size:11px;margin-top:8px">
+                    当前：{{ formatLocalVoiceLabel(c) }}
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <div v-else class="card" style="padding:16px;max-width:520px">
               <label class="field">
                 <span class="field-label">旁白音色</span>
                 <BaseSelect :model-value="narratorVoiceId" :options="voiceSelectOptions" placeholder="选择旁白音色" searchable style="width:100%" @update:model-value="onNarratorVoiceChange" />
@@ -128,11 +181,14 @@
               </button>
             </div>
           </div>
-
-          <!-- Sub: Characters -->
           <div v-else-if="prodTab === 'chars'" class="prod-content">
             <div v-if="isNarrationMode" class="narration-hint">
-              <strong>定妆参考：</strong>从解说文案提取会在画面出现的角色；若文案含不同年龄/时期，会<strong>自动拆成多条定妆</strong>。中年/老年会以青年定妆作参考。顶部可<strong>一键复制/上传全部</strong>定妆。
+              <template v-if="isMotionComicMode">
+                <strong>定妆参考：</strong>从漫剧旁白稿提取<strong>主人公与主要配角</strong>；每个角色可单独<strong>上传/清除</strong>定妆图，或顶部一键操作。
+              </template>
+              <template v-else>
+                <strong>定妆参考：</strong>从解说文案提取角色；每个角色可单独<strong>上传/清除</strong>定妆图，或顶部一键复制/上传/清除。
+              </template>
             </div>
             <div v-if="isNarrationMode" class="prod-image-model-bar" style="margin-bottom:12px">
               <span class="dim" style="font-size:12px">项目画风</span>
@@ -142,12 +198,12 @@
               <div class="empty-visual">
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               </div>
-              <div class="empty-title">从解说文案提取主角定妆</div>
-              <div class="empty-desc">解说素体模式只需主人公的多阶段定妆（青年/中年/老年等），配角无需单独提取</div>
+              <div class="empty-title">{{ isMotionComicMode ? '从旁白稿提取角色定妆' : '从解说文案提取主角定妆' }}</div>
+              <div class="empty-desc">{{ isMotionComicMode ? '漫画解说需主人公 + 主要配角 16:9 横屏定妆参考图（正常头身比国漫风）；一次性路人不提取' : '解说素体模式只需主人公的多阶段定妆（青年/中年/老年等），配角无需单独提取' }}</div>
               <div class="step-empty-actions">
                 <button class="btn btn-primary" :disabled="!localRaw.trim() && !rawContent" @click="doExtractNarrationCharacters">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                  提取主角定妆
+                  {{ isMotionComicMode ? '提取角色定妆' : '提取主角定妆' }}
                 </button>
                 <button class="btn" @click="addNarrationCharacter">手动添加</button>
               </div>
@@ -194,6 +250,7 @@
                 <button v-if="isNarrationMode" class="btn btn-sm" @click="addNarrationCharacter">添加角色</button>
                 <button class="btn btn-sm" :disabled="!visualChars.length" @click="copyAllCharPortraitPrompts">一键复制全部描述词</button>
                 <button class="btn btn-sm" :disabled="!visualChars.length" @click="triggerAllCharImageUpload">一键上传全部（{{ visualChars.length }}）</button>
+                <button class="btn btn-sm" :disabled="!charImgCount" @click="clearAllCharPortraitImages">一键清除全部</button>
                 <button class="btn btn-sm" :disabled="isBatchRunning('charImages') || !charImagesPendingCount" @click="batchCharImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                   生成剩余{{ charImagesPendingCount ? ` (${charImagesPendingCount})` : '' }}
@@ -202,7 +259,7 @@
             </div>
             <div class="asset-grid">
               <div v-for="c in visualChars" :key="c.id" class="card asset-card">
-                <div class="asset-cover">
+                <div class="asset-cover" :class="{ wide: isMotionComicMode }">
                   <img
                     v-if="c.image_url || c.imageUrl"
                     :src="'/' + (c.image_url || c.imageUrl)"
@@ -244,6 +301,20 @@
                   <span :class="['dot', (c.image_url || c.imageUrl) && 'ok', isPendingCharImage(c.id) && 'pending']" />
                   <span class="dim" style="font-size:10px">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
                   <button class="btn btn-sm ml-auto" :disabled="isPendingCharImage(c.id)" @click="genCharImg(c.id)">{{ isPendingCharImage(c.id) ? '生成中' : '生成' }}</button>
+                  <button
+                    class="btn btn-sm"
+                    :disabled="isPendingCharImage(c.id)"
+                    @click="triggerCharImageUpload(c.id)"
+                  >
+                    上传
+                  </button>
+                  <button
+                    v-if="c.image_url || c.imageUrl"
+                    class="btn btn-sm"
+                    @click="clearCharPortraitImage(c.id)"
+                  >
+                    清除
+                  </button>
                   <button
                     v-if="c.image_url || c.imageUrl"
                     class="btn btn-sm"
@@ -296,7 +367,10 @@
 
           <!-- Sub: Dubbing -->
           <div v-else-if="prodTab === 'dubbing'" class="prod-content">
-            <div v-if="isNarrationMode" class="narration-hint">
+            <div v-if="isMotionComicMode" class="narration-hint">
+              <strong>多角色配音：</strong>请先在「角色音色」自动分配 Kokoro / Edge 音色；勾选<strong>本地配音</strong>后批量生成，系统按分镜「角色名：台词」自动选用对应音色。有「旁白：」镜头的，请确保旁白角色也已分配音色。
+            </div>
+            <div v-else-if="isNarrationMode" class="narration-hint">
               <strong>配音策略：</strong>与镜头合成一致，<strong>同配图段合并为一段配音</strong>（多句旁白一次 TTS）；片头镜仍逐镜生成。可先上传 MP3 再「按文案裁剪」；裁剪按<strong>分镜旁白字数比例</strong>切分时长。
             </div>
             <div v-else class="narration-hint">
@@ -554,7 +628,7 @@
                 v-model="customTtsText"
                 class="textarea"
                 rows="3"
-                placeholder="输入要合成的旁白或台词，例如：体验365个人生副本"
+                :placeholder="isMotionComicMode ? '输入要合成的配音台词，例如：标题：废柴少年逆袭' : '输入要合成的旁白或台词，例如：体验365个人生副本'"
               />
               <div v-if="!customTtsUsesLocal" class="custom-tts-actions">
                 <BaseSelect
@@ -640,7 +714,10 @@
                     <div class="dub-copy">
                     <div class="dub-title">
                       <span class="frame-num">{{ item.shotRangeLabel }}</span>
-                      <span class="frame-badge">{{ isNarrationTitleShot(item.sb) ? '片头' : '旁白句' }}</span>
+                      <span class="frame-badge">{{ isNarrationTitleShot(item.sb) ? '片头' : (isMotionComicMode ? '台词' : '旁白句') }}</span>
+                    </div>
+                    <div v-if="isMotionComicMode && item.speakerLabel" class="dim" style="font-size:11px;margin-top:4px">
+                      {{ item.voiceHint || item.speakerLabel }}
                     </div>
                     <ul v-if="!isNarrationTitleShot(item.sb) && item.subtitleLines.length > 1" class="compose-subtitle-lines dub-unit-lines">
                       <li v-for="line in item.subtitleLines" :key="line.index">
@@ -1738,7 +1815,7 @@
           <!-- Sub: Videos -->
           <div v-else-if="!isNarrationMode && prodTab === 'videos'" class="prod-content">
             <div class="narration-hint">
-              <strong>解说模式可跳过本步：</strong>若每镜已有「配图 + 旁白配音」，无需 AI 视频，直接去「镜头合成」即可（配图保持静止画面）。
+              <strong>{{ isMotionComicMode ? '漫画解说可跳过本步：' : '解说模式可跳过本步：' }}</strong>若每镜已有「配图 + 配音」，无需 AI 视频，直接去「镜头合成」即可（配图可加快切+上下运镜）。
             </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>

@@ -140,7 +140,8 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import { dramaAPI } from '~/composables/useApi'
-import { NARRATION_MINIMAL_STYLE, artStyleLabel, artStyleSelectOptions } from '~/composables/useArtStyles'
+import { NARRATION_MINIMAL_STYLE, MOTION_COMIC_DEFAULT_STYLE, artStyleLabel, artStyleSelectOptions } from '~/composables/useArtStyles'
+import { buildDramaMetadata, productionModeLabel as motionComicModeLabel } from '~/composables/useMotionComic'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 const dramas = ref([])
@@ -150,11 +151,13 @@ const form = ref({ title: '', total_episodes: 1, style: NARRATION_MINIMAL_STYLE,
 const styleSelectOptions = artStyleSelectOptions
 const modeSelectOptions = [
   { label: '解说视频（配图+旁白）', value: 'narration' },
+  { label: '漫画解说（条漫+上下运镜）', value: 'motion_comic' },
   { label: '漫剧短剧（完整流程）', value: 'drama' },
 ]
 
 watch(() => form.value.production_mode, (mode) => {
   if (mode === 'narration') form.value.style = NARRATION_MINIMAL_STYLE
+  if (mode === 'motion_comic') form.value.style = MOTION_COMIC_DEFAULT_STYLE
 })
 
 async function load() {
@@ -175,7 +178,7 @@ async function create() {
     const { production_mode, ...rest } = form.value
     const d = await dramaAPI.create({
       ...rest,
-      metadata: JSON.stringify({ production_mode: production_mode || 'drama' }),
+      metadata: buildDramaMetadata(production_mode || 'drama'),
     })
     showCreate.value = false
     navigateTo(`/drama/${d.id}`)
@@ -212,7 +215,7 @@ function getModeLabel(d) {
   if (typeof meta === 'string') {
     try { meta = JSON.parse(meta) } catch { meta = null }
   }
-  return meta?.production_mode === 'narration' ? '解说' : ''
+  return motionComicModeLabel(meta?.production_mode) || ''
 }
 
 function getProgress(d) {

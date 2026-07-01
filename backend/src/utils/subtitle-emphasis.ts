@@ -79,7 +79,7 @@ export function resolveSubtitleNarrationFromSentence(sentence: string): string |
 
 /** 旁白字幕强调：分镜 dialogue 中用 **词** 标记，合成时黄色并加大字号 */
 
-export const NARRATION_SUBTITLE_FONT_SIZE = 65
+export const NARRATION_SUBTITLE_FONT_SIZE = 55
 export const NARRATION_EMPHASIS_FONT_DELTA = 5
 export const NARRATION_EMPHASIS_FONT_SIZE = NARRATION_SUBTITLE_FONT_SIZE + NARRATION_EMPHASIS_FONT_DELTA
 export const NARRATION_SUBTITLE_PLAY_RES_X = 1280
@@ -492,8 +492,8 @@ export function buildCombinedAssHeader(options: {
   } = options
   const styleLines: string[] = []
   if (includeTitleStyles) {
-    const titleWhiteFs = 104
-    const titleFs = 94
+    const titleWhiteFs = 94
+    const titleFs = 84
     styleLines.push(
       `Style: TitleWhite, ${titleFontName}, ${titleWhiteFs}, &HFFFFFF&, &HFF000000&, &H00000000&, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 5, 0, 0, 0, 1`,
       `Style: Title, ${titleFontName}, ${titleFs}, &H0014F0&, &HFF000000&, &H00FFFFFF&, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 5, 0, 0, 0, 1`,

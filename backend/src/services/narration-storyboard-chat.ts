@@ -2,6 +2,8 @@
  * 旁白分镜 — 多轮聊天（讨论拆镜策略、流式展示过程、触发整稿拆镜）
  */
 import { eq } from 'drizzle-orm'
+import { parseProductionMode, isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { MOTION_COMIC_STORYBOARD_CHAT_SYSTEM } from '../constants/motion-comic.js'
 import { db, schema } from '../db/index.js'
 import { resolveEpisodeTextThinking, resolveNarrationStoryboardTextModel } from '../constants/text-models.js'
 import { breakdownNarrationStoryboards } from './narration-breakdown.js'
@@ -32,6 +34,16 @@ const STORYBOARD_CHAT_SYSTEM = [
   '回复简洁、可操作。',
 ].join('\n')
 
+function resolveStoryboardChatSystem(episodeId: number): string {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return STORYBOARD_CHAT_SYSTEM
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  if (isMotionComicMode(parseProductionMode(drama?.metadata))) {
+    return MOTION_COMIC_STORYBOARD_CHAT_SYSTEM
+  }
+  return STORYBOARD_CHAT_SYSTEM
+}
+
 export type NarrationStoryboardChatParams = {
   episodeId: number
   messages: NarrationStoryboardChatTurn[]
@@ -59,9 +71,10 @@ function buildStoryboardChatMessages(params: NarrationStoryboardChatParams) {
   const textModel = resolveNarrationStoryboardTextModel(ep, params.textModel)
   const textThinking = resolveEpisodeTextThinking(ep, params.textThinking)
   const context = buildStoryboardChatContextBlock(params.episodeId, params.script)
+  const systemPrompt = resolveStoryboardChatSystem(params.episodeId)
 
   const apiMessages: TextChatMessage[] = [
-    { role: 'system', content: `${STORYBOARD_CHAT_SYSTEM}\n\n${context}` },
+    { role: 'system', content: `${systemPrompt}\n\n${context}` },
     ...turns,
   ]
 
@@ -75,7 +88,7 @@ function formatStoryboardResultSummary(result: {
   title_hook?: string | null
   emphasis_source?: string
   total_duration?: number
-}) {
+}, motionComic = false) {
   const shotCount = result.count ?? 0
   const sentenceCount = result.sentence_count ?? 0
   const titleCount = result.title_count ?? 0
@@ -84,8 +97,11 @@ function formatStoryboardResultSummary(result: {
   const source = result.emphasis_source === 'llm' ? 'AI 拆镜' : '规则兜底'
   const titleHint = titleCount
     ? `，片头 ${titleCount} 镜${titleHook ? `（${titleHook}）` : ''}`
-    : '，未识别片头（首行请写「标题：」或「今天体验的人生剧本是…」）'
-  return `分镜完成（${source}）：${sentenceCount} 句旁白 → ${shotCount} 镜${titleHint}，约 ${dur}s。可在下方编辑镜头，或继续对话后重新分镜。`
+    : motionComic
+      ? '，未识别片头（首行请写「标题：」或「本期故事：…」）'
+      : '，未识别片头（首行请写「标题：」或「今天体验的人生剧本是…」）'
+  const label = motionComic ? '句台词' : '句旁白'
+  return `${motionComic ? '漫画' : ''}分镜完成（${source}）：${sentenceCount} ${label} → ${shotCount} 镜${titleHint}，约 ${dur}s。可在下方编辑镜头，或继续对话后重新分镜。`
 }
 
 export async function streamNarrationStoryboardChat(
@@ -99,14 +115,15 @@ export async function streamNarrationStoryboardChat(
 
   if (params.action === 'run') {
     const script = String(params.script || '').trim()
-    if (!script) throw new Error('请先填写解说文案')
+    const motionComic = isMotionComicMode(resolveEpisodeProductionMode(params.episodeId))
+    if (!script) throw new Error(motionComic ? '请先填写漫剧旁白稿' : '请先填写解说文案')
 
     const reportStatus = createWorkflowChatStatusReporter(send)
     const onProgress: StoryboardChatProgressCallback = patch => {
       reportStatus(patch.message)
     }
 
-    reportStatus('正在读取解说稿…')
+    reportStatus(motionComic ? '正在读取旁白稿…' : '正在读取解说稿…')
 
     breakdownResult = await breakdownNarrationStoryboards(params.episodeId, script, {
       textModel,
@@ -114,7 +131,7 @@ export async function streamNarrationStoryboardChat(
       onProgress,
     })
 
-    breakdownSummary = formatStoryboardResultSummary(breakdownResult)
+    breakdownSummary = formatStoryboardResultSummary(breakdownResult, motionComic)
     send({
       type: 'storyboard_done',
       count: breakdownResult.count,

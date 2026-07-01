@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
+import { eq, inArray, and, isNull } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, notFound, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
@@ -24,6 +24,7 @@ import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel } from '../constants/text-models.js'
 import { resolveNarrationImageStyle } from '../constants/art-styles.js'
+import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration, parseOpeningPickedImages, buildOpeningPickedImagesZip, pickAndSaveOpeningImages } from '../services/ffmpeg-opening.js'
 import fs from 'fs'
 import { isTitleVideoProcessing, startTitleSegmentVideoGeneration } from '../services/ffmpeg-title-segment.js'
@@ -40,6 +41,7 @@ import { chatNarrationScript, emphasizeNarrationScriptDraft, streamChatNarration
 import { streamNarrationImageDetectChat } from '../services/narration-image-detect-chat.js'
 import { streamNarrationImagePromptChat } from '../services/narration-image-prompt-chat.js'
 import { streamNarrationStoryboardChat } from '../services/narration-storyboard-chat.js'
+import { assignLocalVoicesToDrama, listLocalCastVoiceCandidates } from '../services/local-voice-assign.js'
 
 const app = new Hono()
 
@@ -133,8 +135,9 @@ app.get('/:id/characters', async (c) => {
     .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
   const charIds = links.map(l => l.characterId)
   if (!charIds.length) return success(c, [])
-  const allChars = db.select().from(schema.characters).all()
-  const result = allChars.filter(ch => charIds.includes(ch.id) && !ch.deletedAt)
+  const result = db.select().from(schema.characters)
+    .where(and(inArray(schema.characters.id, charIds), isNull(schema.characters.deletedAt)))
+    .all()
   return success(c, toSnakeCaseArray(result))
 })
 
@@ -145,8 +148,9 @@ app.get('/:id/scenes', async (c) => {
     .where(eq(schema.episodeScenes.episodeId, episodeId)).all()
   const sceneIds = links.map(l => l.sceneId)
   if (!sceneIds.length) return success(c, [])
-  const allScenes = db.select().from(schema.scenes).all()
-  const result = allScenes.filter(sc => sceneIds.includes(sc.id) && !sc.deletedAt)
+  const result = db.select().from(schema.scenes)
+    .where(and(inArray(schema.scenes.id, sceneIds), isNull(schema.scenes.deletedAt)))
+    .all()
   return success(c, toSnakeCaseArray(result))
 })
 
@@ -159,7 +163,12 @@ app.get('/:episode_id/storyboards', async (c) => {
       .all()
       .filter(row => !row.deletedAt),
   )
-  const links = db.select().from(schema.storyboardCharacters).all()
+  const storyboardIds = rows.map(row => row.id)
+  const links = storyboardIds.length
+    ? db.select().from(schema.storyboardCharacters)
+      .where(inArray(schema.storyboardCharacters.storyboardId, storyboardIds))
+      .all()
+    : []
   const charIdsByStoryboard = new Map<number, number[]>()
   for (const link of links) {
     const arr = charIdsByStoryboard.get(link.storyboardId) || []
@@ -167,18 +176,25 @@ app.get('/:episode_id/storyboards', async (c) => {
     charIdsByStoryboard.set(link.storyboardId, arr)
   }
 
-  const episodeCharIds = db.select().from(schema.episodeCharacters)
-    .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
-    .map(link => link.characterId)
-  const allChars = db.select().from(schema.characters).all()
-    .filter(ch => episodeCharIds.includes(ch.id) && !ch.deletedAt)
+  const linkedCharIdSet = new Set<number>()
+  for (const ids of charIdsByStoryboard.values()) {
+    for (const id of ids) linkedCharIdSet.add(id)
+  }
+  const linkedCharIds = [...linkedCharIdSet]
+  const allChars = linkedCharIds.length
+    ? db.select().from(schema.characters)
+      .where(and(inArray(schema.characters.id, linkedCharIds), isNull(schema.characters.deletedAt)))
+      .all()
+    : []
+  const charById = new Map(allChars.map(ch => [ch.id, ch]))
 
   return success(c, rows.map((row) => ({
     ...toSnakeCase(row),
     character_ids: charIdsByStoryboard.get(row.id) || [],
-    characters: allChars
-      .filter(ch => (charIdsByStoryboard.get(row.id) || []).includes(ch.id))
-      .map(ch => toSnakeCase(ch)),
+    characters: (charIdsByStoryboard.get(row.id) || [])
+      .map(id => charById.get(id))
+      .filter(Boolean)
+      .map(ch => toSnakeCase(ch!)),
   })))
 })
 
@@ -237,7 +253,10 @@ app.post('/:id/extract-narration-characters', async (c) => {
   }
 
   const script = String(body.script || ep.scriptContent || ep.content || '').trim()
-  if (!script) return badRequest(c, '请先填写解说文案')
+  if (!script) {
+    const motionComic = isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+    return badRequest(c, motionComic ? '请先填写漫剧旁白稿' : '请先填写解说文案')
+  }
 
   try {
     const result = await extractNarrationCharacters(
@@ -273,6 +292,32 @@ app.post('/:id/link-narration-characters', async (c) => {
     storyboard_count: linked.storyboardCount,
     character_count: linked.characterCount,
   })
+})
+
+// POST /episodes/:id/assign-local-voices — Kokoro 优先、Edge 补位的本地多角色音色分配
+app.post('/:id/assign-local-voices', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await assignLocalVoicesToDrama({
+      dramaId: ep.dramaId,
+      episodeId,
+      modelSize: resolveVoiceboxModelSize(body?.voicebox_model_size ?? body?.voiceboxModelSize),
+      overwrite: body?.overwrite === true,
+    })
+    return success(c, {
+      assigned: result.assigned,
+      skipped: result.skipped,
+      kokoro_available: result.kokoro_available,
+      edge_available: result.edge_available,
+      characters: toSnakeCaseArray(result.characters),
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
 })
 
 // POST /episodes/:id/split-narration-audio — Whisper 转 SRT 后按分镜文案对齐裁剪配音

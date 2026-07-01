@@ -8,9 +8,10 @@
           返回项目
         </button>
         <div class="studio-identity">
-          <h1 class="studio-title">{{ drama.title }}</h1>
+          <h1 class="studio-title">{{ drama?.title || '加载中…' }}</h1>
           <span class="studio-episode-chip">第 {{ episodeNumber }} 集</span>
-          <span v-if="isNarrationMode" class="studio-episode-chip is-mode">解说模式</span>
+          <span v-if="isMotionComicMode" class="studio-episode-chip is-mode">漫画解说</span>
+          <span v-else-if="isNarrationMode" class="studio-episode-chip is-mode">解说模式</span>
           <div class="studio-meta-row">
             <span class="studio-meta-pill">{{ currentSubStageLabel }}</span>
             <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/{{ pipelineStepTotal }}</span>

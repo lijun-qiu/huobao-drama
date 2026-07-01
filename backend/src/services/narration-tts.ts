@@ -10,12 +10,13 @@ export function parseDialogueForTTS(dialogue?: string | null) {
   const raw = dialogue?.trim() || ''
   if (!raw) return { speaker: '', pureText: '', markedText: '', ignorable: true }
   const speakerMatch = raw.match(/^(.+?)[:：]/)
-  const speaker = speakerMatch ? speakerMatch[1].replace(/[（(].+?[)）]/g, '').trim() : ''
+  let speaker = speakerMatch ? speakerMatch[1].replace(/[（(].+?[)）]/g, '').trim() : ''
   const markedText = limitEmphasisMarkers(
     raw.replace(/^.+?[:：]\s*/, '').replace(/[（(].+?[)）]/g, '').replace(/\s+/g, ' ').trim(),
     1,
   )
   const pureText = stripEmphasisMarkers(markedText)
+  if (!speaker && pureText) speaker = '旁白'
   const ignorable = (!!speaker && IGNORE_TTS_SPEAKERS.test(speaker)) || !pureText || IGNORE_TTS_TEXT.test(pureText)
   return { speaker, pureText, markedText, ignorable }
 }

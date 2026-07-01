@@ -13,7 +13,7 @@ import type {
 import { joinProviderUrl } from './url'
 import { parseDataUrl } from '../../utils/storage.js'
 
-export const GPT_IMAGE_DEFAULT_MODEL = 'gpt-image-2-all'
+export const GPT_IMAGE_DEFAULT_MODEL = 'gpt-image-2'
 
 function isQwenImageModel(model?: string | null) {
   return String(model || '').toLowerCase().startsWith('qwen-image')
@@ -67,7 +67,18 @@ function dataUrlToBlob(dataUrl: string): Blob | null {
 function strengthenGptImagePrompt(prompt: string): string {
   const p = prompt || ''
   const isPortrait = /character reference portrait|character design sheet|定妆|turnaround view/i.test(p)
+  const isMotionComicPortrait = isPortrait && /modern Chinese webtoon comic|manhua illustration|16:9 widescreen character/i.test(p)
   const isTitle = /opening background|title overlay|片头|reserved for dynamic title/i.test(p)
+
+  if (isMotionComicPortrait) {
+    return [
+      '【画风强制】现代国漫条漫二维动漫定妆，粗黑线描、平涂赛璐璐、正常头身比、纯色灰背景。',
+      '【画幅强制】16:9横屏宽画幅角色定妆参考图，人物居中，禁止方形竖版海报构图。',
+      '【禁止】像素风、复古滤镜、Q版三头身、3D渲染、厚涂肌理、海报场景、景深背景。',
+      p,
+      '【再次强调】16:9横屏漫画角色设定图，粗线平涂，不要方形竖版不要像素不要复古滤镜。',
+    ].join(' ')
+  }
 
   if (isPortrait) {
     return [

@@ -8,7 +8,7 @@
                 <span class="step-num">01</span>
                 <span class="step-name">剧本生成</span>
               </div>
-              <span class="dim" style="font-size:12px;margin-left:8px">{{ scriptGenMode === 'chat' ? 'AI 对话 · 体验人生解说稿' : '直接输入 · 粘贴或编写解说稿' }}</span>
+              <span class="dim" style="font-size:12px;margin-left:8px">{{ scriptGenMode === 'chat' ? (isMotionComicMode ? 'AI 对话 · 漫画解说写稿' : 'AI 对话 · 体验人生解说稿') : (isMotionComicMode ? '直接输入 · 粘贴或编写解说稿' : '直接输入 · 粘贴或编写解说稿') }}</span>
             </div>
             <div class="toolbar-right">
               <div class="prod-tabs script-gen-tabs">
@@ -61,10 +61,10 @@
             <textarea
               v-model="localRaw"
               class="fill-textarea script-manual-textarea"
-              placeholder="粘贴或编写完整解说稿…&#10;首行建议：今天体验的人生剧本是，…&#10;也可从 Word / 备忘录直接粘贴"
+              :placeholder="isMotionComicMode ? '粘贴或编写快切解说稿…\n首行：本期故事：…\n一句一行，段间空行换场景' : '粘贴或编写完整解说稿…\n首行建议：今天体验的人生剧本是，…\n也可从 Word / 备忘录直接粘贴'"
             />
             <div class="narration-hint" style="margin-top:10px">
-              自备稿可直接在此编辑；保存后进入「文案输入」或「旁白分镜」继续。字幕 ** 强调在分镜时由 Qwen 自动标注。
+              {{ isMotionComicMode ? '漫画解说须用快切解说稿（第三人称+「我」、一句一行）；保存后进「旁白分镜」。' : '自备稿可直接在此编辑；保存后进入「文案输入」或「旁白分镜」继续。字幕 ** 强调在分镜时由 Qwen 自动标注。' }}
             </div>
           </div>
 
@@ -94,7 +94,7 @@
                   :key="idx"
                   :class="['script-chat-msg', msg.role === 'user' ? 'is-user' : 'is-assistant']"
                 >
-                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
+                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : (isMotionComicMode ? '解说大师' : 'AI') }}</span>
                   <div class="script-chat-msg-text">
                     <template v-if="msg.role === 'assistant' && scriptChatGenerating && idx === scriptChatMessages.length - 1 && !msg.content && !msg.thinking">
                       <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
@@ -145,7 +145,7 @@
                   v-model="scriptChatInput"
                   class="script-chat-input"
                   rows="3"
-                  placeholder="描述本期人生，例如：十八岁职高辍学，八十年代进城摆夜市摊…"
+                  :placeholder="isMotionComicMode ? '描述故事梗概，或说「写完整稿」；默认悬疑快切体，一句一行' : '描述本期人生，例如：十八岁职高辍学，八十年代进城摆夜市摊…'"
                   :disabled="scriptChatGenerating"
                   @keydown.enter.exact.prevent="sendScriptChat"
                 />
@@ -218,10 +218,15 @@
           <textarea
             class="fill-textarea"
             v-model="localRaw"
-            placeholder="粘贴解说文案，或在「剧本生成」写稿后点「填入文案并编辑」…"
+            :placeholder="isMotionComicMode ? '粘贴漫画解说稿，或在「剧本生成」写稿后点「填入文案并编辑」…' : '粘贴解说文案，或在「剧本生成」写稿后点「填入文案并编辑」…'"
           />
           <div class="narration-hint" style="margin-top:12px">
-            <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。
+            <template v-if="isMotionComicMode">
+              <strong>漫画解说稿格式：</strong>首行「本期故事：…」；一句一行（8～18字），段间空行换场景；对话嵌入叙述；分镜后一句一图，合成智能运镜。
+            </template>
+            <template v-else>
+              <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。
+            </template>
           </div>
         </div>
 
@@ -502,9 +507,9 @@
             <div class="toolbar-left">
               <div class="step-indicator">
                 <span class="step-num">{{ isNarrationMode ? '03' : '05' }}</span>
-                <span class="step-name">{{ isNarrationMode ? '旁白分镜' : '分镜列表' }}</span>
+                <span class="step-name">{{ isNarrationMode ? stepLabels[storyboardStep] : '分镜列表' }}</span>
               </div>
-              <span v-if="isNarrationMode" class="dim" style="font-size:12px;margin-left:8px">AI 对话 · 整稿拆镜</span>
+              <span v-if="isNarrationMode" class="dim" style="font-size:12px;margin-left:8px">{{ isMotionComicMode ? 'AI 对话 · 旁白拆镜' : 'AI 对话 · 整稿拆镜' }}</span>
             </div>
             <div class="toolbar-right">
               <span v-if="sbs.length" class="char-count">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
@@ -517,8 +522,19 @@
               </template>
               <template v-if="isNarrationMode">
                 <button
+                  type="button"
+                  class="btn btn-sm btn-primary"
+                  :disabled="narrationBreaking || storyboardChatGenerating || narrationStoryboardDescUploading"
+                  :title="isMotionComicMode ? '按当前解说稿整稿拆镜（会覆盖本集全部镜头）' : '按当前文案整稿拆镜（会覆盖本集全部镜头）'"
+                  @click="doNarrationBreakdown()"
+                >
+                  <Loader2 v-if="narrationBreaking" :size="11" class="animate-spin" />
+                  <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                  {{ sbs.length ? '重新分镜' : '执行拆镜' }}
+                </button>
+                <button
                   class="btn btn-sm"
-                  :disabled="narrationStoryboardDescUploading || storyboardChatGenerating"
+                  :disabled="narrationStoryboardDescUploading || storyboardChatGenerating || narrationBreaking"
                   title="上传 .txt 分镜描述：全文案按规则拆分，或【#01】格式逐镜填充"
                   @click="triggerNarrationStoryboardDescUpload"
                 >
@@ -533,6 +549,12 @@
                 {{ sbs.length ? '重新分镜' : 'AI 拆解分镜' }}
               </button>
             </div>
+          </div>
+
+          <div v-if="isNarrationMode && !sbs.length && !storyboardChatGenerating && !narrationBreaking" class="narration-storyboard-cta">
+            <p class="dim" style="margin:0;font-size:13px">
+              {{ isMotionComicMode ? '解说稿已写好？点右上角「执行拆镜」，或下方对话区同按钮。' : '文案已写好？点右上角「执行拆镜」，或下方对话区同按钮。' }}
+            </p>
           </div>
 
           <div v-if="isNarrationMode" class="script-chat-panel script-chat-panel-full storyboard-chat-panel">
@@ -571,7 +593,7 @@
                   :key="'sb-' + idx"
                   :class="['script-chat-msg', msg.role === 'user' ? 'is-user' : 'is-assistant']"
                 >
-                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
+                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : (isMotionComicMode ? '分镜助手' : 'AI') }}</span>
                   <div class="script-chat-msg-text">
                     <template v-if="msg.role === 'assistant' && storyboardChatGenerating && idx === storyboardChatMessages.length - 1 && !msg.content && !msg.thinking && !msg.statusText">
                       <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
@@ -636,8 +658,9 @@
               <span class="tag dim">旁白 TTS 分镜</span>
             </div>
             <div class="narration-breakdown-stats">
-              <span class="tag mono">{{ narrationStoryboardBreakdownPanel.sentenceCount }} 句旁白</span>
               <span class="tag mono">{{ narrationStoryboardBreakdownPanel.count }} 镜</span>
+              <span v-if="!isMotionComicMode" class="tag mono">{{ narrationStoryboardBreakdownPanel.sentenceCount }} 句旁白</span>
+              <span v-else class="tag mono dim">正文 {{ narrationStoryboardBreakdownPanel.sentenceCount }} 镜</span>
               <span class="tag mono">约 {{ narrationStoryboardBreakdownPanel.totalDur }}s</span>
               <span v-if="narrationStoryboardBreakdownPanel.titleCount" class="tag">
                 片头 {{ narrationStoryboardBreakdownPanel.titleCount }} 镜 · {{ narrationStoryboardBreakdownPanel.titleImageCount }} 张标题图
@@ -741,7 +764,9 @@
                     <button class="btn btn-sm" :disabled="narrationEditBusy" @click="insertShotAfter(selectedSb)">后插镜头</button>
                   </div>
                   <p class="dim" style="font-size:11px;margin:0">
-                    例：把片头一句拆四镜 — 台词写「今天体验的人生剧本是，18岁职高辍学打工，省吃俭用五年，结果越来越穷」→ 点「按标点拆成多镜」。
+                    {{ isMotionComicMode
+                      ? '例：片头 hook — 台词写「标题：废柴少年被宗门驱逐，三年后王者归来」→ 点「按标点拆成多镜」。'
+                      : '例：把片头一句拆四镜 — 台词写「今天体验的人生剧本是，18岁职高辍学打工，省吃俭用五年，结果越来越穷」→ 点「按标点拆成多镜」。' }}
                   </p>
                 </div>
                 <template v-if="!isNarrationMode">

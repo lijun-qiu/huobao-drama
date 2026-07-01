@@ -31,7 +31,7 @@
                 v-model="openingSubtitleText"
                 class="input"
                 type="text"
-                placeholder="体验365个人生副本"
+                :placeholder="isMotionComicMode ? '本期故事' : '体验365个人生副本'"
                 style="width:100%;max-width:480px;margin-bottom:10px"
                 @change="saveOpeningSubtitle"
               />
@@ -301,7 +301,7 @@
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
                 <div class="empty-title">生成片头视频</div>
-                <div v-if="!titleShots.length" class="empty-desc">本集暂无片头镜，请先完成旁白分镜</div>
+                <div v-if="!titleShots.length" class="empty-desc">本集暂无片头镜，请先完成{{ isMotionComicMode ? '漫画分镜' : '旁白分镜' }}</div>
                 <div v-else-if="titleVideoError" class="empty-desc" style="color:var(--danger)">{{ titleVideoError }}</div>
                 <div v-else-if="!titleShotsReady" class="empty-desc">请为全部 {{ titleShots.length }} 个片头镜完成配图与配音</div>
                 <div v-else class="empty-desc">就绪：{{ titleShots.length }} 个片头镜可导出</div>

@@ -22,8 +22,9 @@ import {
   type NarrationImageChatTurn,
 } from './narration-image-chat-context.js'
 import { createWorkflowChatStatusReporter } from './workflow-chat-status.js'
+import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 
-const PROMPT_CHAT_SYSTEM = [
+const NARRATION_PROMPT_CHAT_SYSTEM = [
   '你是火宝解说流水线的「配图文案」助手，帮助创作者生成与调整六维配图提示词。',
   '',
   '【六维文案结构】',
@@ -37,6 +38,28 @@ const PROMPT_CHAT_SYSTEM = [
   '',
   '回复简洁；用 #01 段号 指代配图锚点镜头。',
 ].join('\n')
+
+const MOTION_COMIC_PROMPT_CHAT_SYSTEM = [
+  '你是火宝漫画解说流水线的「漫画配图文案」助手，帮助创作者生成与调整六维漫画配图 prompt。',
+  '',
+  '【六维文案结构】',
+  '每条 prompt 含：画风规格、画面主体、年代场景、核心细节动作、光影色调、镜头视角、质感要求；国漫条漫粗线平涂，正常头身比。',
+  '主要配角须写定妆外貌；构图适合上下运镜浏览；禁止写实血腥。',
+  '',
+  '【职责】',
+  '- 解读各段配图文案就绪情况，解释六维要素是否完整。',
+  '- 用户说「开始生成」「补全文案」「重新生成」等时，由系统后台执行；你解读进度与结果。',
+  '- 用户要求改某段文案，先给出修改建议或完整六维示例。',
+  '- 不要输出 markdown 代码块包裹的 JSON；用自然语言 + #镜号 说明。',
+  '',
+  '回复简洁；用 #01 段号 指代配图锚点镜头。',
+].join('\n')
+
+function resolvePromptChatSystem(episodeId: number): string {
+  return isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+    ? MOTION_COMIC_PROMPT_CHAT_SYSTEM
+    : NARRATION_PROMPT_CHAT_SYSTEM
+}
 
 export type NarrationImagePromptChatParams = {
   episodeId: number
@@ -62,7 +85,7 @@ function buildPromptChatMessages(params: NarrationImagePromptChatParams) {
   const context = buildPromptChatContextBlock(params.episodeId)
 
   const apiMessages: TextChatMessage[] = [
-    { role: 'system', content: `${PROMPT_CHAT_SYSTEM}\n\n${context}` },
+    { role: 'system', content: `${resolvePromptChatSystem(params.episodeId)}\n\n${context}` },
     ...turns,
   ]
 

@@ -24,6 +24,14 @@ import {
   NARRATION_PROTAGONIST_FACE,
   NARRATION_USE_RAW_LLM_PROMPTS,
 } from '../constants/art-styles.js'
+import {
+  buildMotionComicCharacterAppearanceSystem,
+  buildMotionComicCharacterExtractSystem,
+  isMajorSupportingCharacter,
+  isMotionComicStyle,
+  MOTION_COMIC_PORTRAIT_FRAMING,
+  MOTION_COMIC_PORTRAIT_SIZE,
+} from '../constants/motion-comic.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { getActiveConfig, getTextConfig } from './ai.js'
 import { callTextChat } from './text-chat.js'
@@ -290,6 +298,16 @@ export function filterNarrationProtagonistOnly<T extends { name: string; role?: 
   return rows.slice(0, 1)
 }
 
+/** 动态漫：保留主人公 + 主要配角 */
+export function filterMotionComicExtractedCharacters<T extends { name: string; role?: string | null }>(
+  rows: T[],
+  script: string,
+): T[] {
+  const kept = rows.filter(row => isProtagonistCharacter(row) || isMajorSupportingCharacter(row))
+  if (kept.length) return kept
+  return filterNarrationProtagonistOnly(rows, script)
+}
+
 function archiveNonProtagonistCharacters(dramaId: number, keepNames: Set<string>): number {
   const ts = now()
   let archived = 0
@@ -539,6 +557,9 @@ function resolvePortraitFraming(style: string, _appearance: string): string {
       'NOT pixel art, NOT retro photo filter, NOT dithered shading',
     ].join(', ')
   }
+  if (isMotionComicStyle(style)) {
+    return MOTION_COMIC_PORTRAIT_FRAMING
+  }
   return [
     'character design reference sheet for animation production',
     'isolated single character on plain light gray studio background',
@@ -552,6 +573,21 @@ const PORTRAIT_STYLE_GUARD = [
   'CRITICAL ART STYLE: modern Chinese short-drama 2D anime, thin clean line art, flat soft cel shading, solid light gray background',
   'FORBIDDEN: pixel art, dithering, 8-bit, retro game, vintage photo filter, nostalgic poster, film grain, CRT noise, cross-hatching',
 ].join(', ')
+
+const MOTION_COMIC_PORTRAIT_STYLE_GUARD = [
+  'CRITICAL ART STYLE: modern Chinese webtoon comic, bold black outlines, flat cel-shaded colors, normal body proportions, 16:9 widescreen character reference',
+  'FORBIDDEN: pixel art, dithering, 8-bit, retro game, vintage photo filter, chibi, 3D render, square portrait crop, vertical poster',
+].join(', ')
+
+function resolvePortraitStyleGuard(style: string): string {
+  if (isMotionComicStyle(style)) return MOTION_COMIC_PORTRAIT_STYLE_GUARD
+  return PORTRAIT_STYLE_GUARD
+}
+
+export function resolvePortraitImageSize(style: string): string | undefined {
+  if (isMotionComicStyle(style)) return MOTION_COMIC_PORTRAIT_SIZE
+  return undefined
+}
 
 function extractEnglishAppearanceTags(appearance: string): { body: string; tags: string } {
   const match = appearance.match(/\bEnglish tags:\s*(.+)$/im)
@@ -645,7 +681,7 @@ export function buildCharacterPortraitPrompt(
 
   const framing = resolvePortraitFraming(normalizedStyle, `${rawAppearance} ${cleanTags}`)
   return [
-    PORTRAIT_STYLE_GUARD,
+    resolvePortraitStyleGuard(normalizedStyle),
     stylePrompt,
     'unified character design sheet, single consistent project art style, no mixed media',
     `${char.name}${stage ? ` (${stage})` : ''}, character reference portrait for animation production`,
@@ -794,6 +830,7 @@ export async function generateCharacterAppearance(params: {
 }): Promise<string> {
   const { character, script, style = 'comic', textModel, textThinking = true, contentContext } = params
   const minimal = isNarrationMinimalStyle(style)
+  const motionComic = isMotionComicStyle(style)
   const scriptText = [
     contentContext?.mentionExcerpt,
     script,
@@ -818,6 +855,8 @@ export async function generateCharacterAppearance(params: {
       '禁止：厚涂写实真人面相、复杂印花、English tags',
       '只输出正文，不要标题、markdown、JSON。',
     ].filter(Boolean).join('\n')
+    : motionComic
+    ? buildMotionComicCharacterAppearanceSystem()
     : [
     '你是影视角色定妆造型设计助手。',
     '必须根据解说稿/剧本中该角色的出场情节、对白、行为来推断外貌，与故事时代、题材、氛围一致。',
@@ -851,7 +890,7 @@ export async function generateCharacterAppearance(params: {
       : '',
     contentContext?.mentionExcerpt?.trim()
       ? `剧本中该角色相关段落：\n${contentContext.mentionExcerpt.trim()}`
-      : script?.trim() ? `剧本/解说稿摘录：\n${script.trim().slice(0, 3500)}` : '',
+      : script?.trim() ? `${motionComic ? '漫剧旁白稿' : '剧本/解说稿'}摘录：\n${script.trim().slice(0, 3500)}` : '',
     contentContext?.storyboardSnippets?.length
       ? `该角色出现的镜头：\n${contentContext.storyboardSnippets.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
       : '',
@@ -907,10 +946,12 @@ export async function extractNarrationCharacters(
       throw new Error('文本 AI 服务未填写 API Key，请在设置中完善配置')
     }
 
-    logTaskProgress('NarrationChars', 'llm-extract-start', { episodeId, model: config.model })
+    logTaskProgress('NarrationChars', 'llm-extract-start', { episodeId, model: config.model, motionComic: isMotionComicStyle(style) })
 
-      const extractWeightArc = detectNarrationWeightArcTheme(script.slice(0, 12000))
-      const system = [
+      const extractWeightArc = !isMotionComicStyle(style) ? detectNarrationWeightArcTheme(script.slice(0, 12000)) : null
+      const system = isMotionComicStyle(style)
+        ? buildMotionComicCharacterExtractSystem()
+        : [
         '你是影视解说项目的角色设定师。解说视频采用极简素体小人画风，画面里只需给「主人公」做定妆参考，配角不需要单独定妆。',
         '规则：',
         '1) 只提取主人公（男主/女主/主角），不要提取配角（妻子、店员、朋友、提亲者等）',
@@ -952,7 +993,9 @@ export async function extractNarrationCharacters(
             personality: String(row?.personality || '').trim(),
           }))
           .filter((row: { name: string }) => row.name && !isNarratorCharacter(row))
-        extracted = filterNarrationProtagonistOnly(extracted, script)
+        extracted = isMotionComicStyle(style)
+          ? filterMotionComicExtractedCharacters(extracted, script)
+          : filterNarrationProtagonistOnly(extracted, script)
       } else {
         logTaskWarn('NarrationChars', 'llm-extract-invalid-json', { preview: text.slice(0, 200) })
       }

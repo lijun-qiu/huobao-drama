@@ -17,8 +17,8 @@ import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION, computePageFlipMe
 import { mixPageFlipSfxIntoMergedVideo } from './ffmpeg-page-flip-sfx.js'
 import { BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { isStoryboardTitleShot, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
+import { isMotionComicMode, parseProductionMode } from '../constants/production-mode.js'
 import { buildComposeUnitGroups, listComposeMergeUnitStoryboards } from './ffmpeg-compose.js'
-import { buildComposeUnitGroups } from './ffmpeg-compose.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -406,6 +406,27 @@ async function mergeSegmentsWithPageFlip(
     run,
     onProgress,
   )
+}
+
+/** 硬切拼接（无云朵转场） */
+async function mergeSegmentsWithConcat(
+  segments: MergeSegment[],
+  outputPath: string,
+  run: ActiveMergeRun,
+  onProgress?: (encodedSec: number) => void,
+): Promise<void> {
+  if (segments.length === 1) {
+    fs.copyFileSync(segments[0].path, outputPath)
+    return
+  }
+  await concatComposedVideos(segments.map(s => s.path), outputPath, run, onProgress)
+}
+
+function episodeUsesMotionComicMerge(episodeId: number): boolean {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return false
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  return isMotionComicMode(parseProductionMode(drama?.metadata))
 }
 
 async function mergeSegmentsSequential(
@@ -852,9 +873,14 @@ async function mergeOrderedSegmentsToOutput(
   segments: MergeSegment[],
   outputPath: string,
   run: ActiveMergeRun,
+  usePageFlip = true,
 ): Promise<void> {
   if (segments.length === 1) {
     fs.copyFileSync(segments[0].path, outputPath)
+    return
+  }
+  if (!usePageFlip) {
+    await mergeSegmentsWithConcat(segments, outputPath, run)
     return
   }
   const tempOut = `${outputPath}.ordered.mp4`
@@ -918,13 +944,14 @@ async function prependOpeningToMergedVideo(
   bodyPath: string,
   run: ActiveMergeRun,
   titleAbsPath?: string | null,
+  usePageFlip = true,
 ): Promise<void> {
   const segments = await buildOrderedMergeSegments({
     openingAbs: openingAbsPath,
     titleAbs: titleAbsPath,
     bodyAbs: bodyPath,
   })
-  await mergeOrderedSegmentsToOutput(segments, bodyPath, run)
+  await mergeOrderedSegmentsToOutput(segments, bodyPath, run, usePageFlip)
 }
 
 async function mixBgmIntoMergedVideo(
@@ -1118,7 +1145,8 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
   if (totalDurationSec <= 0) totalDurationSec = absPaths.length * 3
 
   const groups = buildVisualGroups(storyboards)
-  const usePageFlip = groups.length > 1
+  const motionComicMerge = episodeUsesMotionComicMerge(episodeId)
+  const usePageFlip = !motionComicMerge && groups.length > 1
   const includeOpeningVideo = options.includeOpeningVideo === true
   let tempFiles: string[] = []
 
@@ -1203,7 +1231,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
 
   cleanupTempFiles(tempFiles)
 
-  if (!includeOpeningVideo && !run.cancelled) {
+  if (!includeOpeningVideo && !run.cancelled && !motionComicMerge) {
     setMergeProgress(episodeId, {
       mergeId,
       phase: 'finalizing',
@@ -1236,7 +1264,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       })
       try {
         const openingDur = await getVideoDuration(openingAbs)
-        await prependOpeningToMergedVideo(openingAbs, deliverPath, run)
+        await prependOpeningToMergedVideo(openingAbs, deliverPath, run, undefined, usePageFlip)
         totalDurationSec += openingDur
         pageFlipTimes = prependPageFlipSegmentTimeline(openingDur, pageFlipTimes)
       } catch (err: any) {
@@ -1454,6 +1482,7 @@ async function doOpeningMerge(
   titleAbs?: string | null,
 ) {
   const run: ActiveMergeRun = { mergeId, cancelled: false, command: null, commands: new Set() }
+  const motionComicMerge = episodeUsesMotionComicMerge(episodeId)
   activeMerges.set(episodeId, run)
   setMergeProgress(episodeId, {
     mergeId,
@@ -1474,13 +1503,13 @@ async function doOpeningMerge(
       titleAbs: titleAbs || null,
       bodyAbs,
     })
-    await mergeOrderedSegmentsToOutput(segments, outputPath, run)
+    await mergeOrderedSegmentsToOutput(segments, outputPath, run, !motionComicMerge)
     if (run.cancelled) {
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
       return
     }
 
-    const flipTimes = computePageFlipTransitionTimes(segments.map(seg => seg.duration))
+    const flipTimes = motionComicMerge ? [] : computePageFlipTransitionTimes(segments.map(seg => seg.duration))
     if (flipTimes.length) {
       await mixPageFlipSfxIntoMergedVideo(outputPath, flipTimes, cmd => attachMergeCommand(run, cmd))
     }
@@ -1620,6 +1649,7 @@ async function doTitleMerge(
   openingAbs?: string | null,
 ) {
   const run: ActiveMergeRun = { mergeId, cancelled: false, command: null, commands: new Set() }
+  const motionComicMerge = episodeUsesMotionComicMerge(episodeId)
   activeMerges.set(episodeId, run)
   setMergeProgress(episodeId, {
     mergeId,
@@ -1640,13 +1670,13 @@ async function doTitleMerge(
       titleAbs,
       bodyAbs,
     })
-    await mergeOrderedSegmentsToOutput(segments, outputPath, run)
+    await mergeOrderedSegmentsToOutput(segments, outputPath, run, !motionComicMerge)
     if (run.cancelled) {
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
       return
     }
 
-    const flipTimes = computePageFlipTransitionTimes(segments.map(seg => seg.duration))
+    const flipTimes = motionComicMerge ? [] : computePageFlipTransitionTimes(segments.map(seg => seg.duration))
     if (flipTimes.length) {
       await mixPageFlipSfxIntoMergedVideo(outputPath, flipTimes, cmd => attachMergeCommand(run, cmd))
     }

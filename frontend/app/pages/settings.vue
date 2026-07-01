@@ -344,8 +344,8 @@
         <div class="huobao-grid">
           <label class="field">
             <span class="field-label">Huobao API Key <span class="dim">(统一用于文本 / 图片 / 视频 / 音频)</span></span>
-            <input v-model="huobaoForm.apiKey" class="input" type="password" placeholder="用于 api.chatfire.site 全链路服务" />
-            <span class="field-hint">还没有账号？<a href="https://api.chatfire.site/" target="_blank" rel="noopener">立即注册 →</a></span>
+            <input v-model="huobaoForm.apiKey" class="input" type="password" placeholder="用于 4022 代理全链路服务" />
+            <span class="field-hint">还没有账号？<a href="https://api.4022543.xyz/pricing" target="_blank" rel="noopener">查看模型价格 →</a></span>
           </label>
         </div>
         <div class="preset-grid compact">
@@ -433,7 +433,7 @@ const serviceMeta = {
 }
 const providerPresets = {
   text: {
-    chatfire: { label: '4022 文本（推荐）', baseUrl: 'https://api.4022543.xyz', models: ['deepseek-v4-pro', 'gpt-4o'] },
+    chatfire: { label: '4022 文本（推荐）', baseUrl: 'https://api.4022543.xyz', models: ['deepseek-v4-pro', 'qwen3.5-plus', 'gpt-4o'] },
     openrouter: { label: 'OpenRouter 推荐', baseUrl: 'https://openrouter.ai/api', models: ['google/gemini-3-flash-preview'] },
     openai: { label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'] },
   },
@@ -447,7 +447,7 @@ const providerPresets = {
       label: '4022 网关绘画',
       baseUrl: 'https://api.4022543.xyz',
       models: [
-        'gpt-image-2-all',
+        'gpt-image-2',
         'qwen-image-edit-2509',
         'qwen-image-2.0-2026-03-03',
         'qwen-image-max',
@@ -455,9 +455,6 @@ const providerPresets = {
         'doubao-seedream-4-0-250828',
         'doubao-seedream-5-0-260128',
         'doubao-seedream-4-5-251128',
-        'qwen-image-2.0-2026-03-03',
-        'qwen-image-edit-2509',
-        'qwen-image-max',
       ],
     },
     ali: {
@@ -473,9 +470,11 @@ const providerPresets = {
     },
   },
   video: {
-    volcengine: { label: '火宝视频', baseUrl: 'https://api.chatfire.site/volcengine', models: ['doubao-seedance-1-5-pro-251215'] },
-    vidu: { label: 'Vidu 推荐', baseUrl: 'https://api.vidu.com', models: ['viduq3-turbo'] },
-    ali: { label: '阿里推荐', baseUrl: 'https://dashscope.aliyuncs.com', models: ['wan2.6-i2v-flash'] },
+    vidu: { label: '4022 Vidu（推荐）', baseUrl: 'https://api.4022543.xyz', models: ['viduq3-turbo', 'viduq3-pro', 'viduq2-turbo'] },
+    minimax: { label: '4022 海螺视频', baseUrl: 'https://api.4022543.xyz/minimax', models: ['MiniMax-Hailuo-2.3', 'MiniMax-Hailuo-02'] },
+    volcengine: { label: '火山直连', baseUrl: 'https://ark.cn-beijing.volces.com', models: ['doubao-seedream-5-0-260128'] },
+    vidu_direct: { label: 'Vidu 直连', baseUrl: 'https://api.vidu.com', models: ['viduq3-turbo'] },
+    ali: { label: '阿里推荐', baseUrl: 'https://dashscope.aliyuncs.com', models: ['wan2.6-i2v'] },
   },
   audio: {
     minimax: {
@@ -494,8 +493,8 @@ const providerPresets = {
 }
 const huobaoPresetCards = [
   { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'deepseek-v4-pro', priority: 100 },
-  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2-all', priority: 99 },
-  { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: 'https://api.chatfire.site/volcengine', model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
+  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2', priority: 99 },
+  { serviceType: 'video', label: '视频', provider: 'vidu', baseUrl: 'https://api.4022543.xyz', model: 'viduq3-turbo', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.4022543.xyz/minimax', model: 'speech-2.8-hd', priority: 97 },
   { serviceType: 'music', label: '音乐', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'suno_music_open', priority: 96 },
 ]

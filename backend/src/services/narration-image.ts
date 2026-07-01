@@ -39,6 +39,16 @@ export interface NarrationImageMeta {
   image_prompt_llm_raw?: string
   /** 配图分镜写入：本镜烧录字幕旁白（可含 **强调**，TTS 仍用 dialogue 纯文本） */
   subtitle_narration?: string
+  /** 漫画动态漫：镜型（action/dialogue/reaction 等） */
+  shot_role?: string
+  /** 漫画动态漫：合成动效档位 */
+  motion_tier?: string
+  /** 漫画动态漫：合成镜头运动（zoom_in / pan_lr / diptych_sweep 等） */
+  camera_kind?: string
+  /** 漫画动态漫：一体化分镜 — 表情与肢体 */
+  expression_action?: string
+  /** 漫画动态漫：一体化分镜 — 场景背景 */
+  scene_background?: string
 }
 
 /**

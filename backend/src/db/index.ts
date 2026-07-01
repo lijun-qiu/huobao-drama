@@ -404,9 +404,10 @@ ensureColumn('episodes', 'title_video_error', 'TEXT')
 try {
   sqlite.exec(`
     UPDATE episodes
-    SET image_model = 'gpt-image-2-all'
+    SET image_model = 'gpt-image-2'
     WHERE image_model IS NULL
        OR TRIM(image_model) = ''
+       OR image_model = 'gpt-image-2-all'
        OR image_model LIKE 'doubao-seedream%'
        OR image_model LIKE 'qwen-image%'
        OR image_model LIKE 'gemini-%flash-image%'
@@ -415,7 +416,7 @@ try {
   sqlite.exec(`
     UPDATE ai_service_configs
     SET provider = 'chatfire',
-        model = '["gpt-image-2-all","qwen-image-edit-2509","qwen-image-2.0-2026-03-03","kling-v1-5","kling-v1","gemini-3.1-flash-image-preview"]',
+        model = '["gpt-image-2","qwen-image-edit-2509","qwen-image-2.0-2026-03-03","qwen-image-max"]',
         updated_at = datetime('now')
     WHERE service_type = 'image'
       AND (
@@ -465,7 +466,56 @@ try {
   // ignore
 }
 
-// 文本服务统一走 4022 代理
+// 文本/图片/视频/音频服务统一走 4022 代理
+try {
+  sqlite.exec(`
+    UPDATE ai_service_configs
+    SET base_url = 'https://api.4022543.xyz',
+        updated_at = datetime('now')
+    WHERE service_type IN ('text', 'image', 'music')
+      AND (
+        base_url IS NULL
+        OR TRIM(base_url) = ''
+        OR base_url LIKE '%chatfire.site%'
+      )
+  `)
+  sqlite.exec(`
+    UPDATE ai_service_configs
+    SET base_url = 'https://api.4022543.xyz/minimax',
+        updated_at = datetime('now')
+    WHERE service_type = 'audio'
+      AND provider = 'minimax'
+      AND (
+        base_url IS NULL
+        OR TRIM(base_url) = ''
+        OR base_url LIKE '%chatfire.site%'
+      )
+  `)
+  sqlite.exec(`
+    UPDATE ai_service_configs
+    SET provider = 'vidu',
+        base_url = 'https://api.4022543.xyz',
+        model = '["viduq3-turbo"]',
+        updated_at = datetime('now')
+    WHERE service_type = 'video'
+      AND (
+        provider = 'volcengine'
+        OR model LIKE '%seedance%'
+        OR base_url LIKE '%chatfire.site%'
+      )
+  `)
+  sqlite.exec(`
+    UPDATE ai_service_configs
+    SET model = REPLACE(model, 'gpt-image-2-all', 'gpt-image-2'),
+        updated_at = datetime('now')
+    WHERE service_type = 'image'
+      AND model LIKE '%gpt-image-2-all%'
+  `)
+} catch {
+  // ignore
+}
+
+// 历史文本服务迁移（兼容旧块）
 try {
   sqlite.exec(`
     UPDATE ai_service_configs

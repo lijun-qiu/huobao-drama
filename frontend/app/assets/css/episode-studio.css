@@ -6,6 +6,7 @@
   overflow: hidden;
   padding: 14px;
   gap: 12px;
+  position: relative;
   background:
     radial-gradient(circle at top left, rgba(255,255,255,0.7), transparent 28%),
     linear-gradient(180deg, rgba(255,255,255,0.22), rgba(255,255,255,0)),
@@ -408,6 +409,61 @@
   flex: 1; gap: 12px;
 }
 .loading-text { font-size: 13px; color: var(--text-2); }
+
+/* Studio loading spinner（全屏 / 遮罩 / step-loading 共用） */
+@keyframes studio-spin {
+  to { transform: rotate(360deg); }
+}
+
+.studio-spinner {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.studio-spinner-ring {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border: 3px solid color-mix(in srgb, var(--accent, #6366f1) 18%, transparent);
+  border-top-color: var(--accent, #6366f1);
+  border-radius: 50%;
+  animation: studio-spin 0.75s linear infinite;
+}
+
+.studio-spinner-label {
+  font-size: 14px;
+  color: var(--text-dim, #64748b);
+}
+
+.animate-spin {
+  display: inline-block;
+  animation: studio-spin 0.85s linear infinite;
+  transform-origin: center center;
+}
+
+.studio-loading,
+.studio-loading-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.studio-loading {
+  height: 100vh;
+}
+
+.studio-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 200;
+  background: color-mix(in srgb, var(--bg-base, #0f172a) 82%, transparent);
+  backdrop-filter: blur(3px);
+}
 
 /* Step Navigator Bubble */
 .step-bubble {
@@ -956,6 +1012,15 @@
 .narration-storyboard-step .split-layout {
   flex: 1;
   min-height: 220px;
+}
+
+.narration-storyboard-cta {
+  flex-shrink: 0;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent, #6366f1) 8%, var(--bg-1, #fff));
+  border: 1px solid color-mix(in srgb, var(--accent, #6366f1) 22%, transparent);
 }
 
 .storyboard-chat-panel {

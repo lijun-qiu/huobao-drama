@@ -45,7 +45,17 @@ function preserveShotMeta(existing: ReturnType<typeof parseNarrationImageMeta>) 
   if (existing.title_full) extra.title_full = existing.title_full
   if (existing.subtitle_narration) extra.subtitle_narration = existing.subtitle_narration
   if (typeof existing.body_sentence_index === 'number') extra.body_sentence_index = existing.body_sentence_index
+  if (existing.shot_role) extra.shot_role = existing.shot_role
+  if (existing.motion_tier) extra.motion_tier = existing.motion_tier
+  if (existing.camera_kind) extra.camera_kind = existing.camera_kind
+  if (existing.paragraph_layout) extra.paragraph_layout = existing.paragraph_layout
+  if (existing.expression_action) extra.expression_action = existing.expression_action
+  if (existing.scene_background) extra.scene_background = existing.scene_background
   return extra
+}
+
+function resolveDetectImageMode(isParagraphAnchor: boolean): 'new' | 'inherit' {
+  return isParagraphAnchor ? 'new' : 'inherit'
 }
 
 export type NarrationImageBreakdownOptions = {
@@ -341,7 +351,9 @@ function loadEpisodeStoryboardContext(
     .where(eq(schema.storyboards.episodeId, episodeId))
     .orderBy(asc(schema.storyboards.storyboardNumber))
     .all()
-  if (!orderedStoryboards.length) throw new Error('请先完成旁白分镜')
+  if (!orderedStoryboards.length) {
+    throw new Error('请先完成旁白分镜')
+  }
 
   const sentenceItems: NarrationSentenceItem[] = orderedStoryboards.map((sb) => {
     const meta = parseNarrationImageMeta(sb.referenceImages)
@@ -368,6 +380,7 @@ function loadEpisodeStoryboardContext(
 }
 
 function saveDetectResults(
+  episodeId: number,
   orderedStoryboards: typeof schema.storyboards.$inferSelect[],
   sentenceItems: NarrationSentenceItem[],
   paragraphs: NarrationParagraph[],
@@ -380,11 +393,13 @@ function saveDetectResults(
     const para = paragraphs.find(p => p.startIndex === index)
     const existing = parseNarrationImageMeta(sb.referenceImages)
     const shotMeta = preserveShotMeta(existing)
+    const imageMode = resolveDetectImageMode(isParagraphAnchor)
+    const paragraphLayout = para?.layout || existing.paragraph_layout || 'single'
 
     db.update(schema.storyboards)
       .set({
         imagePrompt: null,
-        referenceImages: buildNarrationImageMeta(isParagraphAnchor ? 'new' : 'inherit', {
+        referenceImages: buildNarrationImageMeta(imageMode, {
           ...shotMeta,
           narration_tts_mode: isParagraphAnchor ? 'new' : 'inherit',
           script_paragraph_index: existing.script_paragraph_index ?? sentenceItems[index]?.paragraphIndex,
@@ -392,7 +407,7 @@ function saveDetectResults(
           narration_lines: para?.sentences,
           image_narration_lines: para ? mergeStoryboardLinesForImagePrompt(para.sentences) : undefined,
           paragraph_index: para?.index,
-          paragraph_layout: para?.layout || 'single',
+          paragraph_layout: paragraphLayout,
           image_prompt_source: undefined,
           image_prompt_llm_raw: undefined,
         }),
@@ -535,7 +550,8 @@ export async function detectNarrationImageAnchors(
       textModel: batchOptions?.textModel,
       textThinking: batchOptions?.textThinking,
     })
-    const { paragraphs, detectSource } = await buildNarrationParagraphsAsync(ctx.sentenceItems, {
+
+    const resolved = await buildNarrationParagraphsAsync(ctx.sentenceItems, {
       imageDetectMode,
       textModel: ctx.textModel,
       textThinking: ctx.textThinking,
@@ -546,6 +562,8 @@ export async function detectNarrationImageAnchors(
       detectBatchSize: batchOptions?.batchSize,
       onDetectProgress: reportProgress,
     })
+    const paragraphs = resolved.paragraphs
+    const detectSource = resolved.detectSource
 
     const paragraphMetaByAnchor = new Map<number, { content: string; layout: 'single' | 'diptych' }>()
     paragraphs.forEach((para) => {
@@ -556,7 +574,7 @@ export async function detectNarrationImageAnchors(
       })
     })
 
-    saveDetectResults(ctx.orderedStoryboards, ctx.sentenceItems, paragraphs, paragraphMetaByAnchor)
+    saveDetectResults(episodeId, ctx.orderedStoryboards, ctx.sentenceItems, paragraphs, paragraphMetaByAnchor)
 
     const firstTitleMeta = ctx.orderedStoryboards
       .map(sb => parseNarrationImageMeta(sb.referenceImages))

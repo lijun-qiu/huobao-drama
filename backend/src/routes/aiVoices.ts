@@ -14,6 +14,7 @@ import { generateTTS } from '../services/tts-generation.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
+import { listLocalCastVoiceCandidates } from '../services/local-voice-assign.js'
 
 const DEFAULT_LOCAL_TTS_PREVIEW_TEXT = '这是一段旁白试听，用于感受当前音色、语速和感情效果。'
 
@@ -23,6 +24,23 @@ const app = new Hono()
 app.get('/voicebox/health', async (c) => {
   const health = await checkVoiceboxHealth()
   return success(c, health)
+})
+
+// GET /ai-voices/local-cast — Kokoro + Edge 本地选角音色池
+app.get('/local-cast', async (c) => {
+  const modelSize = resolveVoiceboxModelSize(c.req.query('model_size') || c.req.query('modelSize'))
+  const voices = await listLocalCastVoiceCandidates(modelSize)
+  return success(c, {
+    kokoro_count: voices.filter(v => v.source === 'kokoro').length,
+    edge_count: voices.filter(v => v.source === 'edge').length,
+    voices: voices.map(v => ({
+      voice_id: v.voice_id,
+      voice_name: v.voice_name,
+      provider: v.provider,
+      source: v.source,
+      gender: v.gender,
+    })),
+  })
 })
 
 // GET /ai-voices?provider=minimax|edge|voicebox

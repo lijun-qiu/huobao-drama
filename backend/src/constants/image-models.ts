@@ -1,6 +1,6 @@
 import { getKlingModelMeta } from './kling-image-models.js'
 
-export const GPT_IMAGE_DEFAULT_MODEL = 'gpt-image-2-all'
+export const GPT_IMAGE_DEFAULT_MODEL = 'gpt-image-2'
 export const DEFAULT_IMAGE_MODEL = GPT_IMAGE_DEFAULT_MODEL
 
 /** 历史默认模型，启动时迁移到 DEFAULT_IMAGE_MODEL */

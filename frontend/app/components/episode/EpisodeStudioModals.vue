@@ -6,7 +6,7 @@
               <div class="shot-editor-title">编辑镜头 #{{ shotEditor.number }}</div>
               <div class="shot-editor-sub">
                 <span v-if="shotEditor.isTitle" class="tag tag-title">片头 · 剧中红字</span>
-                <span v-else class="tag">旁白镜头</span>
+                <span v-else class="tag">{{ isMotionComicMode ? '台词镜头' : '旁白镜头' }}</span>
                 <span class="dim" style="font-size:11px;margin-left:6px">{{ shotEditor.shotType || '未设景别' }} · {{ shotEditor.duration }}s</span>
               </div>
             </div>
@@ -17,7 +17,7 @@
           <div class="shot-editor-body">
             <label class="field">
               <span class="field-label">{{ shotEditor.isTitle ? '剧中台词（合成红字）' : '旁白台词' }}</span>
-              <textarea v-model="shotEditor.dialogue" class="textarea" rows="3" :placeholder="shotEditor.isTitle ? '剧中：今天体验的人生剧本是，' : '旁白：职高读到第二年六月，'" />
+              <textarea v-model="shotEditor.dialogue" class="textarea" rows="3" :placeholder="shotEditor.isTitle ? (isMotionComicMode ? '剧中：标题：…' : '剧中：今天体验的人生剧本是，') : '旁白：…'" />
               <span class="dim" style="font-size:11px;margin-top:4px;display:block">
                 {{ shotEditor.isTitle ? '片头改字后点「保存并重新制作」：将重新配音并合成全部片头镜。' : '改台词后需重新配音并重新合成该镜。' }}
               </span>

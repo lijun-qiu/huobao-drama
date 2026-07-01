@@ -15,11 +15,16 @@ import { now } from '../utils/response.js'
 import { BGM_SOLO_VOLUME, BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { generateTTS } from './tts-generation.js'
 import { resolveEdgeVoice } from './edge-tts-local.js'
+import { resolveStoryboardLocalTtsInput } from './local-tts-resolve.js'
 import { resolveVoiceboxProfileId } from './voicebox-tts.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta, resolveStoryboardImageAnchorShot, resolveStoryboardVisualSource, resolveStoryboardSubtitleNarration, sortStoryboardsByOrder } from './narration-image.js'
 import { deleteEpisodeAssetFileIfUnreferenced } from './storyboard-asset-replace.js'
 import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
+import { parseProductionMode, isMotionComicMode } from '../constants/production-mode.js'
+import { parseMotionComicPreset } from '../constants/motion-comic.js'
+import { resolveMotionComicComposeOptions } from './motion-comic-meta.js'
+import { buildMotionComicComposeFilter } from './motion-comic-camera.js'
 import { joinNarrationTtsParts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
 import { PAGE_FLIP_TRANSITION_SEC } from './ffmpeg-page-transition.js'
@@ -229,7 +234,7 @@ function formatAssTimestamp(seconds: number) {
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`
 }
 
-const TITLE_FONT_SIZE = 94
+const TITLE_FONT_SIZE = 84
 const TITLE_WHITE_FONT_SIZE = TITLE_FONT_SIZE + 10
 
 function escapeAssChar(ch: string) {
@@ -695,11 +700,19 @@ async function generateInlineTtsForStoryboard(
 
   const usesOwnNarrationTts = isNarrationStoryboard(sb) || isTitleShot
   const useLocalTts = usesOwnNarrationTts
-  const localTtsEngine = process.env.LOCAL_TTS_ENGINE === 'voicebox' ? 'voicebox' : 'edge'
+  const defaultLocalEngine = process.env.LOCAL_TTS_ENGINE === 'voicebox' ? 'voicebox' : 'edge'
+  const localInput = useLocalTts
+    ? resolveStoryboardLocalTtsInput(parsedDialogue.speaker, ctx.chars, {
+      isTitleShot: !!isTitleShot,
+      fallbackEngine: defaultLocalEngine as 'edge' | 'voicebox',
+      preferSpeakerVoice: true,
+    })
+    : null
+  const localTtsEngine = localInput?.engine || defaultLocalEngine
   const ttsVoice = useLocalTts
     ? (localTtsEngine === 'voicebox'
-      ? await resolveVoiceboxProfileId(voiceId, process.env.VOICEBOX_PROFILE_ID)
-      : resolveEdgeVoice(voiceId))
+      ? await resolveVoiceboxProfileId(localInput!.voiceInput, process.env.VOICEBOX_PROFILE_ID)
+      : localInput!.voiceInput)
     : voiceId
 
   logTaskProgress('ComposeTask', 'generate-inline-tts', {
@@ -827,6 +840,82 @@ async function concatAudioFiles(audioPaths: string[], outputPath: string): Promi
   }
 }
 
+async function concatVideoFiles(videoPaths: string[], outputPath: string): Promise<void> {
+  if (videoPaths.length === 1) {
+    fs.copyFileSync(videoPaths[0], outputPath)
+    return
+  }
+
+  const listPath = path.join(os.tmpdir(), `huobao-${uuid()}.txt`)
+  const listContent = videoPaths.map(p => `file '${escapeConcatMediaPath(p)}'`).join('\n')
+  fs.writeFileSync(listPath, listContent, 'utf-8')
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg()
+        .input(listPath)
+        .inputOptions(['-f', 'concat', '-safe', '0'])
+        .outputOptions([
+          '-fflags', '+genpts',
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-crf', '23',
+          '-pix_fmt', 'yuv420p',
+          '-an',
+          '-movflags', '+faststart',
+        ])
+        .output(outputPath)
+        .on('end', () => resolve())
+        .on('error', (err) => reject(err))
+        .run()
+    })
+  } finally {
+    if (fs.existsSync(listPath)) fs.unlinkSync(listPath)
+  }
+}
+
+async function renderImageMotionClip(
+  imageAbsPath: string,
+  durationSec: number,
+  videoFilter: string,
+  outputPath: string,
+  episodeId: number,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    throwIfComposeCancelled(episodeId)
+    const videoChain = `[0:v]${videoFilter}[vout]`
+    let cmd = ffmpeg()
+      .input(imageAbsPath)
+      .inputOptions(['-loop', '1'])
+      .complexFilter(videoChain)
+      .outputOptions([
+        '-t', fmtComposeFilterSec(durationSec),
+        '-map', '[vout]',
+        '-an',
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '23',
+        '-g', '1',
+        '-keyint_min', '1',
+        '-tune', 'stillimage',
+        '-pix_fmt', 'yuv420p',
+        '-r', '25',
+        '-vsync', 'cfr',
+      ])
+      .output(outputPath)
+    attachComposeCommand(episodeId, cmd)
+    cmd
+      .on('end', () => resolve())
+      .on('error', (err) => reject(toComposeError(episodeId, err)))
+      .run()
+  })
+}
+
+type GroupMotionComicOptions = {
+  motionPreset: ReturnType<typeof parseMotionComicPreset>
+  pageIndex: number
+}
+
 /** 同配图多句：一次渲染，避免句间切换时背景跳动 */
 export async function renderSameImageGroupSegment(
   orderedStoryboards: Array<{
@@ -839,6 +928,7 @@ export async function renderSameImageGroupSegment(
   outputPath: string,
   pageIndex = 0,
   prevGroupShotCount = 0,
+  motionComic?: GroupMotionComicOptions,
 ): Promise<number> {
   const tempDir = path.join(STORAGE_ROOT, 'temp')
   fs.mkdirSync(tempDir, { recursive: true })
@@ -1014,9 +1104,63 @@ export async function renderSameImageGroupSegment(
   const outputDuration = resolveComposeOutputDuration(contentDuration, transitionPads)
   const episodeId = firstSb?.episodeId ?? 0
 
+  let videoInputPath = imageAbsPath
+  let videoInputIsLoopedImage = true
+  const motionClipTemps: string[] = []
+  let motionVideoTemp: string | null = null
+
+  if (motionComic) {
+    const shotCount = memberRows.length
+    const cameraKinds: string[] = []
+    for (let i = 0; i < memberRows.length; i++) {
+      const row = memberRows[i]
+      const sb = orderedStoryboards[i]
+      const shotText = [
+        row.description,
+        String(row.dialogue || sb.dialogue || '').replace(/^(旁白|剧中)[：:]\s*/, ''),
+      ].filter(Boolean).join(' ')
+      const motionOpts = resolveMotionComicComposeOptions(row.referenceImages, {
+        pageIndex: motionComic.pageIndex,
+        movement: row.movement,
+        shotType: row.shotType,
+        shotText,
+      })
+      cameraKinds.push(motionOpts.cameraKind ?? 'zoom_in')
+      const clipPath = path.join(tempDir, `${uuid()}.mp4`)
+      const filter = buildMotionComicComposeFilter(motionOpts.tier ?? 'static', shotDurationsSec[i], {
+        zoomStep: motionComic.motionPreset.camera?.zoom_step,
+        enablePan: motionComic.motionPreset.camera?.enable_pan,
+        pageIndex: motionComic.pageIndex,
+        shotIndexInGroup: i,
+        shotCountInGroup: shotCount,
+        cameraKind: motionOpts.cameraKind,
+        shotRole: motionOpts.shotRole,
+        isDiptych: motionOpts.isDiptych,
+      })
+      await renderImageMotionClip(imageAbsPath, shotDurationsSec[i], filter, clipPath, episodeId)
+      motionClipTemps.push(clipPath)
+    }
+    motionVideoTemp = path.join(tempDir, `${uuid()}.mp4`)
+    await concatVideoFiles(motionClipTemps, motionVideoTemp)
+    for (const clipPath of motionClipTemps) {
+      if (fs.existsSync(clipPath)) fs.unlinkSync(clipPath)
+    }
+    videoInputPath = motionVideoTemp
+    videoInputIsLoopedImage = false
+    logTaskProgress('ComposeTask', 'motion-comic-group-clips', {
+      episodeId,
+      pageIndex: motionComic.pageIndex,
+      shotCount,
+      cameraKinds,
+    })
+  }
+
   await new Promise<void>((resolve, reject) => {
     throwIfComposeCancelled(episodeId)
-    const filters: string[] = [buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount)]
+    const filters: string[] = []
+    if (!motionComic) {
+      filters.push(buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount))
+    }
     appendComposeVideoPostFilters(
       filters,
       subtitlePath,
@@ -1026,16 +1170,21 @@ export async function renderSameImageGroupSegment(
       watermarkAnimated,
     )
 
-    const videoChain = `[0:v]${filters.join(',')}[vout]`
+    const videoChain = filters.length
+      ? `[0:v]${filters.join(',')}[vout]`
+      : '[0:v]copy[vout]'
     const filterComplex = [
       videoChain,
       buildComposeTransitionAudioPadFilter(1, 'aout', transitionPads),
     ].join(';')
 
     let cmd = ffmpeg()
-      .input(imageAbsPath)
-      .inputOptions(['-loop', '1'])
-      .input(mergedAudioPath)
+    if (videoInputIsLoopedImage) {
+      cmd = cmd.input(videoInputPath).inputOptions(['-loop', '1'])
+    } else {
+      cmd = cmd.input(videoInputPath)
+    }
+    cmd = cmd.input(mergedAudioPath)
     cmd = cmd
       .complexFilter(filterComplex)
       .outputOptions([
@@ -1063,6 +1212,7 @@ export async function renderSameImageGroupSegment(
 
   if (fs.existsSync(mergedAudioPath)) fs.unlinkSync(mergedAudioPath)
   if (fs.existsSync(subtitlePath)) fs.unlinkSync(subtitlePath)
+  if (motionVideoTemp && fs.existsSync(motionVideoTemp)) fs.unlinkSync(motionVideoTemp)
   for (const tempAudio of alignedAudioTemps) {
     if (fs.existsSync(tempAudio)) fs.unlinkSync(tempAudio)
   }
@@ -1338,12 +1488,20 @@ async function composeSameImageGroup(
     const outputPath = path.join(outputDir, outputFilename)
 
     try {
+      const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, ctx.episodeId)).all()
+      const [drama] = ep
+        ? db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+        : [undefined]
+      const motionComicMode = isMotionComicMode(parseProductionMode(drama?.metadata))
+      const motionPreset = parseMotionComicPreset(drama?.metadata)
+
       await renderSameImageGroupSegment(
         ctx.members,
         ctx.imageAbsPath,
         outputPath,
         ctx.pageIndex,
         ctx.prevGroupShotCount,
+        motionComicMode ? { motionPreset, pageIndex: ctx.pageIndex } : undefined,
       )
 
       throwIfComposeCancelled(ctx.episodeId)
@@ -1434,6 +1592,11 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
   })
 
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  const [drama] = ep
+    ? db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+    : [undefined]
+  const motionComicMode = isMotionComicMode(parseProductionMode(drama?.metadata))
+  const motionPreset = parseMotionComicPreset(drama?.metadata)
   const watermarkText = resolveWatermarkText(ep?.watermarkText)
   const watermarkAnimated = resolveWatermarkAnimated(ep?.watermarkAnimated)
 
@@ -1477,11 +1640,22 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
         const pureDialogue = parsedDialogue.pureText
         if (pureDialogue) {
           const useLocalTts = usesOwnNarrationTts
-          const localTtsEngine = process.env.LOCAL_TTS_ENGINE === 'voicebox' ? 'voicebox' : 'edge'
+          const defaultLocalEngine = process.env.LOCAL_TTS_ENGINE === 'voicebox' ? 'voicebox' : 'edge'
+          const chars = ep
+            ? db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId)).all()
+            : []
+          const localInput = useLocalTts
+            ? resolveStoryboardLocalTtsInput(parsedDialogue.speaker, chars, {
+              isTitleShot: !!isTitleShot,
+              fallbackEngine: defaultLocalEngine as 'edge' | 'voicebox',
+              preferSpeakerVoice: true,
+            })
+            : null
+          const localTtsEngine = localInput?.engine || defaultLocalEngine
           const ttsVoice = useLocalTts
             ? (localTtsEngine === 'voicebox'
-              ? await resolveVoiceboxProfileId(voiceId, process.env.VOICEBOX_PROFILE_ID)
-              : resolveEdgeVoice(voiceId))
+              ? await resolveVoiceboxProfileId(localInput!.voiceInput, process.env.VOICEBOX_PROFILE_ID)
+              : localInput!.voiceInput)
             : voiceId
           logTaskProgress('ComposeTask', 'generate-inline-tts', {
             storyboardId,
@@ -1585,6 +1759,34 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
           : getVisualGroupInfo(storyboardId, episodeStoryboards)
         if (useTitleDynamic) {
           filters.push(buildTitleShotMotionFilter(clipDuration, titleGroupInfo!.shotIndexInGroup))
+        } else if (motionComicMode) {
+          const ordered = sortStoryboardsByOrder(episodeStoryboards)
+          const groupIdx = ordered.findIndex(s => s.id === storyboardId)
+          const visualGroups = buildVisualGroups(ordered)
+          const visualGroup = groupIdx >= 0
+            ? visualGroups.find(g => groupIdx >= g.start && groupIdx <= g.end)
+            : undefined
+          const shotCountInGroup = visualGroup ? visualGroup.end - visualGroup.start + 1 : 1
+          const shotText = [
+            sb.description,
+            String(sb.dialogue || '').replace(/^(旁白|剧中)[：:]\s*/, ''),
+          ].filter(Boolean).join(' ')
+          const motionOpts = resolveMotionComicComposeOptions(sb.referenceImages, {
+            pageIndex: visualGroupInfo?.pageIndex,
+            movement: sb.movement,
+            shotType: sb.shotType,
+            shotText,
+          })
+          filters.push(buildMotionComicComposeFilter(motionOpts.tier ?? 'static', clipDuration, {
+            zoomStep: motionPreset.camera?.zoom_step,
+            enablePan: motionPreset.camera?.enable_pan,
+            pageIndex: visualGroupInfo?.pageIndex,
+            shotIndexInGroup: visualGroupInfo?.shotIndexInGroup,
+            shotCountInGroup,
+            cameraKind: motionOpts.cameraKind,
+            shotRole: motionOpts.shotRole,
+            isDiptych: motionOpts.isDiptych,
+          }))
         } else {
           filters.push(buildShotZoomMotionFilter(visualGroupInfo!, clipDuration))
         }

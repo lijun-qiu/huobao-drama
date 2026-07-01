@@ -19,8 +19,9 @@ import {
   type NarrationImageChatTurn,
 } from './narration-image-chat-context.js'
 import { createWorkflowChatStatusReporter } from './workflow-chat-status.js'
+import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 
-const DETECT_CHAT_SYSTEM = [
+const NARRATION_DETECT_CHAT_SYSTEM = [
   '你是火宝解说流水线的「配图换镜检测」助手，帮助创作者决定哪些旁白镜头需要单独配图。',
   '',
   '【职责】',
@@ -37,6 +38,30 @@ const DETECT_CHAT_SYSTEM = [
   '',
   '回复简洁、可操作；用 #01 #02 指代镜头编号。',
 ].join('\n')
+
+const MOTION_COMIC_DETECT_CHAT_SYSTEM = [
+  '你是火宝漫画解说流水线的「配图换镜检测」助手，帮助创作者决定哪些旁白镜头需要单独漫画配图。',
+  '',
+  '【职责】',
+  '- 阅读镜头列表，解释换镜/配图策略（一句一图、动态构图、智能运镜合成）。',
+  '- 用户说「开始检测」「重新检测」「执行检测」等时，由系统后台执行 LLM 检测；你解读检测过程与结果。',
+  '- 检测完成后总结：共多少张需配图、片头几镜、哪些段落是锚点。',
+  '- 用户要求调整时，先讨论可行性，建议重新检测；不要假装已改库。',
+  '',
+  '【配图原则（供讨论）】',
+  '- 漫画解说默认一句一图：每句旁白各需一张动态漫画插画，配合推/拉/横移/上下运镜快切',
+  '- 只有完全同一静止画面才可沿用上一张（极少见）',
+  '- 片头 hook 通常单独 1 张标题图',
+  '- 全片配图比例约 85%～100%，画面须具动作/表情/层次，避免静态站桩',
+  '',
+  '回复简洁、可操作；用 #01 #02 指代镜头编号。',
+].join('\n')
+
+function resolveDetectChatSystem(episodeId: number): string {
+  return isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+    ? MOTION_COMIC_DETECT_CHAT_SYSTEM
+    : NARRATION_DETECT_CHAT_SYSTEM
+}
 
 export type NarrationImageDetectChatParams = {
   episodeId: number
@@ -64,7 +89,7 @@ function buildDetectChatMessages(params: NarrationImageDetectChatParams) {
   const context = buildDetectChatContextBlock(params.episodeId)
 
   const apiMessages: TextChatMessage[] = [
-    { role: 'system', content: `${DETECT_CHAT_SYSTEM}\n\n${context}` },
+    { role: 'system', content: `${resolveDetectChatSystem(params.episodeId)}\n\n${context}` },
     ...turns,
   ]
 

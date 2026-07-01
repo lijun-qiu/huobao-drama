@@ -440,6 +440,8 @@ export const episodeAPI = {
     api.post(`/episodes/${id}/narration-storyboard-breakdown`, { script: options?.script }),
   extractNarrationCharacters: (id: number, options?: { script?: string; style?: string; text_model?: string; text_thinking?: boolean }) =>
     api.post(`/episodes/${id}/extract-narration-characters`, options || {}),
+  assignLocalVoices: (id: number, options?: { overwrite?: boolean; voicebox_model_size?: '0.6B' | '1.7B' }) =>
+    api.post(`/episodes/${id}/assign-local-voices`, options || {}),
   linkNarrationCharacters: (id: number) => api.post(`/episodes/${id}/link-narration-characters`),
   generateOpeningVideo: (id: number, options?: { count?: number }) =>
     api.post(`/episodes/${id}/generate-opening-video`, options || {}),
@@ -489,7 +491,7 @@ export const episodeAPI = {
 export const storyboardAPI = {
   create: (data: any) => api.post('/storyboards', data),
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
-  generateTTS: (id: number, options?: { force?: boolean; async?: boolean; local_tts?: boolean; local_tts_engine?: 'edge' | 'voicebox'; local_voice?: string; tts_speed?: number; voicebox_instruct?: string; voicebox_model_size?: '0.6B' | '1.7B'; unit_tts?: boolean; tts_text?: string }) =>
+  generateTTS: (id: number, options?: { force?: boolean; async?: boolean; local_tts?: boolean; local_tts_engine?: 'edge' | 'voicebox'; local_voice?: string; use_speaker_voice?: boolean; tts_speed?: number; voicebox_instruct?: string; voicebox_model_size?: '0.6B' | '1.7B'; unit_tts?: boolean; tts_text?: string }) =>
     api.post(`/storyboards/${id}/generate-tts`, options || {}),
   uploadTTS: (id: number, audioPath: string) =>
     api.post(`/storyboards/${id}/upload-tts`, { audio_path: audioPath }),
@@ -567,10 +569,11 @@ export const sceneAPI = {
 export const imageAPI = {
   generate: (d: any) => api.post('/images', d),
   get: (id: number) => api.get(`/images/${id}`),
-  list: (params?: { drama_id?: number; storyboard_id?: number }) => {
+  list: (params?: { drama_id?: number; storyboard_id?: number; grid_only?: boolean }) => {
     const query = new URLSearchParams()
     if (params?.drama_id) query.set('drama_id', String(params.drama_id))
     if (params?.storyboard_id) query.set('storyboard_id', String(params.storyboard_id))
+    if (params?.grid_only) query.set('grid_only', '1')
     return api.get(`/images${query.size ? `?${query.toString()}` : ''}`)
   },
 }
@@ -649,6 +652,12 @@ export const voicesAPI = {
   },
   sync: () => api.post('/ai-voices/sync', {}),
   voiceboxHealth: () => api.get('/ai-voices/voicebox/health'),
+  localCast: (options?: { model_size?: '0.6B' | '1.7B' }) => {
+    const params = new URLSearchParams()
+    if (options?.model_size) params.set('model_size', options.model_size)
+    const query = params.toString()
+    return api.get(`/ai-voices/local-cast${query ? `?${query}` : ''}`)
+  },
   previewLocal: (options?: {
     local_tts_engine?: 'edge' | 'voicebox'
     local_voice?: string

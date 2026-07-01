@@ -120,11 +120,28 @@ app.get('/:id', async (c) => {
 app.get('/', async (c) => {
   const storyboardId = c.req.query('storyboard_id')
   const dramaId = c.req.query('drama_id')
+  const gridOnly = c.req.query('grid_only') === '1' || c.req.query('grid_only') === 'true'
 
-  let rows = db.select().from(schema.imageGenerations).all()
+  let rows: typeof schema.imageGenerations.$inferSelect[] = []
+  if (storyboardId) {
+    rows = db.select().from(schema.imageGenerations)
+      .where(eq(schema.imageGenerations.storyboardId, Number(storyboardId)))
+      .all()
+  } else if (dramaId) {
+    rows = db.select().from(schema.imageGenerations)
+      .where(eq(schema.imageGenerations.dramaId, Number(dramaId)))
+      .all()
+  } else {
+    rows = db.select().from(schema.imageGenerations).all()
+  }
 
-  if (storyboardId) rows = rows.filter(r => r.storyboardId === Number(storyboardId))
-  if (dramaId) rows = rows.filter(r => r.dramaId === Number(dramaId))
+  if (gridOnly) {
+    rows = rows.filter(r =>
+      r.status === 'completed'
+      && String(r.frameType || '').startsWith('grid_')
+      && !!(r.localPath?.trim()),
+    )
+  }
 
   return success(c, rows)
 })

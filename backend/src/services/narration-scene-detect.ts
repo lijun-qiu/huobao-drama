@@ -24,6 +24,13 @@ import {
   NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
   NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
 } from '../constants/art-styles.js'
+import {
+  isMotionComicStyle,
+  MOTION_COMIC_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
+  MOTION_COMIC_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
+  MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS,
+  MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS,
+} from '../constants/motion-comic.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 import {
   calcPromptBatchPercent,
@@ -148,6 +155,30 @@ export type NarrationSceneSegment = {
 }
 
 export type ImageDetectMode = 'paragraph' | 'conservative' | 'balanced'
+
+type ImageSegmentBounds = {
+  minShots: number
+  maxShots: number
+  minRatio: number
+  maxRatio: number
+}
+
+function resolveImageSegmentBounds(style?: string | null): ImageSegmentBounds {
+  if (isMotionComicStyle(style)) {
+    return {
+      minShots: MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS,
+      maxShots: MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS,
+      minRatio: MOTION_COMIC_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
+      maxRatio: MOTION_COMIC_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
+    }
+  }
+  return {
+    minShots: NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
+    maxShots: NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
+    minRatio: NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
+    maxRatio: NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
+  }
+}
 
 /** 强场景切换：地点/时间明显跳转 */
 const STRONG_SCENE_SHIFT_RE = /来到|走(进|向|出|到)|跑进|冲进|踏入|进入|离开|走出|返回|回到|抵达|赶到|第二天|翌日|次日|多年后|数年后|几年后|几小时后|清晨|黎明|黄昏|傍晚|夜里|深夜|天亮|小时候|闪回|回忆|镜头一转|画面一转|另一边|另一处|转场|切换|与此同时/
@@ -898,10 +929,11 @@ function applyImageAnchorConstraints(
   needs: boolean[],
   minimumTrueCount: number,
   maximumTrueCount: number,
+  bounds: ImageSegmentBounds,
 ): boolean[] {
-  let result = enforceImageSegmentShotBounds(needs)
-  result = boostImageAnchorCountToMinimum(result, minimumTrueCount)
-  result = trimImageAnchorCountToMaximum(result, maximumTrueCount)
+  let result = enforceImageSegmentShotBounds(needs, bounds.minShots, bounds.maxShots)
+  result = boostImageAnchorCountToMinimum(result, minimumTrueCount, bounds.minShots, bounds.maxShots)
+  result = trimImageAnchorCountToMaximum(result, maximumTrueCount, bounds.minShots, bounds.maxShots)
   return result
 }
 
@@ -993,21 +1025,21 @@ function countTrueDetectUnits(analysis: Array<{ needs_image?: unknown }>): numbe
   return analysis.filter(row => row?.needs_image === true).length
 }
 
-function resolveMinimumDetectTrueCount(storyboardCount: number): number {
+function resolveMinimumDetectTrueCount(storyboardCount: number, bounds: ImageSegmentBounds): number {
   if (storyboardCount <= 0) return 0
-  return Math.max(1, Math.ceil(storyboardCount * NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO))
+  return Math.max(1, Math.ceil(storyboardCount * bounds.minRatio))
 }
 
-function resolveMaximumDetectTrueCount(storyboardCount: number): number {
+function resolveMaximumDetectTrueCount(storyboardCount: number, bounds: ImageSegmentBounds): number {
   if (storyboardCount <= 0) return 0
-  const minimum = resolveMinimumDetectTrueCount(storyboardCount)
-  const maximum = Math.floor(storyboardCount * NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO)
+  const minimum = resolveMinimumDetectTrueCount(storyboardCount, bounds)
+  const maximum = Math.floor(storyboardCount * bounds.maxRatio)
   return Math.max(minimum, maximum)
 }
 
-function formatDetectRatioRange(): string {
-  const minPct = Math.round(NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO * 100)
-  const maxPct = Math.round(NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO * 100)
+function formatDetectRatioRange(bounds: ImageSegmentBounds): string {
+  const minPct = Math.round(bounds.minRatio * 100)
+  const maxPct = Math.round(bounds.maxRatio * 100)
   return `${minPct}%～${maxPct}%`
 }
 
@@ -1074,6 +1106,7 @@ type DetectLLMCallContext = {
   minimumTrueCount: number
   maximumTrueCount: number
   ratioRange: string
+  segmentBounds: ImageSegmentBounds
   previousEpisodeNarration?: string[]
   textModel?: string | null
   textThinking: boolean
@@ -1098,10 +1131,10 @@ function buildDetectUserPayload(
     detect_unit_count: batchUnits.length,
     minimum_true_count: batchMeta ? batchMin : ctx.minimumTrueCount,
     maximum_true_count: batchMeta ? batchMax : ctx.maximumTrueCount,
-    minimum_true_ratio: NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
-    maximum_true_ratio: NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
-    min_shots_per_image: NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
-    max_shots_per_image: NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
+    minimum_true_ratio: ctx.segmentBounds.minRatio,
+    maximum_true_ratio: ctx.segmentBounds.maxRatio,
+    min_shots_per_image: ctx.segmentBounds.minShots,
+    max_shots_per_image: ctx.segmentBounds.maxShots,
     ...(batchMeta ? {
       batch_index: batchMeta.batchIndex,
       batch_count: batchMeta.batchCount,
@@ -1123,6 +1156,7 @@ async function finalizeDetectNeedsFromAnalysis(
   maximumTrueCount: number,
   ratioRange: string,
   imagePrompts: unknown,
+  bounds: ImageSegmentBounds,
 ): Promise<NarrationDetectLLMResult> {
   if (analysis.length !== units.length) {
     throw new Error(`配图换镜 AI 返回无效（期望 ${units.length} 项 analysis）`)
@@ -1134,7 +1168,7 @@ async function finalizeDetectNeedsFromAnalysis(
   }
 
   const beforeBounds = needs.filter(Boolean).length
-  needs = applyImageAnchorConstraints(needs, minimumTrueCount, maximumTrueCount)
+  needs = applyImageAnchorConstraints(needs, minimumTrueCount, maximumTrueCount, bounds)
   const afterBounds = needs.filter(Boolean).length
   if (afterBounds !== beforeBounds) {
     logTaskProgress('NarrationScene', 'segment-bounds-applied', {
@@ -1142,8 +1176,8 @@ async function finalizeDetectNeedsFromAnalysis(
       afterAnchors: afterBounds,
       minimumTrueCount,
       maximumTrueCount,
-      minShots: NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
-      maxShots: NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
+      minShots: bounds.minShots,
+      maxShots: bounds.maxShots,
     })
   }
 
@@ -1236,9 +1270,10 @@ export async function detectImageNeedsWithLLM(
 
   const detectMode = mode === 'conservative' ? 'conservative' : 'paragraph'
   const units = buildNarrationDetectUnits(items)
-  const minimumTrueCount = resolveMinimumDetectTrueCount(items.length)
-  const maximumTrueCount = resolveMaximumDetectTrueCount(items.length)
-  const ratioRange = formatDetectRatioRange()
+  const segmentBounds = resolveImageSegmentBounds(style)
+  const minimumTrueCount = resolveMinimumDetectTrueCount(items.length, segmentBounds)
+  const maximumTrueCount = resolveMaximumDetectTrueCount(items.length, segmentBounds)
+  const ratioRange = formatDetectRatioRange(segmentBounds)
   const batchSize = resolveDetectBatchSize(options?.batchSize)
   const useBatch = shouldUseDetectBatching(items.length, options?.batchThreshold)
   const onProgress = options?.onProgress
@@ -1248,8 +1283,8 @@ export async function detectImageNeedsWithLLM(
     detectUnitCount: units.length,
     minimumTrueCount,
     maximumTrueCount,
-    minimumTrueRatio: NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
-    maximumTrueRatio: NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
+    minimumTrueRatio: segmentBounds.minRatio,
+    maximumTrueRatio: segmentBounds.maxRatio,
     timeoutMs: resolveDetectLLMTimeoutMs(units.length),
     model: config.model,
     detectMode,
@@ -1270,6 +1305,7 @@ export async function detectImageNeedsWithLLM(
     minimumTrueCount,
     maximumTrueCount,
     ratioRange,
+    segmentBounds,
     previousEpisodeNarration,
     textModel,
     textThinking: false,
@@ -1334,6 +1370,7 @@ export async function detectImageNeedsWithLLM(
         maximumTrueCount,
         ratioRange,
         lastImagePrompts,
+        segmentBounds,
       )
 
       logTaskSuccess('NarrationScene', 'llm-detect-done', {
@@ -1378,7 +1415,7 @@ export async function detectImageNeedsWithLLM(
       const retryHint = [
         `上次输出仅 ${trueUnitCount} 个 needs_image=true，低于最低要求 ${minimumTrueCount}（镜头数 ${items.length} 的 ${ratioRange} 下限）。`,
         `配图张数目标区间：${minimumTrueCount}～${maximumTrueCount} 张（${ratioRange}）。`,
-        `每个配图段须覆盖 ${NARRATION_IMAGE_SEGMENT_MIN_SHOTS}～${NARRATION_IMAGE_SEGMENT_MAX_SHOTS} 镜（含锚点镜），禁止单镜成段或连续 5 镜以上共用一图。`,
+        `每个配图段须覆盖 ${segmentBounds.minShots}～${segmentBounds.maxShots} 镜（含锚点镜），禁止连续 3 镜以上共用一图。`,
         '请重新通读全文：只有「上一张图可原样复用、无任何可视差异」的单元才标 false；',
         '凡有场景/时间/动作/物件/经营阶段/视觉焦点变化的一律标 true。',
         '输出完整 JSON，analysis 长度仍须与 sentences 相同。',
@@ -1403,6 +1440,7 @@ export async function detectImageNeedsWithLLM(
       maximumTrueCount,
       ratioRange,
       llmResult.image_prompts,
+      segmentBounds,
     )
 
     logTaskSuccess('NarrationScene', 'llm-detect-done', {
@@ -1483,12 +1521,13 @@ export async function resolveImageNeeds(
       message: 'LLM 检测超时，改用规则兜底分配配图段…',
       percent: 90,
     })
-    const minimumTrueCount = resolveMinimumDetectTrueCount(items.length)
-    const maximumTrueCount = resolveMaximumDetectTrueCount(items.length)
+    const segmentBounds = resolveImageSegmentBounds(options?.style)
+    const minimumTrueCount = resolveMinimumDetectTrueCount(items.length, segmentBounds)
+    const maximumTrueCount = resolveMaximumDetectTrueCount(items.length, segmentBounds)
     const rawNeeds = mode === 'conservative'
       ? detectImageNeedsConservative(items)
       : detectImageNeedsBalanced(items)
-    const needs = applyImageAnchorConstraints(rawNeeds, minimumTrueCount, maximumTrueCount)
+    const needs = applyImageAnchorConstraints(rawNeeds, minimumTrueCount, maximumTrueCount, segmentBounds)
     return {
       needs,
       segmentDescriptions: new Map(),

@@ -5,14 +5,15 @@ import { success, notFound, created, badRequest, now } from '../utils/response.j
 import { toSnakeCase } from '../utils/transform.js'
 import { parseModelField } from '../services/ai.js'
 import { redactUrl, logTaskError, logTaskProgress, logTaskSuccess } from '../utils/task-logger.js'
+import { joinProviderUrl } from '../services/adapters/url.js'
 
 const app = new Hono()
 
 const HUOBAO_PRESET_SERVICES = [
   { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'deepseek-v4-pro,qwen3.5-plus,gpt-4o', priority: 100 },
-  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2-all', priority: 99 },
-  { serviceType: 'video', label: '视频', provider: 'volcengine', baseUrl: 'https://api.chatfire.site/volcengine', model: 'doubao-seedance-1-5-pro-251215', priority: 98 },
-  { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'speech-2.8-hd', priority: 97 },
+  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2', priority: 99 },
+  { serviceType: 'video', label: '视频', provider: 'vidu', baseUrl: 'https://api.4022543.xyz', model: 'viduq3-turbo', priority: 98 },
+  { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.4022543.xyz/minimax', model: 'speech-2.8-hd', priority: 97 },
   { serviceType: 'music', label: '音乐', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'suno_music_open', priority: 96 },
 ] as const
 
@@ -125,7 +126,7 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
       url: joinProviderUrl(baseUrl, '/kling/v1', '/images/generations'),
       headers: bearerHeaders(apiKey, true),
       body: {
-        model_name: m || 'gpt-image-2-all',
+        model_name: m || 'gpt-image-2',
         prompt: 'probe',
         n: 1,
         aspect_ratio: '16:9',

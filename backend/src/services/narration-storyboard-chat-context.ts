@@ -3,6 +3,7 @@
  */
 import { asc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
+import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 import { parseNarrationScript } from './narration-breakdown.js'
 import { parseNarrationImageMeta } from './narration-image.js'
 
@@ -45,17 +46,19 @@ export function buildStoryboardChatContextBlock(episodeId: number, scriptOverrid
     `集序号：第 ${ep.episodeNumber} 集`,
   ].filter(Boolean)
 
+  const motionComic = isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+
   if (script) {
     const { title, body } = parseNarrationScript(script)
     const charCount = script.replace(/\s/g, '').length
-    lines.push('', `【解说稿】约 ${charCount} 字`)
+    lines.push('', `【${motionComic ? '漫剧旁白稿' : '解说稿'}】约 ${charCount} 字`)
     if (title) lines.push(`片头：${title.slice(0, 120)}${title.length > 120 ? '…' : ''}`)
     const bodyPreview = body.trim().slice(0, 400)
     if (bodyPreview) {
       lines.push(`正文节选：${bodyPreview}${body.length > 400 ? '…' : ''}`)
     }
   } else {
-    lines.push('', '【解说稿】尚未填写，执行分镜前需先有完整解说稿。')
+    lines.push('', `【${motionComic ? '漫剧旁白稿' : '解说稿'}】尚未填写，执行分镜前需先有完整${motionComic ? '旁白稿' : '解说稿'}。`)
   }
 
   if (orderedStoryboards.length) {
@@ -64,7 +67,7 @@ export function buildStoryboardChatContextBlock(episodeId: number, scriptOverrid
       const num = sb.storyboardNumber ?? index + 1
       const meta = parseNarrationImageMeta(sb.referenceImages)
       const text = storyboardNarrationSentence(sb).slice(0, 80)
-      const tag = meta.narration_shot_type === 'title' ? '片头' : '旁白'
+      const tag = meta.narration_shot_type === 'title' ? '片头' : (motionComic ? '台词' : '旁白')
       lines.push(`#${String(num).padStart(2, '0')} [${tag}] ${text}`)
     })
     if (orderedStoryboards.length > 12) {

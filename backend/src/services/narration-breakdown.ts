@@ -1,4 +1,11 @@
 import { eq } from 'drizzle-orm'
+import {
+  formatMotionComicDialogue,
+  motionComicShotDescription,
+  type MotionComicStoryboardShot,
+} from '../constants/motion-comic.js'
+import { buildMotionComicStoryboardMetaFromShot } from './motion-comic-meta.js'
+import { buildMotionComicStoryboardShotsWithLLM } from './motion-comic-storyboard-llm.js'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import {
@@ -123,6 +130,188 @@ export function estimateNarrationDuration(sentence: string, isTitle = false) {
   const chars = sentence.replace(/\s/g, '').length
   if (isTitle) return Math.max(6, Math.min(12, Math.ceil(chars / 3.5)))
   return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
+}
+
+function insertMotionComicStoryboardShot(
+  episodeId: number,
+  shot: MotionComicStoryboardShot,
+  storyboardNumber: number,
+  ts: string,
+  options: {
+    isTitle?: boolean
+    titleFull?: string | null
+    titleHook?: string | null
+    paragraphIndex?: number
+    bodyIndex?: number
+    episodeCharacters: ReturnType<typeof getEpisodeVisualCharacters>
+  },
+): { storyboardNumber: number; duration: number } {
+  const dialogue = formatMotionComicDialogue(shot.speaker, shot.dialogue, shot.emphasis_word)
+  const isTitle = options.isTitle ?? shot.speaker === '剧中'
+  const duration = estimateNarrationDuration(dialogue.replace(/^[^：:]+[:：]\s*/, ''), isTitle)
+  const description = motionComicShotDescription(shot)
+
+  const res = db.insert(schema.storyboards).values({
+    episodeId,
+    storyboardNumber,
+    title: isTitle ? '片头标题' : (shot.dialogue.slice(0, 12) || `镜头${storyboardNumber}`),
+    location: shot.background,
+    description,
+    dialogue,
+    action: shot.expression_action,
+    atmosphere: shot.atmosphere || null,
+    imagePrompt: null,
+    referenceImages: buildMotionComicStoryboardMetaFromShot(shot, {
+      script_paragraph_index: options.paragraphIndex ?? 0,
+      body_sentence_index: options.bodyIndex,
+      subtitle_narration: dialogue.replace(/^[^：:]+[:：]\s*/, ''),
+      ...(isTitle && options.titleFull
+        ? {
+          narration_shot_type: 'title' as const,
+          title_hook: options.titleHook ?? undefined,
+          title_full: options.titleFull,
+        }
+        : {}),
+    }),
+    shotType: shot.shot_type,
+    angle: shot.angle,
+    movement: shot.movement,
+    duration,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run()
+
+  linkStoryboardCharactersFromText(
+    Number(res.lastInsertRowid),
+    [dialogue, shot.expression_action, shot.background, options.titleFull].filter(Boolean).join('\n'),
+    options.episodeCharacters,
+  )
+
+  return { storyboardNumber, duration }
+}
+
+async function breakdownMotionComicStoryboards(
+  episodeId: number,
+  script: string,
+  ep: typeof schema.episodes.$inferSelect,
+  options?: {
+    textModel?: string | null
+    textThinking?: boolean
+    onProgress?: (patch: { message: string; percent?: number; phase?: string }) => void
+  },
+) {
+  const report = (patch: { message: string; percent?: number; phase?: string }) => {
+    options?.onProgress?.(patch)
+  }
+
+  report({ message: '正在解析漫剧台本…', percent: 8, phase: 'reading' })
+
+  const { title, body } = parseNarrationScript(script)
+  const titleVisualHook = title ? extractTitleHook(title) : null
+  // 传完整台本给 LLM，避免 parseNarrationScript 剥掉「标题：」前缀
+  const scriptForLlm = script.trim()
+
+  const textModel = resolveNarrationStoryboardTextModel(ep, options?.textModel)
+  const episodeCharacters = getEpisodeVisualCharacters(episodeId, ep.dramaId)
+  const characterNames = episodeCharacters.map(c => c.name).filter(Boolean)
+
+  report({ message: '正在 LLM 拆成一体化分镜（对白·表情动作·运镜·背景）…', percent: 15, phase: 'llm' })
+
+  let titleShots: MotionComicStoryboardShot[] = []
+  let shots: MotionComicStoryboardShot[] = []
+  let emphasisSource: 'llm' | 'rules' = 'llm'
+
+  try {
+    const llmResult = await buildMotionComicStoryboardShotsWithLLM(scriptForLlm, {
+      textModel,
+      episodeTextModel: ep.textModel,
+      characterNames,
+    })
+    titleShots = llmResult.titleShots
+    shots = llmResult.shots
+    if (!titleShots.length && title?.trim()) {
+      const titleLine = /^标题\s*[:：]/.test(script.trim().split('\n')[0] || '')
+        ? script.trim().split('\n')[0].trim()
+        : `标题：${title.trim()}`
+      titleShots = [{
+        speaker: '剧中',
+        dialogue: titleLine,
+        expression_action: '标题呈现',
+        shot_type: '全景',
+        angle: '平视',
+        movement: '固定',
+        background: '片头氛围背景',
+        shot_role: 'establishing',
+      }]
+    }
+    report({ message: `拆镜完成：片头 ${titleShots.length} 镜、正文 ${shots.length} 镜`, percent: 72, phase: 'llm' })
+  } catch (err: unknown) {
+    logTaskWarn('NarrationBreakdown', 'motion-comic-storyboard-fallback', {
+      episodeId,
+      error: String((err as Error)?.message || err || 'unknown'),
+    })
+    emphasisSource = 'rules'
+    report({ message: '一体化分镜 LLM 失败，请检查台本格式后重试', percent: 50, phase: 'fallback' })
+    throw err
+  }
+
+  if (!titleShots.length && !shots.length) throw new Error('未能从台本中拆分出有效镜头')
+
+  report({ message: '正在写入镜头…', percent: 78, phase: 'saving' })
+
+  const ts = now()
+  const existingStoryboardIds = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, episodeId)).all()
+    .map(sb => sb.id)
+
+  for (const storyboardId of existingStoryboardIds) {
+    db.delete(schema.storyboardCharacters)
+      .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
+      .run()
+  }
+  db.delete(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId)).run()
+
+  let totalDuration = 0
+  let storyboardNumber = 0
+  const titleFull = title || titleShots[0]?.dialogue || null
+
+  for (const shot of titleShots) {
+    storyboardNumber++
+    const { duration } = insertMotionComicStoryboardShot(episodeId, shot, storyboardNumber, ts, {
+      isTitle: true,
+      titleFull,
+      titleHook: titleVisualHook,
+      episodeCharacters,
+    })
+    totalDuration += duration
+  }
+
+  shots.forEach((shot, index) => {
+    storyboardNumber++
+    const { duration } = insertMotionComicStoryboardShot(episodeId, shot, storyboardNumber, ts, {
+      paragraphIndex: 0,
+      bodyIndex: index,
+      episodeCharacters,
+    })
+    totalDuration += duration
+  })
+
+  db.update(schema.episodes)
+    .set({ duration: Math.max(1, Math.ceil(totalDuration / 60)), updatedAt: ts })
+    .where(eq(schema.episodes.id, episodeId))
+    .run()
+
+  report({ message: `已保存 ${storyboardNumber} 镜`, percent: 100, phase: 'done' })
+
+  return {
+    count: storyboardNumber,
+    sentence_count: shots.length,
+    title_count: titleShots.length,
+    title_hook: titleVisualHook,
+    total_duration: totalDuration,
+    emphasis_source: emphasisSource,
+    text_model: textModel,
+  }
 }
 
 /** 旁白分镜：整稿一次 LLM 拆镜 + ** 标注（失败回退规则拆句 + 批量标注） */

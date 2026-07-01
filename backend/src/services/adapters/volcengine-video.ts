@@ -12,12 +12,13 @@ import type {
   VideoPollResponse,
 } from './types'
 import { joinProviderUrl } from './url'
+import { LEGACY_DEFAULT_VIDEO_MODELS } from '../../constants/video-models.js'
 
 export class VolcEngineVideoAdapter implements VideoProviderAdapter {
   provider = 'volcengine'
 
   buildGenerateRequest(config: AIConfig, record: VideoGenerationRecord): ProviderRequest {
-    const model = record.model || config.model || 'doubao-seedance-1-5-pro-251215'
+    const model = record.model || config.model || LEGACY_DEFAULT_VIDEO_MODELS[0]
 
     const content: any[] = [{ type: 'text', text: record.prompt || '' }]
 

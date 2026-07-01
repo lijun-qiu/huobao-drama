@@ -8,9 +8,13 @@ import {
   NARRATION_USE_RAW_LLM_PROMPTS,
 } from '~/composables/useArtStyles'
 
-export type ProductionMode = 'drama' | 'narration'
+export type ProductionMode = 'drama' | 'narration' | 'motion_comic'
 
-export const DEFAULT_IMAGE_MODEL = 'gpt-image-2-all'
+export function isNarrationLikeMode(mode: ProductionMode): boolean {
+  return mode === 'narration' || mode === 'motion_comic'
+}
+
+export const DEFAULT_IMAGE_MODEL = 'gpt-image-2'
 
 export const DEFAULT_TEXT_MODEL = 'deepseek-v4-pro'
 export const DEFAULT_TEXT_THINKING = true
@@ -72,7 +76,7 @@ export function resolveEpisodeTextThinking(
 }
 
 export const IMAGE_MODEL_OPTIONS = [
-  { value: 'gpt-image-2-all', label: 'GPT Image 2 · ¥0.21/张（默认·文生图+参考图定妆）' },
+  { value: 'gpt-image-2', label: 'GPT Image 2 · ¥0.21/张（默认·文生图+参考图定妆）' },
   { value: 'qwen-image-edit-2509', label: 'Qwen Image Edit · ¥0.12/张（参考图定妆）' },
   { value: 'qwen-image-2.0-2026-03-03', label: 'Qwen Image 2.0 · ¥0.26/张（4022·参考图）' },
   { value: 'kling-v1-5', label: 'Kling V1.5 · ¥0.17/张（同脸 subject 参考）' },
@@ -158,6 +162,7 @@ export function parseProductionMode(drama: any): ProductionMode {
     try { meta = JSON.parse(meta) } catch { meta = null }
   }
   if (meta?.production_mode === 'narration') return 'narration'
+  if (meta?.production_mode === 'motion_comic') return 'motion_comic'
   return 'drama'
 }
 
@@ -1250,7 +1255,7 @@ export function narrationTtsReady(storyboards: any[]) {
 }
 
 export function workflowStepTotal(mode: ProductionMode) {
-  return mode === 'narration' ? 10 : 12
+  return isNarrationLikeMode(mode) ? 10 : 12
 }
 
 export interface WorkflowState {
@@ -1275,7 +1280,7 @@ export interface WorkflowState {
 }
 
 export function workflowProgress(mode: ProductionMode, s: WorkflowState) {
-  if (mode === 'narration') {
+  if (isNarrationLikeMode(mode)) {
     let p = 0
     if (s.rawContent) p++
     if (s.charsCount > 0) p++
@@ -1305,15 +1310,18 @@ export function workflowProgress(mode: ProductionMode, s: WorkflowState) {
 }
 
 export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
-  if (mode === 'narration') {
+  if (mode === 'narration' || mode === 'motion_comic') {
+    const scriptLabel = mode === 'motion_comic' ? '漫画解说' : '解说'
+    const storyboardLabel = '旁白分镜'
+    const composeDesc = mode === 'motion_comic' ? '漫画图+旁白+上下运镜' : '配图+旁白'
     return [
       {
         id: 'script',
-        label: '解说',
+        label: scriptLabel,
         items: [
-          { key: 'script:chat', label: '剧本生成', desc: 'AI 写解说稿或直接输入', done: s.rawContent },
-          { key: 'script:raw', label: '文案输入', desc: '粘贴解说稿', done: s.rawContent },
-          { key: 'script:storyboard', label: '旁白分镜', desc: '拆成镜头', done: s.sbsCount > 0 },
+          { key: 'script:chat', label: '剧本生成', desc: mode === 'motion_comic' ? 'AI 写短剧稿' : 'AI 写解说稿或直接输入', done: s.rawContent },
+          { key: 'script:raw', label: '文案输入', desc: '粘贴文稿', done: s.rawContent },
+          { key: 'script:storyboard', label: storyboardLabel, desc: '拆成镜头', done: s.sbsCount > 0 },
         ],
       },
       {
@@ -1322,10 +1330,10 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
         items: [
           { key: 'prod:voice', label: '旁白音色', desc: '选择配音', done: s.narratorReady },
           { key: 'prod:chars', label: '定妆参考', desc: '角色参考图', done: s.charsCount > 0 },
-          { key: 'prod:shots', label: '生成配图', desc: '换场景配图', done: s.sbsCount > 0 && (s.narrationImagesReady ?? s.shotImgCount === s.sbsCount) },
+          { key: 'prod:shots', label: '生成配图', desc: mode === 'motion_comic' ? '漫画插画+换镜' : '换场景配图', done: s.sbsCount > 0 && (s.narrationImagesReady ?? s.shotImgCount === s.sbsCount) },
           { key: 'prod:dubbing', label: '生成配音', desc: 'TTS 旁白', done: s.sbsCount > 0 && (s.narrationTtsReady ?? (!s.ttsEligibleCount || s.ttsGeneratedCount === s.ttsEligibleCount)) },
           { key: 'prod:bgm', label: 'BGM 配乐', desc: 'Suno / PixVerse', done: s.sbsCount > 0 && (s.bgmAppliedCount ?? 0) > 0 },
-          { key: 'prod:compose', label: '镜头合成', desc: '配图+旁白', done: s.sbsCount > 0 && s.composedCount === s.sbsCount },
+          { key: 'prod:compose', label: '镜头合成', desc: composeDesc, done: s.sbsCount > 0 && s.composedCount === s.sbsCount },
         ],
       },
       {
@@ -1359,7 +1367,7 @@ export function dramaStoryboardStep() {
 }
 
 export function resolveScriptStep(mode: ProductionMode, key: string) {
-  if (mode === 'narration') {
+  if (isNarrationLikeMode(mode)) {
     if (key === 'script:chat') return narrationScriptChatStep()
     if (key === 'script:raw') return narrationRawContentStep()
     if (key === 'script:storyboard') return narrationStoryboardStep()
@@ -1388,7 +1396,7 @@ export function resolveActiveSubStepKey(
     return 'export:merge'
   }
   if (panel === 'production') return `prod:${prodTab}`
-  if (mode === 'narration') {
+  if (isNarrationLikeMode(mode)) {
     if (scriptStep === narrationStoryboardStep()) return 'script:storyboard'
     if (scriptStep === narrationRawContentStep()) return 'script:raw'
     return 'script:chat'

@@ -5,7 +5,7 @@ import { success, badRequest, now } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { generateVoiceSample } from '../services/tts-generation.js'
 import { generateImage } from '../services/image-generation.js'
-import { generateCharacterAppearance, resolveCharacterPortraitGeneration, resolvePortraitImageModel, variantNeedsYouthPortraitReference, variantPortraitSortOrder, getVariantAgeGroup, finalizeCharacterAppearance } from '../services/narration-characters.js'
+import { generateCharacterAppearance, resolveCharacterPortraitGeneration, resolvePortraitImageModel, resolvePortraitImageSize, variantNeedsYouthPortraitReference, variantPortraitSortOrder, getVariantAgeGroup, finalizeCharacterAppearance } from '../services/narration-characters.js'
 import { buildCharacterAppearanceContext } from '../services/ai-description-context.js'
 import { recognizePortraitImage } from '../services/kling-image-recognize.js'
 import { resolveEpisodeImageModel, imageModelSupportsReferenceImages } from '../constants/image-models.js'
@@ -92,6 +92,7 @@ async function submitCharacterPortrait(
     dramaId: char.dramaId,
     prompt: resolved.prompt,
     model,
+    size: resolvePortraitImageSize(style),
     configId: ep.imageConfigId ?? undefined,
     referenceImages,
   })
@@ -412,6 +413,7 @@ app.post('/:id/generate-image', async (c) => {
       dramaId: char.dramaId,
       prompt: resolved.prompt,
       model,
+      size: resolvePortraitImageSize(style),
       configId: ep.imageConfigId ?? undefined,
       referenceImages,
     })
