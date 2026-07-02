@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import {
@@ -11,9 +11,15 @@ import {
   inferNarrationBodyWeightTierFromText,
   coerceMinimalLLMImagePrompt,
   isNarrationMinimalStyle,
+  isNarrationAnimeStyle,
   normalizeArtStyle,
   sanitizeCharacterAppearance,
   sanitizeAppearanceForPortrait,
+  stripMinimalAppearanceForPortrait,
+  stripBodyMeasureSpecsFromAppearance,
+  formatNarrationStyleSpecBracket,
+  NARRATION_ANIME_SCENE_SUFFIX,
+  NARRATION_ANIME_STYLE,
   appendToNarrationBracket,
   NARRATION_MINIMAL_CLOTHING_LLM_RULE,
   NARRATION_MINIMAL_EXPRESSION_LLM_RULE,
@@ -31,12 +37,18 @@ import {
   isMotionComicStyle,
   MOTION_COMIC_PORTRAIT_FRAMING,
   MOTION_COMIC_PORTRAIT_SIZE,
+  MOTION_COMIC_SCENE_SUFFIX,
+  MOTION_COMIC_STYLE,
 } from '../constants/motion-comic.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { getActiveConfig, getTextConfig } from './ai.js'
 import { callTextChat } from './text-chat.js'
 import { parseNarrationImageMeta } from './narration-image.js'
+import { parseDialogueForTTS } from './narration-tts.js'
+import { isMotionComicMode, parseProductionMode } from '../constants/production-mode.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
+
+const NARRATION_ONLY_SPEAKERS = new Set(['旁白', '剧中', 'OS', '画外音', '画外'])
 
 export type NarrationCharacterRow = {
   id: number
@@ -340,6 +352,131 @@ export function syncStoryboardCharacters(storyboardId: number, characterIds: num
   }
 }
 
+function unlinkCharacterFromEpisode(episodeId: number, characterId: number) {
+  db.delete(schema.episodeCharacters)
+    .where(and(
+      eq(schema.episodeCharacters.episodeId, episodeId),
+      eq(schema.episodeCharacters.characterId, characterId),
+    ))
+    .run()
+}
+
+/** 从本集分镜 dialogue 收集说话人（动态漫音色分配依据） */
+export function collectEpisodeStoryboardSpeakers(episodeId: number): Set<string> {
+  const speakers = new Set<string>()
+  for (const sb of db.select().from(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId)).all()) {
+    if (sb.deletedAt) continue
+    const parsed = parseDialogueForTTS(sb.dialogue)
+    if (parsed.ignorable || !parsed.speaker) continue
+    speakers.add(parsed.speaker === '剧中' ? '旁白' : parsed.speaker)
+  }
+  return speakers
+}
+
+function getEpisodeLinkedCharacterRows(episodeId: number, dramaId: number) {
+  const links = db.select().from(schema.episodeCharacters)
+    .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
+  const linkedIds = new Set(links.map(link => link.characterId))
+  return db.select().from(schema.characters).all()
+    .filter(ch => ch.dramaId === dramaId && !ch.deletedAt && linkedIds.has(ch.id))
+}
+
+export function ensureDramaNarratorCharacter(dramaId: number, episodeId?: number) {
+  const existing = db.select().from(schema.characters).all()
+    .find(c => c.dramaId === dramaId && !c.deletedAt && (c.name === '旁白' || c.role === '旁白'))
+  if (existing) {
+    if (episodeId) linkCharacterToEpisode(episodeId, existing.id)
+    return existing
+  }
+
+  const needsNarrator = episodeId
+    ? collectEpisodeStoryboardSpeakers(episodeId).has('旁白')
+    : false
+  if (!needsNarrator) return null
+
+  const ts = now()
+  const res = db.insert(schema.characters).values({
+    dramaId,
+    name: '旁白',
+    role: '旁白',
+    description: '过渡叙述与片头叠字',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run()
+  const id = Number(res.lastInsertRowid)
+  if (episodeId) linkCharacterToEpisode(episodeId, id)
+  return db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()[0] || null
+}
+
+/** 动态漫：按当前分镜说话人同步本集角色关联（创建缺失角色、解除过期关联） */
+export function syncMotionComicCharactersFromSpeakers(episodeId: number, dramaId: number) {
+  const speakers = collectEpisodeStoryboardSpeakers(episodeId)
+  if (!speakers.size) {
+    return {
+      created: 0,
+      linked: 0,
+      unlinked: 0,
+      speakers: [] as string[],
+      characters: getEpisodeVisualCharacters(episodeId, dramaId),
+    }
+  }
+
+  const ts = now()
+  let created = 0
+  let linked = 0
+  let unlinked = 0
+
+  if (speakers.has('旁白')) {
+    ensureDramaNarratorCharacter(dramaId, episodeId)
+  }
+
+  const dramaChars = db.select().from(schema.characters).all()
+    .filter(c => c.dramaId === dramaId && !c.deletedAt)
+
+  for (const speaker of speakers) {
+    if (speaker === '旁白') continue
+    let ch = dramaChars.find(c => c.name.trim() === speaker)
+    if (!ch) {
+      const res = db.insert(schema.characters).values({
+        dramaId,
+        name: speaker,
+        role: '角色',
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      ch = db.select().from(schema.characters).where(eq(schema.characters.id, Number(res.lastInsertRowid))).all()[0]
+      if (ch) dramaChars.push(ch)
+      created++
+    }
+    if (!ch) continue
+    const hadLink = db.select().from(schema.episodeCharacters)
+      .where(and(
+        eq(schema.episodeCharacters.episodeId, episodeId),
+        eq(schema.episodeCharacters.characterId, ch.id),
+      ))
+      .all().length > 0
+    linkCharacterToEpisode(episodeId, ch.id)
+    if (!hadLink) linked++
+  }
+
+  for (const ch of getEpisodeLinkedCharacterRows(episodeId, dramaId)) {
+    const name = ch.name.trim()
+    const keep = isNarratorCharacter(ch) ? speakers.has('旁白') : speakers.has(name)
+    if (!keep) {
+      unlinkCharacterFromEpisode(episodeId, ch.id)
+      unlinked++
+    }
+  }
+
+  return {
+    created,
+    linked,
+    unlinked,
+    speakers: [...speakers],
+    characters: getEpisodeVisualCharacters(episodeId, dramaId),
+  }
+}
+
 export function getEpisodeVisualCharacters(episodeId: number, dramaId: number): NarrationCharacterRow[] {
   const links = db.select().from(schema.episodeCharacters)
     .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
@@ -482,6 +619,42 @@ export function buildStoryboardCharacterContextText(sb: {
   return parts.map(v => String(v || '').trim()).filter(Boolean).join('\n')
 }
 
+/** 从分镜对白解析说话人并映射到角色 ID（动态漫一句一镜换说话人时用） */
+export function resolveSpeakerCharacterId(
+  dialogue: string | null | undefined,
+  characters: NarrationCharacterRow[],
+): number | null {
+  const parsed = parseDialogueForTTS(String(dialogue || ''))
+  if (parsed.ignorable || !parsed.speaker) return null
+  const speakerName = parsed.speaker === '剧中' ? '旁白' : parsed.speaker.trim()
+  if (NARRATION_ONLY_SPEAKERS.has(speakerName)) return null
+
+  const variants = characters.filter(c => c.name.trim() === speakerName)
+  if (variants.length === 1) return variants[0].id
+  if (variants.length > 1) return pickBestVariantForText(String(dialogue || ''), variants).id
+
+  if (speakerName === '我') {
+    const protagonistIds = detectFirstPersonProtagonistIds(String(dialogue || ''), characters)
+    if (protagonistIds.length) return protagonistIds[0]
+    const protag = characters.find(c => isProtagonistCharacter(c))
+    if (protag) return protag.id
+  }
+  return null
+}
+
+export function detectStoryboardCharacterIds(
+  text: string,
+  characters: NarrationCharacterRow[],
+  options?: { dialogue?: string | null; speakerPriority?: boolean },
+): number[] {
+  const speakerId = resolveSpeakerCharacterId(options?.dialogue, characters)
+  if (speakerId && options?.speakerPriority) return [speakerId]
+
+  const ids = new Set(detectCharacterIdsInText(text, characters))
+  if (speakerId) ids.add(speakerId)
+  return [...ids]
+}
+
 export function resolveStoryboardCharacterIdsForShot(
   storyboardId: number,
   options?: { sync?: boolean },
@@ -492,9 +665,14 @@ export function resolveStoryboardCharacterIdsForShot(
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
   if (!ep) throw new Error('剧集不存在')
 
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  const motionComicMode = isMotionComicMode(parseProductionMode(drama?.metadata))
   const characters = getEpisodeVisualCharacters(sb.episodeId, ep.dramaId)
   const text = buildStoryboardCharacterContextText(sb)
-  const ids = detectCharacterIdsInText(text, characters)
+  const ids = detectStoryboardCharacterIds(text, characters, {
+    dialogue: sb.dialogue,
+    speakerPriority: motionComicMode,
+  })
   if (options?.sync !== false) syncStoryboardCharacters(storyboardId, ids)
 
   return {
@@ -511,14 +689,17 @@ export function linkStoryboardCharactersFromText(
   storyboardId: number,
   text: string,
   characters: NarrationCharacterRow[],
+  options?: { dialogue?: string | null; speakerPriority?: boolean },
 ) {
-  const ids = detectCharacterIdsInText(text, characters)
+  const ids = detectStoryboardCharacterIds(text, characters, options)
   syncStoryboardCharacters(storyboardId, ids)
   return ids
 }
 
 export function linkAllNarrationStoryboardCharacters(episodeId: number, dramaId: number) {
   const characters = getEpisodeVisualCharacters(episodeId, dramaId)
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
+  const motionComicMode = isMotionComicMode(parseProductionMode(drama?.metadata))
   const storyboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId)).all()
     .filter(sb => !sb.deletedAt)
@@ -526,7 +707,11 @@ export function linkAllNarrationStoryboardCharacters(episodeId: number, dramaId:
   let linked = 0
   for (const sb of storyboards) {
     const text = buildStoryboardCharacterContextText(sb)
-    const ids = linkStoryboardCharactersFromText(sb.id, text, characters)
+    const ids = detectStoryboardCharacterIds(text, characters, {
+      dialogue: sb.dialogue,
+      speakerPriority: motionComicMode,
+    })
+    syncStoryboardCharacters(sb.id, ids)
     if (ids.length) linked++
   }
   return { storyboardCount: storyboards.length, linkedStoryboardCount: linked, characterCount: characters.length }
@@ -654,7 +839,9 @@ export function buildCharacterPortraitPrompt(
   options?: { portraitReference?: boolean; referenceVariantLabel?: string | null; styleAnchorReference?: boolean },
 ) {
   const normalizedStyle = normalizeArtStyle(style)
-  const rawAppearance = sanitizeCharacterAppearance(char.appearance?.trim() || char.description?.trim() || '')
+  const minimal = isNarrationMinimalStyle(normalizedStyle)
+  let rawAppearance = sanitizeCharacterAppearance(char.appearance?.trim() || char.description?.trim() || '')
+  if (!minimal) rawAppearance = stripMinimalAppearanceForPortrait(rawAppearance)
   const { body: appearance, tags: englishTags } = extractEnglishAppearanceTags(rawAppearance)
   const cleanTags = englishTags ? sanitizeCharacterAppearance(englishTags) : ''
   const role = char.role?.trim() || ''
@@ -667,7 +854,34 @@ export function buildCharacterPortraitPrompt(
   const styleAnchorHint = options?.styleAnchorReference
     ? 'match reference image art style, line weight, flat cel shading, and color technique ONLY, generate a completely different character per appearance description, do NOT copy face identity or outfit from reference'
     : ''
-  const minimal = isNarrationMinimalStyle(normalizedStyle)
+  if (isNarrationAnimeStyle(normalizedStyle)) {
+    const plot = [
+      char.name,
+      stage ? `${stage}阶段` : '',
+      appearance || '正常头身比，清晰线稿，生动表情',
+      cleanTags,
+    ].filter(Boolean).join('，')
+    return [
+      formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE),
+      '【场景：浅灰纯色背景，单人全身动漫人物定妆参考图，无环境无场景元素】',
+      `【剧情：${plot}】`,
+      NARRATION_ANIME_SCENE_SUFFIX,
+    ].join('，')
+  }
+  if (isMotionComicStyle(normalizedStyle)) {
+    const plot = [
+      char.name,
+      stage ? `${stage}阶段` : '',
+      appearance || '正常头身比，粗线平涂，表情生动',
+      cleanTags,
+    ].filter(Boolean).join('，')
+    return [
+      formatNarrationStyleSpecBracket(undefined, MOTION_COMIC_STYLE),
+      '【场景：浅灰纯色背景，单人全身漫画人物定妆参考图，无环境无场景元素】',
+      `【剧情：${plot}】`,
+      MOTION_COMIC_SCENE_SUFFIX,
+    ].join('，')
+  }
   if (minimal) {
     const actionPlot = coerceMinimalCharacterAppearance(char.variantLabel, appearance)
     const plot = [
@@ -901,11 +1115,13 @@ export async function generateCharacterAppearance(params: {
   if (!cleaned) throw new Error('AI 未返回有效外貌描述')
   logTaskSuccess('CharacterAppearance', 'llm-generate-done', { name: character.name, length: cleaned.length })
   if (minimal) return coerceMinimalCharacterAppearance(character.variantLabel, cleaned)
-  return finalizeCharacterAppearance(cleaned.slice(0, 600), {
+  const finalized = await finalizeCharacterAppearance(cleaned.slice(0, 600), {
     name: character.name,
     role: character.role,
     variantLabel: character.variantLabel,
   })
+  if (motionComic) return stripBodyMeasureSpecsFromAppearance(finalized).slice(0, 600)
+  return finalized
 }
 
 export function collectCharacterReferenceImages(

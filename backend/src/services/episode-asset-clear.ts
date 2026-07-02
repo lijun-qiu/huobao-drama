@@ -2,7 +2,7 @@ import { eq, inArray } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
-import { sortStoryboardsByOrder, parseNarrationImageMeta, buildNarrationImageMeta } from './narration-image.js'
+import { sortStoryboardsByOrder, parseNarrationImageMeta, buildNarrationImageMeta, buildNarrationImageMetaAfterDetectClear, storyboardHasImageDetectMarks } from './narration-image.js'
 import {
   deleteUniqueStaticFiles,
   imagePathsToDelete,
@@ -142,6 +142,44 @@ export async function clearEpisodeNarrationImagePrompts(episodeId: number) {
   return { cleared }
 }
 
+/** 清除本集全部配图换镜检测分镜（不保留检测分段；旁白镜头列表与已有配图文件不动） */
+export async function clearEpisodeNarrationImageDetect(episodeId: number) {
+  const storyboards = collectEpisodeStoryboards(episodeId)
+  const ts = now()
+  let cleared = 0
+
+  logTaskStart('EpisodeAssetClear', 'narration-image-detect', { episodeId })
+
+  for (const sb of storyboards) {
+    const meta = parseNarrationImageMeta(sb.referenceImages)
+    const hadDetect = storyboardHasImageDetectMarks(meta)
+    const hasPrompt = String(sb.imagePrompt || '').trim()
+      || meta.image_prompt_source
+      || meta.image_prompt_llm_raw
+    if (!hadDetect && !hasPrompt) continue
+
+    const { changed, referenceImages } = buildNarrationImageMetaAfterDetectClear(sb.referenceImages)
+    if (!changed && !hasPrompt) continue
+
+    db.update(schema.storyboards)
+      .set({
+        imagePrompt: null,
+        referenceImages,
+        updatedAt: ts,
+      })
+      .where(eq(schema.storyboards.id, sb.id))
+      .run()
+    cleared++
+  }
+
+  if (!cleared) {
+    return { cleared: 0 }
+  }
+
+  logTaskSuccess('EpisodeAssetClear', 'narration-image-detect', { episodeId, cleared })
+  return { cleared }
+}
+
 /** 清除本集所有镜头配音，删除音频/字幕文件并清空数据库字段 */
 export async function clearEpisodeNarrationTts(episodeId: number) {
   const storyboards = collectEpisodeStoryboards(episodeId)
@@ -253,6 +291,128 @@ export async function clearEpisodeComposedVideos(episodeId: number) {
   return {
     cleared,
     files_deleted: filesDeleted,
+    merges_cleared: mergesCleared,
+  }
+}
+
+function collectStoryboardAssetPaths(sb: typeof schema.storyboards.$inferSelect): string[] {
+  const paths: string[] = []
+  paths.push(...imagePathsToDelete(String(sb.composedImage || '')))
+  for (const field of [
+    sb.firstFrameImage,
+    sb.lastFrameImage,
+    sb.videoUrl,
+    sb.ttsAudioUrl,
+    sb.subtitleUrl,
+    sb.composedVideoUrl,
+    sb.bgmAudioUrl,
+  ]) {
+    const rel = normalizeStaticRel(field)
+    if (rel) paths.push(rel)
+  }
+  return paths
+}
+
+/** 清除本集全部分镜（含关联配图/配音/合成与生成记录） */
+export async function clearEpisodeStoryboards(episodeId: number) {
+  const storyboards = collectEpisodeStoryboards(episodeId)
+  if (!storyboards.length) {
+    return { cleared: 0, files_deleted: 0, generations_deleted: 0, merges_cleared: 0 }
+  }
+
+  logTaskStart('EpisodeAssetClear', 'storyboards', {
+    episodeId,
+    storyboardCount: storyboards.length,
+  })
+
+  const storyboardIds = storyboards.map(sb => sb.id)
+  const pathsToDelete = storyboards.flatMap(collectStoryboardAssetPaths)
+
+  const imageGens = storyboardIds.length
+    ? db.select().from(schema.imageGenerations)
+      .where(inArray(schema.imageGenerations.storyboardId, storyboardIds))
+      .all()
+    : []
+  for (const gen of imageGens) {
+    if (gen.localPath) pathsToDelete.push(normalizeStaticRel(gen.localPath))
+    if (gen.imageUrl) pathsToDelete.push(normalizeStaticRel(gen.imageUrl))
+  }
+
+  const videoGens = storyboardIds.length
+    ? db.select().from(schema.videoGenerations)
+      .where(inArray(schema.videoGenerations.storyboardId, storyboardIds))
+      .all()
+    : []
+  for (const gen of videoGens) {
+    if (gen.localPath) pathsToDelete.push(normalizeStaticRel(gen.localPath))
+    if (gen.videoUrl) pathsToDelete.push(normalizeStaticRel(gen.videoUrl))
+  }
+
+  const merges = db.select().from(schema.videoMerges)
+    .where(eq(schema.videoMerges.episodeId, episodeId))
+    .all()
+    .filter(row => !row.deletedAt)
+  for (const merge of merges) {
+    const rel = normalizeStaticRel(merge.mergedUrl)
+    if (rel) pathsToDelete.push(rel)
+  }
+
+  const filesDeleted = deleteUniqueStaticFiles(pathsToDelete)
+
+  const ts = now()
+  for (const storyboardId of storyboardIds) {
+    db.delete(schema.storyboardCharacters)
+      .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
+      .run()
+  }
+  for (const gen of imageGens) {
+    db.delete(schema.imageGenerations)
+      .where(eq(schema.imageGenerations.id, gen.id))
+      .run()
+  }
+  for (const gen of videoGens) {
+    db.delete(schema.videoGenerations)
+      .where(eq(schema.videoGenerations.id, gen.id))
+      .run()
+  }
+  db.delete(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, episodeId))
+    .run()
+
+  let mergesCleared = 0
+  for (const merge of merges) {
+    db.update(schema.videoMerges)
+      .set({
+        status: 'cancelled',
+        mergedUrl: null,
+        deletedAt: ts,
+        completedAt: null,
+      })
+      .where(eq(schema.videoMerges.id, merge.id))
+      .run()
+    mergesCleared++
+  }
+
+  db.update(schema.episodes)
+    .set({ duration: 0, updatedAt: ts })
+    .where(eq(schema.episodes.id, episodeId))
+    .run()
+
+  const cleared = storyboards.length
+  const generationsDeleted = imageGens.length + videoGens.length
+
+  logTaskSuccess('EpisodeAssetClear', 'storyboards', {
+    episodeId,
+    cleared,
+    filesDeleted,
+    generationsDeleted,
+    mergesCleared,
+  })
+
+  return {
+    cleared,
+    files_deleted: filesDeleted,
+    generations_deleted: generationsDeleted,
     merges_cleared: mergesCleared,
   }
 }

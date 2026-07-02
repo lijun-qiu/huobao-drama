@@ -11,6 +11,8 @@ import {
   extractNarrationBodyStageFromText,
   formatNarrationBodyWeightSpec,
   inferParagraphBodyWeightTier,
+  usesNarrationNaturalBodyLock,
+  isNarrationAnimeStyle,
   resolveLLMImagePrompt,
   isNarrationDateOnlySentence,
   isNarrationMinimalStyle,
@@ -122,6 +124,8 @@ function chunkParagraphPromptBatch<T>(items: T[], batchSize: number): T[][] {
 export type NarrationSentenceItem = {
   sentence: string
   paragraphIndex: number
+  /** 分镜原始对白（含说话人前缀），动态漫配图检测用 */
+  dialogue?: string | null
   /** 片头标题镜（检测时连续片头句合并为一个 LLM 单元） */
   isTitle?: boolean
 }
@@ -529,6 +533,47 @@ export function detectImageNeedsConservative(items: NarrationSentenceItem[]): bo
   return allocateImageNeedsByRatio(items, undefined, 'conservative')
 }
 
+function parseStoryboardSpeaker(item: NarrationSentenceItem): string {
+  const raw = String(item.dialogue || item.sentence || '').trim()
+  const speakerMatch = raw.match(/^(.+?)[:：]/)
+  let speaker = speakerMatch ? speakerMatch[1].replace(/[（(].+?[)）]/g, '').trim() : ''
+  if (!speaker) speaker = '旁白'
+  return speaker
+}
+
+/** 动态漫规则兜底：换人说话须换图，同说话人 1～2 镜一图，全片配图 ≥50% */
+export function detectImageNeedsMotionComic(items: NarrationSentenceItem[]): boolean[] {
+  if (!items.length) return []
+
+  const speakers = items.map(parseStoryboardSpeaker)
+  const raw = items.map((item, index) => {
+    if (item.isTitle) {
+      if (index === 0) return true
+      return !items[index - 1]?.isTitle
+    }
+    if (isNarrationDateOnlySentence(item.sentence)) return false
+    if (index === 0) return true
+
+    const prev = items[index - 1]
+    const sentence = item.sentence
+    if (speakers[index] !== speakers[index - 1]) return true
+    if (item.paragraphIndex !== prev.paragraphIndex) return true
+    if (STRONG_SCENE_SHIFT_RE.test(sentence)) return true
+    if (SCENE_SHIFT_RE.test(sentence)) return true
+    if (SCENE_OPENING_RE.test(sentence)) return true
+    if (BEAT_SHIFT_RE.test(sentence)) return true
+    return false
+  })
+
+  let needs = suppressDateOnlyImageAnchors(items, raw)
+  needs = ensureMaxNarrationGap(items, needs, MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS)
+  return enforceImageSegmentShotBounds(
+    needs,
+    MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS,
+    MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS,
+  )
+}
+
 /** 同一场景连续超过 maxGap 句仍无新图 → 补一张，避免画面长时间不切换 */
 export function ensureMaxNarrationGap(
   items: NarrationSentenceItem[],
@@ -738,7 +783,7 @@ export function buildNarrationDetectUnits(items: NarrationSentenceItem[]): Narra
     units.push({
       detectIndex: units.length + 1,
       storyboardIndices: [i],
-      text: items[i].sentence,
+      text: String(items[i].dialogue || '').trim() || items[i].sentence,
     })
     i++
   }
@@ -1524,14 +1569,17 @@ export async function resolveImageNeeds(
     const segmentBounds = resolveImageSegmentBounds(options?.style)
     const minimumTrueCount = resolveMinimumDetectTrueCount(items.length, segmentBounds)
     const maximumTrueCount = resolveMaximumDetectTrueCount(items.length, segmentBounds)
-    const rawNeeds = mode === 'conservative'
-      ? detectImageNeedsConservative(items)
-      : detectImageNeedsBalanced(items)
+    const motionComic = isMotionComicStyle(options?.style)
+    const rawNeeds = motionComic
+      ? detectImageNeedsMotionComic(items)
+      : mode === 'conservative'
+        ? detectImageNeedsConservative(items)
+        : detectImageNeedsBalanced(items)
     const needs = applyImageAnchorConstraints(rawNeeds, minimumTrueCount, maximumTrueCount, segmentBounds)
     return {
       needs,
       segmentDescriptions: new Map(),
-      source: mode === 'conservative' ? 'conservative' : 'balanced',
+      source: motionComic ? 'balanced' : (mode === 'conservative' ? 'conservative' : 'balanced'),
     }
   }
 }
@@ -1696,6 +1744,7 @@ export async function generateParagraphImagePromptsWithLLM(
       variantLabel: (ch as { variantLabel?: string | null }).variantLabel,
       appearance: ch.appearance,
     }))
+    const naturalBodyLock = usesNarrationNaturalBodyLock(style)
 
     const fullNarration = fullBodyLines.length
       ? fullBodyLines.map(s => String(s || '').trim()).filter(Boolean)
@@ -1754,7 +1803,10 @@ export async function generateParagraphImagePromptsWithLLM(
 
       const user = JSON.stringify({
         ...(previousEpisodeNarration.length ? { previous_episode_narration: previousEpisodeNarration } : {}),
-        ...(weightArc
+        ...(naturalBodyLock
+          ? { protagonist_body_policy: '正常头身比标准动漫身材匀称，禁止写胖瘦体型词' }
+          : {}),
+        ...(weightArc && !naturalBodyLock
           ? {
             weight_arc: {
               theme_labels: weightArc.theme_labels,
@@ -1766,11 +1818,7 @@ export async function generateParagraphImagePromptsWithLLM(
         characters: characterPayload,
         paragraphs: batch.map(p => {
           const priorNarration = buildPriorNarrationLines(previousEpisodeNarration, fullBodyLines, p.startIndex)
-          const suggestedTier = inferParagraphBodyWeightTier(p.sentences, priorNarration, fullBodyLines)
-          const stage = extractNarrationBodyStageFromText(p.sentences.join('\n'))
-            || extractNarrationBodyStageFromText(priorNarration.join('\n'))
-            || '青年'
-          return {
+          const base = {
             paragraph_index: p.index,
             start_index: p.startIndex,
             timeline_up_to_index: p.startIndex,
@@ -1778,23 +1826,36 @@ export async function generateParagraphImagePromptsWithLLM(
             layout: p.layout,
             narration_lines: p.sentences,
             tts_sentences: p.ttsSentences?.length ? p.ttsSentences : p.sentences,
+            ...(p.sceneDescription ? { detect_scene_description: p.sceneDescription } : {}),
+          }
+          if (naturalBodyLock) return base
+          const suggestedTier = inferParagraphBodyWeightTier(p.sentences, priorNarration, fullBodyLines)
+          const stage = extractNarrationBodyStageFromText(p.sentences.join('\n'))
+            || extractNarrationBodyStageFromText(priorNarration.join('\n'))
+            || '青年'
+          return {
+            ...base,
             suggested_body_weight_tier: suggestedTier,
             ...(suggestedTier !== 'standard'
               ? { suggested_body_spec: formatNarrationBodyWeightSpec(stage, suggestedTier) }
               : {}),
-            ...(p.sceneDescription ? { detect_scene_description: p.sceneDescription } : {}),
           }
         }),
         output_format: {
           paragraph_prompts: paragraphOutputHint,
           paragraph_outfit_continuity:
             '同一 paragraph_index/start_index 配图段内，主人公服装款式+#hex 须完全一致（含 diptych 左右格）；#hex紧挨款式词无空格，须带简笔轮廓；配角/配偶也须写 #hex（如 #64748b低饱和便装、#ffffff围裙）；禁止中文色词',
-          ...(weightArc
+          ...(naturalBodyLock
             ? {
-              paragraph_body_weight:
-                '同一配图段内 suggested_body_weight_tier 与【画面主体】躯干宽高须一致；跨段可随剧情从 obese/chubby 过渡到 slim',
+              paragraph_body_policy:
+                '全片统一正常头身比动漫审美；【画面主体】禁止写胖瘦体型词与份数计量，只写发型表情服装姿态',
             }
-            : {}),
+            : weightArc
+              ? {
+                paragraph_body_weight:
+                  '同一配图段内 suggested_body_weight_tier 与【画面主体】躯干宽高须一致；跨段可随剧情从 obese/chubby 过渡到 slim',
+              }
+              : {}),
         },
       })
 

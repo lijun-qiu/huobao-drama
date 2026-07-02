@@ -312,6 +312,19 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
   return { narration_image_mode: 'inherit' }
 }
 
+/** 是否已写入配图换镜检测结果（① 检测配图） */
+export function storyboardHasImageDetectMarks(meta: NarrationImageMeta): boolean {
+  return typeof meta.paragraph_index === 'number'
+    || !!meta.scene_content
+    || (meta.narration_lines?.length ?? 0) > 0
+    || (meta.image_narration_lines?.length ?? 0) > 0
+    || (meta.narration_image_mode === 'new' && !meta.narration_image_source)
+}
+
+export function narrationImageDetectAnchorCount(storyboards: any[]) {
+  return storyboards.filter(sb => storyboardHasImageDetectMarks(parseNarrationImageMeta(sb))).length
+}
+
 export function isNarrationTitleShot(sb: any) {
   const meta = parseNarrationImageMeta(sb)
   if (meta.narration_shot_type === 'title') return true
@@ -335,11 +348,11 @@ export function sortStoryboards(list: any[]) {
 }
 
 /** 合成/合并分组用：与后端 resolveStoryboardVisualSource 的 key 对齐 */
-export function getStoryboardComposeVisualKey(sb: any, storyboards: any[]) {
+export function getStoryboardComposeVisualKey(sb: any, storyboards: any[], ordered = sortStoryboards(storyboards)) {
   if (sb?.video_url || sb?.videoUrl) return `video:${sb.video_url || sb.videoUrl}`
   const ownImage = sb?.composed_image || sb?.composedImage || sb?.first_frame_image || sb?.firstFrameImage
   if (ownImage) return `image:${ownImage}`
-  const effective = resolveNarrationEffectiveImage(storyboards, sb)
+  const effective = resolveNarrationEffectiveImage(storyboards, sb, ordered)
   if (effective.path) return `image:${effective.path}`
   return `none:${sb.id}`
 }
@@ -364,8 +377,7 @@ export function buildComposeVisualGroups(storyboards: any[]) {
 }
 
 /** 配图锚点镜：本镜为 new，或向前找到最近的 new 锚点（与 inherit 链对齐） */
-export function resolveNarrationImageAnchorShot(storyboards: any[], sb: any) {
-  const ordered = sortStoryboards(storyboards)
+export function resolveNarrationImageAnchorShot(storyboards: any[], sb: any, ordered = sortStoryboards(storyboards)) {
   const idx = ordered.findIndex(item => item.id === sb.id)
   if (idx < 0) return sb
   for (let i = idx; i >= 0; i--) {
@@ -376,13 +388,13 @@ export function resolveNarrationImageAnchorShot(storyboards: any[], sb: any) {
 }
 
 /** 合成单元（检测配图 paragraph 或分镜同图继承，与后端 buildComposeUnitGroups 对齐） */
-export function resolveComposeUnitKey(sb: any, storyboards: any[]) {
-  const anchor = resolveNarrationImageAnchorShot(storyboards, sb)
+export function resolveComposeUnitKey(sb: any, storyboards: any[], ordered = sortStoryboards(storyboards)) {
+  const anchor = resolveNarrationImageAnchorShot(storyboards, sb, ordered)
   const meta = parseNarrationImageMeta(anchor)
   if (typeof meta.paragraph_index === 'number') {
     return `para:${meta.paragraph_index}`
   }
-  return getStoryboardComposeVisualKey(sb, storyboards)
+  return getStoryboardComposeVisualKey(sb, ordered)
 }
 
 export function buildComposeUnitGroups(storyboards: any[]) {
@@ -416,8 +428,12 @@ export function buildComposeUnitGroups(storyboards: any[]) {
 /** @deprecated 别名 */
 export const buildParagraphComposeGroups = buildComposeUnitGroups
 
-export function getParagraphComposeMembers(sb: any, storyboards: any[]) {
-  return resolveParagraphComposeMembers(sb, buildComposeUnitGroups(storyboards))
+export function getParagraphComposeMembers(
+  sb: any,
+  storyboards: any[],
+  groups?: { members: any[] }[],
+) {
+  return resolveParagraphComposeMembers(sb, groups ?? buildComposeUnitGroups(storyboards))
 }
 
 export function resolveParagraphComposeMembers(
@@ -496,12 +512,20 @@ export function buildComposeUnitSubtitleLines(members: any[]): ComposeUnitSubtit
   return lines
 }
 
-export function getComposeUnitSubtitleLines(sb: any, storyboards: any[]): ComposeUnitSubtitleLine[] {
-  return buildComposeUnitSubtitleLines(getParagraphComposeMembers(sb, storyboards))
+export function getComposeUnitSubtitleLines(
+  sb: any,
+  storyboards: any[],
+  groups?: { members: any[] }[],
+): ComposeUnitSubtitleLine[] {
+  return buildComposeUnitSubtitleLines(getParagraphComposeMembers(sb, storyboards, groups))
 }
 
-export function getComposeUnitTotalDurationSec(sb: any, storyboards: any[]): number {
-  const lines = getComposeUnitSubtitleLines(sb, storyboards)
+export function getComposeUnitTotalDurationSec(
+  sb: any,
+  storyboards: any[],
+  groups?: { members: any[] }[],
+): number {
+  const lines = getComposeUnitSubtitleLines(sb, storyboards, groups)
   if (!lines.length) return estimateStoryboardDurationSec(sb)
   return lines[lines.length - 1].endSec
 }
@@ -514,8 +538,12 @@ export function formatComposeTimecode(sec: number): string {
   return `${m}:${r.toFixed(1).padStart(4, '0')}`
 }
 
-export function formatComposeUnitDuration(sb: any, storyboards: any[]): string {
-  return formatComposeTimecode(getComposeUnitTotalDurationSec(sb, storyboards))
+export function formatComposeUnitDuration(
+  sb: any,
+  storyboards: any[],
+  groups?: { members: any[] }[],
+): string {
+  return formatComposeTimecode(getComposeUnitTotalDurationSec(sb, storyboards, groups))
 }
 
 export function getComposeUnitShotRangeLabel(sb: any, storyboards: any[]): string {
@@ -625,12 +653,17 @@ export function narrationTtsUnitReady(storyboards: any[], sb: any) {
 }
 
 /** 镜头合成/导出：每个配图单元取代表镜（不含片头） */
-export function getComposeUnitLeaders(storyboards: any[]) {
-  return buildComposeUnitGroups(storyboards)
+export function getComposeUnitLeaders(
+  storyboards: any[],
+  groups?: { key: string; members: any[]; startIdx: number }[],
+) {
+  const unitGroups = groups ?? buildComposeUnitGroups(storyboards)
+  const ordered = sortStoryboards(storyboards)
+  return unitGroups
     .map(g => g.members[0])
     .filter(leader => {
       if (!isComposeScopeStoryboard(leader, storyboards)) return false
-      const anchor = resolveNarrationImageAnchorShot(storyboards, leader)
+      const anchor = resolveNarrationImageAnchorShot(storyboards, leader, ordered)
       return !isNarrationTitleShot(anchor)
     })
 }
@@ -683,10 +716,14 @@ export function resolveComposedVideoUrlForShot(sb: any, storyboards: any[]) {
   return null
 }
 
-export function hasComposedStoryboard(sb: any, storyboards?: any[]) {
+export function hasComposedStoryboard(
+  sb: any,
+  storyboards?: any[],
+  groups?: { members: any[] }[],
+) {
   if (getComposedVideoUrl(sb)) return true
   if (!storyboards?.length) return false
-  return getParagraphComposeMembers(sb, storyboards).some(m => !!getComposedVideoUrl(m))
+  return getParagraphComposeMembers(sb, storyboards, groups).some(m => !!getComposedVideoUrl(m))
 }
 
 /** 批量合成：每个配图段只触发一次 */
@@ -757,8 +794,7 @@ export function getNarrationShotOwnImage(sb: any) {
   return sb?.composed_image || sb?.composedImage || null
 }
 
-export function resolveNarrationEffectiveImage(storyboards: any[], sb: any) {
-  const ordered = sortStoryboards(storyboards)
+export function resolveNarrationEffectiveImage(storyboards: any[], sb: any, ordered = sortStoryboards(storyboards)) {
   const idx = ordered.findIndex(item => item.id === sb.id)
   if (idx < 0) return { path: null, inherited: false, sourceId: null }
 

@@ -6,6 +6,7 @@ import {
 } from '../constants/motion-comic.js'
 import { resolveNarrationStoryboardTextModel } from '../constants/text-models.js'
 import { logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
+import { isMotionComicOutroLine, sanitizeMotionComicScript } from '../utils/motion-comic-script.js'
 import { compactMotionComicStoryboardShots } from './motion-comic-shot-merge.js'
 import { getTextConfig } from './ai.js'
 import { callTextChat } from './text-chat.js'
@@ -83,6 +84,7 @@ function parseShot(raw: unknown): MotionComicStoryboardShot | null {
     dialogueRaw,
   )
   if (!dialogue) return null
+  if (isMotionComicOutroLine(dialogue) || isMotionComicOutroLine(`${speaker}：${dialogue}`)) return null
 
   const expression_action = String(o.expression_action ?? o.action ?? '').trim()
   const shot_type = String(o.shot_type ?? o.shotType ?? '中景').trim() || '中景'
@@ -142,7 +144,7 @@ async function splitMotionComicScriptWithLLM(
   script: string,
   options: { textModel: string; characterNames?: string[] },
 ): Promise<MotionComicStoryboardLLMResult | null> {
-  const trimmed = script.trim()
+  const trimmed = sanitizeMotionComicScript(script)
   if (!trimmed) return { titleShots: [], shots: [], usedLlm: true }
 
   const user = JSON.stringify({

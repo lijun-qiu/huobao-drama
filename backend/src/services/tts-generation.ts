@@ -9,8 +9,10 @@ import { v4 as uuid } from 'uuid'
 import { getAudioConfigById } from './ai.js'
 import { getTTSAdapter } from './adapters/registry.js'
 import { generateEdgeTTS } from './edge-tts-local.js'
+import { mapLocalVoiceToEdge, resolveLocalTtsVoiceInput } from './local-tts-resolve.js'
 import { generateVoiceboxTTS, resolveVoiceboxProfileId, type VoiceboxModelSize } from './voicebox-tts.js'
-import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, redactUrl } from '../utils/task-logger.js'
+import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
+import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 import { applyTtsSpeedToAudioFile, resolveTtsSpeed } from '../utils/tts-speed.js'
 import { getAbsolutePath } from '../utils/storage.js'
 import ffmpeg from 'fluent-ffmpeg'
@@ -138,9 +140,68 @@ export async function generateTTS(params: TTSParams): Promise<string> {
 }
 
 /**
- * 为角色生成试听音频
+ * 为角色生成试听音频（支持 Edge / Voicebox；Voicebox 失败时按性别回退 Edge）
  */
-export async function generateVoiceSample(characterName: string, voiceId: string, configId?: number | null): Promise<string> {
+export async function generateVoiceSample(
+  characterName: string,
+  voiceId: string,
+  configId?: number | null,
+  voiceProvider?: string | null,
+  charMeta?: { role?: string | null; appearance?: string | null; description?: string | null },
+  voiceboxModelSize?: VoiceboxModelSize | null,
+): Promise<{ path: string; engine: 'edge' | 'voicebox' | 'api' }> {
   const sampleText = `你好，我是${characterName}。很高兴认识你，这是我的声音试听。`
-  return generateTTS({ text: sampleText, voice: voiceId, configId })
+  const meta = {
+    name: characterName,
+    voiceStyle: voiceId,
+    voiceProvider,
+    role: charMeta?.role,
+    appearance: charMeta?.appearance,
+    description: charMeta?.description,
+  }
+
+  let resolved: ReturnType<typeof resolveLocalTtsVoiceInput>
+  try {
+    resolved = resolveLocalTtsVoiceInput(voiceId, voiceProvider)
+  } catch {
+    const path = await generateTTS({ text: sampleText, voice: voiceId, configId })
+    return { path, engine: 'api' }
+  }
+
+  if (resolved.engine === 'edge') {
+    const path = await generateTTS({
+      text: sampleText,
+      voice: resolved.voice,
+      localTts: true,
+      localTtsEngine: 'edge',
+    })
+    return { path, engine: 'edge' }
+  }
+
+  try {
+    const profileId = await resolveVoiceboxProfileId(resolved.voice)
+    const path = await generateTTS({
+      text: sampleText,
+      voice: profileId,
+      localTts: true,
+      localTtsEngine: 'voicebox',
+      voiceboxModelSize: voiceboxModelSize ?? undefined,
+    })
+    return { path, engine: 'voicebox' }
+  } catch (err: any) {
+    const edgeVoice = mapLocalVoiceToEdge(meta)
+    logTaskWarn('VoiceSample', 'voicebox-fallback-edge', {
+      characterName,
+      voiceId,
+      error: err.message,
+      edgeVoice,
+    })
+    const path = await generateTTS({
+      text: sampleText,
+      voice: edgeVoice,
+      localTts: true,
+      localTtsEngine: 'edge',
+    })
+    return { path, engine: 'edge' }
+  }
 }

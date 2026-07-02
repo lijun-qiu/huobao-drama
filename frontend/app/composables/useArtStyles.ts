@@ -13,7 +13,7 @@ export const MOTION_COMIC_STYLE = 'motion-comic'
 
 export const MOTION_COMIC_DEFAULT_STYLE = MOTION_COMIC_STYLE
 
-/** 解说配图可选画风（独立于项目 drama.style） */
+/** 解说配图可选画风（定妆参考与配图共用） */
 export const NARRATION_IMAGE_STYLE_OPTIONS = [
   { value: NARRATION_MINIMAL_STYLE, label: '简体素人' },
   { value: NARRATION_ANIME_STYLE, label: '动漫风格' },
@@ -23,7 +23,7 @@ export function resolveNarrationImageStyle(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
   if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
-  return NARRATION_MINIMAL_STYLE
+  return NARRATION_ANIME_STYLE
 }
 
 /** 主人公面部：素体头上的正常卡通脸（参考温馨叙事插画） */

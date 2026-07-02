@@ -4,10 +4,21 @@ import {
   motionComicShotDescription,
   type MotionComicStoryboardShot,
 } from '../constants/motion-comic.js'
-import { buildMotionComicStoryboardMetaFromShot, buildMotionComicSegmentMotionMeta } from './motion-comic-meta.js'
+import { parseProductionMode, isMotionComicMode } from '../constants/production-mode.js'
+import {
+  buildMotionComicStoryboardMetaFromShot,
+  buildMotionComicSegmentMotionMeta,
+} from './motion-comic-meta.js'
 import { buildMotionComicStoryboardShotsWithLLM } from './motion-comic-storyboard-llm.js'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
+import {
+  extractMotionComicTitleShot,
+  isMotionComicOutroLine,
+  motionComicScriptHasSpeakerPrefixes,
+  parseMotionComicSpeakerLines,
+  sanitizeMotionComicScript,
+} from '../utils/motion-comic-script.js'
 import {
   buildNarrationTitleImagePromptContent,
   artStylePrompt,
@@ -20,6 +31,8 @@ import {
 import {
   getEpisodeVisualCharacters,
   linkStoryboardCharactersFromText,
+  syncMotionComicCharactersFromSpeakers,
+  linkAllNarrationStoryboardCharacters,
 } from './narration-characters.js'
 import {
   splitNarrationSentencesWithMeta,
@@ -35,6 +48,7 @@ const TITLE_ALT_PREFIX_RE = /^(?:片头(?:标题)?|开场标题)\s*[:：]\s*(.+)
 const TITLE_BRACKET_RE = /^【\s*标题\s*】\s*(.+)$/i
 const TITLE_OPENING_RE = /^今天体验的人生剧本是[，,]?\s*.+/
 const TITLE_SCRIPT_RE = /^(?:本期|本集)?人生剧本\s*[:：]?\s*.+/
+const MOTION_COMIC_TITLE_RE = /^(?:剧中\s*[:：]\s*)?(?:本期|本集)?故事\s*[:：]\s*.+/
 
 function stripBom(text: string) {
   return text.replace(/^\uFEFF/, '')
@@ -58,8 +72,8 @@ export function parseNarrationScript(text: string) {
     return { title: title || null, body }
   }
 
-  if (TITLE_OPENING_RE.test(firstLine) || TITLE_SCRIPT_RE.test(firstLine)) {
-    return { title: firstLine, body: lines.slice(1).join('\n').trim() }
+  if (TITLE_OPENING_RE.test(firstLine) || TITLE_SCRIPT_RE.test(firstLine) || MOTION_COMIC_TITLE_RE.test(firstLine)) {
+    return { title: firstLine.replace(/^剧中\s*[:：]\s*/, ''), body: lines.slice(1).join('\n').trim() }
   }
 
   const blocks = normalized.split(/\n\s*\n+/).map(block => block.trim()).filter(Boolean)
@@ -77,6 +91,8 @@ export function extractTitleHook(title: string) {
   let hook = title
     .replace(/^今天体验的人生剧本是[，,]?\s*/, '')
     .replace(/^(?:本期|本集)?人生剧本\s*[:：]?\s*/, '')
+    .replace(/^(?:本期|本集)?故事\s*[:：]\s*/, '')
+    .replace(/^剧中\s*[:：]\s*/, '')
     .replace(/^【|】$/g, '')
     .replace(/^[，,、\s]+/, '')
     .trim()
@@ -194,9 +210,45 @@ function insertMotionComicStoryboardShot(
     Number(res.lastInsertRowid),
     [dialogue, shot.expression_action, shot.background, options.titleFull].filter(Boolean).join('\n'),
     options.episodeCharacters,
+    { dialogue, speakerPriority: true },
   )
 
   return { storyboardNumber, duration }
+}
+
+function defaultMotionComicShotFromLine(line: { speaker: string; dialogue: string }): MotionComicStoryboardShot {
+  return {
+    speaker: line.speaker,
+    dialogue: line.dialogue,
+    expression_action: '自然状态',
+    shot_type: '中景',
+    angle: '平视',
+    movement: '固定',
+    background: '未指定场景',
+  }
+}
+
+function buildMotionComicShotsFromSpeakerScript(script: string): {
+  titleShots: MotionComicStoryboardShot[]
+  shots: MotionComicStoryboardShot[]
+} | null {
+  const cleaned = sanitizeMotionComicScript(script)
+  const { title, body } = parseNarrationScript(cleaned)
+  if (!body.trim() || !motionComicScriptHasSpeakerPrefixes(body)) return null
+
+  const rawLines = parseMotionComicSpeakerLines(body)
+    .filter(line => !isMotionComicOutroLine(line.dialogue) && !isMotionComicOutroLine(`${line.speaker}：${line.dialogue}`))
+
+  const titleLine = extractMotionComicTitleShot(title, rawLines)
+  let bodyLines = rawLines
+  if (titleLine && bodyLines[0]?.speaker === titleLine.speaker && bodyLines[0]?.dialogue === titleLine.dialogue) {
+    bodyLines = bodyLines.slice(1)
+  }
+
+  const titleShots = titleLine ? [defaultMotionComicShotFromLine(titleLine)] : []
+  const shots = bodyLines.map(defaultMotionComicShotFromLine)
+  if (!titleShots.length && !shots.length) return null
+  return { titleShots, shots }
 }
 
 async function breakdownMotionComicStoryboards(
@@ -215,10 +267,10 @@ async function breakdownMotionComicStoryboards(
 
   report({ message: '正在解析漫剧台本…', percent: 8, phase: 'reading' })
 
-  const { title, body } = parseNarrationScript(script)
+  const scriptClean = sanitizeMotionComicScript(script)
+  const { title, body } = parseNarrationScript(scriptClean)
   const titleVisualHook = title ? extractTitleHook(title) : null
-  // 传完整台本给 LLM，避免 parseNarrationScript 剥掉「标题：」前缀
-  const scriptForLlm = script.trim()
+  const scriptForLlm = scriptClean.trim()
 
   const textModel = resolveNarrationStoryboardTextModel(ep, options?.textModel)
   const episodeCharacters = getEpisodeVisualCharacters(episodeId, ep.dramaId)
@@ -230,6 +282,13 @@ async function breakdownMotionComicStoryboards(
   let shots: MotionComicStoryboardShot[] = []
   let emphasisSource: 'llm' | 'rules' = 'llm'
 
+  const parsedFromSpeakers = buildMotionComicShotsFromSpeakerScript(scriptClean)
+  if (parsedFromSpeakers) {
+    titleShots = parsedFromSpeakers.titleShots
+    shots = parsedFromSpeakers.shots
+    emphasisSource = 'rules'
+    report({ message: `规则拆镜：片头 ${titleShots.length} 镜、正文 ${shots.length} 镜`, percent: 72, phase: 'parse' })
+  } else {
   try {
     const llmResult = await buildMotionComicStoryboardShotsWithLLM(scriptForLlm, {
       textModel,
@@ -262,6 +321,7 @@ async function breakdownMotionComicStoryboards(
     emphasisSource = 'rules'
     report({ message: '一体化分镜 LLM 失败，请检查台本格式后重试', percent: 50, phase: 'fallback' })
     throw err
+  }
   }
 
   if (!titleShots.length && !shots.length) throw new Error('未能从台本中拆分出有效镜头')
@@ -310,6 +370,9 @@ async function breakdownMotionComicStoryboards(
     .where(eq(schema.episodes.id, episodeId))
     .run()
 
+  syncMotionComicCharactersFromSpeakers(episodeId, ep.dramaId)
+  linkAllNarrationStoryboardCharacters(episodeId, ep.dramaId)
+
   report({ message: `已保存 ${storyboardNumber} 镜`, percent: 100, phase: 'done' })
 
   return {
@@ -340,8 +403,13 @@ export async function breakdownNarrationStoryboards(
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error('Episode not found')
 
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
   const script = (scriptOverride || ep.scriptContent || ep.content || '').trim()
   if (!script) throw new Error('请先填写解说文案')
+
+  if (isMotionComicMode(parseProductionMode(drama?.metadata))) {
+    return breakdownMotionComicStoryboards(episodeId, script, ep, options)
+  }
 
   report({ message: '正在解析解说稿…', percent: 8, phase: 'reading' })
 

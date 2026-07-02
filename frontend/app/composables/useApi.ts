@@ -172,7 +172,7 @@ export const episodeAPI = {
     }, options?.signal)
 
     if (streamError) throw streamError
-    if (!result?.reply) throw new Error('AI 未返回内容')
+    if (!result?.reply && !result?.breakdown) throw new Error('AI 未返回内容')
     return result
   },
   narrationScriptChat: (
@@ -181,6 +181,7 @@ export const episodeAPI = {
       messages: Array<{ role: 'user' | 'assistant'; content: string }>
       text_model?: string
       text_thinking?: boolean
+      script?: string
     },
     options?: { signal?: AbortSignal },
   ) => api.post(`/episodes/${id}/narration-script-chat`, data, options),
@@ -195,6 +196,7 @@ export const episodeAPI = {
       messages: Array<{ role: 'user' | 'assistant'; content: string }>
       text_model?: string
       text_thinking?: boolean
+      script?: string
     },
     options?: {
       signal?: AbortSignal
@@ -483,9 +485,11 @@ export const episodeAPI = {
   cropNarrationImages: (id: number) => api.post(`/episodes/${id}/crop-narration-images`, {}),
   restoreNarrationImages: (id: number) => api.post(`/episodes/${id}/restore-narration-images`, {}),
   clearNarrationImages: (id: number) => api.post(`/episodes/${id}/clear-narration-images`, {}),
+  clearNarrationImageDetect: (id: number) => api.post(`/episodes/${id}/clear-narration-image-detect`, {}),
   clearNarrationImagePrompts: (id: number) => api.post(`/episodes/${id}/clear-narration-image-prompts`, {}),
   clearNarrationTts: (id: number) => api.post(`/episodes/${id}/clear-narration-tts`, {}),
   clearComposedVideos: (id: number) => api.post(`/episodes/${id}/clear-composed-videos`, {}),
+  clearStoryboards: (id: number) => api.post(`/episodes/${id}/clear-storyboards`, {}),
 }
 
 export const storyboardAPI = {
@@ -540,25 +544,32 @@ export const uploadAPI = {
 export const characterAPI = {
   create: (data: any) => api.post('/characters', data),
   update: (id: number, data: any) => api.put(`/characters/${id}`, data),
-  getPortraitPrompt: (id: number, episodeId: number, options?: { useReference?: boolean }) => {
+  getPortraitPrompt: (id: number, episodeId: number, options?: { useReference?: boolean; imageStyle?: string }) => {
     const query = new URLSearchParams({ episode_id: String(episodeId) })
     if (options?.useReference === false) query.set('use_reference', 'false')
+    if (options?.imageStyle) query.set('image_style', options.imageStyle)
     return api.get<{ prompt: string }>(`/characters/${id}/portrait-prompt?${query.toString()}`)
   },
-  voiceSample: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId }),
-  generateImage: (id: number, episodeId: number, options?: { useReference?: boolean }) =>
+  voiceSample: (id: number, episodeId: number, options?: { voicebox_model_size?: '0.6B' | '1.7B' }) =>
+    api.post(`/characters/${id}/generate-voice-sample`, {
+      episode_id: episodeId,
+      ...(options?.voicebox_model_size ? { voicebox_model_size: options.voicebox_model_size } : {}),
+    }),
+  generateImage: (id: number, episodeId: number, options?: { useReference?: boolean; imageStyle?: string }) =>
     api.post(`/characters/${id}/generate-image`, {
       episode_id: episodeId,
       use_reference: options?.useReference !== false,
+      image_style: options?.imageStyle,
     }),
   recognizePortrait: (id: number, episodeId: number) => api.post(`/characters/${id}/recognize-portrait`, { episode_id: episodeId }),
-  generateAppearance: (id: number, data: { episode_id?: number; script?: string; content?: string; text_model?: string; text_thinking?: boolean }) =>
+  generateAppearance: (id: number, data: { episode_id?: number; script?: string; content?: string; text_model?: string; text_thinking?: boolean; image_style?: string }) =>
     api.post(`/characters/${id}/generate-appearance`, data),
-  batchImages: (ids: number[], episodeId: number, options?: { useReference?: boolean }) =>
+  batchImages: (ids: number[], episodeId: number, options?: { useReference?: boolean; imageStyle?: string }) =>
     api.post('/characters/batch-generate-images', {
       character_ids: ids,
       episode_id: episodeId,
       use_reference: options?.useReference !== false,
+      image_style: options?.imageStyle,
     }),
 }
 

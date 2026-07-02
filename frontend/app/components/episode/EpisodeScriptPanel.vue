@@ -64,7 +64,7 @@
               :placeholder="isMotionComicMode ? '粘贴或编写快切解说稿…\n首行：本期故事：…\n一句一行，段间空行换场景' : '粘贴或编写完整解说稿…\n首行建议：今天体验的人生剧本是，…\n也可从 Word / 备忘录直接粘贴'"
             />
             <div class="narration-hint" style="margin-top:10px">
-              {{ isMotionComicMode ? '漫画解说须用快切解说稿（第三人称+「我」、一句一行）；保存后进「旁白分镜」。' : '自备稿可直接在此编辑；保存后进入「文案输入」或「旁白分镜」继续。字幕 ** 强调在分镜时由 Qwen 自动标注。' }}
+              {{ isMotionComicMode ? '漫画解说须用快切解说稿（每行说话人：台词）；保存后进「旁白分镜」。在 AI 对话里说「补说话人」可改已保存文案。' : '自备稿可直接在此编辑；保存后进入「文案输入」或「旁白分镜」继续。字幕 ** 强调在分镜时由 Qwen 自动标注。' }}
             </div>
           </div>
 
@@ -145,7 +145,7 @@
                   v-model="scriptChatInput"
                   class="script-chat-input"
                   rows="3"
-                  :placeholder="isMotionComicMode ? '描述故事梗概，或说「写完整稿」；默认悬疑快切体，一句一行' : '描述本期人生，例如：十八岁职高辍学，八十年代进城摆夜市摊…'"
+                  :placeholder="isMotionComicMode ? '写完整稿，或多轮改稿：补说话人、去片尾…（直接输入里的文案会自动带入）' : '描述本期人生，例如：十八岁职高辍学，八十年代进城摆夜市摊…'"
                   :disabled="scriptChatGenerating"
                   @keydown.enter.exact.prevent="sendScriptChat"
                 />
@@ -222,7 +222,7 @@
           />
           <div class="narration-hint" style="margin-top:12px">
             <template v-if="isMotionComicMode">
-              <strong>漫画解说稿格式：</strong>首行「本期故事：…」；一句一行（8～18字），段间空行换场景；对话嵌入叙述；分镜后 1～3 句一图，同图整段一种运镜。
+              <strong>漫画解说稿格式：</strong>首行「本期故事：…」；一句一行（8～18字），段间空行换场景；对话嵌入叙述；分镜后 1～2 镜一图、换人说话须换图，同图整段一种运镜。
             </template>
             <template v-else>
               <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。
@@ -520,11 +520,23 @@
               <template v-if="!sbs.length && !isNarrationMode">
                 <span class="locked-config">视频模型 · {{ lockedVideoConfigLabel }}</span>
               </template>
+              <button
+                v-if="sbs.length"
+                type="button"
+                class="btn btn-sm"
+                :disabled="storyboardClearing || narrationBreaking || storyboardChatGenerating || narrationStoryboardDescUploading"
+                title="删除本集全部分镜及关联配图/配音/合成，便于重新拆镜"
+                @click="clearAllStoryboards()"
+              >
+                <Loader2 v-if="storyboardClearing" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+                {{ storyboardClearing ? '清除中…' : `清除分镜 (${sbs.length})` }}
+              </button>
               <template v-if="isNarrationMode">
                 <button
                   type="button"
                   class="btn btn-sm btn-primary"
-                  :disabled="narrationBreaking || storyboardChatGenerating || narrationStoryboardDescUploading"
+                  :disabled="narrationBreaking || storyboardChatGenerating || narrationStoryboardDescUploading || storyboardClearing"
                   :title="isMotionComicMode ? '按当前解说稿整稿拆镜（会覆盖本集全部镜头）' : '按当前文案整稿拆镜（会覆盖本集全部镜头）'"
                   @click="doNarrationBreakdown()"
                 >
@@ -543,7 +555,7 @@
                   上传分镜描述
                 </button>
               </template>
-              <button v-if="!isNarrationMode" class="btn btn-sm" :disabled="rn || narrationBreaking" @click="doBreakdown()">
+              <button v-if="!isNarrationMode" class="btn btn-sm" :disabled="rn || narrationBreaking || storyboardClearing" @click="doBreakdown()">
                 <Loader2 v-if="rn && rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 {{ sbs.length ? '重新分镜' : 'AI 拆解分镜' }}
@@ -576,11 +588,21 @@
                     <button type="button" class="prod-tab" :class="{ active: !episodeTextThinking }" @click="setEpisodeTextThinking(false)">关</button>
                   </div>
                 </div>
-                <button type="button" class="btn btn-sm" :disabled="storyboardChatGenerating" @click="clearStoryboardChat">清空对话</button>
+                <button
+                  v-if="sbs.length"
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="storyboardClearing || storyboardChatGenerating"
+                  title="删除本集全部分镜后再重新拆镜"
+                  @click="clearAllStoryboards()"
+                >
+                  {{ storyboardClearing ? '清除中…' : '清除分镜' }}
+                </button>
+                <button type="button" class="btn btn-sm" :disabled="storyboardChatGenerating || storyboardClearing" @click="clearStoryboardChat">清空对话</button>
                 <button
                   type="button"
                   class="btn btn-sm btn-primary"
-                  :disabled="storyboardChatGenerating"
+                  :disabled="storyboardChatGenerating || storyboardClearing"
                   @click="sendStoryboardChat('run')"
                 >
                   <Loader2 v-if="storyboardChatGenerating" :size="11" class="animate-spin" />

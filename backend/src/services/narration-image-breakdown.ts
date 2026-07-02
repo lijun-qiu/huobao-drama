@@ -400,6 +400,7 @@ function loadEpisodeStoryboardContext(
       : 0
     return {
       sentence: storyboardNarrationSentence(sb),
+      dialogue: String(sb.dialogue || '').trim() || undefined,
       paragraphIndex: scriptParagraphIndex,
       isTitle: meta.narration_shot_type === 'title',
     }
@@ -513,6 +514,7 @@ function savePromptAnchorsOnly(
       sb.id,
       [sentence, paraInfo.content, paraInfo.prompt].filter(Boolean).join('\n'),
       ctx.episodeCharacters,
+      { dialogue: sb.dialogue, speakerPriority: ctx.motionComicMode },
     )
     saved++
   }
@@ -565,13 +567,12 @@ function savePromptResults(
       .where(eq(schema.storyboards.id, sb.id))
       .run()
 
-    if (isParagraphAnchor) {
-      linkStoryboardCharactersFromText(
-        sb.id,
-        [sentence, paraInfo?.content, paraInfo?.prompt].filter(Boolean).join('\n'),
-        ctx.episodeCharacters,
-      )
-    }
+    linkStoryboardCharactersFromText(
+      sb.id,
+      [sentence, paraInfo?.content, paraInfo?.prompt].filter(Boolean).join('\n'),
+      ctx.episodeCharacters,
+      { dialogue: sb.dialogue, speakerPriority: ctx.motionComicMode },
+    )
   })
 }
 

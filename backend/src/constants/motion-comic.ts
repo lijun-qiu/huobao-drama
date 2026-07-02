@@ -25,13 +25,13 @@ export const MOTION_COMIC_IMAGE_STYLE_OPTIONS = [
   { value: MOTION_COMIC_STYLE, label: '漫画解说' },
 ] as const
 
-/** 漫画解说：每张配图覆盖 1～3 镜（一段一图，整段一种运镜） */
+/** 漫画解说：每张配图覆盖 1～2 镜（一段一图，整段一种运镜） */
 export const MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS = 1
-export const MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS = 3
+export const MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS = 2
 
-/** 漫画解说：配图锚点占镜头数比例 */
-export const MOTION_COMIC_IMAGE_DETECT_MIN_STORYBOARD_RATIO = 0.35
-export const MOTION_COMIC_IMAGE_DETECT_MAX_STORYBOARD_RATIO = 0.55
+/** 漫画解说：配图锚点占镜头数比例（50% 以上；换人说话须换图时可达 100%） */
+export const MOTION_COMIC_IMAGE_DETECT_MIN_STORYBOARD_RATIO = 0.5
+export const MOTION_COMIC_IMAGE_DETECT_MAX_STORYBOARD_RATIO = 1
 
 /** 项目级动效预设（写入 dramas.metadata） */
 export interface MotionComicPreset {
@@ -115,9 +115,22 @@ export const MOTION_COMIC_SIX_DIM_LLM_RULE = [
 export const MOTION_COMIC_ACTION_LLM_RULE =
   '【打斗/动作镜】须写动态姿势、拳头/腿部运动方向、漫画放射状速度线、冲击构图；禁止写实血腥，用漫画夸张表现'
 
-/** 一句一图 + 运镜合成：画面须具动态瞬间与层次，避免静态站桩 */
+/** 动态漫：统一动漫审美（不写胖瘦体型词） */
+export const MOTION_COMIC_BODY_CONSISTENCY_LLM_RULE = [
+  '【人物审美·硬性】全片统一正常头身比国漫条漫人物（以【画风规格】为准），禁止写「微胖」「肥胖」「瘦削」「腰腹略鼓」等胖瘦体型词；',
+  '禁止写「躯干X份高×Y份宽」「三头身」「圆头直径」等素体份数计量；',
+  '【画面主体】只写发型、表情、服装、姿态与道具，不要额外描写肩腰肚胖瘦。',
+].join(' ')
+
+export const MOTION_COMIC_LLM_ANALYSIS_STEPS_PROMPT = [
+  '1) 通读 full_narration（及 previous_episode_narration 若有），把握主线、人物关系、场景变迁与情绪节奏',
+  '2) 读 prior_narration 与 characters；同一配图段内主人公服装款式+#hex 须一致',
+  '3) 读 narration_lines 确定本配图段叙事锚点；先锁定单帧（位置+姿态+动作+表情），再按六维填空',
+  '4) 结合 full_narration 丰富场景与动作，禁止只贴段内字面',
+].join('\n')
+
 export const MOTION_COMIC_DYNAMIC_IMAGE_LLM_RULE = [
-  '【一段一图·动态瞬间】每条 prompt 对应一个配图段（narration_lines 可含 1～3 句），须写出该段最具视觉冲击力的单一瞬间，禁止把无关剧情揉进一张图。',
+  '【一段一图·动态瞬间】每条 prompt 对应一个配图段（narration_lines 可含 1～2 句），须写出该段最具视觉冲击力的单一瞬间，禁止把无关剧情揉进一张图。',
   '【运镜友好构图】画面留前中后景层次（前景道具/中景主体/背景环境），主体姿态与肢体方向明确，便于后续推近/拉远/横移/上下运镜；避免主体贴边、画面过满。',
   '【动态表现】优先写可见动作、表情变化、物体互动、速度线/冲击线/气流线；情绪镜写夸张表情与肢体语言；建立镜写环境纵深与空间关系。',
   '【镜头视角多样化】相邻配图段宜交替使用中景/近景/特写/略俯/略仰，避免连续多镜同一景别同一站桩姿势。',
@@ -149,7 +162,7 @@ export function buildMotionComicCharacterExtractSystem(): string {
     '3) 输出字段：name、variant_label、role、appearance、personality',
     '4) role：主人公写「主角/男主/女主」；主要配角写「主要配角·身份」（如 主要配角·反派、主要配角·师父）',
     '5) variant_label：人生阶段或形态（童年/青年/老年等）；全篇单形态可留空或「常态」；主人公多阶段须拆多条',
-    '6) appearance：中英混合，只写人物本身（年龄、性别、发型、五官、服装主色#hex、体型、标志特征）；正常头身比漫画人物，禁止 Q 版三头身',
+    '6) appearance：中英混合，只写人物本身（年龄、性别、发型、五官、服装主色#hex、标志特征）；正常头身比漫画人物，禁止 Q 版三头身与胖瘦体型词',
     '7) 主要配角 appearance 须与主人公明显区分（不同发型、服装配色、体型或标志配饰），便于定妆参考图一致',
     '8) 禁止画风词：retro style, chibi, 3D, 真人, 厚涂, Q版, 条漫, pixel',
     '9) 示例 appearance：25岁男性反派，剑眉冷目，黑长发束冠，穿#1e293b深灰长袍，瘦高。\nEnglish tags: black long hair, topknot, dark gray robe, cold eyes',
@@ -163,7 +176,8 @@ export function buildMotionComicCharacterAppearanceSystem(): string {
     '你是漫画解说项目的角色定妆造型设计助手。',
     '画风：现代国漫条漫，正常头身比，粗线平涂，表情可夸张，16:9横屏定妆参考构图；禁止 Q 版、3D、真人写实。',
     '须根据漫剧旁白稿中该角色的出场情节、对白、行为推断外貌，与故事时代、题材一致。',
-    '主人公与主要配角之间、各主要配角之间须有清晰视觉区分（发型、服装主色、体型、标志配饰）。',
+    '不写胖瘦体型词；人物统一为正常头身比漫画审美，禁止素体份数、三头身、圆头直径等计量词。',
+    '主人公与主要配角之间、各主要配角之间须有清晰视觉区分（发型、服装主色、标志配饰）。',
     '若提供了 variant_label，外貌须严格对应该阶段，不得写成其他年龄。',
     '中文为主，可夹 English tags；80-180 字；只描述人物本身，禁止画风/艺术风格词。',
     '输出格式：一段中文外貌 + 换行 + English tags: 英文逗号分隔（发型/服装/配饰），如 English tags: black ponytail, red martial arts robe, jade pendant',
@@ -172,7 +186,7 @@ export function buildMotionComicCharacterAppearanceSystem(): string {
 }
 
 export const MOTION_COMIC_SCENE_BODY_EXAMPLE =
-  '【画风规格：现代国漫条漫，粗黑线描，平涂赛璐璐，16:9横屏】，【画面主体：一位青年男性主人公位于画面中景偏左，穿#2563eb蓝色夹克，瞳孔收缩、嘴微张的震惊表情】，【年代场景：现代都市夜晚街道，霓虹招牌与雨湿路面作后景】，【核心细节动作：右脚后退半步重心后移，双手抬至胸前，漫画速度线从侧后方放射】，【光影色调：霓虹冷色侧光，前景略暗后景虚化】，【镜头视角：中近景略仰，主体占画面约40%留运镜空间】，【质感要求：平涂赛璐璐，线条清晰，无文字无水印】'
+  '【画风规格：现代国漫条漫，粗黑线描，平涂赛璐璐，16:9横屏】，【画面主体：一位青年男性主人公（黑色短发，瞳孔收缩、嘴微张的震惊表情）位于画面中景偏左，穿#2563eb蓝色夹克】，【年代场景：现代都市夜晚街道，霓虹招牌与雨湿路面作后景】，【核心细节动作：右脚后退半步重心后移，双手抬至胸前，漫画速度线从侧后方放射】，【光影色调：霓虹冷色侧光，前景略暗后景虚化】，【镜头视角：中近景略仰，主体占画面约40%留运镜空间】，【质感要求：平涂赛璐璐，线条清晰，无文字无水印】'
 
 export function formatMotionComicStyleSpecBracket(): string {
   return `【画风规格：${MOTION_COMIC_STYLE_SPEC}】`
@@ -456,7 +470,8 @@ export const MOTION_COMIC_SCRIPT_TEMPLATE_SUSPENSE = [
   '- 一句一行，便于 TTS 一镜一句；单句 8～18 字为主，最长不超过 22 字',
   '- 长句须按呼吸点拆成多行，禁止一行超过 25 字',
   '- 段与段之间空一行；空行 = 换场景或换平行叙事线',
-  '- 对话嵌入叙述：「xx说道」「xx喊道」「xx问」，或短引号对白接在叙述后；禁止独占一行的「角色名：台词」',
+  '- **每行必须以「说话人：台词」开头**（全角冒号）；叙述用「旁白：」，角色直接引语用角色名（主人公引语用「我：」），片头 hook 用「剧中：本期故事：…」',
+  '- 禁止把对白嵌进旁白句（不要「xx说道」再接台词在同一行）；对白须单独一行并写清说话人',
   '',
   '【九段剧情骨架（按顺序写，可压缩不可跳步）】',
   '1) 反差钩子：日常温情/小恩惠 + 主人公突然抛出惊人之语（1～4 句）',
@@ -467,7 +482,7 @@ export const MOTION_COMIC_SCRIPT_TEMPLATE_SUSPENSE = [
   '6) 平行危机线B：主人公赶救/施法/行动，可穿插灵力限制、倒计时（段间空行，4～8 句）',
   '7) 倒计时压迫：电话不接、砸门、「最多还有X分钟」类句式强化紧张（穿插全文）',
   '8) 高潮解局：主人公出手制服/定身/警察赶到（4～8 句）',
-  '9) 余韵收尾：谢礼、人设亮相、新悬念或下一卦钩子（3～8 句，结尾留钩）',
+  '9) 余韵收尾：谢礼、人设亮相、余味收束（3～8 句；可留剧情悬念，**禁止**关注/订阅/下期预告等引流句）',
   '',
   '【节奏与漫画感】',
   '- 关键反转单独成句；数字、时间、年龄等具体信息单独成句',
@@ -476,41 +491,43 @@ export const MOTION_COMIC_SCRIPT_TEMPLATE_SUSPENSE = [
   '- 不写写实血腥；刑案用押解、破门、制服等漫画夸张表现',
   '',
   '【片头 hook】',
-  '- 第一行：「本期故事：」+ 2～4 个信息点（身份/事件/反转）',
-  '- 或直接用反差钩子首句作片头，第二行空行后接正文',
+  '- 第一行：「剧中：本期故事：」+ 2～4 个信息点（身份/事件/反转）',
+  '- 或「剧中：」+ 反差钩子首句；第二行空行后接正文',
+  '',
+  '【片尾·禁止】',
+  '- 禁止「故事还没结束」「下期继续更新」「记得点个关注」「我是那个…咱们下期再见」等短视频引流收尾',
 ].join('\n')
 
 /** 悬疑模板 · 格式示例（节选，展示句读与多线节奏） */
 export const MOTION_COMIC_SCRIPT_EXAMPLE_SUSPENSE = [
-  '本期故事：大学生算卦救卤肉店，连环杀人犯破门而入。',
+  '剧中：本期故事：大学生算卦救卤肉店，连环杀人犯破门而入。',
   '',
-  '卤肉店老板看我太过可怜',
-  '好心给我一个肉夹馍',
-  '我却转头就对他说',
-  '你儿子快死了',
-  '看着两人惊悚的目光',
-  '我又掐指一算',
-  '到你女儿也要死了',
+  '旁白：卤肉店老板看我太过可怜',
+  '旁白：好心给我一个肉夹馍',
+  '旁白：我却转头就对他说',
+  '我：你儿子快死了',
+  '旁白：看着两人惊悚的目光',
+  '旁白：我又掐指一算',
+  '我：到你女儿也要死了',
   '',
-  '刘翠兰有点摇摆不定',
-  '看了看丈夫',
-  '又看了看我',
-  '小闺女才4岁',
-  '儿子18岁',
-  '儿子刚考上本地的大学',
+  '旁白：刘翠兰有点摇摆不定',
+  '旁白：看了看丈夫',
+  '旁白：又看了看我',
+  '旁白：小闺女才4岁',
+  '旁白：儿子18岁',
+  '旁白：儿子刚考上本地的大学',
   '',
-  '陈家佑掏出自己的手机',
-  '一边拨打着儿子的电话',
-  '一边道',
-  '小伙子，我信你一次',
-  '宁可信其有，不可信其无',
+  '旁白：陈家佑掏出自己的手机',
+  '旁白：一边拨打着儿子的电话',
+  '陈家佑：小伙子，我信你一次',
+  '陈家佑：宁可信其有，不可信其无',
 ].join('\n')
 
 /** 漫画解说台本格式（写剧本 / 分镜 / skill 共用；默认悬疑快切模板） */
 export const MOTION_COMIC_SCRIPT_FORMAT_RULE = [
   '【输出形态·硬性要求】',
   '你必须输出「第三人称快切解说稿」，适合 TTS 一镜一句 + 漫画配图一句一图 + 智能运镜合成。',
-  '禁止输出场景化对白台本（角色名：台词）、禁止小说长段落 prose。',
+  '每行必须是「说话人：台词」（旁白/角色名/我/剧中）；禁止无说话人的裸句；禁止小说长段落 prose。',
   '',
   MOTION_COMIC_SCRIPT_TEMPLATE_SUSPENSE,
   '',
@@ -521,6 +538,7 @@ export const MOTION_COMIC_SCRIPT_FORMAT_RULE = [
   '- 禁止 markdown、**、分镜表、JSON、制作说明',
   '- 禁止镜头语言（特写、推镜、横移等）',
   '- 禁止一行超过 25 字的超长句',
+  '- 禁止片尾引流：故事还没结束、下期继续、记得关注、咱们下期再见等',
 ].join('\n')
 
 export const MOTION_COMIC_SCRIPT_CHAT_SYSTEM = [
@@ -534,9 +552,9 @@ export const MOTION_COMIC_SCRIPT_CHAT_SYSTEM = [
   '2) 用户未指定风格时，默认采用「悬疑灵异 · 第三人称快切解说」模板（九段骨架 + 一句一行）。',
   '3) 用户指定「体验人生」「第二人称你」时，可改用体验人生体，但仍须一句一行、段间空行。',
   '4) 先理解再动笔：用户说「写完整稿」「直接写」时立刻输出，不反复追问。',
-  '5) 解说感优先：强开场、密反转、多线交叉、倒计时压迫、结尾留钩。',
+  '5) 解说感优先：强开场、密反转、多线交叉、倒计时压迫；结尾可留剧情悬念，不写关注/下期预告。',
   '6) 可画可播：每句能想象成漫画条漫插画；不写写实血腥。',
-  '7) 用户给小说长文/对白台本时，改写成快切解说稿后再输出（拆短句、嵌对话、补九段骨架）。',
+  '7) 用户给小说长文/无说话人台本时，改写成快切解说稿后再输出（拆短句、补说话人前缀、补九段骨架）。',
   '',
   '【篇幅】',
   '- 用户未指定时，完整稿 3000～8000 汉字。',
@@ -544,9 +562,10 @@ export const MOTION_COMIC_SCRIPT_CHAT_SYSTEM = [
   '',
   '【交互】',
   '- 用户要求写完整稿/出剧本：只输出解说稿正文（严格遵循【输出形态·硬性要求】与【标准结构】）。',
-  '- 用户要求修改：输出修改后的完整稿，或明确说明改了哪段。',
-  '- 用户给的是对白台本/小说体：改写为旁白解说稿后再输出。',
-  '- 闲聊、选题、讨论设定：正常对话，不必强行输出整稿。',
+  '- **多轮改稿**：用户后续可说「补说话人」「补人名」「去片尾关注句」「改第二段」等；须结合【当前台本】或对话中上一版完整稿修改。',
+  '- 改稿类请求：可先一句极短确认（≤20字），空一行后**必须输出修改后的完整台本**（每行说话人：台词），不要只解释、不要只给片段。',
+  '- 用户给的是无说话人稿/小说体：改写为带说话人前缀的快切解说稿后再输出。',
+  '- 仅闲聊、选题、讨论设定时正常对话，不必输出整稿。',
 ].join('\n')
 
 export const MOTION_COMIC_STORYBOARD_CHAT_SYSTEM = [
@@ -557,7 +576,7 @@ export const MOTION_COMIC_STORYBOARD_CHAT_SYSTEM = [
   '- 正文：按句拆镜，句末标点必拆；逗号/顿号仅当相邻合计超过约 16 字才拆。',
   '- 自动为关键词标注 ** 强调（黄字字幕）；用户稿中已有 ** 则保留。',
   '- 每镜一条旁白台词，时长按字数估算，便于一句一镜配音。',
-  '- 配图策略：1～3 句共用一张漫画插画（一段一图）；换图处硬切；**同一张图整段只用一种运镜**',
+  '- 配图策略：1～2 镜共用一张漫画插画（一段一图）；**换人说话须换图**；换图处硬切；**同一张图整段只用一种运镜**',
   '- 单镜运镜：根据旁白句/景别/运镜字段推断（特写→推近，全景→拉远，位移→横移，可上下浏览）',
   '',
   '【职责】',
@@ -571,9 +590,12 @@ export const MOTION_COMIC_STORYBOARD_CHAT_SYSTEM = [
 /** 漫画解说整稿拆镜 LLM（保留兼容；主流程已走旁白分镜） */
 export function buildMotionComicStoryboardLLMSystem(): string {
   return [
-    '你是漫画解说分镜导演。输入整篇解说稿，按句拆成旁白镜头序列。',
-    '每镜一条旁白台词，自动标注 emphasis_word；片头 hook 写入 title_shots，speaker=剧中。',
-    '配图节奏：1～3 句一图（一段一图）；合成时**每张图整段一种运镜**，同图多句共享该运镜。',
+    '你是漫画解说分镜导演。输入整篇解说稿，按句拆成镜头序列。',
+    '每镜一条台词，必须指定 speaker（旁白/角色名/我/民警/接线员等）；片头 hook 写入 title_shots，speaker=剧中。',
+    '若台本每行已是「说话人：台词」，保留原 speaker，按行拆镜，不要合并不同说话人。',
+    '若台本无说话人前缀，叙述句 speaker=旁白，角色直接引语 speaker=角色名，主人公引语 speaker=我。',
+    '自动标注 emphasis_word；跳过片尾引流句（故事还没结束、下期继续、记得关注、咱们下期再见等）。',
+    '配图节奏：1～2 镜一图（一段一图）；**换人说话须换图**；合成时**每张图整段一种运镜**，同图多句共享该运镜。',
     '只输出 JSON：',
     '{"title_shots":[{"speaker":"剧中","dialogue":"本期故事：…","emphasis_word":""}],"shots":[{"speaker":"旁白","dialogue":"…","emphasis_word":""}]}',
     '无片头时 title_shots=[]。不要 markdown，不要解释。',
@@ -602,7 +624,10 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
   hasDiptych?: boolean
 }): string {
   return [
-    '你是漫画解说分镜美术指导。每个配图段含 1～3 句旁白，须为该段写一张动态感强、层次丰富的中文 image_prompt。',
+    '你是漫画解说分镜美术指导。每个配图段含 1～2 句旁白，须为该段写一张动态感强、层次丰富的中文 image_prompt。',
+    '分析流程：',
+    MOTION_COMIC_LLM_ANALYSIS_STEPS_PROMPT,
+    MOTION_COMIC_BODY_CONSISTENCY_LLM_RULE,
     MOTION_COMIC_SIX_DIM_LLM_RULE,
     MOTION_COMIC_ACTION_LLM_RULE,
     MOTION_COMIC_DYNAMIC_IMAGE_LLM_RULE,
@@ -616,36 +641,37 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
   ].filter(Boolean).join('\n')
 }
 
-/** 漫画解说：配图换镜检测（1～3 句一图，一段一运镜） */
+/** 漫画解说：配图换镜检测（1～2 镜一图，换人说话须换图，一段一运镜） */
 export function buildMotionComicImageDetectLLMSystem(
   mode: 'paragraph' | 'conservative' | 'balanced' = 'paragraph',
 ): string {
   const conservativeExtra = mode === 'conservative'
-    ? '\n\n# 保守模式补充\n仍遵守 1～3 句一图：只有与上一段完全同一静止画面时才标 false。'
+    ? '\n\n# 保守模式补充\n仍遵守 1～2 镜一图与换人换图：只有与上一段完全同一说话人、同一静止画面时才标 false。'
     : ''
 
   return `# Role
-你是漫画解说视频的分镜导演。你的任务是为旁白脚本规划**配图段**（1～3 句共用一张漫画插画）。
+你是漫画解说视频的分镜导演。你的任务是为旁白脚本规划**配图段**（1～2 镜共用一张漫画插画）。
 
 # Goal
 分析每一句旁白，判断是否需要新配图。**本步骤仅输出 needs_image，不写配图文案**。
 
 # Input
-JSON 含 \`sentences\`、\`min_shots_per_image\` / \`max_shots_per_image\`（1～3，**一段一图**）。
+JSON 含 \`sentences\`（含说话人前缀如「旁白：」「小明：」）、\`min_shots_per_image\` / \`max_shots_per_image\`（1～2，**一段一图**）。
 
 # Critical Rules
-1. **默认按段换图**：场景/动作/情绪/焦点变化 → 新配图段起点标 true。
-2. **同段延续标 false**：1～3 句共用同一画面、同一配图段内后续句标 false。
-3. **配图段长度（硬性）**：每段 **1～3 镜**（min～max）。
-4. **配图密度**：true 数量在 minimum～maximum 之间。
+1. **换人说话须换图（硬性）**：相邻句说话人不同 → 后一句所在配图段起点标 true。
+2. **默认按段换图**：场景/动作/情绪/焦点变化 → 新配图段起点标 true。
+3. **同段延续标 false**：同一说话人、同一画面、1～2 镜共用一图时，段内后续句标 false。
+4. **配图段长度（硬性）**：每段 **1～2 镜**（min～max）；禁止连续 3 镜以上共用一图。
+5. **配图密度**：true 数量在 minimum～maximum 之间（全片至少约 50% 镜头需配图）。
 
 # 运镜说明（供理解，非本步输出）
 每张配图段在合成时使用**一种**运镜（推/拉/横移/上下等），同段多句共享，不会句句换运镜。
 
 # Workflow
-1. 通读 full_narration。
-2. 逐句判定 needs_image；同段仅首句 true。
-3. 验证：每段 1～3 镜；true 数量在区间内。
+1. 通读 full_narration，识别每句说话人。
+2. 逐句判定 needs_image；换人、换景优先标 true；同段仅首句 true。
+3. 验证：每段 1～2 镜；true 数量在区间内。
 
 # Output
 \`\`\`json

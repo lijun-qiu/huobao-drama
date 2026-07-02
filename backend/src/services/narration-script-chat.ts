@@ -1,9 +1,10 @@
 import { eq } from 'drizzle-orm'
-import { parseProductionMode, isMotionComicMode } from '../constants/production-mode.js'
+import { parseProductionMode, isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 import { MOTION_COMIC_SCRIPT_CHAT_SYSTEM } from '../constants/motion-comic.js'
 import { db, schema } from '../db/index.js'
 import { resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel } from '../constants/text-models.js'
 import { ensureScriptEmphasisInBody } from '../utils/subtitle-emphasis.js'
+import { sanitizeMotionComicScript, lineHasSpeakerPrefix } from '../utils/motion-comic-script.js'
 import { callTextChatMessages, streamTextChatMessages, type TextChatMessage } from './text-chat.js'
 import { logTaskProgress, logTaskWarn } from '../utils/task-logger.js'
 import { parseNarrationScript } from './narration-breakdown.js'
@@ -55,7 +56,12 @@ const NARRATION_SCRIPT_CHAT_SYSTEM = [
   '- 镜头语言（特写、推镜）、markdown 标题、分点列表、「大家好」「点赞关注」。',
   '',
   '用户要求写完整稿时，只输出解说稿正文（第一行即片头 hook），且须满足【篇幅】3000～10000 字。',
-  '用户要求修改时，输出修改后的完整稿或明确说明改动了哪段；若仅改人称，须整稿统一处理。',
+  '',
+  '【多轮改稿】',
+  '- 支持多轮：用户可在后续消息说「改第二段」「补内心戏」「缩短到5000字」等，须结合【当前台本】或对话历史中的上一版完整稿修改。',
+  '- 改稿类请求（含补说话人/改人称/去片尾/扩写/缩写）：先可一句极短确认（≤20字），空一行后**必须输出修改后的完整稿**，不要只解释改了哪段、不要只给 diff。',
+  '- 若【当前台本】已有内容而用户未贴新稿，在其基础上改，勿另起新故事。',
+  '',
   '闲聊、选题讨论时可正常对话，不必强行输出整稿。',
 ].join('\n')
 
@@ -125,6 +131,69 @@ function buildEpisodeContext(episodeId: number): string {
   return lines.length ? `【当前项目】\n${lines.join('\n')}` : ''
 }
 
+/** 剧本聊天上下文：带入「直接输入」/已保存文案，支持多轮改稿 */
+export function buildScriptChatContextBlock(episodeId: number, scriptOverride?: string): string {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return ''
+
+  const motionComic = isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+  const script = String(scriptOverride || ep.scriptContent || ep.content || '').trim()
+  const parts = [buildEpisodeContext(episodeId)]
+
+  if (!script) {
+    parts.push('', `【当前台本】尚未保存。用户可在「直接输入」粘贴后切回 AI 对话，或在对话里直接贴全文。`)
+    return parts.filter(Boolean).join('\n')
+  }
+
+  const { title, body } = parseNarrationScript(script)
+  const charCount = script.replace(/\s/g, '').length
+  const bodyLines = body.split('\n').map(l => l.trim()).filter(Boolean)
+  const prefixedRatio = bodyLines.length
+    ? bodyLines.filter(lineHasSpeakerPrefix).length / bodyLines.length
+    : 0
+
+  parts.push(
+    '',
+    `【当前台本】约 ${charCount} 字（来自已保存文案 / 直接输入，多轮改稿请在此基础上修改）`,
+  )
+  if (title) {
+    parts.push(`片头：${title.slice(0, 160)}${title.length > 160 ? '…' : ''}`)
+  }
+  if (motionComic && prefixedRatio < 0.5) {
+    parts.push('格式提示：当前稿多数行无「说话人：」前缀；若用户要求补说话人/补人名，须输出带前缀的完整稿。')
+  }
+
+  // 完整带入，便于「补人名」等多轮改稿；超长时截断并说明
+  const maxChars = 24_000
+  if (script.length <= maxChars) {
+    parts.push('', '--- 台本全文 ---', script, '--- 台本结束 ---')
+  } else {
+    parts.push(
+      '',
+      '--- 台本节选（前段） ---',
+      script.slice(0, maxChars),
+      '…（后文略，完整内容见对话历史中用户/助手消息）',
+      '--- 节选结束 ---',
+    )
+  }
+
+  return parts.join('\n')
+}
+
+function looksLikeScriptChatDraftReply(text: string): boolean {
+  const trimmed = String(text || '').trim()
+  if (!trimmed) return false
+  const charCount = trimmed.replace(/\s/g, '').length
+  if (charCount < 180) return false
+  const lines = trimmed.split('\n').map(l => l.trim()).filter(Boolean)
+  if (lines.length < 4) return false
+  if (/^今天体验的人生剧本是/m.test(trimmed)) return true
+  if (/^(?:剧中\s*[:：]\s*)?(?:本期|本集)?故事\s*[:：]/m.test(trimmed)) return true
+  if (lines.filter(lineHasSpeakerPrefix).length >= 3) return true
+  const { body } = parseNarrationScript(trimmed)
+  return body.replace(/\s/g, '').length >= 150
+}
+
 function sanitizeChatTurns(messages: NarrationScriptChatTurn[]): NarrationScriptChatTurn[] {
   return (messages || [])
     .map(m => ({
@@ -135,11 +204,21 @@ function sanitizeChatTurns(messages: NarrationScriptChatTurn[]): NarrationScript
     .slice(-24)
 }
 
+function finalizeMotionComicScriptReply(reply: string, episodeId: number): string {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return reply
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  if (!isMotionComicMode(parseProductionMode(drama?.metadata))) return reply
+  if (!looksLikeScriptChatDraftReply(reply)) return reply.trim()
+  return sanitizeMotionComicScript(reply, { ensureSpeakers: true })
+}
+
 function buildNarrationScriptChatMessages(params: {
   episodeId: number
   messages: NarrationScriptChatTurn[]
   textModel?: string | null
   textThinking?: boolean
+  script?: string
 }) {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, params.episodeId)).all()
   if (!ep) throw new Error('集不存在')
@@ -151,7 +230,7 @@ function buildNarrationScriptChatMessages(params: {
 
   const textModel = resolveNarrationScriptChatTextModel(params.textModel)
   const textThinking = resolveEpisodeTextThinking(ep, params.textThinking)
-  const context = buildEpisodeContext(params.episodeId)
+  const context = buildScriptChatContextBlock(params.episodeId, params.script)
   const systemPrompt = resolveScriptChatSystem(params.episodeId)
 
   const apiMessages: TextChatMessage[] = [
@@ -171,6 +250,7 @@ export async function streamChatNarrationScript(
     messages: NarrationScriptChatTurn[]
     textModel?: string | null
     textThinking?: boolean
+    script?: string
   },
   onDelta: (delta: string, full: string) => void,
   signal?: AbortSignal,
@@ -198,7 +278,7 @@ export async function streamChatNarrationScript(
   )
 
   return {
-    reply: reply.trim(),
+    reply: finalizeMotionComicScriptReply(reply.trim(), params.episodeId),
     model: textModel,
     text_thinking: textThinking,
   }
@@ -209,6 +289,7 @@ export async function chatNarrationScript(params: {
   messages: NarrationScriptChatTurn[]
   textModel?: string | null
   textThinking?: boolean
+  script?: string
 }) {
   const { textModel, textThinking, apiMessages, turns } = buildNarrationScriptChatMessages(params)
 
@@ -230,7 +311,7 @@ export async function chatNarrationScript(params: {
   if (!reply) throw new Error('AI 未返回内容')
 
   return {
-    reply,
+    reply: finalizeMotionComicScriptReply(reply, params.episodeId),
     model: textModel,
     text_thinking: textThinking,
   }

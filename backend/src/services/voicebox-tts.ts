@@ -15,7 +15,7 @@ const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../
 const VOICEBOX_BASE_URL = (process.env.VOICEBOX_BASE_URL || 'http://127.0.0.1:17493').replace(/\/$/, '')
 const VOICEBOX_TIMEOUT_MS = Number(process.env.VOICEBOX_TIMEOUT_MS || 600_000)
 const VOICEBOX_HEALTH_TIMEOUT_MS = Number(process.env.VOICEBOX_HEALTH_TIMEOUT_MS || 15_000)
-const VOICEBOX_CONCURRENCY = Math.max(1, Number(process.env.VOICEBOX_CONCURRENCY || 3))
+const VOICEBOX_CONCURRENCY = Math.max(1, Number(process.env.VOICEBOX_CONCURRENCY || 4))
 
 export interface VoiceboxProfile {
   id: string
@@ -181,6 +181,58 @@ export interface VoiceboxPresetVoice {
 
 const VOICEBOX_PROFILE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const PRESET_REF_PREFIX = 'preset:'
+const CHINESE_KOKORO_PRESET_RE = /^z[fm]_/i
+
+export function parseVoiceboxPresetRef(voiceId?: string | null): { engine: string; presetVoiceId: string } | null {
+  const raw = String(voiceId || '').trim()
+  if (!raw.startsWith(PRESET_REF_PREFIX)) return null
+  const parts = raw.split(':')
+  const engine = parts[1]
+  const presetVoiceId = parts.slice(2).join(':')
+  if (!engine || !presetVoiceId) return null
+  return { engine, presetVoiceId }
+}
+
+export function isChineseVoiceboxLanguage(language?: string | null): boolean {
+  const lang = String(language || '').trim().toLowerCase()
+  return lang === 'zh' || lang === '中文'
+}
+
+/** Kokoro 中文 preset 为 zf_* / zm_*；am_/af_* 等会把中文台词读成英文 */
+export function isChineseCapableKokoroPreset(presetVoiceId?: string | null): boolean {
+  return CHINESE_KOKORO_PRESET_RE.test(String(presetVoiceId || '').trim())
+}
+
+export function isChineseCapableVoiceboxVoice(
+  voiceId?: string | null,
+  meta?: Pick<VoiceboxProfile, 'preset_engine' | 'preset_voice_id' | 'language' | 'voice_type'> | null,
+): boolean {
+  const presetRef = parseVoiceboxPresetRef(voiceId)
+  if (presetRef?.engine === 'kokoro') {
+    return isChineseCapableKokoroPreset(presetRef.presetVoiceId)
+  }
+  if (meta?.preset_engine === 'kokoro') {
+    return isChineseCapableKokoroPreset(meta.preset_voice_id)
+  }
+  if (meta?.voice_type === 'cloned') {
+    return isChineseVoiceboxLanguage(meta.language)
+  }
+  return isChineseVoiceboxLanguage(meta?.language)
+}
+
+export function textPrefersChineseTtsLanguage(text: string): boolean {
+  const raw = String(text || '')
+  const cjk = (raw.match(/[\u4e00-\u9fff]/g) || []).length
+  if (cjk >= 2) return true
+  const latin = (raw.match(/[A-Za-z]/g) || []).length
+  return cjk > 0 && cjk >= latin
+}
+
+export function resolveTtsLanguageForText(text: string, profileLanguage?: string | null): string {
+  if (textPrefersChineseTtsLanguage(text)) return 'zh'
+  const lang = String(profileLanguage || 'zh').trim()
+  return isChineseVoiceboxLanguage(lang) ? 'zh' : (lang || 'zh')
+}
 
 const QWEN_CUSTOM_VOICE_HINTS: Record<string, string> = {
   Vivian: '明快略尖的年轻女声',
@@ -252,6 +304,7 @@ export type VoiceboxVoiceOption = {
   description: string[]
   sample_count: number
   preset_engine?: string
+  preset_voice_id?: string
   supports_instruct?: boolean
   model_ready?: boolean
   model_hint?: string
@@ -279,6 +332,7 @@ export async function listVoiceboxVoiceOptions(modelSize?: VoiceboxModelSize): P
       description: p.description ? [p.description] : [],
       sample_count: p.sample_count ?? 0,
       preset_engine: p.preset_engine || undefined,
+      preset_voice_id: p.preset_voice_id || undefined,
       supports_instruct: p.preset_engine === 'qwen_custom_voice',
       model_ready: modelState.ready,
       model_hint: modelState.hint,
@@ -303,6 +357,7 @@ export async function listVoiceboxVoiceOptions(modelSize?: VoiceboxModelSize): P
           description: [`${engineLabel} 内置${hint ? ` · ${hint}` : ''}`],
           sample_count: 0,
           preset_engine: engine,
+          preset_voice_id: v.voice_id,
           supports_instruct: engine === 'qwen_custom_voice',
           model_ready: modelState.ready,
           model_hint: modelState.hint,
@@ -372,6 +427,7 @@ export async function generateVoiceboxTTS(
   }
   const resolvedModelSize = modelState.modelSize
   if (!lang) lang = resolveProfileLanguage(resolvedProfileId, profiles)
+  lang = resolveTtsLanguageForText(trimmed, lang)
 
   const styleInstructRaw = resolveVoiceboxInstruct(instruct)
   const styleInstruct = voiceboxProfileSupportsInstruct(profileMeta) ? styleInstructRaw : undefined

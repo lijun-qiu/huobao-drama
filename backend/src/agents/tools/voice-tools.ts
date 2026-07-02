@@ -101,7 +101,9 @@ export function createVoiceTools(episodeId: number, dramaId: number) {
 function inferGender(name: string, desc: unknown) {
   const description = Array.isArray(desc) ? desc.join(' ') : ''
   const text = `${name} ${description}`
-  if (/[男|青年|大爷|学长|boy|man|male]/i.test(text)) return '男声'
-  if (/[女|少女|御姐|奶奶|girl|woman|female]/i.test(text)) return '女声'
+  if (/(?:^|[\s:/_-])male(?:[-_]|$)/i.test(text)) return '男声'
+  if (/(?:^|[\s:/_-])female(?:[-_]|$)/i.test(text)) return '女声'
+  if (/(男|青年|大爷|学长|\bboy\b|\bman\b|\bmale\b)/i.test(text)) return '男声'
+  if (/(女|少女|御姐|奶奶|\bgirl\b|\bwoman\b|\bfemale\b)/i.test(text)) return '女声'
   return '中性'
 }

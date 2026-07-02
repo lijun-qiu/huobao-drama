@@ -133,6 +133,60 @@ export function buildNarrationImageMeta(
   })
 }
 
+/** 是否已写入配图换镜检测结果（① 检测配图） */
+export function storyboardHasImageDetectMarks(meta: NarrationImageMeta): boolean {
+  return typeof meta.paragraph_index === 'number'
+    || !!meta.scene_content
+    || (meta.narration_lines?.length ?? 0) > 0
+    || (meta.image_narration_lines?.length ?? 0) > 0
+    || (meta.narration_image_mode === 'new' && !meta.narration_image_source)
+}
+
+const IMAGE_DETECT_META_KEYS = [
+  'scene_content',
+  'narration_lines',
+  'image_narration_lines',
+  'paragraph_index',
+  'paragraph_layout',
+  'image_prompt_source',
+  'image_prompt_llm_raw',
+] as const
+
+/** 清除配图换镜检测 meta，保留旁白拆镜与已有配图来源标记 */
+export function buildNarrationImageMetaAfterDetectClear(
+  referenceImages: string | null | undefined,
+): { changed: boolean; referenceImages: string } {
+  const meta = parseNarrationImageMeta(referenceImages)
+  const hadDetect = storyboardHasImageDetectMarks(meta)
+  const hadPromptMeta = !!meta.image_prompt_source || !!meta.image_prompt_llm_raw
+  if (!hadDetect && !hadPromptMeta) {
+    return {
+      changed: false,
+      referenceImages: referenceImages || buildNarrationImageMeta('inherit'),
+    }
+  }
+
+  let raw: Record<string, unknown> = {}
+  if (referenceImages) {
+    try {
+      const parsed = JSON.parse(referenceImages)
+      if (parsed && typeof parsed === 'object') raw = { ...(parsed as Record<string, unknown>) }
+    } catch {
+      // ignore
+    }
+  }
+
+  for (const key of IMAGE_DETECT_META_KEYS) delete raw[key]
+
+  const mode = meta.narration_image_source ? 'new' : 'inherit'
+  raw.narration_image_mode = mode
+  if (mode === 'inherit' && meta.narration_shot_type !== 'title' && typeof meta.body_sentence_index === 'number') {
+    raw.narration_tts_mode = 'new'
+  }
+
+  return { changed: true, referenceImages: JSON.stringify(raw) }
+}
+
 export function patchNarrationImageMeta(
   referenceImages: string | null | undefined,
   patch: Partial<Omit<NarrationImageMeta, 'narration_image_mode'>>,

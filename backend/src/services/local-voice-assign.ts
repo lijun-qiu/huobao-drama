@@ -3,7 +3,8 @@ import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { EDGE_VOICE_OPTIONS } from './edge-tts-local.js'
 import { parseDialogueForTTS } from './narration-tts.js'
-import { listVoiceboxVoiceOptions } from './voicebox-tts.js'
+import { ensureDramaNarratorCharacter } from './narration-characters.js'
+import { listVoiceboxVoiceOptions, isChineseCapableVoiceboxVoice, parseVoiceboxPresetRef } from './voicebox-tts.js'
 import { resolveVoiceboxModelSize, type VoiceboxModelSize } from '../utils/voicebox-model-size.js'
 import { logTaskProgress, logTaskSuccess } from '../utils/task-logger.js'
 
@@ -14,16 +15,18 @@ export type LocalVoiceCandidate = {
   voice_name: string
   provider: 'voicebox' | 'edge'
   gender: VoiceGender
-  source: 'kokoro' | 'edge'
+  source: 'kokoro' | 'edge' | 'cloned'
 }
 
 export function inferVoiceGenderFromLabel(label: string): VoiceGender {
   const text = String(label || '').trim()
   if (!text) return 'neutral'
-  if (/[女|娘|姐|妹|母|妻|girl|woman|female|xiaoxiao|xiaoyi|晓晓|晓伊|晓北|晓妮|anna|sohee|serena|vivian]/i.test(text)) {
+  if (/(?:^|[\s:/_-])(?:preset:kokoro:)?female(?:[-_]|$)/i.test(text)) return 'female'
+  if (/(?:^|[\s:/_-])(?:preset:kokoro:)?male(?:[-_]|$)/i.test(text)) return 'male'
+  if (/(女|娘|姐|妹|母|妻|少女|御姐|奶奶|晓晓|晓伊|晓北|晓妮|\bgirl\b|\bwoman\b|\bfemale\b|xiaoxiao|xiaoyi|anna|sohee|serena|vivian)/i.test(text)) {
     return 'female'
   }
-  if (/[男|爷|爸|兄|弟|boy|man|male|yunxi|yunjian|yunyang|云希|云扬|云健|uncle|dylan|eric|ryan|aiden|fu]/i.test(text)) {
+  if (/(男|爷|爸|兄|弟|青年|大爷|学长|云希|云扬|云健|\bboy\b|\bman\b|\bmale\b|yunxi|yunjian|yunyang|uncle|dylan|eric|ryan|aiden|fu)/i.test(text)) {
     return 'male'
   }
   return 'neutral'
@@ -66,18 +69,38 @@ function sortCharactersForVoiceAssign<T extends { name: string; role?: string | 
 export async function listLocalCastVoiceCandidates(modelSize?: VoiceboxModelSize): Promise<LocalVoiceCandidate[]> {
   const preferredSize = resolveVoiceboxModelSize(modelSize)
   const kokoro: LocalVoiceCandidate[] = []
+  const cloned: LocalVoiceCandidate[] = []
   try {
     const voiceboxRows = await listVoiceboxVoiceOptions(preferredSize)
     for (const row of voiceboxRows) {
-      if (row.preset_engine !== 'kokoro') continue
       if (row.model_ready === false) continue
-      kokoro.push({
-        voice_id: row.voice_id,
-        voice_name: row.voice_name,
-        provider: 'voicebox',
-        gender: inferVoiceGenderFromLabel(row.voice_name),
-        source: 'kokoro',
-      })
+      const meta = {
+        preset_engine: row.preset_engine,
+        preset_voice_id: row.preset_voice_id || parseVoiceboxPresetRef(row.voice_id)?.presetVoiceId,
+        language: row.language === '中文' ? 'zh' : row.language,
+        voice_type: row.voice_type,
+      }
+      if (row.preset_engine === 'kokoro') {
+        if (!isChineseCapableVoiceboxVoice(row.voice_id, meta)) continue
+        kokoro.push({
+          voice_id: row.voice_id,
+          voice_name: row.voice_name,
+          provider: 'voicebox',
+          gender: inferVoiceGenderFromLabel(`${row.voice_name} ${row.voice_id} ${(row.description || []).join(' ')}`),
+          source: 'kokoro',
+        })
+        continue
+      }
+      if (row.voice_type === 'cloned') {
+        if (!isChineseCapableVoiceboxVoice(row.voice_id, meta)) continue
+        cloned.push({
+          voice_id: row.voice_id,
+          voice_name: row.voice_name,
+          provider: 'voicebox',
+          gender: inferVoiceGenderFromLabel(`${row.voice_name} ${row.voice_id} ${(row.description || []).join(' ')}`),
+          source: 'cloned',
+        })
+      }
     }
   } catch {
     // Voicebox 未运行时仅使用 Edge
@@ -87,11 +110,11 @@ export async function listLocalCastVoiceCandidates(modelSize?: VoiceboxModelSize
     voice_id: v.voice_id,
     voice_name: v.voice_name,
     provider: 'edge' as const,
-    gender: inferVoiceGenderFromLabel(v.voice_name),
+    gender: inferVoiceGenderFromLabel(`${v.voice_name} ${v.voice_id}`),
     source: 'edge' as const,
   }))
 
-  return [...kokoro, ...edge]
+  return [...kokoro, ...cloned, ...edge]
 }
 
 function pickVoiceFromPool(
@@ -107,31 +130,7 @@ function pickVoiceFromPool(
 }
 
 function ensureNarratorCharacter(dramaId: number, episodeId?: number) {
-  const existing = db.select().from(schema.characters).all()
-    .find(c => c.dramaId === dramaId && !c.deletedAt && (c.name === '旁白' || c.role === '旁白'))
-  if (existing) return existing
-
-  const needsNarrator = episodeId
-    ? db.select().from(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId)).all()
-      .some(sb => {
-        if (sb.deletedAt) return false
-        const parsed = parseDialogueForTTS(sb.dialogue)
-        return parsed.speaker === '旁白' || parsed.speaker === '剧中'
-      })
-    : false
-  if (!needsNarrator) return null
-
-  const ts = now()
-  const res = db.insert(schema.characters).values({
-    dramaId,
-    name: '旁白',
-    role: '旁白',
-    description: '过渡叙述与片头叠字',
-    createdAt: ts,
-    updatedAt: ts,
-  }).run()
-  const id = Number(res.lastInsertRowid)
-  return db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()[0] || null
+  return ensureDramaNarratorCharacter(dramaId, episodeId)
 }
 
 export async function assignLocalVoicesToDrama(options: {
@@ -252,6 +251,7 @@ export async function assignLocalVoicesToDrama(options: {
     assigned,
     skipped,
     kokoro_available: kokoroPool.length,
+    cloned_available: candidates.filter(v => v.source === 'cloned').length,
     edge_available: edgePool.length,
     characters: refreshed,
   }

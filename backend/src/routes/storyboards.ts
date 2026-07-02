@@ -10,7 +10,7 @@ import { buildComposeUnitMergedTtsText, findComposeUnitMembers, propagateCompose
 import { formatCharacterDisplayName, resolveStoryboardCharacterIdsForShot } from '../services/narration-characters.js'
 import { DEFAULT_EDGE_VOICE, resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { findCharacterVoiceMeta, isEdgeVoiceId, mapLocalVoiceToEdge, resolveStoryboardLocalTtsInput, type LocalTtsEngine } from '../services/local-tts-resolve.js'
-import { checkVoiceboxHealth, resolveVoiceboxProfileId } from '../services/voicebox-tts.js'
+import { checkVoiceboxHealth, listVoiceboxProfiles, resolveVoiceboxProfileId, isChineseCapableKokoroPreset, isChineseCapableVoiceboxVoice, parseVoiceboxPresetRef, textPrefersChineseTtsLanguage } from '../services/voicebox-tts.js'
 import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.js'
 import {
   purgeStoryboardTtsBeforeRegenerate,
@@ -402,7 +402,32 @@ app.post('/:id/generate-tts', async (c) => {
         )
       }
       ttsVoice = ttsEngine === 'voicebox'
-        ? await resolveVoiceboxProfileId(localInput.voiceInput)
+        ? await (async () => {
+          const voiceInput = localInput.voiceInput
+          const presetRef = parseVoiceboxPresetRef(voiceInput)
+          let capable = true
+          if (presetRef?.engine === 'kokoro') {
+            capable = isChineseCapableKokoroPreset(presetRef.presetVoiceId)
+          } else if (/^[0-9a-f-]{36}$/i.test(voiceInput)) {
+            const profiles = await listVoiceboxProfiles()
+            const meta = profiles.find(p => p.id === voiceInput)
+            capable = isChineseCapableVoiceboxVoice(voiceInput, meta)
+          }
+          if (!capable && textPrefersChineseTtsLanguage(pureDialogue)) {
+            ttsEngine = 'edge'
+            edgeFallbackVoice = edgeFallbackVoice || mapLocalVoiceToEdge(
+              findCharacterVoiceMeta(speaker, chars, { isTitleShot: !!isTitleShot }),
+              fallbackVoice,
+            )
+            logTaskWarn('StoryboardAPI', 'voicebox-non-chinese-fallback-edge', {
+              storyboardId: id,
+              voiceInput,
+              fallbackVoice: edgeFallbackVoice,
+            })
+            return edgeFallbackVoice
+          }
+          return resolveVoiceboxProfileId(voiceInput)
+        })()
         : localInput.voiceInput
     }
 

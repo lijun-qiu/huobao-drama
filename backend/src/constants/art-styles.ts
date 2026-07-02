@@ -11,6 +11,7 @@ import {
   MOTION_COMIC_STYLE_SPEC,
   MOTION_COMIC_NEGATIVE_PROMPT,
 } from './motion-comic.js'
+import { isMotionComicMode, resolveEpisodeProductionMode } from './production-mode.js'
 
 export type ArtStyleContext = 'scene' | 'diptych' | 'title' | 'portrait' | 'agent'
 
@@ -32,7 +33,7 @@ export {
   MOTION_COMIC_NEGATIVE_PROMPT,
 } from './motion-comic.js'
 
-/** 解说配图可选画风（独立于项目 drama.style） */
+/** 解说配图可选画风（定妆参考与配图共用） */
 export const NARRATION_IMAGE_STYLE_OPTIONS = [
   { value: NARRATION_MINIMAL_STYLE, label: '简体素人' },
   { value: NARRATION_ANIME_STYLE, label: '动漫风格' },
@@ -42,7 +43,18 @@ export function resolveNarrationImageStyle(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
   if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
-  return NARRATION_MINIMAL_STYLE
+  return NARRATION_ANIME_STYLE
+}
+
+/** 定妆 + 配图统一画风：优先 image_style，漫画解说固定条漫，否则默认动漫 */
+export function resolveEpisodeVisualStyle(
+  episodeId: number,
+  options?: { imageStyle?: string | null; dramaStyle?: string | null },
+): string {
+  const explicit = String(options?.imageStyle || '').trim()
+  if (explicit) return resolveNarrationImageStyle(explicit)
+  if (isMotionComicMode(resolveEpisodeProductionMode(episodeId))) return MOTION_COMIC_STYLE
+  return resolveNarrationImageStyle(options?.dramaStyle)
 }
 
 /** 主人公面部：素体头上的正常卡通脸（参考温馨叙事插画） */
@@ -243,7 +255,7 @@ const NARRATION_BODY_WEIGHT_SLIM_RE =
 const NARRATION_BODY_WEIGHT_OBESE_RE =
   /肥胖|胖子|超重|圆滚滚|圆滚|肚腩|臃肿|更胖|肉会颤|叠起来的肉|体重反弹|创(?:新)?高|显眼的轮廓|勒住.*大腿|办公椅.*吱呀|体型和你差不多|手感好.*暖和|专门定做|正装.*定做/
 const NARRATION_BODY_WEIGHT_CHUBBY_RE =
-  /(?:^|[^不])胖[^子]|偏胖|略胖|体型圆润|圆润的|养得真好|有福气|多吃|体重秤|大瓷碗|吃(?:了|一)肚子/
+  /微胖|丰满|(?:^|[^不])胖[^子]|偏胖|略胖|体型圆润|圆润的|养得真好|有福气|多吃|体重秤|大瓷碗|吃(?:了|一)肚子/
 const NARRATION_BODY_WEIGHT_ANY_RE =
   /肥胖|偏胖|略胖|圆润|圆滚|超重|臃肿|肚腩|瘦削|苗条|躯干[\d.]+\s*份\s*[×xX]\s*[\d.]+\s*份|1\.\d+\s*份宽/
 
@@ -385,6 +397,104 @@ export const NARRATION_ANIME_SCENE_SUFFIX =
 export const NARRATION_ANIME_TEXTURE_LLM_HINT =
   '清晰线稿，赛璐璐平涂与柔和渐变，表情夸张生动，环境陈设有细节，无文字无水印'
 
+/** 动漫/动态漫：统一人物审美（不写胖瘦体型词，只保持正常头身比动漫风） */
+export const NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE = [
+  '【人物审美·硬性】全片统一正常头身比动漫/漫画人物（以【画风规格】为准），禁止写「微胖」「肥胖」「瘦削」「腰腹略鼓」「肩背厚实」等胖瘦体型词；',
+  '禁止写「躯干X份高×Y份宽」「三头身」「圆头直径」等素体份数计量；',
+  '【画面主体】只写发型、表情、服装、姿态与道具，不要额外描写肩腰肚胖瘦；情绪只改表情（汗珠/脸红/眼神）。',
+].join(' ')
+
+/** @deprecated 动漫/动态漫不再按档位写体型，仅保留类型供素体模式使用 */
+export type AnimeBodyBuild = 'slim' | 'average' | 'stocky' | 'chubby' | 'obese'
+
+/** @deprecated 动漫/动态漫配图不再注入胖瘦体型描述 */
+export const NARRATION_ANIME_BODY_DESCRIPTORS: Record<AnimeBodyBuild, string> = {
+  slim: '偏瘦匀称身材，肩窄腰直，腹部平坦，四肢修长',
+  average: '标准匀称身材，肩腰比例正常，腹部平坦，体态健康',
+  stocky: '敦实健壮身材，肩背略宽，腰腹紧实，四肢有力',
+  chubby: '微胖体型，腰腹略鼓，肩背略厚，四肢偏圆润但不臃肿',
+  obese: '明显肥胖身材，腰腹突出圆润，肩背宽厚，整体体量较大',
+}
+
+/** 动漫配图：写 prompt 用分析流程 */
+export const NARRATION_ANIME_LLM_ANALYSIS_STEPS_PROMPT = [
+  '1) 通读 full_narration（及 previous_episode_narration 若有），把握全文主线、人物关系、地点变迁、核心物件与情绪节奏',
+  '2) 读 prior_narration 与 characters，提取已出现地点、陈设载体、具体物件名、服装款式、人生阶段；同一配图段内主人公服装款式+#hex 主色须锁定一致',
+  '3) 读 narration_lines 确定本配图段叙事锚点；先锁定单帧（位置+姿态+动作+表情），再按动漫模板六维填空',
+  '4) 按 NARRATION_ANIME_SCENE_BODY_TEMPLATE 写出丰富 prompt，结合 full_narration 与 prior_narration；禁止只贴段内字面',
+] as const
+
+/** @deprecated 使用 NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE */
+export const NARRATION_ANIME_BODY_CONSISTENCY_LLM_RULE = NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE
+
+/** @deprecated 动漫/动态漫不再按体重弧线改体型 */
+export const NARRATION_ANIME_BODY_WEIGHT_ARC_LLM_RULE = ''
+
+/** 动漫 / 动态漫：是否用自然语言锁定全片主人公体型（禁止素体份数计量） */
+export function usesNarrationNaturalBodyLock(style?: string | null): boolean {
+  return isNarrationAnimeStyle(style) || isMotionComicStyle(style)
+}
+
+/** 剥离外貌/定妆中的素体份数与胖瘦体型词 */
+export function stripBodyMeasureSpecsFromAppearance(appearance?: string | null): string {
+  return stripProtagonistBodyWeightPhrases(
+    String(appearance || '')
+      .replace(/躯干[\d.]+\s*份\s*高\s*[×xX]\s*[\d.]+\s*份\s*宽(?:\s*（[^）]*）)?/g, '')
+      .replace(/站立总高[\d.]+份[^，,；;\n]*/g, '')
+      .replace(/圆头[\d.]+份[^，,；;\n]*/g, ''),
+  )
+}
+
+/** 从角色设定/全文推断主人公审美锚点（固定正常头身比动漫风，不写胖瘦） */
+export function inferEpisodeAnimeBodyDescriptor(
+  _fullNarration: string[],
+  _characters?: Array<{ appearance?: string | null; role?: string | null; name?: string | null }>,
+): string {
+  return '正常头身比标准动漫身材匀称'
+}
+
+export function inferEpisodeAnimeBodyBuild(fullNarration: string[]): AnimeBodyBuild {
+  const text = fullNarration.join('\n')
+  const arc = detectNarrationWeightArcTheme(fullNarration)
+  if (arc?.active) {
+    if (/肥胖|臃肿|圆滚滚|肚腩|超重/.test(text) && !/瘦下来|减肥成功|瘦身逆袭/.test(text.slice(-800))) {
+      return 'obese'
+    }
+    if (/减肥|瘦下来|瘦身|逆袭/.test(text)) return 'slim'
+    return 'chubby'
+  }
+  if (NARRATION_BODY_WEIGHT_OBESE_RE.test(text)) return 'obese'
+  if (NARRATION_BODY_WEIGHT_CHUBBY_RE.test(text)) return 'chubby'
+  if (NARRATION_BODY_WEIGHT_SLIM_RE.test(text)) return 'slim'
+  if (/健壮|魁梧|敦实|肌肉/.test(text)) return 'stocky'
+  return 'average'
+}
+
+const ANIME_MINIMAL_BODY_MEASURE_RE =
+  /，?躯干\s*[\d.]+\s*份\s*高\s*[×xX]\s*[\d.]+\s*份\s*宽(?:\s*（[^）]*）)?|（腰腹圆润略鼓）|（瘦削匀称腰腹平坦）|（标准匀称）|（明显肥胖[^）]*）|（腰腹微鼓）|（偏胖[^）]*）/g
+
+const NARRATION_BODY_WEIGHT_PHRASE_RE =
+  /(?:微胖|偏胖|略胖|肥胖|臃肿|超重|圆滚|肥硕|瘦削|精瘦|苗条|纤瘦|丰满|壮实|敦实|健壮|魁梧)(?:体型|身材)?[^，,；;）)]{0,24}|(?:身材|体型|体格)[^，,；;\n]{2,40}|(?:腰腹|肩背|腹部|肚腩)[^，,；;）)]{0,16}/g
+
+function stripProtagonistBodyWeightPhrases(text: string): string {
+  return String(text || '')
+    .replace(ANIME_MINIMAL_BODY_MEASURE_RE, '')
+    .replace(NARRATION_BODY_WEIGHT_PHRASE_RE, '')
+    .replace(/，{2,}/g, '，')
+    .replace(/^，|，$/g, '')
+    .trim()
+}
+
+/** 清洗动漫/动态漫 prompt 中误入的胖瘦体型词与素体份数，不注入体型描述 */
+export function normalizeAnimeProtagonistBodyInPrompt(
+  prompt: string,
+  _lockedBody?: string | null,
+): string {
+  return prompt
+    .replace(ANIME_MINIMAL_BODY_MEASURE_RE, '')
+    .replace(/【画面主体[：:]([^】]*)】/g, (_, raw) => `【画面主体：${stripProtagonistBodyWeightPhrases(String(raw))}】`)
+}
+
 /** 按画风取【画风规格】固定正文 */
 export function getNarrationStyleSpecBody(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
@@ -507,7 +617,7 @@ export const NARRATION_ANIME_STYLE_SPEC_LLM_RULE =
 
 /** 动漫风格七维正文模板 */
 export const NARRATION_ANIME_SCENE_BODY_TEMPLATE =
-  '【画风规格：照抄固定文风规格】，【画面主体：无配角时写「一位X期主人公（性别+动漫外貌简述+夸张表情，正常头身比）位于{位置}以{姿态}，身穿#hex款式，无配角」；有配角时写「一位主人公…，一位或几位配角位于{配角位置}（低饱和便装，简化动漫脸型）」；禁止写素体小人/圆点眼/三头身】，【年代场景：时代氛围+具体地点；有载体时写「载体+陈列物件名」】，【核心细节动作：无配角时只写猫/道具/环境互动；有配角时写配角动作（勿重复写主人公姿态）】，【光影色调：光线明暗、时段、冷暖与剧情情绪】，【镜头视角：中景或中近景，电影感叙事构图，朝向主人公整体】，【质感要求：清晰线稿，赛璐璐平涂与柔和渐变，表情夸张生动，无文字无水印】'
+  '【画风规格：照抄固定文风规格】，【画面主体：无配角时写「一位X期主人公（性别+发型+夸张表情，正常头身比）位于{位置}以{姿态}，身穿#hex款式，无配角」；有配角时写「一位主人公…，一位或几位配角位于{配角位置}（低饱和便装，简化动漫脸型）」；禁止写素体小人/圆点眼/三头身/份数计量/胖瘦体型词】，【年代场景：时代氛围+具体地点；有载体时写「载体+陈列物件名」】，【核心细节动作：无配角时只写猫/道具/环境互动；有配角时写配角动作（勿重复写主人公姿态）】，【光影色调：光线明暗、时段、冷暖与剧情情绪】，【镜头视角：中景或中近景，电影感叙事构图，朝向主人公整体】，【质感要求：清晰线稿，赛璐璐平涂与柔和渐变，表情夸张生动，无文字无水印】'
 
 /** 动漫风格 LLM 唯一结构规范 */
 export const NARRATION_ANIME_SIX_DIM_LLM_RULE = [
@@ -516,6 +626,7 @@ export const NARRATION_ANIME_SIX_DIM_LLM_RULE = [
   `【七维正文·严格按序填空】${NARRATION_ANIME_SCENE_BODY_TEMPLATE}`,
   '【单帧一致】写七维前先锁定唯一可画瞬间（主人公位置+姿态+动作）；【画面主体】须写清位置、姿态与动漫表情；【核心细节动作】【镜头视角】须同一瞬间同一姿态；配角须与主人公分句写位置。',
   '【人物规格】主人公与配角均为正常头身比动漫人物，大眼睛带瞳孔高光，表情可夸张（紧张时可画汗珠、脸红、颤抖线）；禁止素体小人、圆点眼、三头身、Q版比例。',
+  NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE,
   NARRATION_MINIMAL_CLOTHING_LLM_RULE,
   NARRATION_FIXTURES_LLM_RULE,
   NARRATION_ATMOSPHERE_LLM_RULE,
@@ -757,10 +868,16 @@ export function buildNarrationParagraphImagePromptLLMSystem(
   const structured = minimal || anime
   const violenceRule = `${NARRATION_VIOLENCE_CONTENT_LLM_RULE}；${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`
 
+  const analysisSteps = minimal
+    ? NARRATION_LLM_ANALYSIS_STEPS_PROMPT
+    : anime
+      ? NARRATION_ANIME_LLM_ANALYSIS_STEPS_PROMPT
+      : NARRATION_LLM_ANALYSIS_STEPS_PROMPT
+
   const shared = [
     `你是影视解说分镜美术指导。拆镜结构已由规则确定，根据整集旁白与全文剧情为每个配图段写${structured ? '中文' : ''} image_prompt，须丰富场景、陈设与动作，不单贴当前段落字面。`,
     '分析流程：',
-    ...NARRATION_LLM_ANALYSIS_STEPS_PROMPT,
+    ...analysisSteps,
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
     NARRATION_FULL_PLOT_ENRICHMENT_LLM_RULE,
     NARRATION_PREVIOUS_EPISODE_LLM_RULE,
@@ -774,7 +891,9 @@ export function buildNarrationParagraphImagePromptLLMSystem(
       : anime
         ? NARRATION_ANIME_SIX_DIM_LLM_RULE
         : NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE,
-    options?.weightArc?.active ? NARRATION_BODY_WEIGHT_ARC_LLM_RULE : '',
+    options?.weightArc?.active && minimal
+      ? NARRATION_BODY_WEIGHT_ARC_LLM_RULE
+      : '',
     violenceRule,
     NARRATION_VEHICLE_LLM_RULE,
     minimal ? NARRATION_LLM_PROMPT_GOOD_BAD_EXAMPLES : '',
@@ -3143,6 +3262,20 @@ export function sanitizeAppearanceForPortrait(appearance?: string | null): strin
   return sanitizeCharacterAppearance(appearance)
 }
 
+/** 非素体定妆：剥离素体小人画风残留，避免动漫/条漫定妆被旧外貌描述污染 */
+export function stripMinimalAppearanceForPortrait(appearance?: string | null): string {
+  let text = stripBodyMeasureSpecsFromAppearance(appearance)
+  if (!text) return ''
+  if (!/素体|圆点眼|三头身|简笔轮廓|正常卡通脸/.test(text)) return text
+  text = text
+    .replace(/白色素体小人主人公|白色素体小人|几位白色素体小人配角|几位白色素体小人|白色圆头素体小人|黑色素体小人/g, ' ')
+    .replace(/正常卡通脸[^，,；;]*/g, ' ')
+    .replace(/两个小圆点眼[^，,；;]*/g, ' ')
+    .replace(/简笔轮廓/g, ' ')
+    .replace(/[，,；;]{2,}/g, '，')
+  return tidyAppearancePunctuation(text)
+}
+
 const SCENE_PROMPT_REPLACEMENTS: Array<[RegExp, string]> = [
   [/黑色素体小人/g, '白色素体小人主人公'],
   [/黑色黑色素体小人/g, '白色素体小人主人公'],
@@ -3505,6 +3638,8 @@ export type FinalizeNarrationPromptOptions = {
   titleBodySentences?: string[]
   /** 主人公定妆，用于规则兜底时对齐人生阶段与姿态 */
   protagonistHints?: NarrationProtagonistHint[]
+  /** 动漫画风：全片锁定主人公自然语言体型 */
+  lockedAnimeProtagonistBody?: string | null
 }
 
 /** 最终清洗配图 prompt：推断【场景】【剧情】并套素体万能模板 */
@@ -3911,7 +4046,11 @@ export function shouldPreserveRawNarrationPrompt(raw?: string | null): boolean {
 }
 
 /** 将 LLM/旧库中的动漫配图 prompt 对齐七维模板 */
-export function coerceAnimeLLMImagePrompt(prompt?: string | null, style?: string | null): string {
+export function coerceAnimeLLMImagePrompt(
+  prompt?: string | null,
+  style?: string | null,
+  options?: { lockedProtagonistBody?: string | null },
+): string {
   let text = ensureNarrationStyleSpecDim(String(prompt || '').trim(), style)
   if (!text) return ''
   text = text.replace(/【([^：:【]+)[：:]([^】]*)】/g, (_, label, body) => {
@@ -3925,6 +4064,7 @@ export function coerceAnimeLLMImagePrompt(prompt?: string | null, style?: string
   if (!/【画风规格[：:]/.test(text) && /【(?:画面主体|年代场景)/.test(text)) {
     text = `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，${text}`
   }
+  text = normalizeAnimeProtagonistBodyInPrompt(text, options?.lockedProtagonistBody)
   return applyMinimalNoClothingGuard(text)
 }
 
@@ -3951,7 +4091,9 @@ export function resolveNarrationImagePrompt(
   const raw = String(prompt || '').trim()
   if (!raw) return ''
   if (isNarrationMinimalStyle(style)) return coerceMinimalLLMImagePrompt(raw)
-  if (isNarrationAnimeStyle(style)) return coerceAnimeLLMImagePrompt(raw, style)
+  if (usesNarrationNaturalBodyLock(style)) {
+    return coerceAnimeLLMImagePrompt(raw, style)
+  }
   return raw
 }
 
@@ -4055,9 +4197,8 @@ export function resolveLLMImagePrompt(
   const raw = String(prompt || '').trim()
   if (!raw) return ''
   if (isNarrationMinimalStyle(style)) return coerceMinimalLLMImagePrompt(raw)
-  if (isNarrationAnimeStyle(style)) return coerceAnimeLLMImagePrompt(raw, style)
-  if (isMotionComicStyle(style) && hasNarrationSixDimStructure(raw)) {
-    return ensureNarrationStyleSpecDim(raw, style)
+  if (usesNarrationNaturalBodyLock(style)) {
+    return coerceAnimeLLMImagePrompt(raw, style)
   }
   return raw
 }

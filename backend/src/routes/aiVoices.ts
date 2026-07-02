@@ -32,6 +32,7 @@ app.get('/local-cast', async (c) => {
   const voices = await listLocalCastVoiceCandidates(modelSize)
   return success(c, {
     kokoro_count: voices.filter(v => v.source === 'kokoro').length,
+    cloned_count: voices.filter(v => v.source === 'cloned').length,
     edge_count: voices.filter(v => v.source === 'edge').length,
     voices: voices.map(v => ({
       voice_id: v.voice_id,

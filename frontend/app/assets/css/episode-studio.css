@@ -1146,6 +1146,13 @@
   line-height: 1.6;
 }
 .narration-hint strong { color: var(--accent); font-weight: 600; }
+.narration-hint-with-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 
 .local-tts-bar {
   display: flex;
@@ -1566,6 +1573,7 @@
 .dub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .dub-copy { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .dub-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dub-voice-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
 .dub-desc { font-size: 13px; line-height: 1.6; color: var(--text-1); }
 .dub-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11px; }
 .dub-foot { display: flex; align-items: center; gap: 10px; padding-top: 8px; border-top: 1px solid rgba(27, 41, 64, 0.08); }

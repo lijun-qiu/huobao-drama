@@ -17,13 +17,15 @@ import { cropEpisodeNarrationImageWatermarks, restoreEpisodeNarrationImageWaterm
 import {
   clearEpisodeComposedVideos,
   clearEpisodeNarrationImages,
+  clearEpisodeNarrationImageDetect,
   clearEpisodeNarrationImagePrompts,
   clearEpisodeNarrationTts,
+  clearEpisodeStoryboards,
 } from '../services/episode-asset-clear.js'
-import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters } from '../services/narration-characters.js'
+import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters, syncMotionComicCharactersFromSpeakers } from '../services/narration-characters.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel } from '../constants/text-models.js'
-import { resolveNarrationImageStyle } from '../constants/art-styles.js'
+import { resolveEpisodeVisualStyle, resolveNarrationImageStyle } from '../constants/art-styles.js'
 import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration, parseOpeningPickedImages, buildOpeningPickedImagesZip, pickAndSaveOpeningImages } from '../services/ffmpeg-opening.js'
 import fs from 'fs'
@@ -246,11 +248,11 @@ app.post('/:id/extract-narration-characters', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c)
 
-  let style = String(body.style || '').trim()
-  if (!style) {
-    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
-    style = drama?.style || 'comic'
-  }
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  const style = resolveNarrationImageStyle(
+    body.style || body.image_style || body.imageStyle
+      || resolveEpisodeVisualStyle(episodeId, { dramaStyle: drama?.style }),
+  )
 
   const script = String(body.script || ep.scriptContent || ep.content || '').trim()
   if (!script) {
@@ -286,11 +288,23 @@ app.post('/:id/link-narration-characters', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c)
 
+  let speakerSync: ReturnType<typeof syncMotionComicCharactersFromSpeakers> | null = null
+  if (isMotionComicMode(resolveEpisodeProductionMode(episodeId))) {
+    speakerSync = syncMotionComicCharactersFromSpeakers(episodeId, ep.dramaId)
+  }
   const linked = linkAllNarrationStoryboardCharacters(episodeId, ep.dramaId)
   return success(c, {
     linked_storyboard_count: linked.linkedStoryboardCount,
     storyboard_count: linked.storyboardCount,
     character_count: linked.characterCount,
+    speaker_sync: speakerSync
+      ? {
+        created: speakerSync.created,
+        linked: speakerSync.linked,
+        unlinked: speakerSync.unlinked,
+        speakers: speakerSync.speakers,
+      }
+      : null,
   })
 })
 
@@ -302,6 +316,9 @@ app.post('/:id/assign-local-voices', async (c) => {
   if (!ep) return notFound(c)
 
   try {
+    if (isMotionComicMode(resolveEpisodeProductionMode(episodeId))) {
+      syncMotionComicCharactersFromSpeakers(episodeId, ep.dramaId)
+    }
     const result = await assignLocalVoicesToDrama({
       dramaId: ep.dramaId,
       episodeId,
@@ -380,6 +397,7 @@ app.post('/:id/narration-script-chat', async (c) => {
     messages,
     textModel: body.text_model ?? body.textModel,
     textThinking: resolveEpisodeTextThinking(ep, body.text_thinking ?? body.textThinking),
+    script: typeof body.script === 'string' ? body.script : undefined,
   }
 
   const accept = String(c.req.header('accept') || '').toLowerCase()
@@ -890,6 +908,21 @@ app.post('/:id/clear-narration-images', async (c) => {
   }
 })
 
+// POST /episodes/:id/clear-narration-image-detect — 清除本集全部配图换镜检测结果
+app.post('/:id/clear-narration-image-detect', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await clearEpisodeNarrationImageDetect(episodeId)
+    if (!result.cleared) return badRequest(c, '本集暂无配图换镜检测分镜可清除')
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
 // POST /episodes/:id/clear-narration-image-prompts — 清除本集全部配图文案（保留检测分段）
 app.post('/:id/clear-narration-image-prompts', async (c) => {
   const episodeId = Number(c.req.param('id'))
@@ -914,6 +947,21 @@ app.post('/:id/clear-narration-tts', async (c) => {
   try {
     const result = await clearEpisodeNarrationTts(episodeId)
     if (!result.cleared) return badRequest(c, '本集暂无配音可清除')
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/clear-storyboards — 清除本集全部分镜（含关联资源）
+app.post('/:id/clear-storyboards', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await clearEpisodeStoryboards(episodeId)
+    if (!result.cleared) return badRequest(c, '本集暂无分镜可清除')
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)
