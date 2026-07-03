@@ -66,17 +66,25 @@ function dataUrlToBlob(dataUrl: string): Blob | null {
 
 function strengthenGptImagePrompt(prompt: string): string {
   const p = prompt || ''
-  const isPortrait = /character reference portrait|character design sheet|定妆|turnaround view/i.test(p)
-  const isMotionComicPortrait = isPortrait && /modern Chinese webtoon comic|manhua illustration|16:9 widescreen character/i.test(p)
+  const isPortrait = /character reference portrait|character design sheet|定妆|turnaround view|三视图/i.test(p)
+  const isThreeViewPortrait = isPortrait && /modern Chinese webtoon comic|manhua illustration|16:9 widescreen character|现代国漫条漫|现代高质量 2D 动漫|动漫三视图|素体小人三视图|白色素体|极简素体|three views front side back|turnaround design sheet/i.test(p)
   const isTitle = /opening background|title overlay|片头|reserved for dynamic title/i.test(p)
 
-  if (isMotionComicPortrait) {
+  if (isThreeViewPortrait) {
+    const isMotionComic = /现代国漫条漫|webtoon comic|粗黑线描|manhua illustration/i.test(p)
+    const isMinimal = /素体小人|白色素体|极简素体|stick figure/i.test(p)
+    const styleLine = isMotionComic
+      ? '现代国漫条漫二维动漫定妆，粗黑线描、平涂赛璐璐、正常头身比、英俊帅气动漫脸型、纯白色背景'
+      : isMinimal
+        ? '极简素体小人定妆，白色简笔轮廓、正常卡通脸圆眼带高光、纯白色背景'
+        : '现代高质量二维动漫定妆，清晰线稿、赛璐璐平涂、正常头身比、英俊帅气动漫脸型、纯白色背景'
+    const faceHint = isMinimal ? '清晰展示正常卡通脸与体型比例' : '清晰展示脸型五官与全身服装'
     return [
-      '【画风强制】现代国漫条漫二维动漫定妆，粗黑线描、平涂赛璐璐、正常头身比、纯色灰背景。',
-      '【画幅强制】16:9横屏宽画幅角色定妆参考图，人物居中，禁止方形竖版海报构图。',
-      '【禁止】像素风、复古滤镜、Q版三头身、3D渲染、厚涂肌理、海报场景、景深背景。',
+      `【画风强制】${styleLine}。`,
+      `【构图强制】16:9横屏三视图定妆参考图（正面+侧面+背面同屏），${faceHint}，禁止单角度半身或灰底。`,
+      '【禁止】像素风、复古滤镜、Q版三头身、3D渲染、厚涂肌理、海报场景、景深背景、仅大头特写、手持道具、拿物品。',
       p,
-      '【再次强调】16:9横屏漫画角色设定图，粗线平涂，不要方形竖版不要像素不要复古滤镜。',
+      `【再次强调】白底三视图${isMinimal ? '素体小人' : '动漫'}角色设定图，${isMinimal ? '正常卡通脸清晰' : '脸型清晰英俊'}，双手自然下垂不拿道具，不要单视角不要灰底不要像素不要复古滤镜。`,
     ].join(' ')
   }
 

@@ -79,7 +79,7 @@ export function resolveSubtitleNarrationFromSentence(sentence: string): string |
 
 /** 旁白字幕强调：分镜 dialogue 中用 **词** 标记，合成时黄色并加大字号 */
 
-export const NARRATION_SUBTITLE_FONT_SIZE = 50
+export const NARRATION_SUBTITLE_FONT_SIZE = 35
 export const NARRATION_EMPHASIS_FONT_DELTA = 5
 export const NARRATION_EMPHASIS_FONT_SIZE = NARRATION_SUBTITLE_FONT_SIZE + NARRATION_EMPHASIS_FONT_DELTA
 export const NARRATION_SUBTITLE_PLAY_RES_X = 1280
@@ -97,8 +97,6 @@ const NARRATION_ASS_LAYOUT_TAG = `{\\an2\\pos(${NARRATION_SUBTITLE_POS_X},${NARR
 const NARRATION_ASS_WHITE_TAG = `{\\fs${NARRATION_SUBTITLE_FONT_SIZE}\\fscx100\\fscy100\\c&HFFFFFF&}`
 /** 布局仍按正文字号，仅 fscx/fscy 放大黄字，避免 \\fs 更大撑高整行 */
 const NARRATION_ASS_EMPHASIS_TAG = `{\\fs${NARRATION_SUBTITLE_FONT_SIZE}\\fscx${NARRATION_EMPHASIS_FONT_SCALE}\\fscy${NARRATION_EMPHASIS_FONT_SCALE}\\c&H0000FFFF&}`
-
-const SUBTITLE_PUNCT_RE = /[，。！？；：、,.!?;:'"''""（）()\[\]《》【】「」『』…—·\-~～]/g
 const EMPHASIS_MARKER_RE = /\*\*(.+?)\*\*/g
 
 export function stripEmphasisMarkers(text: string): string {
@@ -368,23 +366,23 @@ export function validateEmphasisMarkedSentence(original: string, marked: string)
   return stripBannedEmphasisMarkers(stripNumericEmphasisMarkers(limitEmphasisMarkers(clean, 1)))
 }
 
-function stripPunctSegment(text: string): string {
-  return text.replace(SUBTITLE_PUNCT_RE, '').replace(/\s+/g, ' ')
+function normalizeSubtitleSegment(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
 }
 
-/** 去标点但保留 **强调** 标记位置 */
+/** 烧录字幕：保留标点与 **强调**，仅规整空白 */
 export function stripSubtitlePunctuationPreservingEmphasis(text: string): string {
   const parts: string[] = []
   let lastIndex = 0
   let match: RegExpExecArray | null
   const re = new RegExp(EMPHASIS_MARKER_RE.source, 'g')
   while ((match = re.exec(text))) {
-    parts.push(stripPunctSegment(text.slice(lastIndex, match.index)))
-    const inner = stripPunctSegment(match[1]).trim()
+    parts.push(normalizeSubtitleSegment(text.slice(lastIndex, match.index)))
+    const inner = normalizeSubtitleSegment(match[1])
     if (inner) parts.push(`**${inner}**`)
     lastIndex = match.index + match[0].length
   }
-  parts.push(stripPunctSegment(text.slice(lastIndex)))
+  parts.push(normalizeSubtitleSegment(text.slice(lastIndex)))
   return parts.join('').replace(/\s+/g, ' ').trim()
 }
 

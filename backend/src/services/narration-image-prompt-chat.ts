@@ -16,6 +16,7 @@ import {
 } from './narration-image-breakdown-progress.js'
 import { streamTextChatMessages, type TextChatMessage } from './text-chat.js'
 import { logTaskProgress } from '../utils/task-logger.js'
+import { now } from '../utils/response.js'
 import {
   buildPromptChatContextBlock,
   sanitizeImageChatTurns,
@@ -34,6 +35,7 @@ const NARRATION_PROMPT_CHAT_SYSTEM = [
   '- 解读当前各段配图文案就绪情况，解释六维要素是否完整。',
   '- 用户说「开始生成」「补全文案」「重新生成」等时，由系统后台执行 LLM 批量生成；你解读进度与结果。',
   '- 用户要求改某段文案（如「#05 改成夜市全景」），先给出修改建议或完整六维示例，建议重新生成该段或全量生成。',
+  '- 【画面主体】有定妆的角色须写「对照定妆「name·阶段」」；手持物/槟榔等写在【核心细节动作】或【年代场景·陈设】；陈设须写具体物件名勿泛称。',
   '- 不要输出 markdown 代码块包裹的 JSON；用自然语言 + #镜号 说明。',
   '',
   '回复简洁；用 #01 段号 指代配图锚点镜头。',
@@ -149,6 +151,8 @@ export async function streamNarrationImagePromptChat(
         paragraph_count: result.paragraph_count,
         prompts_generated: result.prompts_generated,
         message: promptSummary,
+        generated_at: result.generated_at ?? now(),
+        image_prompt_at: result.image_prompt_at,
       })
     } finally {
       releaseNarrationImageBreakdownJob(params.episodeId)

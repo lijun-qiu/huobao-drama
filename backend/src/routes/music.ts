@@ -60,7 +60,7 @@ app.post('/suggest-description', async (c) => {
       storyboardId: body.storyboard_id ? Number(body.storyboard_id) : undefined,
       storyboard,
     })
-    return success(c, { description })
+    return success(c, { description, generated_at: now() })
   } catch (err: any) {
     logTaskError('MusicAPI', 'suggest-description', { error: err.message })
     return badRequest(c, err.message)

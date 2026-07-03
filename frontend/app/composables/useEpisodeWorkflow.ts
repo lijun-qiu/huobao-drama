@@ -1025,6 +1025,16 @@ export function formatCharacterDisplayName(char: { name?: string | null; variant
   return label ? `${name} · ${label}` : name
 }
 
+/** 定妆卡片副标题：解说主人公固定身份不展示；职业/情节误标也不展示 */
+export function formatCharacterRoleSubtitle(char: { name?: string | null; role?: string | null }) {
+  const role = String(char?.role || '').trim()
+  if (!role || role === '角色') return ''
+  if (/^(男主|女主|主人公|主角)$/.test(role)) return ''
+  if (/[、，,/]|个体户|万元户|老板|店员|职员|患者|店主|工人|学徒|铺主|装修|赌球|沪漂/.test(role)) return ''
+  if (/^主要配角/.test(role)) return role
+  return role
+}
+
 export function getStoryboardCharacterIdsFromShot(sb: any) {
   return sb?.character_ids || sb?.characterIds || []
 }

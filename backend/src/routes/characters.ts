@@ -293,7 +293,7 @@ app.post('/:id/generate-appearance', async (c) => {
       .run()
     const [row] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
     logTaskSuccess('CharacterAppearance', 'generate', { characterId: id, length: appearance.length })
-    return success(c, { appearance, character: toSnakeCase(row) })
+    return success(c, { appearance, character: toSnakeCase(row), generated_at: now() })
   } catch (err: any) {
     logTaskError('CharacterAppearance', 'generate', { characterId: id, error: err.message })
     return badRequest(c, err.message)
@@ -338,7 +338,7 @@ app.post('/:id/recognize-portrait', async (c) => {
       .run()
     const [row] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
     logTaskSuccess('CharacterRecognize', 'portrait', { characterId: id, length: description.length })
-    return success(c, { appearance: merged, recognition: description, character: toSnakeCase(row) })
+    return success(c, { appearance: merged, recognition: description, character: toSnakeCase(row), generated_at: now() })
   } catch (err: any) {
     logTaskError('CharacterRecognize', 'portrait', { characterId: id, error: err.message })
     return badRequest(c, err.message)

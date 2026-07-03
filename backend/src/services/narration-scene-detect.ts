@@ -1597,6 +1597,15 @@ export type ParagraphPromptInput = {
 type CharacterPromptHint = {
   name: string
   appearance?: string | null
+  variant_label?: string | null
+  portrait_label?: string
+  has_portrait?: boolean
+}
+
+function formatCharacterPortraitLabel(name: string, variantLabel?: string | null): string {
+  const stage = String(variantLabel || '').trim()
+  if (!stage || stage === '常态' || stage === '默认') return name
+  return `${name}·${stage}`
 }
 
 function buildFullNarrationForPrompt(options: {
@@ -1760,15 +1769,25 @@ export async function generateParagraphImagePromptsWithLLM(
         const coerced = coerceMinimalCharacterAppearance(variantLabel, ch.appearance)
         return {
           name: ch.name,
+          variant_label: variantLabel,
+          portrait_label: formatCharacterPortraitLabel(ch.name, variantLabel),
+          has_portrait: !!(ch as { imageUrl?: string | null }).imageUrl?.trim(),
           life_stage: variantLabel,
           posture_action: coerced,
           simplified_outfit: coerced,
+          appearance: coerced,
         }
       })
-      : characters.map(ch => ({
-        name: ch.name,
-        appearance: ch.appearance || '',
-      }))
+      : characters.map(ch => {
+        const variantLabel = (ch as { variantLabel?: string | null }).variantLabel || ''
+        return {
+          name: ch.name,
+          variant_label: variantLabel,
+          portrait_label: formatCharacterPortraitLabel(ch.name, variantLabel),
+          has_portrait: !!(ch as { imageUrl?: string | null }).imageUrl?.trim(),
+          appearance: ch.appearance || '',
+        }
+      })
 
     const paragraphOutputHint = episodeHasDiptych
       ? '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；layout=single 按六维输出；layout=diptych 按【左格】【右格】各写完整六维'

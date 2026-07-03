@@ -13,6 +13,19 @@ export const MOTION_COMIC_STYLE = 'motion-comic'
 
 export const MOTION_COMIC_DEFAULT_STYLE = MOTION_COMIC_STYLE
 
+/** 解说动漫 / 漫画解说共用：三视图定妆 */
+export const THREE_VIEW_PORTRAIT_SCENE_CN =
+  '纯白色背景，动漫三视图定妆参考图（正面/侧面/背面同一角色同屏），清晰展示脸型五官与发型，无环境无场景元素'
+
+export const THREE_VIEW_PORTRAIT_PLOT_ANIME_CN =
+  '英俊帅气动漫脸型，五官立体清晰，正常头身比，清晰线稿赛璐璐平涂，三视图全身站姿，服装与标志配饰在各角度均可见'
+
+export const THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN =
+  '白色素体小人，正常卡通脸圆眼带高光，三视图全身站姿，简化年代服装简笔轮廓，各角度可见体型比例与标志道具'
+
+export const THREE_VIEW_PORTRAIT_SCENE_MINIMAL_CN =
+  '纯白色背景，素体小人三视图定妆参考图（正面/侧面/背面同一角色同屏），清晰展示正常卡通脸与体型比例，无环境无场景元素'
+
 /** 解说配图可选画风（定妆参考与配图共用） */
 export const NARRATION_IMAGE_STYLE_OPTIONS = [
   { value: NARRATION_MINIMAL_STYLE, label: '简体素人' },
@@ -328,21 +341,21 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
     scene: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     diptych: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     title: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【场景：浅灰纯色背景，单人全身${NARRATION_PROTAGONIST_BODY}定妆参考图】，【剧情：${NARRATION_PROTAGONIST_EYES}，人生阶段与动作姿态】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【场景：${THREE_VIEW_PORTRAIT_SCENE_MINIMAL_CN}】，【剧情：${THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN}】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     agent: NARRATION_IMAGE_STYLE_CORE,
   },
   [NARRATION_ANIME_STYLE]: {
     scene: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     diptych: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     title: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【片头背景场景】，【主题氛围】，${NARRATION_ANIME_SCENE_SUFFIX}`,
-    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【场景：浅灰纯色背景，单人全身动漫人物定妆参考图】，【剧情：正常头身比，清晰线稿，人生阶段与动作姿态】，${NARRATION_ANIME_SCENE_SUFFIX}`,
+    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【场景：${THREE_VIEW_PORTRAIT_SCENE_CN}】，【剧情：${THREE_VIEW_PORTRAIT_PLOT_ANIME_CN}】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     agent: `${NARRATION_ANIME_STYLE_SPEC_BODY}，禁止Q版三头身、3D渲染、真人照片`,
   },
   [MOTION_COMIC_STYLE]: {
     scene: 'modern Chinese webtoon comic style, bold black outlines, flat cel-shaded colors, normal body proportions, expressive exaggerated faces, manhua illustration, dynamic action lines for fight scenes, cinematic composition, NOT chibi, NOT 3D',
     diptych: 'modern Chinese webtoon comic style, horizontal two-panel before/after action, bold outlines, flat cel colors, normal proportions, manhua illustration',
     title: 'modern Chinese webtoon comic style, atmospheric background, bold outlines, dramatic lighting, no text',
-    portrait: 'modern Chinese webtoon comic character reference, bold black outlines, flat cel colors, normal body proportions, 16:9 widescreen horizontal framing, plain light gray background',
+    portrait: 'modern Chinese webtoon comic character turnaround reference sheet, three views front side back, bold black outlines, flat cel colors, normal body proportions, handsome attractive anime face, clear facial features, 16:9 widescreen horizontal framing, pure white background',
     agent: 'modern Chinese webtoon comic style, bold outlines, flat cel colors, expressive faces, action lines allowed, NOT chibi',
   },
   'short-drama': {

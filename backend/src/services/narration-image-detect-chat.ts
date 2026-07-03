@@ -13,6 +13,7 @@ import {
 } from './narration-image-breakdown-progress.js'
 import { streamTextChatMessages, type TextChatMessage } from './text-chat.js'
 import { logTaskProgress } from '../utils/task-logger.js'
+import { now } from '../utils/response.js'
 import {
   buildDetectChatContextBlock,
   sanitizeImageChatTurns,
@@ -148,6 +149,8 @@ export async function streamNarrationImageDetectChat(
         image_needed_count: result.image_needed_count,
         image_detect_source: result.image_detect_source,
         message: detectSummary,
+        generated_at: result.generated_at ?? now(),
+        image_detect_at: result.image_detect_at,
       })
     } finally {
       releaseNarrationImageBreakdownJob(params.episodeId)

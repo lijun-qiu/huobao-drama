@@ -11,6 +11,13 @@ import {
   MOTION_COMIC_STYLE_SPEC,
   MOTION_COMIC_NEGATIVE_PROMPT,
 } from './motion-comic.js'
+import {
+  THREE_VIEW_PORTRAIT_PLOT_ANIME_CN,
+  THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN,
+  THREE_VIEW_PORTRAIT_SCENE_CN,
+  THREE_VIEW_PORTRAIT_SCENE_MINIMAL_CN,
+  NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
+} from './portrait-reference.js'
 import { isMotionComicMode, resolveEpisodeProductionMode } from './production-mode.js'
 
 export type ArtStyleContext = 'scene' | 'diptych' | 'title' | 'portrait' | 'agent'
@@ -441,7 +448,11 @@ export function stripBodyMeasureSpecsFromAppearance(appearance?: string | null):
     String(appearance || '')
       .replace(/躯干[\d.]+\s*份\s*高\s*[×xX]\s*[\d.]+\s*份\s*宽(?:\s*（[^）]*）)?/g, '')
       .replace(/站立总高[\d.]+份[^，,；;\n]*/g, '')
-      .replace(/圆头[\d.]+份[^，,；;\n]*/g, ''),
+      .replace(/圆头[\d.]+份[^，,；;\n]*/g, '')
+      .replace(/standard\s+torso[\d.\sx×xXwWhH]*(?:\([^)]*\))?/gi, '')
+      .replace(/\btorso\s+\d+(?:\.\d+)?h\s*[×xX]\s*\d+(?:\.\d+)?w\b/gi, '')
+      .replace(/teeth\s+turning\s+black/gi, 'dark-stained teeth')
+      .replace(/牙齿洁白转乌黑/g, '牙齿微黄'),
   )
 }
 
@@ -561,7 +572,7 @@ export const NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE =
 
 /** LLM：【年代场景】陈设（权威表述，纯 AI 输出，无后处理补全） */
 export const NARRATION_FIXTURES_LLM_RULE =
-  '【年代场景·陈设】陈设唯一写入【年代场景】：有摊位/货架/柜台/桌面/展台/铺面等载体时，必须写「载体+上陈列/摆放+具体物件名称」（从 prior_narration、full_narration 或 narration_lines 提取）；句式「{场所}，{载体}上陈列{物件甲}与{物件乙}」；同场所可从 prior 延续仍相关物件，场景/经营形态切换时重设；须与【核心细节动作】展示行为一致；禁止货物/商品/货物堆/各类商品等泛称；无载体则只写场所'
+  '【年代场景·陈设·硬性】陈设唯一写入【年代场景】：有摊位/货架/柜台/桌面/展台/流水线/工位/铺面/墙面等载体时，必须写「{时代氛围}{具体场所}，{载体}上陈列/摆放至少2个具体物件名（含材质或颜色，如绿色传送带、金属零件盒、成堆纸箱、啤酒罐与烟盒、木质算盘）」；同一场所可写多个载体；须从 prior_narration、full_narration 或 narration_lines 提取或合理推断；同场所可从 prior 延续仍相关物件，场景/经营形态切换时重设；须与【核心细节动作】展示行为一致；禁止只写「堆叠的纸箱」「各类工具」「货物/商品/货物堆/各类商品/工具」等泛称；无载体则写场所环境细节（墙面标语、门窗、灯管、地面材质等）至少1项'
 
 /** @deprecated 使用 NARRATION_FIXTURES_LLM_RULE */
 export const NARRATION_FIXTURES_FORMAT_LLM_RULE = NARRATION_FIXTURES_LLM_RULE
@@ -597,6 +608,7 @@ export const NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE = [
   `【万能模板】完整 prompt = ${formatNarrationStyleSpecBracket()} + 场景六维 + ${NARRATION_UNIVERSAL_SCENE_SUFFIX}；${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
   NARRATION_STYLE_SPEC_LLM_RULE,
   `【七维正文·严格按序填空】${NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE}`,
+  NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
   '【单帧一致】写七维前先锁定唯一可画瞬间（主人公位置+姿态+动作）；【画面主体】须同时写清位置与姿态，【核心细节动作】【镜头视角】须同一瞬间同一位置同一姿态，禁止动作维再写与主体不同的姿态；与【年代场景】【光影色调】同空间同氛围；配角须与主人公逗号分句分开写位置，禁止挤在同一括号内。',
   '【无配角单帧】旁白无其他人物时【画面主体】须写「无配角」；禁止同时出现站立展示与躺卧/侧卧/休息两种姿态（文生图易画两个同款主人公）；【画风规格】只写通用三头身比例，勿写「标准站姿」「中心前景站立」等与{姿态}冲突的词',
   NARRATION_PARTIAL_CLOSEUP_LLM_RULE,
@@ -617,13 +629,14 @@ export const NARRATION_ANIME_STYLE_SPEC_LLM_RULE =
 
 /** 动漫风格七维正文模板 */
 export const NARRATION_ANIME_SCENE_BODY_TEMPLATE =
-  '【画风规格：照抄固定文风规格】，【画面主体：无配角时写「一位X期主人公（性别+发型+夸张表情，正常头身比）位于{位置}以{姿态}，身穿#hex款式，无配角」；有配角时写「一位主人公…，一位或几位配角位于{配角位置}（低饱和便装，简化动漫脸型）」；禁止写素体小人/圆点眼/三头身/份数计量/胖瘦体型词】，【年代场景：时代氛围+具体地点；有载体时写「载体+陈列物件名」】，【核心细节动作：无配角时只写猫/道具/环境互动；有配角时写配角动作（勿重复写主人公姿态）】，【光影色调：光线明暗、时段、冷暖与剧情情绪】，【镜头视角：中景或中近景，电影感叙事构图，朝向主人公整体】，【质感要求：清晰线稿，赛璐璐平涂与柔和渐变，表情夸张生动，无文字无水印】'
+  '【画风规格：照抄固定文风规格】，【画面主体：无配角时写「对照定妆「name·阶段」（若无定妆则写一位X期主人公）（性别+发型+夸张表情，正常头身比）位于{位置}以{姿态}，身穿#hex款式，无配角」；有配角时写「一位主人公…，一位或几位配角位于{配角位置}（低饱和便装，简化动漫脸型）」；禁止写素体小人/圆点眼/三头身/份数计量/胖瘦体型词】，【年代场景：时代氛围+具体地点+载体上陈列至少2个具体物件名（含材质或颜色）】，【核心细节动作：无配角时只写猫/道具/环境互动（手持物写在此维）；有配角时写配角动作（勿重复写主人公姿态）】，【光影色调：光线明暗、时段、冷暖与剧情情绪】，【镜头视角：中景或中近景，电影感叙事构图，朝向主人公整体】，【质感要求：清晰线稿，赛璐璐平涂与柔和渐变，表情夸张生动，无文字无水印】'
 
 /** 动漫风格 LLM 唯一结构规范 */
 export const NARRATION_ANIME_SIX_DIM_LLM_RULE = [
   `【动漫模板】完整 prompt = ${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)} + 场景六维 + ${NARRATION_ANIME_SCENE_SUFFIX}；${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
   NARRATION_ANIME_STYLE_SPEC_LLM_RULE,
   `【七维正文·严格按序填空】${NARRATION_ANIME_SCENE_BODY_TEMPLATE}`,
+  NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
   '【单帧一致】写七维前先锁定唯一可画瞬间（主人公位置+姿态+动作）；【画面主体】须写清位置、姿态与动漫表情；【核心细节动作】【镜头视角】须同一瞬间同一姿态；配角须与主人公分句写位置。',
   '【人物规格】主人公与配角均为正常头身比动漫人物，大眼睛带瞳孔高光，表情可夸张（紧张时可画汗珠、脸红、颤抖线）；禁止素体小人、圆点眼、三头身、Q版比例。',
   NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE,
@@ -636,7 +649,7 @@ export const NARRATION_ANIME_SIX_DIM_LLM_RULE = [
 
 /** 动漫风格六维填表示例 */
 export const NARRATION_ANIME_SCENE_BODY_EXAMPLE =
-  `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【画面主体：一位青年期男性主人公（黑色略凌乱短发，大眼睛带高光，脸颊泛红、额头汗珠，表情紧张）位于客厅沙发前以坐姿僵直（身穿#64748b休闲T恤与#334155长裤），无配角】，【年代场景：现代都市客厅，蓝色布艺沙发、木质茶几上摆啤酒罐与烟盒】，【核心细节动作：头部周围画白色颤抖线强调紧张】，【光影色调：室内自然光偏冷，低饱和蓝灰色调】，【镜头视角：中近景平视，镜头朝向主人公面部与上半身】，【质感要求：${NARRATION_ANIME_TEXTURE_LLM_HINT}】`
+  `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【画面主体：对照定妆「男主·青年」（黑色略凌乱短发，大眼睛带高光，脸颊泛红、额头汗珠，表情紧张）位于客厅沙发前以坐姿僵直（身穿#64748b休闲T恤与#334155长裤），无配角】，【年代场景：现代都市客厅，蓝色布艺沙发、木质茶几上摆啤酒罐与烟盒与遥控器等小物】，【核心细节动作：头部周围画白色颤抖线强调紧张】，【光影色调：室内自然光偏冷，低饱和蓝灰色调】，【镜头视角：中近景平视，镜头朝向主人公面部与上半身】，【质感要求：${NARRATION_ANIME_TEXTURE_LLM_HINT}】`
 
 /** @deprecated 已并入 NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE */
 export const NARRATION_FRAME_TRIAD_CONSISTENCY_LLM_RULE = NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE
@@ -910,7 +923,7 @@ export function buildNarrationParagraphImagePromptLLMSystem(
       `2) 填空示例：${example}，${suffix}`,
       '3) layout=single：单张完整场景，禁止 grid/collage/multi-panel/split/storyboard',
       options?.hasDiptych ? `4) ${NARRATION_DIPPTYCH_SIX_PART_LLM_RULE}` : '',
-      options?.hasCharacters ? 'characters 提供人生阶段与外貌，写入【画面主体】主人公段' : '',
+      options?.hasCharacters ? 'characters 提供 portrait_label、has_portrait 与外貌；有定妆时【画面主体】须对照定妆标签，详见【定妆对照】规则' : '',
       '每条 prompt 须以 narration_lines 为锚点、结合 full_narration 与 prior_narration 丰富场景/陈设/动作；不要输出负面提示词',
     ].filter(Boolean)
     return [...shared, ...hardRules, '只输出 JSON，不要解释。'].join('\n')
@@ -1170,14 +1183,14 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
     scene: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     diptych: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     title: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【片头背景场景】，【主题氛围】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
-    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【场景：浅灰纯色背景，单人全身${NARRATION_PROTAGONIST_BODY}定妆参考图】，【剧情：${NARRATION_PROTAGONIST_EYES}，人生阶段与动作姿态】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
+    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE)}，【场景：${THREE_VIEW_PORTRAIT_SCENE_MINIMAL_CN}】，【剧情：${THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN}】，${NARRATION_UNIVERSAL_SCENE_SUFFIX}`,
     agent: NARRATION_IMAGE_STYLE_CORE,
   },
   [NARRATION_ANIME_STYLE]: {
     scene: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     diptych: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     title: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【片头背景场景】，【主题氛围】，${NARRATION_ANIME_SCENE_SUFFIX}`,
-    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【场景：浅灰纯色背景，单人全身动漫人物定妆参考图】，【剧情：正常头身比，清晰线稿，人生阶段与动作姿态】，${NARRATION_ANIME_SCENE_SUFFIX}`,
+    portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【场景：${THREE_VIEW_PORTRAIT_SCENE_CN}】，【剧情：${THREE_VIEW_PORTRAIT_PLOT_ANIME_CN}】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     agent: `${NARRATION_ANIME_STYLE_SPEC_BODY}，${NARRATION_ANIME_STYLE_FORBIDDEN}`,
   },
   'short-drama': {
@@ -3464,21 +3477,21 @@ export function buildMinimalPortraitPostureHint(variantLabel?: string | null): s
   const stage = normalizeNarrationBodyStage(label)
   const spec = formatNarrationBodyStageSpec(stage)
   if (stage === '小孩') {
-    return `${body}主人公，${face}，开心微笑，简化童装轮廓，${spec}，站立，简单活泼姿态`
+    return `${body}主人公，${face}，开心微笑，简化童装轮廓，${spec}，三视图标准站立双手自然下垂`
   }
   if (stage === '少年') {
-    return `${body}主人公，${face}，青涩微笑，简化校服或休闲装轮廓，${spec}，站立或行走，可背书包轮廓`
+    return `${body}主人公，${face}，青涩微笑，简化校服或休闲装轮廓，${spec}，三视图标准站立双手自然下垂`
   }
   if (stage === '青年') {
-    return `${body}主人公，${face}，自信微笑，简化年代服装轮廓，${spec}，站立或行走，可持简单道具轮廓`
+    return `${body}主人公，${face}，自信微笑，简化年代服装轮廓，${spec}，三视图标准站立双手自然下垂`
   }
   if (stage === '中年') {
-    return `${body}主人公，${face}，沉稳表情，简化中年便装轮廓，${spec}，坐或站放松姿态，可手持茶杯轮廓`
+    return `${body}主人公，${face}，沉稳表情，简化中年便装轮廓，${spec}，三视图标准站立双手自然下垂`
   }
   if (stage === '老年') {
-    return `${body}主人公，${face}，慈祥微笑，简化老年便装轮廓，${spec}，坐于凳上，可手持圆扇轮廓`
+    return `${body}主人公，${face}，慈祥微笑，简化老年便装轮廓，${spec}，三视图标准站立双手自然下垂`
   }
-  return `${body}主人公，${face}，中性表情，简化服装轮廓，${spec}，中性站立姿态`
+  return `${body}主人公，${face}，中性表情，简化服装轮廓，${spec}，三视图标准站立双手自然下垂`
 }
 
 function extractBodyWeightAppearanceFragments(raw: string): string[] {

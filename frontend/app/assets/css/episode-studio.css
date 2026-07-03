@@ -1061,6 +1061,19 @@
   margin-bottom: 4px;
 }
 .image-workflow-chat-tabs { margin-bottom: 0; flex-shrink: 0; }
+.image-workflow-chat-tabs .prod-tab {
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  line-height: 1.35;
+}
+.image-workflow-chat-tabs .tab-step-time {
+  display: block;
+  width: 100%;
+  font-size: 10px;
+  font-weight: 400;
+  margin-top: 2px;
+}
+.image-workflow-status .narration-breakdown-stats { gap: 6px; }
 .image-workflow-chat-panel {
   flex: 0 0 auto;
   height: min(400px, 42vh);
@@ -1770,6 +1783,15 @@
   font-size: 11px;
   line-height: 1.45;
   color: var(--error);
+}
+.llm-failed-at {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--error);
+}
+.llm-generated-at {
+  font-size: 11px;
+  line-height: 1.45;
 }
 .prod-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid rgba(27, 41, 64, 0.08); }
 .prod-actions .btn { flex: 1 1 120px; justify-content: center; }

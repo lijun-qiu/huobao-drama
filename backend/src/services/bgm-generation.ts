@@ -31,7 +31,7 @@ import { downloadFile, getAbsolutePath } from '../utils/storage.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 
 /** 镜头合成 / 成片混音：BGM 相对旁白音量 */
-export const BGM_VOICE_MIX_VOLUME = 0.08
+export const BGM_VOICE_MIX_VOLUME = 0.06
 /** 无旁白镜头：BGM 音量 */
 export const BGM_SOLO_VOLUME = 0.18
 

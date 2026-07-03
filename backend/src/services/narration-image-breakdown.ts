@@ -30,6 +30,7 @@ import { loadEpisodeContinuityContext } from './episode-continuity.js'
 import { isMotionComicMode, parseProductionMode } from '../constants/production-mode.js'
 import { buildMotionComicAnchorMotionMeta, buildMotionComicSegmentMotionMeta } from './motion-comic-meta.js'
 import { now } from '../utils/response.js'
+import { llmGeneratedAt } from '../utils/llm-meta.js'
 import { applySubtitleLinesToStoryboards } from './narration-emphasis-apply.js'
 
 function storyboardNarrationSentence(sb: {
@@ -232,7 +233,8 @@ async function runNarrationImagePromptGeneration(
         image_needed_count: allParagraphs.length,
         prompts_generated: allParagraphs.length,
         image_prompt_source: 'llm_raw',
-        image_prompt_at: Date.now(),
+        image_prompt_at: now(),
+        generated_at: llmGeneratedAt(),
         retry_missing_prompts: !!options?.retryMissing,
         prompts_updated: 0,
       }
@@ -325,6 +327,7 @@ async function runNarrationImagePromptGeneration(
           : `已生成 ${allParagraphs.length} 条纯 LLM 配图文案`,
       percent: 100,
       paragraph_count: allParagraphs.length,
+      generated_at: llmGeneratedAt(),
     })
 
     return {
@@ -333,7 +336,8 @@ async function runNarrationImagePromptGeneration(
       image_needed_count: allParagraphs.length,
       prompts_generated: allParagraphs.length,
       image_prompt_source: 'llm_raw',
-      image_prompt_at: Date.now(),
+      image_prompt_at: now(),
+      generated_at: llmGeneratedAt(),
       retry_missing_prompts: !!options?.retryMissing,
       prompts_updated: pendingParagraphs.length,
       paragraphs_retried: options?.retryMissing ? pendingParagraphs.length : undefined,
@@ -656,6 +660,7 @@ export async function detectNarrationImageAnchors(
       percent: 100,
       paragraph_count: paragraphs.length,
       image_detect_source: detectSource,
+      generated_at: llmGeneratedAt(),
     })
 
     return {
@@ -665,9 +670,10 @@ export async function detectNarrationImageAnchors(
       title_image_count: titleImageCount,
       title_hook: titleVisualHook,
       image_detect_source: detectSource,
-      image_detect_at: Date.now(),
+      image_detect_at: now(),
       image_detect_mode: imageDetectMode,
       body_storyboard_count: ctx.orderedStoryboards.length - titleCount,
+      generated_at: llmGeneratedAt(),
     }
   } catch (err: any) {
     const message = String(err?.message || err || '配图换镜检测失败')
@@ -712,5 +718,5 @@ export async function breakdownNarrationImages(
     textModel: options?.textModel,
     textThinking: options?.textThinking,
   })
-  return { ...detect, ...prompts, image_breakdown_at: Date.now() }
+  return { ...detect, ...prompts, image_breakdown_at: now(), generated_at: llmGeneratedAt() }
 }

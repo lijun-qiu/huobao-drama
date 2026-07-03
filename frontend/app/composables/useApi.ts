@@ -137,6 +137,7 @@ export const episodeAPI = {
       model?: string
       text_thinking?: boolean
       breakdown?: Record<string, unknown>
+      generated_at?: string
     } | null = null
     let streamError: Error | null = null
 
@@ -167,6 +168,7 @@ export const episodeAPI = {
           model: payload.model ? String(payload.model) : undefined,
           text_thinking: payload.text_thinking as boolean | undefined,
           breakdown: payload.breakdown as Record<string, unknown> | undefined,
+          generated_at: payload.generated_at != null ? String(payload.generated_at) : undefined,
         }
       }
     }, options?.signal)
@@ -218,6 +220,7 @@ export const episodeAPI = {
       reply: string
       model?: string
       text_thinking?: boolean
+      generated_at?: string
     } | null = null
     let streamError: Error | null = null
 
@@ -239,6 +242,7 @@ export const episodeAPI = {
           reply: String(payload.reply || ''),
           model: payload.model ? String(payload.model) : undefined,
           text_thinking: payload.text_thinking as boolean | undefined,
+          generated_at: payload.generated_at != null ? String(payload.generated_at) : undefined,
         }
       }
     }, options?.signal)
@@ -308,6 +312,7 @@ export const episodeAPI = {
       model?: string
       text_thinking?: boolean
       detect?: { summary?: string }
+      generated_at?: string
     } | null = null
     let streamError: Error | null = null
 
@@ -338,6 +343,7 @@ export const episodeAPI = {
           model: payload.model ? String(payload.model) : undefined,
           text_thinking: payload.text_thinking as boolean | undefined,
           detect: payload.detect as { summary?: string } | undefined,
+          generated_at: payload.generated_at != null ? String(payload.generated_at) : undefined,
         }
       }
     }, options?.signal)
@@ -379,6 +385,7 @@ export const episodeAPI = {
       model?: string
       text_thinking?: boolean
       prompt?: { summary?: string }
+      generated_at?: string
     } | null = null
     let streamError: Error | null = null
 
@@ -409,6 +416,7 @@ export const episodeAPI = {
           model: payload.model ? String(payload.model) : undefined,
           text_thinking: payload.text_thinking as boolean | undefined,
           prompt: payload.prompt as { summary?: string } | undefined,
+          generated_at: payload.generated_at != null ? String(payload.generated_at) : undefined,
         }
       }
     }, options?.signal)

@@ -546,7 +546,7 @@ app.post('/:id/scan-narration-image', async (c) => {
       textModel: body.text_model || body.textModel,
       textThinking: body.text_thinking ?? body.textThinking,
     })
-    return success(c, result)
+    return success(c, { ...result, generated_at: now() })
   } catch (err: any) {
     return badRequest(c, err.message)
   }

@@ -208,14 +208,6 @@ export function getStoryboardVisualSource(sb: {
   return null
 }
 
-/** 烧录字幕用：去掉中英文标点，保留正文与空格 */
-function stripSubtitlePunctuation(text: string): string {
-  return text
-    .replace(/[，。！？；：、,.!?;:'"''""（）()\[\]《》【】「」『』…—·\-~～]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
 function probeMediaDuration(filePath: string): Promise<number> {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(filePath, (err, data) => {

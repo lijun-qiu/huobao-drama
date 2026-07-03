@@ -1,14 +1,11 @@
 import { and, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
+import { llmGeneratedAt } from '../utils/llm-meta.js'
 import {
   artStylePrompt,
-  buildMinimalPortraitPostureHint,
-  buildNarrationPortraitPromptContent,
   coerceMinimalCharacterAppearance,
   detectNarrationWeightArcTheme,
-  formatNarrationBodyWeightSpec,
-  inferNarrationBodyWeightTierFromText,
   coerceMinimalLLMImagePrompt,
   isNarrationMinimalStyle,
   isNarrationAnimeStyle,
@@ -20,12 +17,9 @@ import {
   formatNarrationStyleSpecBracket,
   NARRATION_ANIME_SCENE_SUFFIX,
   NARRATION_ANIME_STYLE,
+  NARRATION_MINIMAL_STYLE,
+  NARRATION_UNIVERSAL_SCENE_SUFFIX,
   appendToNarrationBracket,
-  NARRATION_MINIMAL_CLOTHING_LLM_RULE,
-  NARRATION_MINIMAL_EXPRESSION_LLM_RULE,
-  NARRATION_MINIMAL_BODY_SIZE_SPEC,
-  NARRATION_BODY_STAGE_SIZE_HINTS,
-  NARRATION_BODY_STAGE_SPECS,
   NARRATION_PROTAGONIST_BODY,
   NARRATION_PROTAGONIST_FACE,
   NARRATION_USE_RAW_LLM_PROMPTS,
@@ -35,11 +29,27 @@ import {
   buildMotionComicCharacterExtractSystem,
   isMajorSupportingCharacter,
   isMotionComicStyle,
-  MOTION_COMIC_PORTRAIT_FRAMING,
-  MOTION_COMIC_PORTRAIT_SIZE,
+  MOTION_COMIC_PORTRAIT_PLOT_CN,
   MOTION_COMIC_SCENE_SUFFIX,
   MOTION_COMIC_STYLE,
 } from '../constants/motion-comic.js'
+import {
+  buildNarrationAnimeCharacterAppearanceSystem,
+  buildNarrationAnimeCharacterExtractSystem,
+  buildNarrationMinimalCharacterAppearanceSystem,
+  buildNarrationMinimalCharacterExtractSystem,
+  THREE_VIEW_PORTRAIT_FRAMING,
+  THREE_VIEW_PORTRAIT_FRAMING_MINIMAL,
+  THREE_VIEW_PORTRAIT_PLOT_ANIME_CN,
+  THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN,
+  THREE_VIEW_PORTRAIT_SCENE_CN,
+  THREE_VIEW_PORTRAIT_SCENE_MINIMAL_CN,
+  THREE_VIEW_PORTRAIT_SIZE,
+  THREE_VIEW_PORTRAIT_STYLE_GUARD_ANIME,
+  THREE_VIEW_PORTRAIT_STYLE_GUARD_MINIMAL,
+  THREE_VIEW_PORTRAIT_STYLE_GUARD_MOTION_COMIC,
+  sanitizePortraitPlotForThreeView,
+} from '../constants/portrait-reference.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { getActiveConfig, getTextConfig } from './ai.js'
 import { callTextChat } from './text-chat.js'
@@ -63,6 +73,28 @@ export type NarrationCharacterRow = {
 export function normalizeVariantLabel(label?: string | null): string {
   const raw = String(label || '').trim()
   if (!raw || raw === '常态' || raw === '默认') return ''
+  return raw
+}
+
+/** 提取/落库前规范化 role：解说主人公只保留 男主/女主，禁止职业或跨集情节标签 */
+export function normalizeExtractedCharacterRole(name?: string | null, role?: string | null): string {
+  const n = String(name || '').trim()
+  const raw = String(role || '').trim()
+  if (/^旁白$/.test(n)) return '旁白'
+  if (/^主要配角/.test(raw)) return raw
+  if (/^女主$|^女主人?$/.test(n) || /^女主$|女性主角|女主角/.test(raw)) return '女主'
+  if (/^(男主|主角|我)$/.test(n) || /^(男主|主人公|主角)$/.test(raw)) return '男主'
+  if (/女主|女性主角|女主角/.test(raw)) return '女主'
+  if (/男主|主人公|主角|叙述者/.test(raw) && !/[、，,/]|个体户|万元户|老板|店员|职员|患者|店主|工人|学徒/.test(raw)) {
+    return /女/.test(raw) ? '女主' : '男主'
+  }
+  if (n === '男主' || n === '主角' || n === '我') return '男主'
+  if (n === '女主') return '女主'
+  if (!raw || raw === '角色') return n.includes('女') ? '女主' : '男主'
+  // 职业/情节标签（含顿号、斜杠）一律归并为固定身份
+  if (/[、，,/]|个体户|万元户|老板|店员|职员|患者|店主|工人|学徒|个体|万元|铺主|装修|赌球|沪漂|丈夫|妻子/.test(raw)) {
+    return /女/.test(n + raw) ? '女主' : '男主'
+  }
   return raw
 }
 
@@ -734,16 +766,13 @@ export { callTextChat } from './text-chat.js'
 
 function resolvePortraitFraming(style: string, _appearance: string): string {
   if (isNarrationMinimalStyle(style)) {
-    return [
-      'single black filled stick figure with two small white dot eyes on plain light gray background',
-      'no clothing, no outfit, no shoes, no hat, plain stick figure body only',
-      'simple white dot eyes only on black round head, distinguish by posture and small props, NOT detailed face, NOT realistic portrait, NOT anime face',
-      'NOT movie poster, NOT scenic background, NOT environmental illustration',
-      'NOT pixel art, NOT retro photo filter, NOT dithered shading',
-    ].join(', ')
+    return THREE_VIEW_PORTRAIT_FRAMING_MINIMAL
   }
   if (isMotionComicStyle(style)) {
-    return MOTION_COMIC_PORTRAIT_FRAMING
+    return THREE_VIEW_PORTRAIT_FRAMING
+  }
+  if (isNarrationAnimeStyle(style)) {
+    return THREE_VIEW_PORTRAIT_FRAMING
   }
   return [
     'character design reference sheet for animation production',
@@ -759,18 +788,19 @@ const PORTRAIT_STYLE_GUARD = [
   'FORBIDDEN: pixel art, dithering, 8-bit, retro game, vintage photo filter, nostalgic poster, film grain, CRT noise, cross-hatching',
 ].join(', ')
 
-const MOTION_COMIC_PORTRAIT_STYLE_GUARD = [
-  'CRITICAL ART STYLE: modern Chinese webtoon comic, bold black outlines, flat cel-shaded colors, normal body proportions, 16:9 widescreen character reference',
-  'FORBIDDEN: pixel art, dithering, 8-bit, retro game, vintage photo filter, chibi, 3D render, square portrait crop, vertical poster',
-].join(', ')
+const MOTION_COMIC_PORTRAIT_STYLE_GUARD = THREE_VIEW_PORTRAIT_STYLE_GUARD_MOTION_COMIC
 
 function resolvePortraitStyleGuard(style: string): string {
   if (isMotionComicStyle(style)) return MOTION_COMIC_PORTRAIT_STYLE_GUARD
+  if (isNarrationAnimeStyle(style)) return THREE_VIEW_PORTRAIT_STYLE_GUARD_ANIME
+  if (isNarrationMinimalStyle(style)) return THREE_VIEW_PORTRAIT_STYLE_GUARD_MINIMAL
   return PORTRAIT_STYLE_GUARD
 }
 
 export function resolvePortraitImageSize(style: string): string | undefined {
-  if (isMotionComicStyle(style)) return MOTION_COMIC_PORTRAIT_SIZE
+  if (isMotionComicStyle(style) || isNarrationAnimeStyle(style) || isNarrationMinimalStyle(style)) {
+    return THREE_VIEW_PORTRAIT_SIZE
+  }
   return undefined
 }
 
@@ -855,42 +885,46 @@ export function buildCharacterPortraitPrompt(
     ? 'match reference image art style, line weight, flat cel shading, and color technique ONLY, generate a completely different character per appearance description, do NOT copy face identity or outfit from reference'
     : ''
   if (isNarrationAnimeStyle(normalizedStyle)) {
-    const plot = [
+    const plot = sanitizePortraitPlotForThreeView([
       char.name,
       stage ? `${stage}阶段` : '',
-      appearance || '正常头身比，清晰线稿，生动表情',
+      appearance || THREE_VIEW_PORTRAIT_PLOT_ANIME_CN,
       cleanTags,
-    ].filter(Boolean).join('，')
+    ].filter(Boolean).join('，'))
     return [
       formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE),
-      '【场景：浅灰纯色背景，单人全身动漫人物定妆参考图，无环境无场景元素】',
+      `【场景：${THREE_VIEW_PORTRAIT_SCENE_CN}】`,
       `【剧情：${plot}】`,
       NARRATION_ANIME_SCENE_SUFFIX,
     ].join('，')
   }
   if (isMotionComicStyle(normalizedStyle)) {
-    const plot = [
+    const plot = sanitizePortraitPlotForThreeView([
       char.name,
       stage ? `${stage}阶段` : '',
-      appearance || '正常头身比，粗线平涂，表情生动',
+      appearance || MOTION_COMIC_PORTRAIT_PLOT_CN,
       cleanTags,
-    ].filter(Boolean).join('，')
+    ].filter(Boolean).join('，'))
     return [
       formatNarrationStyleSpecBracket(undefined, MOTION_COMIC_STYLE),
-      '【场景：浅灰纯色背景，单人全身漫画人物定妆参考图，无环境无场景元素】',
+      `【场景：${THREE_VIEW_PORTRAIT_SCENE_CN}】`,
       `【剧情：${plot}】`,
       MOTION_COMIC_SCENE_SUFFIX,
     ].join('，')
   }
   if (minimal) {
-    const actionPlot = coerceMinimalCharacterAppearance(char.variantLabel, appearance)
+    const actionPlot = sanitizePortraitPlotForThreeView(coerceMinimalCharacterAppearance(char.variantLabel, appearance))
     const plot = [
       char.name,
       stage ? `${stage}阶段` : '',
-      actionPlot,
+      actionPlot || THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN,
     ].filter(Boolean).join('，')
-    const scene = `浅灰纯色背景，单人全身${NARRATION_PROTAGONIST_BODY}定妆参考图，无环境无场景元素`
-    return buildNarrationPortraitPromptContent(scene, plot)
+    return [
+      formatNarrationStyleSpecBracket(undefined, NARRATION_MINIMAL_STYLE),
+      `【场景：${THREE_VIEW_PORTRAIT_SCENE_MINIMAL_CN}】`,
+      `【剧情：${plot}】`,
+      NARRATION_UNIVERSAL_SCENE_SUFFIX,
+    ].join('，')
   }
 
   const framing = resolvePortraitFraming(normalizedStyle, `${rawAppearance} ${cleanTags}`)
@@ -1045,32 +1079,20 @@ export async function generateCharacterAppearance(params: {
   const { character, script, style = 'comic', textModel, textThinking = true, contentContext } = params
   const minimal = isNarrationMinimalStyle(style)
   const motionComic = isMotionComicStyle(style)
+  const anime = isNarrationAnimeStyle(style)
   const scriptText = [
     contentContext?.mentionExcerpt,
     script,
     ...(contentContext?.storyboardSnippets || []),
   ].filter(Boolean).join('\n')
   const weightArc = minimal && scriptText.trim() ? detectNarrationWeightArcTheme(scriptText) : null
-  const scriptWeightTier = inferNarrationBodyWeightTierFromText(scriptText)
   logTaskProgress('CharacterAppearance', 'llm-generate-start', { name: character.name, model: getTextConfig(textModel).model })
   const system = minimal
-    ? [
-      '你是解说素体小人项目的角色动作标注助手。',
-      `本项目主人公定妆是「${NARRATION_PROTAGONIST_BODY}，${NARRATION_PROTAGONIST_FACE}」，${NARRATION_MINIMAL_CLOTHING_LLM_RULE}，${NARRATION_MINIMAL_EXPRESSION_LLM_RULE}，通用尺寸：${NARRATION_MINIMAL_BODY_SIZE_SPEC}；人生阶段微调：${NARRATION_BODY_STAGE_SIZE_HINTS}。`,
-      `根据剧本情节，只输出该人生阶段的「${NARRATION_PROTAGONIST_BODY} + 正常卡通脸表情 + 简化年代服装轮廓 + 尺寸比例 + 动作姿态 + 可选简单道具」，20-60 字中文。`,
-      `示例（小孩）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸开心微笑，${NARRATION_BODY_STAGE_SPECS.小孩}，站立活泼姿态`,
-      `示例（少年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸青涩微笑，${NARRATION_BODY_STAGE_SPECS.少年}，站立或行走`,
-      `示例（青年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸自信微笑，简化花衬衫与喇叭裤轮廓，${NARRATION_BODY_STAGE_SPECS.青年}，站立或行走`,
-      `示例（中年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸沉稳表情，简化围裙或便装轮廓，${NARRATION_BODY_STAGE_SPECS.中年}，坐于柜台后手持茶杯轮廓`,
-      `示例（老年）：${NARRATION_PROTAGONIST_BODY}，正常卡通脸慈祥微笑，简化老年便装轮廓，${NARRATION_BODY_STAGE_SPECS.老年}，坐于凳上手持圆扇轮廓`,
-      weightArc
-        ? `【体重弧线】剧本含${weightArc.theme_labels.join('/')}主题：须写体重档位与具象躯干宽高（如 obese 青年期躯干1.0份高×1.30份宽）；参考：${formatNarrationBodyWeightSpec('青年', scriptWeightTier !== 'standard' ? scriptWeightTier : 'obese')}`
-        : '',
-      '禁止：厚涂写实真人面相、复杂印花、English tags',
-      '只输出正文，不要标题、markdown、JSON。',
-    ].filter(Boolean).join('\n')
+    ? buildNarrationMinimalCharacterAppearanceSystem({ weightArc: weightArc ?? undefined })
     : motionComic
     ? buildMotionComicCharacterAppearanceSystem()
+    : anime
+    ? buildNarrationAnimeCharacterAppearanceSystem()
     : [
     '你是影视角色定妆造型设计助手。',
     '必须根据解说稿/剧本中该角色的出场情节、对白、行为来推断外貌，与故事时代、题材、氛围一致。',
@@ -1120,7 +1142,7 @@ export async function generateCharacterAppearance(params: {
     role: character.role,
     variantLabel: character.variantLabel,
   })
-  if (motionComic) return stripBodyMeasureSpecsFromAppearance(finalized).slice(0, 600)
+  if (motionComic || anime) return stripBodyMeasureSpecsFromAppearance(finalized).slice(0, 600)
   return finalized
 }
 
@@ -1164,26 +1186,16 @@ export async function extractNarrationCharacters(
 
     logTaskProgress('NarrationChars', 'llm-extract-start', { episodeId, model: config.model, motionComic: isMotionComicStyle(style) })
 
-      const extractWeightArc = !isMotionComicStyle(style) ? detectNarrationWeightArcTheme(script.slice(0, 12000)) : null
+      const extractWeightArc = !isMotionComicStyle(style) && isNarrationMinimalStyle(style)
+        ? detectNarrationWeightArcTheme(script.slice(0, 12000))
+        : null
       const system = isMotionComicStyle(style)
         ? buildMotionComicCharacterExtractSystem()
-        : [
-        '你是影视解说项目的角色设定师。解说视频采用极简素体小人画风，画面里只需给「主人公」做定妆参考，配角不需要单独定妆。',
-        '规则：',
-        '1) 只提取主人公（男主/女主/主角），不要提取配角（妻子、店员、朋友、提亲者等）',
-        '2) 不要提取「旁白」「解说员」「作者」',
-        '3) 输出字段：name、variant_label、role、appearance、personality',
-        '4) variant_label 表示该条定妆的时期/形态：如 童年、少年、青年、中年、老年；若全篇只有一个时期则留空或填「常态」',
-        '5) 同一主人公若文案出现明显不同人生阶段（回忆、多年后、少年与晚年等），必须拆成多条记录：name 相同，variant_label 不同，appearance 各自独立',
-        '6) 第一人称「我」叙述时，name 用「男主」或「女主」，并按青年/中年/老年等阶段拆分 variant_label',
-        '7) appearance：中英混合，只写人物外貌与服饰（年龄、性别、发型、服装、体型、标志特征、动作道具）；禁止画风/艺术风格/retro/vintage look/pixel/复古风/Q版/条漫；年代只体现在服装发型（如80年代花衬衫、三七分发型），禁止写 "1980s retro style" 或 "retro hairstyle"，应写 "1980s side-part hairstyle"',
-        extractWeightArc
-          ? `7b) 剧本含${extractWeightArc.theme_labels.join('/')}主题：appearance 须写体重档位与具象躯干宽高（如 obese 青年期躯干1.0份高×1.30份宽；逆袭后 slim 0.90份宽），禁止只写标准三头身`
-          : '',
-        '8) 示例 appearance：28岁男性个体户，精干结实。\nEnglish tags: 1980s side-part haircut, floral shirt, bell-bottom pants, aviator sunglasses, bicycle',
-        '9) 合并同一人物同一时期的称呼，不要重复',
-        '只输出 JSON，不要解释。',
-      ].filter(Boolean).join('\n')
+        : isNarrationAnimeStyle(style)
+        ? buildNarrationAnimeCharacterExtractSystem()
+        : isNarrationMinimalStyle(style)
+        ? buildNarrationMinimalCharacterExtractSystem({ weightArc: extractWeightArc ?? undefined })
+        : buildNarrationAnimeCharacterExtractSystem()
 
       const user = JSON.stringify({
         script: script.slice(0, 12000),
@@ -1204,7 +1216,10 @@ export async function extractNarrationCharacters(
           .map((row: any) => ({
             name: String(row?.name || '').trim(),
             variantLabel: normalizeVariantLabel(row?.variant_label ?? row?.variantLabel),
-            role: String(row?.role || '角色').trim(),
+            role: normalizeExtractedCharacterRole(
+              String(row?.name || '').trim(),
+              String(row?.role || '').trim(),
+            ),
             appearance: sanitizeCharacterAppearance(String(row?.appearance || '').trim()),
             personality: String(row?.personality || '').trim(),
           }))
@@ -1258,7 +1273,7 @@ export async function extractNarrationCharacters(
     )
     if (match) {
       const updates: Record<string, any> = { updatedAt: ts }
-      if (row.role && !match.role) updates.role = row.role
+      if (row.role) updates.role = row.role
       if (variantLabel && match.variantLabel !== variantLabel) updates.variantLabel = variantLabel
       if (row.appearance && (!match.appearance || match.appearance.length < row.appearance.length)) {
         updates.appearance = sanitizeCharacterAppearance(row.appearance)
@@ -1273,7 +1288,7 @@ export async function extractNarrationCharacters(
       const res = db.insert(schema.characters).values({
         dramaId,
         name: row.name,
-        role: row.role || '角色',
+        role: row.role || normalizeExtractedCharacterRole(row.name, null),
         variantLabel,
         appearance: sanitizeCharacterAppearance(row.appearance || ''),
         personality: row.personality || '',
@@ -1297,5 +1312,5 @@ export async function extractNarrationCharacters(
     linkedStoryboards: linked.linkedStoryboardCount,
   })
 
-  return { created, updated, archived, characters, linked }
+  return { created, updated, archived, characters, linked, generated_at: llmGeneratedAt() }
 }

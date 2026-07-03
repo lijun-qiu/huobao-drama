@@ -9,6 +9,7 @@ export type NarrationImageBreakdownProgress = {
   batch_count?: number
   paragraph_count?: number
   image_detect_source?: 'llm' | 'balanced' | 'conservative'
+  generated_at?: string
   updated_at: number
   error?: string
 }
@@ -94,6 +95,7 @@ export function updateNarrationImageBreakdownProgress(
     batch_count: patch.batch_count ?? prev?.batch_count,
     paragraph_count: patch.paragraph_count ?? prev?.paragraph_count,
     image_detect_source: patch.image_detect_source ?? prev?.image_detect_source,
+    generated_at: patch.generated_at ?? prev?.generated_at,
     updated_at: Date.now(),
     error: patch.error !== undefined ? patch.error : prev?.error,
   }

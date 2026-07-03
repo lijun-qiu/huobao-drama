@@ -141,6 +141,8 @@ export async function streamNarrationStoryboardChat(
       total_duration: breakdownResult.total_duration,
       emphasis_source: breakdownResult.emphasis_source,
       message: breakdownSummary,
+      generated_at: breakdownResult.generated_at,
+      storyboard_breakdown_at: breakdownResult.storyboard_breakdown_at,
     })
   }
 

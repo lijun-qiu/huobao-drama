@@ -106,6 +106,8 @@
                         <div class="script-chat-thinking-body">{{ msg.thinking }}</div>
                       </div>
                       <div v-if="msg.content" class="script-chat-reply">{{ msg.content }}</div>
+                      <div v-if="msg.role === 'assistant' && msg.failedAt" class="llm-failed-at" style="font-size:11px;margin-top:4px">失败于 {{ formatBreakdownTime(msg.failedAt) }}<template v-if="msg.errorMessage">：{{ msg.errorMessage }}</template></div>
+                      <div v-else-if="msg.role === 'assistant' && msg.generatedAt" class="dim llm-generated-at" style="font-size:11px;margin-top:4px">生成于 {{ formatBreakdownTime(msg.generatedAt) }}</div>
                       <div
                         v-else-if="msg.role === 'assistant' && scriptChatGenerating && idx === scriptChatMessages.length - 1 && msg.thinking"
                         class="dim script-chat-writing-hint"
@@ -628,6 +630,8 @@
                         <div class="script-chat-thinking-body">{{ msg.thinking }}</div>
                       </div>
                       <div v-if="msg.content" class="script-chat-reply">{{ msg.content }}</div>
+                      <div v-if="msg.role === 'assistant' && msg.failedAt" class="llm-failed-at" style="font-size:11px;margin-top:4px">失败于 {{ formatBreakdownTime(msg.failedAt) }}<template v-if="msg.errorMessage">：{{ msg.errorMessage }}</template></div>
+                      <div v-else-if="msg.role === 'assistant' && msg.generatedAt" class="dim llm-generated-at" style="font-size:11px;margin-top:4px">生成于 {{ formatBreakdownTime(msg.generatedAt) }}</div>
                       <div
                         v-else-if="msg.role === 'assistant' && storyboardChatGenerating && idx === storyboardChatMessages.length - 1 && msg.thinking"
                         class="dim script-chat-writing-hint"
@@ -671,11 +675,12 @@
             </div>
           </div>
 
-          <div v-if="isNarrationMode && sbs.length && narrationStoryboardBreakdownPanel" class="narration-breakdown-panel">
+          <div v-if="isNarrationMode && narrationStoryboardBreakdownPanel" class="narration-breakdown-panel">
             <div class="narration-breakdown-head">
               <div>
                 <strong>旁白分镜结果</strong>
-                <span v-if="narrationStoryboardBreakdownPanel.generatedAt" class="dim" style="font-size:11px;margin-left:8px">{{ formatBreakdownTime(narrationStoryboardBreakdownPanel.generatedAt) }}</span>
+                <span v-if="narrationStoryboardBreakdownPanel.failedAt" class="llm-failed-at" style="font-size:11px;margin-left:8px">失败于 {{ formatBreakdownTime(narrationStoryboardBreakdownPanel.failedAt) }}<template v-if="narrationStoryboardBreakdownPanel.errorMessage">：{{ narrationStoryboardBreakdownPanel.errorMessage }}</template></span>
+                <span v-else-if="narrationStoryboardBreakdownPanel.generatedAt" class="dim" style="font-size:11px;margin-left:8px">生成于 {{ formatBreakdownTime(narrationStoryboardBreakdownPanel.generatedAt) }}</span>
               </div>
               <span class="tag dim">旁白 TTS 分镜</span>
             </div>

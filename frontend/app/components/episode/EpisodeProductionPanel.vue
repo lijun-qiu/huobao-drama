@@ -211,10 +211,10 @@
           <div v-else-if="prodTab === 'chars'" class="prod-content">
             <div v-if="isNarrationMode" class="narration-hint">
               <template v-if="isMotionComicMode">
-                <strong>定妆参考：</strong>从漫剧旁白稿提取<strong>主人公与主要配角</strong>；每个角色可单独<strong>上传/清除</strong>定妆图，或顶部一键操作。
+                <strong>定妆参考：</strong>从漫剧旁白稿提取<strong>主人公与主要配角</strong>；白底三视图定妆（正面/侧面/背面），清晰展示脸型；每个角色可单独<strong>上传/清除</strong>定妆图，或顶部一键操作。
               </template>
               <template v-else>
-                <strong>定妆参考：</strong>从解说文案提取角色；每个角色可单独<strong>上传/清除</strong>定妆图，或顶部一键复制/上传/清除。
+                <strong>定妆参考：</strong>从解说文案提取主角；<strong>白底三视图</strong>（正面/侧面/背面）；每个角色可单独<strong>上传/清除</strong>定妆图，或顶部一键复制/上传/清除。
               </template>
             </div>
             <div v-if="isNarrationMode" class="prod-image-model-bar" style="margin-bottom:12px">
@@ -234,7 +234,7 @@
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               </div>
               <div class="empty-title">{{ isMotionComicMode ? '从旁白稿提取角色定妆' : '从解说文案提取主角定妆' }}</div>
-              <div class="empty-desc">{{ isMotionComicMode ? '漫画解说需主人公 + 主要配角 16:9 横屏定妆参考图（正常头身比国漫风）；一次性路人不提取' : '定妆与配图共用上方「画风风格」，默认动漫风格；切换画风后请重新生成定妆' }}</div>
+              <div class="empty-desc">{{ isMotionComicMode ? '漫画解说需主人公 + 主要配角 16:9 横屏三视图定妆（白底、清晰脸型、英俊帅气动漫五官）；一次性路人不提取' : '16:9 白底三视图定妆（正面/侧面/背面）；动漫风格清晰脸型，素体风格清晰卡通脸与体型；切换画风后请重新生成' }}</div>
               <div class="step-empty-actions">
                 <button class="btn btn-primary" :disabled="!localRaw.trim() && !rawContent" @click="doExtractNarrationCharacters">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -242,6 +242,7 @@
                 </button>
                 <button class="btn" @click="addNarrationCharacter">手动添加</button>
               </div>
+              <p v-if="narrationExtractFailedAt" class="llm-failed-at" style="margin-top:12px;text-align:center">失败于 {{ formatBreakdownTime(narrationExtractFailedAt) }}<template v-if="narrationExtractError">：{{ narrationExtractError }}</template></p>
             </div>
             <div v-else-if="isNarrationMode && narrationExtracting" class="step-loading">
               <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
@@ -282,6 +283,8 @@
               <span v-if="chars.length > visualChars.length" class="tag">旁白仅保留声音</span>
               <div class="ml-auto flex gap-1">
                 <button v-if="isNarrationMode && visualChars.length" class="btn btn-sm" :disabled="narrationExtracting" @click="doExtractNarrationCharacters">重新提取</button>
+                <span v-if="narrationExtractFailedAt" class="llm-failed-at" style="font-size:11px;align-self:center">失败于 {{ formatBreakdownTime(narrationExtractFailedAt) }}<template v-if="narrationExtractError">：{{ narrationExtractError }}</template></span>
+                <span v-else-if="narrationExtractGeneratedAt" class="dim" style="font-size:11px;align-self:center">提取于 {{ formatBreakdownTime(narrationExtractGeneratedAt) }}</span>
                 <button v-if="isNarrationMode" class="btn btn-sm" @click="addNarrationCharacter">添加角色</button>
                 <button class="btn btn-sm" :disabled="!visualChars.length" @click="copyAllCharPortraitPrompts">一键复制全部描述词</button>
                 <button class="btn btn-sm" :disabled="!visualChars.length" @click="triggerAllCharImageUpload">一键上传全部（{{ visualChars.length }}）</button>
@@ -308,7 +311,7 @@
                 </div>
                 <div class="asset-body">
                   <div class="asset-name">{{ formatCharacterDisplayName(c) }}</div>
-                  <div class="asset-meta dim">{{ c.role || '角色' }}</div>
+                  <div v-if="formatCharacterRoleSubtitle(c)" class="asset-meta dim">{{ formatCharacterRoleSubtitle(c) }}</div>
                   <textarea
                     class="textarea"
                     rows="3"
@@ -323,6 +326,8 @@
                     :disabled="isPendingCharAppearance(c.id)"
                     @click="generateCharAppearance(c.id)"
                   >{{ isPendingCharAppearance(c.id) ? 'AI 生成中…' : 'AI 生成描述' }}</button>
+                  <span v-if="charAppearanceFailedAt[c.id]" class="llm-failed-at" style="font-size:10px;display:block;margin-top:4px">失败于 {{ formatBreakdownTime(charAppearanceFailedAt[c.id]) }}<template v-if="charAppearanceError[c.id]">：{{ charAppearanceError[c.id] }}</template></span>
+                  <span v-else-if="charAppearanceGeneratedAt[c.id]" class="dim" style="font-size:10px;display:block;margin-top:4px">生成于 {{ formatBreakdownTime(charAppearanceGeneratedAt[c.id]) }}</span>
                   <button
                     v-if="imageModelSupportsReferenceImages(episodeImageModel)"
                     class="btn btn-sm"
@@ -335,6 +340,8 @@
                 <div class="asset-foot">
                   <span :class="['dot', (c.image_url || c.imageUrl) && 'ok', isPendingCharImage(c.id) && 'pending']" />
                   <span class="dim" style="font-size:10px">{{ (c.image_url || c.imageUrl) ? '已生成' : (isPendingCharImage(c.id) ? '生成中' : '待生成') }}</span>
+                  <span v-if="charImageFailedAt[c.id]" class="llm-failed-at" style="font-size:10px;margin-left:4px">失败于 {{ formatBreakdownTime(charImageFailedAt[c.id]) }}<template v-if="charImageError[c.id]">：{{ charImageError[c.id] }}</template></span>
+                  <span v-else-if="resolveCharImageDisplayTime(c)" class="dim" style="font-size:10px;margin-left:4px">定妆于 {{ formatBreakdownTime(resolveCharImageDisplayTime(c)) }}</span>
                   <button class="btn btn-sm ml-auto" :disabled="isPendingCharImage(c.id)" @click="genCharImg(c.id)">{{ isPendingCharImage(c.id) ? '生成中' : '生成' }}</button>
                   <button
                     class="btn btn-sm"
@@ -787,7 +794,7 @@
           <!-- Sub: BGM -->
           <div v-else-if="prodTab === 'bgm'" class="prod-content">
             <div class="narration-hint">
-              <strong>BGM 策略：</strong>默认 <code>suno_music_open</code>（纯器乐）；可选 <code>pixverse-sound-effect</code>（按画面生成环境音，需关联已合成镜头）；也可<strong>上传本地音频</strong>直接使用。BGM 库按<strong>项目</strong>共享。合成时自动与旁白混音（BGM 音量约 8%）。
+              <strong>BGM 策略：</strong>默认 <code>suno_music_open</code>（纯器乐）；可选 <code>pixverse-sound-effect</code>（按画面生成环境音，需关联已合成镜头）；也可<strong>上传本地音频</strong>直接使用。BGM 库按<strong>项目</strong>共享。合成时自动与旁白混音（BGM 音量约 6%）。
             </div>
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ bgmAppliedCount }} 已配 BGM</span>
@@ -832,6 +839,8 @@
                 <button class="btn btn-sm" :disabled="bgmDescGenerating" @click="generateBgmDescription">
                   {{ bgmDescGenerating ? 'AI 生成中…' : 'AI 生成描述' }}
                 </button>
+                <span v-if="bgmDescFailedAt" class="llm-failed-at" style="font-size:11px;align-self:center">失败于 {{ formatBreakdownTime(bgmDescFailedAt) }}<template v-if="bgmDescError">：{{ bgmDescError }}</template></span>
+                <span v-else-if="bgmDescGeneratedAt" class="dim" style="font-size:11px;align-self:center">生成于 {{ formatBreakdownTime(bgmDescGeneratedAt) }}</span>
               </div>
               <div v-if="bgmModel === 'pixverse-sound-effect'" class="dim" style="font-size:12px;margin-top:8px">
                 PixVerse 需关联已合成/有视频的镜头，将按画面生成环境音与音效（4022 网关要求上传 video_media_id）。
@@ -922,6 +931,38 @@
               </button>
             </div>
 
+            <div v-if="narrationImageBreakdownPanel" class="narration-breakdown-panel image-workflow-status" style="margin-bottom:12px">
+              <div class="narration-breakdown-stats" style="margin:0">
+                <span class="tag mono">
+                  ① 检测配图
+                  <strong>{{ narrationImageBreakdownPanel.detectCount }}</strong> 张
+                  <span v-if="narrationImageBreakdownPanel.detectFailedAt" class="llm-failed-at">· 失败于 {{ formatBreakdownTime(narrationImageBreakdownPanel.detectFailedAt) }}<template v-if="narrationImageBreakdownPanel.detectError">：{{ narrationImageBreakdownPanel.detectError }}</template></span>
+                  <span v-else-if="narrationImageBreakdownPanel.detectAt" class="dim">· 检测于 {{ formatBreakdownTime(narrationImageBreakdownPanel.detectAt) }}</span>
+                </span>
+                <span class="tag mono">
+                  ② 配图文案
+                  <strong>{{ narrationImageBreakdownPanel.promptCount }}</strong><template v-if="narrationImageBreakdownPanel.detectCount">/{{ narrationImageBreakdownPanel.detectCount }}</template> 条
+                  <span v-if="narrationImageBreakdownPanel.promptFailedAt" class="llm-failed-at">· 失败于 {{ formatBreakdownTime(narrationImageBreakdownPanel.promptFailedAt) }}<template v-if="narrationImageBreakdownPanel.promptError">：{{ narrationImageBreakdownPanel.promptError }}</template></span>
+                  <span v-else-if="narrationImageBreakdownPanel.promptAt" class="dim">· 文案于 {{ formatBreakdownTime(narrationImageBreakdownPanel.promptAt) }}</span>
+                </span>
+                <span v-if="narrationImageBreakdownPanel.auditFailedAt || narrationImageBreakdownPanel.auditAt" class="tag mono">
+                  ③ 文案检查
+                  <span v-if="narrationImageBreakdownPanel.auditFailedAt" class="llm-failed-at">· 失败于 {{ formatBreakdownTime(narrationImageBreakdownPanel.auditFailedAt) }}<template v-if="narrationImageBreakdownPanel.auditError">：{{ narrationImageBreakdownPanel.auditError }}</template></span>
+                  <span v-else class="dim">· 检查于 {{ formatBreakdownTime(narrationImageBreakdownPanel.auditAt) }}</span>
+                  <template v-if="narrationImageBreakdownPanel.auditShotsWithIssues != null"> · {{ narrationImageBreakdownPanel.auditShotsWithIssues }} 镜有问题</template>
+                </span>
+                <span v-if="narrationImageBreakdownPanel.optimizeAt" class="tag dim">优化于 {{ formatBreakdownTime(narrationImageBreakdownPanel.optimizeAt) }}</span>
+                <span v-if="narrationImageBreakdownPanel.detectLabel" class="tag">{{ narrationImageBreakdownPanel.detectLabel }}</span>
+                <span v-if="narrationImageBreakdownPanel.promptLabel" class="tag">{{ narrationImageBreakdownPanel.promptLabel }}</span>
+                <span v-if="narrationImageBreakdownPanel.diptychCount" class="tag">含 {{ narrationImageBreakdownPanel.diptychCount }} 张两宫格</span>
+                <span v-if="narrationImageBreakdownPanel.detectCount" class="tag dim">约 ¥{{ narrationImageBreakdownPanel.estImageCost }}（{{ narrationImageBreakdownPanel.priceLabel }}）</span>
+              </div>
+              <div v-if="narrationImageBreakdownPanel.detectCount" class="narration-breakdown-steps" style="margin-top:8px">
+                <strong>下一步：</strong>
+                批量生成或上传配图 → 镜头合成 → 导出
+              </div>
+            </div>
+
             <div class="image-workflow-chat-wrap">
               <div class="prod-tabs image-workflow-chat-tabs">
                 <button
@@ -933,6 +974,8 @@
                 >
                   ① 检测配图
                   <span v-if="narrationDetectDisplayCount" class="btn-step-count">{{ narrationDetectDisplayCount }}</span>
+                  <span v-if="narrationImageBreakdownPanel?.detectFailedAt" class="llm-failed-at tab-step-time">失败于 {{ formatBreakdownTime(narrationImageBreakdownPanel.detectFailedAt) }}</span>
+                  <span v-else-if="narrationImageBreakdownPanel?.detectAt" class="dim tab-step-time">检测于 {{ formatBreakdownTime(narrationImageBreakdownPanel.detectAt) }}</span>
                 </button>
                 <button
                   type="button"
@@ -943,6 +986,8 @@
                 >
                   ② 生成文案
                   <span v-if="narrationDetectDisplayCount" class="btn-step-count">{{ narrationPromptDisplayCount }}/{{ narrationDetectDisplayCount }}</span>
+                  <span v-if="narrationImageBreakdownPanel?.promptFailedAt" class="llm-failed-at tab-step-time">失败于 {{ formatBreakdownTime(narrationImageBreakdownPanel.promptFailedAt) }}</span>
+                  <span v-else-if="narrationImageBreakdownPanel?.promptAt" class="dim tab-step-time">文案于 {{ formatBreakdownTime(narrationImageBreakdownPanel.promptAt) }}</span>
                 </button>
               </div>
 
@@ -951,6 +996,8 @@
                 <div class="script-chat-body">
                   <div class="script-chat-toolbar">
                     <span class="dim" style="font-size:12px">换镜检测 · AI 对话</span>
+                    <span v-if="narrationImageBreakdownPanel?.detectFailedAt" class="llm-failed-at" style="font-size:11px">失败于 {{ formatBreakdownTime(narrationImageBreakdownPanel.detectFailedAt) }}<template v-if="narrationImageBreakdownPanel.detectError">：{{ narrationImageBreakdownPanel.detectError }}</template></span>
+                    <span v-else-if="narrationImageBreakdownPanel?.detectAt" class="dim" style="font-size:11px">检测于 {{ formatBreakdownTime(narrationImageBreakdownPanel.detectAt) }}</span>
                     <button type="button" class="btn btn-sm" :disabled="imageDetectChatGenerating" @click="clearImageDetectChat">清空对话</button>
                     <button
                       type="button"
@@ -990,6 +1037,8 @@
                             <div class="script-chat-thinking-body">{{ msg.thinking }}</div>
                           </div>
                           <div v-if="msg.content" class="script-chat-reply">{{ msg.content }}</div>
+                          <div v-if="msg.role === 'assistant' && msg.failedAt" class="llm-failed-at" style="font-size:11px;margin-top:4px">失败于 {{ formatBreakdownTime(msg.failedAt) }}<template v-if="msg.errorMessage">：{{ msg.errorMessage }}</template></div>
+                          <div v-else-if="msg.role === 'assistant' && msg.generatedAt" class="dim llm-generated-at" style="font-size:11px;margin-top:4px">生成于 {{ formatBreakdownTime(msg.generatedAt) }}</div>
                         </template>
                       </div>
                     </div>
@@ -1032,6 +1081,8 @@
                 <div class="script-chat-body">
                   <div class="script-chat-toolbar">
                     <span class="dim" style="font-size:12px">六维文案 · AI 对话</span>
+                    <span v-if="narrationImageBreakdownPanel?.promptFailedAt" class="llm-failed-at" style="font-size:11px">失败于 {{ formatBreakdownTime(narrationImageBreakdownPanel.promptFailedAt) }}<template v-if="narrationImageBreakdownPanel.promptError">：{{ narrationImageBreakdownPanel.promptError }}</template></span>
+                    <span v-else-if="narrationImageBreakdownPanel?.promptAt" class="dim" style="font-size:11px">文案于 {{ formatBreakdownTime(narrationImageBreakdownPanel.promptAt) }}</span>
                     <button type="button" class="btn btn-sm" :disabled="imagePromptChatGenerating" @click="clearImagePromptChat">清空对话</button>
                     <button
                       type="button"
@@ -1070,6 +1121,8 @@
                             <div class="script-chat-thinking-body">{{ msg.thinking }}</div>
                           </div>
                           <div v-if="msg.content" class="script-chat-reply">{{ msg.content }}</div>
+                          <div v-if="msg.role === 'assistant' && msg.failedAt" class="llm-failed-at" style="font-size:11px;margin-top:4px">失败于 {{ formatBreakdownTime(msg.failedAt) }}<template v-if="msg.errorMessage">：{{ msg.errorMessage }}</template></div>
+                          <div v-else-if="msg.role === 'assistant' && msg.generatedAt" class="dim llm-generated-at" style="font-size:11px;margin-top:4px">生成于 {{ formatBreakdownTime(msg.generatedAt) }}</div>
                         </template>
                       </div>
                     </div>
@@ -1232,6 +1285,8 @@
                   <Loader2 v-if="narrationImageAuditing" :size="11" class="animate-spin" />
                   ③ 检查文案
                 </button>
+                <span v-if="narrationImageBreakdownPanel?.auditFailedAt" class="llm-failed-at" style="font-size:11px">失败于 {{ formatBreakdownTime(narrationImageBreakdownPanel.auditFailedAt) }}<template v-if="narrationImageBreakdownPanel.auditError">：{{ narrationImageBreakdownPanel.auditError }}</template></span>
+                <span v-else-if="narrationImageBreakdownPanel?.auditAt" class="dim" style="font-size:11px">检查于 {{ formatBreakdownTime(narrationImageBreakdownPanel.auditAt) }}</span>
                 <button
                   class="btn btn-sm"
                   :disabled="narrationImageDescUploading || !sbs.length"
@@ -1252,6 +1307,9 @@
                   <span class="dim" style="font-size:11px;margin-left:8px">
                     {{ narrationImageAuditPanel.shotsWithIssues }}/{{ narrationImageAuditPanel.total }} 镜有问题 · 共 {{ narrationImageAuditPanel.issueCount }} 项
                   </span>
+                  <span v-if="narrationImageBreakdownPanel?.auditFailedAt" class="llm-failed-at" style="font-size:11px;margin-left:8px">失败于 {{ formatBreakdownTime(narrationImageBreakdownPanel.auditFailedAt) }}</span>
+                  <span v-else-if="narrationImageBreakdownPanel?.auditAt" class="dim" style="font-size:11px;margin-left:8px">检查于 {{ formatBreakdownTime(narrationImageBreakdownPanel.auditAt) }}</span>
+                  <span v-if="narrationImageBreakdownPanel?.optimizeAt" class="dim" style="font-size:11px;margin-left:8px">优化于 {{ formatBreakdownTime(narrationImageBreakdownPanel.optimizeAt) }}</span>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                   <button
@@ -1299,44 +1357,6 @@
                   </div>
                 </div>
                 <p v-if="!narrationImageAuditPanel.shotsWithIssues" class="dim" style="font-size:12px;margin:8px 0">未发现明显问题</p>
-              </div>
-            </div>
-            <div v-if="narrationImageBreakdownPanel" class="narration-breakdown-panel" style="margin-bottom:12px">
-              <div class="narration-breakdown-head">
-                <div>
-                  <strong>配图分镜进度</strong>
-                </div>
-                <div class="flex gap-1 items-center flex-wrap">
-                  <span v-if="narrationImageBreakdownPanel.detectLabel" class="tag">{{ narrationImageBreakdownPanel.detectLabel }}</span>
-                  <button
-                    type="button"
-                    class="btn btn-sm"
-                    :disabled="narrationAssetClearing || !canClearNarrationImageDetect"
-                    title="清除检测配图结果，便于按新规则重新检测"
-                    @click="clearAllNarrationImageDetect"
-                  >
-                    {{ narrationAssetClearing ? '清除中…' : `清除检测配图${narrationDetectClearCount ? ` (${narrationDetectClearCount})` : ''}` }}
-                  </button>
-                </div>
-              </div>
-              <div class="narration-breakdown-stats">
-                <span class="tag mono">
-                  ① 检测分镜
-                  <strong>{{ narrationImageBreakdownPanel.detectCount }}</strong> 张
-                  <span v-if="narrationImageBreakdownPanel.detectAt" class="dim">· {{ formatBreakdownTime(narrationImageBreakdownPanel.detectAt) }}</span>
-                </span>
-                <span class="tag mono">
-                  ② 六维文案
-                  <strong>{{ narrationImageBreakdownPanel.promptCount }}</strong><template v-if="narrationImageBreakdownPanel.detectCount">/{{ narrationImageBreakdownPanel.detectCount }}</template> 条
-                  <span v-if="narrationImageBreakdownPanel.promptAt" class="dim">· {{ formatBreakdownTime(narrationImageBreakdownPanel.promptAt) }}</span>
-                </span>
-                <span v-if="narrationImageBreakdownPanel.diptychCount" class="tag">含 {{ narrationImageBreakdownPanel.diptychCount }} 张两宫格</span>
-                <span v-if="narrationImageBreakdownPanel.promptLabel" class="tag">{{ narrationImageBreakdownPanel.promptLabel }}</span>
-                <span v-if="narrationImageBreakdownPanel.detectCount" class="tag dim">约 ¥{{ narrationImageBreakdownPanel.estImageCost }}（{{ narrationImageBreakdownPanel.priceLabel }}）</span>
-              </div>
-              <div class="narration-breakdown-steps">
-                <strong>下一步：</strong>
-                批量生成或上传配图 → 镜头合成 → 导出
               </div>
             </div>
             <div class="prod-section-bar">
@@ -1531,6 +1551,8 @@
                   >
                     {{ pendingShotScanIds.includes(sb.id) ? '扫描中' : '扫描配图' }}
                   </button>
+                  <span v-if="shotScanFailedAt[sb.id]" class="llm-failed-at" style="font-size:10px">失败于 {{ formatBreakdownTime(shotScanFailedAt[sb.id]) }}<template v-if="shotScanError[sb.id]">：{{ shotScanError[sb.id] }}</template></span>
+                  <span v-else-if="shotScanGeneratedAt[sb.id]" class="dim" style="font-size:10px">扫描于 {{ formatBreakdownTime(shotScanGeneratedAt[sb.id]) }}</span>
                   <button
                     class="btn btn-sm"
                     :disabled="!findPrevNarrationShotWithImage(sb)"

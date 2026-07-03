@@ -383,6 +383,8 @@ async function breakdownMotionComicStoryboards(
     total_duration: totalDuration,
     emphasis_source: emphasisSource,
     text_model: textModel,
+    storyboard_breakdown_at: now(),
+    generated_at: now(),
   }
 }
 
@@ -549,6 +551,8 @@ export async function breakdownNarrationStoryboards(
     total_duration: totalDuration,
     emphasis_source: emphasisSource,
     text_model: textModel,
+    storyboard_breakdown_at: now(),
+    generated_at: now(),
   }
 }
 

@@ -77,6 +77,7 @@ import {
   hasDuplicateStoryboardNumbers,
   hasEffectiveNarrationTts,
   formatCharacterDisplayName,
+  formatCharacterRoleSubtitle,
   normalizeVariantLabel,
   variantNeedsYouthPortraitReference,
   getVariantAgeGroup,
@@ -92,6 +93,7 @@ import {
 import { artStyleLabel, NARRATION_MINIMAL_STYLE, MOTION_COMIC_STYLE, MOTION_COMIC_DEFAULT_STYLE, NARRATION_IMAGE_STYLE_OPTIONS, resolveNarrationImageStyle, normalizeArtStyle } from '~/composables/useArtStyles'
 import { buildFolderUploadSlots, isImageUploadFile, parseShotImageFilename } from '~/utils/shotImageFilename'
 import { hasEmphasisMarkers, stripEmphasisMarkers } from '~/utils/subtitle-emphasis'
+import { stampChatAssistantGeneratedAt, stampChatAssistantFailed, pickLlmGeneratedAt, resolveLlmTimestamp, isLlmCancelled, llmErrorMessage } from '~/utils/llm-timestamp'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 
@@ -316,6 +318,24 @@ const narrationImageDescUploading = ref(false)
 const storyboardDescUploadTarget = ref(null)
 const storyboardDescUploadInputRef = ref(null)
 const narrationExtracting = ref(false)
+const narrationExtractGeneratedAt = ref(null)
+const narrationExtractFailedAt = ref(null)
+const narrationExtractError = ref(null)
+const charAppearanceGeneratedAt = ref({})
+const charAppearanceFailedAt = ref({})
+const charAppearanceError = ref({})
+const charImageGeneratedAt = ref({})
+const charImageFailedAt = ref({})
+const charImageError = ref({})
+const charRecognizeGeneratedAt = ref({})
+const charRecognizeFailedAt = ref({})
+const charRecognizeError = ref({})
+const shotScanGeneratedAt = ref({})
+const shotScanFailedAt = ref({})
+const shotScanError = ref({})
+const bgmDescGeneratedAt = ref(null)
+const bgmDescFailedAt = ref(null)
+const bgmDescError = ref(null)
 const narrationBreakdownSummary = ref(null)
 const imageDetectMode = ref('paragraph')
 const imageDetectBatchThreshold = ref(80)
@@ -649,6 +669,9 @@ const narrationImageBreakdownProgressPercent = computed(() => {
 const narrationImageBreakdownProgressMessage = computed(() => {
   const progress = narrationImageBreakdownProgress.value
   if (!progress) return '正在启动配图分镜…'
+  if (progress.status === 'failed' || progress.status === 'cancelled') {
+    return progress.message || progress.error || '配图任务失败'
+  }
   const batch = progress.batch ?? progress.batchCount
   const batchCount = progress.batch_count ?? progress.batchCount
   if (batch && batchCount && (progress.phase === 'prompts' || progress.phase === 'detecting')) {
@@ -815,7 +838,7 @@ const exportWatermarkText = ref('顺拾人间')
 const exportWatermarkAnimated = ref(false)
 let watermarkSaveTimer = null
 const exportBgmMusicId = ref(null)
-const exportBgmVolume = ref(8)
+const exportBgmVolume = ref(6)
 const exportBgmApplying = ref(false)
 const bgmApplyingAllId = ref(null)
 const visibleBgmLibrary = computed(() => {
@@ -1123,7 +1146,7 @@ function restoreExportBgmPrefs() {
   exportBgmMusicId.value = id ? Number(id) : null
   let vol = window.localStorage.getItem(`drama-${dramaId}-export-bgm-vol`)
   if (vol == null) vol = window.localStorage.getItem(`episode-${epId.value}-export-bgm-vol`)
-  if (vol) exportBgmVolume.value = Number(vol) || 8
+  if (vol) exportBgmVolume.value = Number(vol) || 6
 }
 
 function formatBgmModelLabel(model) {
@@ -3050,8 +3073,12 @@ const hasNarrationImageBreakdown = computed(() => {
 })
 
 const narrationStoryboardBreakdownPanel = computed(() => {
-  if (!isNarrationMode.value || !sbs.value.length) return null
+  if (!isNarrationMode.value) return null
   const s = narrationBreakdownSummary.value
+  const failedAt = s?.storyboard_breakdown_failed_at ?? s?.storyboardBreakdownFailedAt ?? null
+  const errorMessage = s?.storyboard_breakdown_error ?? s?.storyboardBreakdownError ?? null
+  const generatedAt = s?.storyboard_breakdown_at ?? s?.storyboardBreakdownAt ?? s?.generated_at ?? s?.generatedAt ?? null
+  if (!sbs.value.length && !failedAt && !generatedAt) return null
   const liveCount = sbs.value.length
   const liveTitleCount = sbs.value.filter(sb => isNarrationTitleShot(sb)).length
   const liveBodyCount = liveCount - liveTitleCount
@@ -3061,7 +3088,6 @@ const narrationStoryboardBreakdownPanel = computed(() => {
   const titleImageCount = s?.title_image_count ?? s?.titleImageCount ?? (titleCount ? 1 : 0)
   const titleHook = s?.title_hook ?? s?.titleHook ?? null
   const totalDur = s?.total_duration ?? s?.totalDuration ?? totalDuration.value
-  const generatedAt = s?.storyboard_breakdown_at ?? s?.storyboardBreakdownAt ?? s?.generated_at ?? s?.generatedAt ?? null
   return {
     count,
     sentenceCount,
@@ -3070,12 +3096,16 @@ const narrationStoryboardBreakdownPanel = computed(() => {
     titleHook,
     totalDur,
     generatedAt,
+    failedAt,
+    errorMessage,
   }
 })
 
 const narrationImageBreakdownPanel = computed(() => {
-  if (!isNarrationMode.value || !sbs.value.length || !hasNarrationImageBreakdown.value) return null
+  if (!isNarrationMode.value || !sbs.value.length) return null
   const s = narrationBreakdownSummary.value
+  const detectFailedAt = s?.image_detect_failed_at ?? s?.imageDetectFailedAt ?? null
+  const promptFailedAt = s?.image_prompt_failed_at ?? s?.imagePromptFailedAt ?? null
   const detectCount = narrationDetectDisplayCount.value
   const promptCount = narrationPromptDisplayCount.value
   const diptychCount = s?.diptych_count ?? s?.diptychCount ?? 0
@@ -3094,18 +3124,29 @@ const narrationImageBreakdownPanel = computed(() => {
     detectLabel: buildNarrationImageDetectLabel(detectSource, detectMode),
     promptLabel: buildNarrationImagePromptLabel(promptSource),
     detectAt: s?.image_detect_at ?? s?.imageDetectAt ?? null,
+    detectFailedAt: s?.image_detect_failed_at ?? s?.imageDetectFailedAt ?? null,
+    detectError: s?.image_detect_error ?? s?.imageDetectError ?? null,
     promptAt: s?.image_prompt_at ?? s?.imagePromptAt ?? null,
+    promptFailedAt: s?.image_prompt_failed_at ?? s?.imagePromptFailedAt ?? null,
+    promptError: s?.image_prompt_error ?? s?.imagePromptError ?? null,
+    auditAt: s?.image_audit_at ?? s?.imageAuditAt ?? null,
+    auditFailedAt: s?.image_audit_failed_at ?? s?.imageAuditFailedAt ?? null,
+    auditError: s?.image_audit_error ?? s?.imageAuditError ?? null,
+    optimizeAt: s?.image_optimize_at ?? s?.imageOptimizeAt ?? null,
+    auditShotsWithIssues: s?.image_audit_shots_with_issues ?? s?.imageAuditShotsWithIssues ?? null,
+    auditIssueCount: s?.image_audit_issue_count ?? s?.imageAuditIssueCount ?? null,
   }
 })
 
 function syncNarrationBreakdownImageCount() {
-  if (!epId.value || !isNarrationMode.value || !narrationBreakdownSummary.value || !sbs.value.length) return
+  if (!epId.value || !isNarrationMode.value || !sbs.value.length) return
   const liveDetect = narrationImageDetectLiveCount.value
   const livePrompts = narrationPromptLiveCount.value
-  const prev = narrationBreakdownSummary.value
+  const prev = narrationBreakdownSummary.value || {}
   const cachedDetect = prev.paragraph_count ?? prev.paragraphCount ?? prev.image_needed_count ?? prev.imageNeededCount ?? 0
   const cachedPrompts = prev.prompts_generated ?? prev.promptsGenerated ?? 0
-  if (liveDetect === cachedDetect && livePrompts === cachedPrompts) return
+  if (narrationBreakdownSummary.value && liveDetect === cachedDetect && livePrompts === cachedPrompts) return
+  if (!liveDetect && !livePrompts && !narrationBreakdownSummary.value) return
   persistNarrationBreakdownSummary({
     ...prev,
     image_needed_count: liveDetect,
@@ -3114,12 +3155,64 @@ function syncNarrationBreakdownImageCount() {
   })
 }
 
+function persistLlmBreakdownFailure(kind: 'storyboard' | 'detect' | 'prompt', error: unknown) {
+  if (isLlmCancelled(error)) return
+  const ts = resolveLlmTimestamp()
+  const message = llmErrorMessage(error)
+  const patch = kind === 'storyboard'
+    ? {
+      storyboard_breakdown_failed_at: ts,
+      storyboard_breakdown_error: message,
+      storyboard_breakdown_at: null,
+      generated_at: null,
+    }
+    : kind === 'detect'
+      ? {
+        image_detect_failed_at: ts,
+        image_detect_error: message,
+        image_detect_at: null,
+      }
+      : {
+        image_prompt_failed_at: ts,
+        image_prompt_error: message,
+        image_prompt_at: null,
+      }
+  persistNarrationBreakdownSummary({ ...narrationBreakdownSummary.value, ...patch })
+}
+
+function clearLlmBreakdownFailure(kind: 'storyboard' | 'detect' | 'prompt') {
+  const patch = kind === 'storyboard'
+    ? { storyboard_breakdown_failed_at: null, storyboard_breakdown_error: null }
+    : kind === 'detect'
+      ? { image_detect_failed_at: null, image_detect_error: null }
+      : { image_prompt_failed_at: null, image_prompt_error: null }
+  persistNarrationBreakdownSummary({ ...narrationBreakdownSummary.value, ...patch })
+}
+
 function persistNarrationBreakdownSummary(res) {
   if (!epId.value) return
   const prev = narrationBreakdownSummary.value || {}
   const liveImageDetect = sbs.value.length ? narrationImageDetectLiveCount.value : null
   const storyboardAt = res?.storyboard_breakdown_at ?? res?.storyboardBreakdownAt ?? res?.generatedAt ?? prev.storyboard_breakdown_at ?? prev.storyboardBreakdownAt ?? prev.generated_at ?? prev.generatedAt ?? null
+  const storyboardFailedAt = res?.storyboard_breakdown_failed_at !== undefined
+    ? res.storyboard_breakdown_failed_at
+    : (res?.storyboardBreakdownFailedAt !== undefined ? res.storyboardBreakdownFailedAt : prev.storyboard_breakdown_failed_at ?? prev.storyboardBreakdownFailedAt ?? null)
+  const storyboardError = res?.storyboard_breakdown_error !== undefined
+    ? res.storyboard_breakdown_error
+    : (res?.storyboardBreakdownError !== undefined ? res.storyboardBreakdownError : prev.storyboard_breakdown_error ?? prev.storyboardBreakdownError ?? null)
   const imageAt = res?.image_breakdown_at ?? res?.imageBreakdownAt ?? prev.image_breakdown_at ?? prev.imageBreakdownAt ?? null
+  const detectFailedAt = res?.image_detect_failed_at !== undefined
+    ? res.image_detect_failed_at
+    : (res?.imageDetectFailedAt !== undefined ? res.imageDetectFailedAt : prev.image_detect_failed_at ?? prev.imageDetectFailedAt ?? null)
+  const detectError = res?.image_detect_error !== undefined
+    ? res.image_detect_error
+    : (res?.imageDetectError !== undefined ? res.imageDetectError : prev.image_detect_error ?? prev.imageDetectError ?? null)
+  const promptFailedAt = res?.image_prompt_failed_at !== undefined
+    ? res.image_prompt_failed_at
+    : (res?.imagePromptFailedAt !== undefined ? res.imagePromptFailedAt : prev.image_prompt_failed_at ?? prev.imagePromptFailedAt ?? null)
+  const promptError = res?.image_prompt_error !== undefined
+    ? res.image_prompt_error
+    : (res?.imagePromptError !== undefined ? res.imagePromptError : prev.image_prompt_error ?? prev.imagePromptError ?? null)
   const storyboardReset = !!(res?.storyboard_breakdown_at ?? res?.storyboardBreakdownAt)
   const detectCleared = !!(res?.image_detect_cleared ?? res?.imageDetectCleared)
   const liveTitleCount = sbs.value.filter(sb => isNarrationTitleShot(sb)).length
@@ -3163,7 +3256,13 @@ function persistNarrationBreakdownSummary(res) {
       : (storyboardReset ? null : (res?.image_prompt_at ?? res?.imagePromptAt ?? prev.image_prompt_at ?? prev.imagePromptAt ?? null)),
     total_duration: res?.total_duration ?? res?.totalDuration ?? prev.total_duration ?? prev.totalDuration ?? 0,
     storyboard_breakdown_at: storyboardAt,
+    storyboard_breakdown_failed_at: storyboardAt ? null : storyboardFailedAt,
+    storyboard_breakdown_error: storyboardAt ? null : storyboardError,
     image_breakdown_at: detectCleared ? null : (storyboardReset ? null : imageAt),
+    image_detect_failed_at: detectCleared ? null : (storyboardReset ? null : (res?.image_detect_at ?? res?.imageDetectAt ? null : detectFailedAt)),
+    image_detect_error: detectCleared ? null : (storyboardReset ? null : (res?.image_detect_at ?? res?.imageDetectAt ? null : detectError)),
+    image_prompt_failed_at: detectCleared ? null : (storyboardReset ? null : (res?.image_prompt_at ?? res?.imagePromptAt ? null : promptFailedAt)),
+    image_prompt_error: detectCleared ? null : (storyboardReset ? null : (res?.image_prompt_at ?? res?.imagePromptAt ? null : promptError)),
     generated_at: storyboardAt,
   }
   delete payload.image_detect_cleared
@@ -3798,12 +3897,22 @@ async function generateBgmDescription() {
     })
     if (result?.description) {
       bgmDesc.value = result.description
+      bgmDescGeneratedAt.value = pickLlmGeneratedAt(result) ?? resolveLlmTimestamp()
+      bgmDescFailedAt.value = null
+      bgmDescError.value = null
       toast.success('BGM 描述已生成')
     } else {
+      bgmDescFailedAt.value = resolveLlmTimestamp()
+      bgmDescError.value = 'AI 未返回描述'
       toast.error('AI 未返回描述')
     }
   } catch (e) {
-    toast.error(e.message)
+    if (!isLlmCancelled(e)) {
+      bgmDescGeneratedAt.value = null
+      bgmDescFailedAt.value = resolveLlmTimestamp()
+      bgmDescError.value = llmErrorMessage(e)
+      toast.error(e.message)
+    }
   } finally {
     bgmDescGenerating.value = false
   }
@@ -3919,6 +4028,47 @@ async function refreshSecondary() {
   await Promise.allSettled(tasks)
 }
 
+function stampCharImageSuccess(charId: number, ts?: string | null) {
+  charImageGeneratedAt.value = {
+    ...charImageGeneratedAt.value,
+    [charId]: ts ? String(ts) : resolveLlmTimestamp(),
+  }
+  charImageFailedAt.value = { ...charImageFailedAt.value, [charId]: null }
+  charImageError.value = { ...charImageError.value, [charId]: null }
+}
+
+function stampCharImageFailure(charId: number, error: unknown) {
+  if (isLlmCancelled(error)) return
+  charImageGeneratedAt.value = { ...charImageGeneratedAt.value, [charId]: null }
+  charImageFailedAt.value = { ...charImageFailedAt.value, [charId]: resolveLlmTimestamp() }
+  charImageError.value = {
+    ...charImageError.value,
+    [charId]: typeof error === 'string' ? error : llmErrorMessage(error),
+  }
+}
+
+function resolveCharImageDisplayTime(c: { id: number; image_url?: string; imageUrl?: string; updated_at?: string; updatedAt?: string }) {
+  if (charImageFailedAt.value[c.id]) return null
+  const stamped = charImageGeneratedAt.value[c.id]
+  if (stamped) return stamped
+  if (c.image_url || c.imageUrl) return c.updated_at || c.updatedAt || null
+  return null
+}
+
+function syncCharImageTimestampsFromChars() {
+  const next = { ...charImageGeneratedAt.value }
+  for (const c of chars.value) {
+    const url = c.image_url || c.imageUrl
+    const updatedAt = c.updated_at || c.updatedAt
+    if (!url || !updatedAt) continue
+    const existing = next[c.id]
+    if (!existing || new Date(updatedAt) > new Date(existing)) {
+      next[c.id] = String(updatedAt)
+    }
+  }
+  charImageGeneratedAt.value = next
+}
+
 async function refresh(options?: { deferSecondary?: boolean; skipDramaRefetch?: boolean }) {
   const deferSecondary = options?.deferSecondary !== false
   const skipDramaRefetch = options?.skipDramaRefetch === true && !!drama.value
@@ -3942,6 +4092,7 @@ async function refresh(options?: { deferSecondary?: boolean; skipDramaRefetch?: 
     chars.value = charsRes || []
     scenes.value = scenesRes || []
     sbs.value = sortStoryboards(sbsRes || [])
+    syncCharImageTimestampsFromChars()
     syncSelectedStoryboardFromList()
 
     applyEpisodeDataAfterLoad(ep)
@@ -4125,12 +4276,15 @@ async function sendScriptChat() {
     if (result?.reply) {
       scriptChatMessages.value[assistantIdx].content = result.reply
     }
+    stampChatAssistantGeneratedAt(scriptChatMessages.value, assistantIdx, result)
   } catch (e) {
-    const msg = scriptChatMessages.value[assistantIdx]
-    if (!msg?.content && !msg?.thinking) {
-      scriptChatMessages.value.splice(assistantIdx, 1)
+    if (!stampChatAssistantFailed(scriptChatMessages.value, assistantIdx, e)) {
+      const msg = scriptChatMessages.value[assistantIdx]
+      if (!msg?.content && !msg?.thinking) {
+        scriptChatMessages.value.splice(assistantIdx, 1)
+      }
     }
-    if (e.message !== '请求已取消') toast.error(e.message)
+    if (!isLlmCancelled(e)) toast.error(e.message)
   } finally {
     scriptChatGenerating.value = false
     scriptChatAbortController.value = null
@@ -4233,31 +4387,52 @@ async function sendImageDetectChat(explicitAction?: 'run') {
         imageDetectChatMessages.value[assistantIdx].statusText = content
         scrollImageDetectChatToBottom()
       },
+      onProgress: payload => {
+        if (payload?.type === 'detect_done' && action === 'run') {
+          const ts = resolveLlmTimestamp(pickLlmGeneratedAt(payload), payload?.image_detect_at)
+          persistNarrationBreakdownSummary({
+            ...narrationBreakdownSummary.value,
+            image_needed_count: narrationDetectDisplayCount.value,
+            paragraph_count: narrationDetectDisplayCount.value,
+            image_detect_at: ts,
+            image_detect_source: payload?.image_detect_source ?? 'llm',
+          })
+        }
+      },
     })
 
     if (result?.reply) {
       const msg = imageDetectChatMessages.value[assistantIdx]
       msg.content = result.reply
     }
+    stampChatAssistantGeneratedAt(imageDetectChatMessages.value, assistantIdx, result)
 
     if (action === 'run') {
+      clearLlmBreakdownFailure('detect')
       await refresh()
       syncNarrationBreakdownImageCount()
       const count = narrationDetectDisplayCount.value
+      const ts = resolveLlmTimestamp(
+        pickLlmGeneratedAt(result),
+        narrationBreakdownSummary.value?.image_detect_at,
+      )
       persistNarrationBreakdownSummary({
         ...narrationBreakdownSummary.value,
         image_needed_count: count,
         paragraph_count: count,
-        image_detect_at: Date.now(),
+        image_detect_at: ts,
         image_detect_source: 'llm',
       })
     }
   } catch (e) {
-    const msg = imageDetectChatMessages.value[assistantIdx]
-    if (!msg?.content && !msg?.thinking && !msg?.statusText) {
-      imageDetectChatMessages.value.splice(assistantIdx, 1)
+    if (action === 'run') persistLlmBreakdownFailure('detect', e)
+    if (!stampChatAssistantFailed(imageDetectChatMessages.value, assistantIdx, e)) {
+      const msg = imageDetectChatMessages.value[assistantIdx]
+      if (!msg?.content && !msg?.thinking && !msg?.statusText) {
+        imageDetectChatMessages.value.splice(assistantIdx, 1)
+      }
     }
-    if (e.message !== '请求已取消') toast.error(e.message)
+    if (!isLlmCancelled(e)) toast.error(e.message)
   } finally {
     imageDetectChatGenerating.value = false
     imageDetectChatAbortController.value = null
@@ -4315,29 +4490,49 @@ async function sendImagePromptChat(explicitAction?: 'run' | 'retry_missing') {
         imagePromptChatMessages.value[assistantIdx].statusText = content
         scrollImagePromptChatToBottom()
       },
+      onProgress: payload => {
+        if (payload?.type === 'prompt_done' && action) {
+          const ts = resolveLlmTimestamp(pickLlmGeneratedAt(payload), payload?.image_prompt_at)
+          persistNarrationBreakdownSummary({
+            ...narrationBreakdownSummary.value,
+            prompts_generated: narrationPromptDisplayCount.value,
+            image_prompt_at: ts,
+            image_prompt_source: 'llm_raw',
+          })
+        }
+      },
     })
 
     if (result?.reply) {
       const msg = imagePromptChatMessages.value[assistantIdx]
       msg.content = result.reply
     }
+    stampChatAssistantGeneratedAt(imagePromptChatMessages.value, assistantIdx, result)
 
     if (action) {
+      clearLlmBreakdownFailure('prompt')
       await refresh()
       syncNarrationBreakdownImageCount()
+      const ts = resolveLlmTimestamp(
+        pickLlmGeneratedAt(result),
+        narrationBreakdownSummary.value?.image_prompt_at,
+      )
       persistNarrationBreakdownSummary({
         ...narrationBreakdownSummary.value,
         prompts_generated: narrationPromptDisplayCount.value,
-        image_prompt_at: Date.now(),
+        image_prompt_at: ts,
         image_prompt_source: 'llm_raw',
       })
     }
   } catch (e) {
-    const msg = imagePromptChatMessages.value[assistantIdx]
-    if (!msg?.content && !msg?.thinking && !msg?.statusText) {
-      imagePromptChatMessages.value.splice(assistantIdx, 1)
+    if (action) persistLlmBreakdownFailure('prompt', e)
+    if (!stampChatAssistantFailed(imagePromptChatMessages.value, assistantIdx, e)) {
+      const msg = imagePromptChatMessages.value[assistantIdx]
+      if (!msg?.content && !msg?.thinking && !msg?.statusText) {
+        imagePromptChatMessages.value.splice(assistantIdx, 1)
+      }
     }
-    if (e.message !== '请求已取消') toast.error(e.message)
+    if (!isLlmCancelled(e)) toast.error(e.message)
   } finally {
     imagePromptChatGenerating.value = false
     imagePromptChatAbortController.value = null
@@ -4430,17 +4625,21 @@ async function sendStoryboardChat(explicitAction?: 'run') {
       const msg = storyboardChatMessages.value[assistantIdx]
       msg.content = result.reply
     }
+    stampChatAssistantGeneratedAt(storyboardChatMessages.value, assistantIdx, result)
 
     if (action === 'run') {
       const res = result?.breakdown || {}
       await finalizeStoryboardBreakdown(res)
     }
   } catch (e) {
-    const msg = storyboardChatMessages.value[assistantIdx]
-    if (!msg?.content && !msg?.thinking && !msg?.statusText) {
-      storyboardChatMessages.value.splice(assistantIdx, 1)
+    if (action === 'run') persistLlmBreakdownFailure('storyboard', e)
+    if (!stampChatAssistantFailed(storyboardChatMessages.value, assistantIdx, e)) {
+      const msg = storyboardChatMessages.value[assistantIdx]
+      if (!msg?.content && !msg?.thinking && !msg?.statusText) {
+        storyboardChatMessages.value.splice(assistantIdx, 1)
+      }
     }
-    if (e.message !== '请求已取消') toast.error(e.message)
+    if (!isLlmCancelled(e)) toast.error(e.message)
   } finally {
     storyboardChatGenerating.value = false
     storyboardChatAbortController.value = null
@@ -4546,9 +4745,10 @@ function persistImageDetectBatchPrefs() {
 async function applyStoryboardBreakdownProgress(res) {
   await refreshStoryboardsOnly()
   scriptStoryboardPage.value = 1
+  clearLlmBreakdownFailure('storyboard')
   persistNarrationBreakdownSummary({
     ...res,
-    storyboard_breakdown_at: Date.now(),
+    storyboard_breakdown_at: resolveLlmTimestamp(res?.generated_at, res?.storyboard_breakdown_at),
   })
 }
 
@@ -4595,7 +4795,8 @@ function doNarrationBreakdown() {
       toast.success(`${sbLabel}：${sentenceCount} 句 → ${res?.count || 0} 镜${titleHint}`)
       await finalizeStoryboardBreakdown(res)
     } catch (e) {
-      toast.error(e.message)
+      persistLlmBreakdownFailure('storyboard', e)
+      if (!isLlmCancelled(e)) toast.error(e.message)
     } finally {
       narrationBreaking.value = false
     }
@@ -4667,11 +4868,13 @@ function doNarrationImageDetect() {
       } else {
         toast.success(`检测完成：${count} 张需配图`)
       }
+      clearLlmBreakdownFailure('detect')
+      const ts = resolveLlmTimestamp(progress?.generated_at, progress?.image_detect_at)
       persistNarrationBreakdownSummary({
         ...narrationBreakdownSummary.value,
         image_needed_count: count,
         paragraph_count: count,
-        image_detect_at: Date.now(),
+        image_detect_at: ts,
         image_detect_source: source,
       })
     },
@@ -4693,10 +4896,15 @@ function doNarrationImagePrompts() {
       } else {
         toast.success(`配图文案已就绪（${count} 条）`)
       }
+      clearLlmBreakdownFailure('prompt')
+      const ts = resolveLlmTimestamp(
+        narrationImageBreakdownProgress.value?.generated_at,
+        narrationBreakdownSummary.value?.image_prompt_at,
+      )
       persistNarrationBreakdownSummary({
         ...narrationBreakdownSummary.value,
         prompts_generated: count,
-        image_prompt_at: Date.now(),
+        image_prompt_at: ts,
         image_prompt_source: 'llm_raw',
       })
     },
@@ -4718,9 +4926,18 @@ function doNarrationImagePromptsTest() {
     test_batch_index: narrationPromptTestBatchIndex.value,
     ...narrationTextModelParams(),
   }), {
-    onSuccess: async () => {
+    onSuccess: async (progress) => {
       await refresh()
       syncNarrationBreakdownImageCount()
+      clearLlmBreakdownFailure('prompt')
+      const count = narrationPromptDisplayCount.value
+      const ts = resolveLlmTimestamp(progress?.generated_at, progress?.image_prompt_at)
+      persistNarrationBreakdownSummary({
+        ...narrationBreakdownSummary.value,
+        prompts_generated: count,
+        image_prompt_at: ts,
+        image_prompt_source: 'llm_raw',
+      })
       const label = batch?.label || `段批 ${narrationPromptTestBatchIndex.value}`
       toast.success(pending < total
         ? `测试完成：${label}（${pending} 段新文案）`
@@ -4741,10 +4958,18 @@ function doRetryMissingNarrationImagePrompts() {
     prompt_batch_size: imagePromptBatchSize.value,
     ...narrationTextModelParams(),
   }), {
-    onSuccess: async () => {
+    onSuccess: async (progress) => {
       await refresh()
       syncNarrationBreakdownImageCount()
+      clearLlmBreakdownFailure('prompt')
       const count = narrationPromptDisplayCount.value
+      const ts = resolveLlmTimestamp(progress?.generated_at, progress?.image_prompt_at)
+      persistNarrationBreakdownSummary({
+        ...narrationBreakdownSummary.value,
+        prompts_generated: count,
+        image_prompt_at: ts,
+        image_prompt_source: 'llm_raw',
+      })
       toast.success(`已补全缺失配图文案（当前 ${count} 条）`)
     },
     startMessage: '正在补全缺失配图文案…',
@@ -4784,7 +5009,10 @@ function runNarrationImageStep(step, apiCall, { onSuccess, startMessage }) {
       syncNarrationBreakdownImageCount()
       onSuccess?.(progress || stepResult)
     } catch (e) {
-      toast.error(e.message)
+      const step = narrationImageStep.value
+      if (step === 'detect') persistLlmBreakdownFailure('detect', e)
+      else if (step === 'prompts') persistLlmBreakdownFailure('prompt', e)
+      if (!isLlmCancelled(e)) toast.error(e.message)
     } finally {
       stopNarrationImageBreakdownPoll()
       narrationImageBreaking.value = false
@@ -4813,10 +5041,24 @@ async function doNarrationImageAudit() {
       issueCount,
       items: res?.items || [],
     }
+    persistNarrationBreakdownSummary({
+      ...narrationBreakdownSummary.value,
+      image_audit_at: resolveLlmTimestamp(),
+      image_audit_failed_at: null,
+      image_audit_error: null,
+      image_audit_shots_with_issues: shotsWithIssues,
+      image_audit_issue_count: issueCount,
+    })
     toast.info(shotsWithIssues
       ? `发现 ${shotsWithIssues}/${total} 镜共 ${issueCount} 项问题，可逐条或全部应用优化`
       : `已检查 ${total} 镜，未发现明显问题`)
   } catch (e) {
+    persistNarrationBreakdownSummary({
+      ...narrationBreakdownSummary.value,
+      image_audit_failed_at: resolveLlmTimestamp(),
+      image_audit_error: llmErrorMessage(e),
+      image_audit_at: null,
+    })
     toast.error(e.message)
   } finally {
     narrationImageAuditing.value = false
@@ -4840,6 +5082,11 @@ async function doNarrationImageOptimize(storyboardIds) {
   try {
     const res = await episodeAPI.narrationImageOptimize(epId.value, { storyboard_ids: storyboardIds })
     const optimized = res?.optimized ?? 0
+    persistNarrationBreakdownSummary({
+      ...narrationBreakdownSummary.value,
+      image_optimize_at: resolveLlmTimestamp(),
+      image_prompt_source: optimized > 0 ? 'optimized' : (narrationBreakdownSummary.value?.image_prompt_source ?? null),
+    })
     toast.success(`已优化 ${optimized} 条配图文案`)
     await refresh()
     await doNarrationImageAudit()
@@ -4968,13 +5215,15 @@ async function onStoryboardDescUploadSelected(event) {
       const skipped = res?.skipped ?? 0
       const mode = res?.mode === 'lines' ? '逐行' : '【#序号】'
       toast.success(`已导入 ${updated} 条配图描述（${mode}）${skipped ? `，${skipped} 条未匹配` : ''}`)
+      await refresh()
       if (updated > 0) {
         persistNarrationBreakdownSummary({
-          image_breakdown_at: Date.now(),
+          ...narrationBreakdownSummary.value,
+          image_prompt_at: resolveLlmTimestamp(),
           image_prompt_source: 'upload',
+          prompts_generated: narrationPromptLiveCount.value,
         })
       }
-      await refresh()
     }
   } catch (e) {
     toast.error(e.message)
@@ -5048,6 +5297,9 @@ async function doExtractNarrationCharacters() {
       text_model: episodeTextModel.value,
       text_thinking: episodeTextThinking.value,
     })
+    narrationExtractGeneratedAt.value = pickLlmGeneratedAt(res) ?? resolveLlmTimestamp()
+    narrationExtractFailedAt.value = null
+    narrationExtractError.value = null
     const created = res?.created ?? 0
     const updated = res?.updated ?? 0
     const archived = res?.archived ?? 0
@@ -5077,7 +5329,12 @@ async function doExtractNarrationCharacters() {
       }
     }
   } catch (e) {
-    toast.error(e.message)
+    if (!isLlmCancelled(e)) {
+      narrationExtractGeneratedAt.value = null
+      narrationExtractFailedAt.value = resolveLlmTimestamp()
+      narrationExtractError.value = llmErrorMessage(e)
+      toast.error(e.message)
+    }
   } finally {
     narrationExtracting.value = false
   }
@@ -5295,10 +5552,13 @@ async function watchCharImageResult(charId, generationId, attempts = 36, delay =
         const gen = await imageAPI.get(generationId)
         if (gen?.status === 'failed') {
           pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
+          stampCharImageFailure(charId, gen?.error_msg || gen?.errorMsg || '定妆生成失败')
           toast.error(gen?.error_msg || gen?.errorMsg || '定妆生成失败')
           return false
         }
         if (gen?.status === 'completed') {
+          const ts = gen?.updated_at || gen?.updatedAt || gen?.completed_at || gen?.completedAt
+          stampCharImageSuccess(charId, ts ? String(ts) : null)
           await refresh()
           pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
           return true
@@ -5311,11 +5571,13 @@ async function watchCharImageResult(charId, generationId, attempts = 36, delay =
     const url = char?.image_url || char?.imageUrl || ''
     const updatedAt = char?.updated_at || char?.updatedAt || ''
     if (url && (url !== startUrl || updatedAt !== startUpdatedAt)) {
+      stampCharImageSuccess(charId, updatedAt ? String(updatedAt) : null)
       pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
       return true
     }
   }
   pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
+  stampCharImageFailure(charId, '定妆生成超时或失败，请重试')
   toast.warning('定妆生成超时或失败，请重试')
   return false
 }
@@ -5781,6 +6043,12 @@ async function scanNarrationShotImage(sb) {
       text_model: episodeTextModel.value,
       text_thinking: episodeTextThinking.value,
     })
+    shotScanGeneratedAt.value = {
+      ...shotScanGeneratedAt.value,
+      [sb.id]: pickLlmGeneratedAt(res) ?? resolveLlmTimestamp(),
+    }
+    shotScanFailedAt.value = { ...shotScanFailedAt.value, [sb.id]: null }
+    shotScanError.value = { ...shotScanError.value, [sb.id]: null }
     const score = res?.match_score ?? '—'
     const summary = res?.summary || '扫描完成'
     const issues = (res?.issues || []).filter(Boolean)
@@ -5790,7 +6058,12 @@ async function scanNarrationShotImage(sb) {
       toast.success(`${summary}（${score}分）`)
     }
   } catch (e) {
-    toast.error(e.message)
+    if (!isLlmCancelled(e)) {
+      shotScanGeneratedAt.value = { ...shotScanGeneratedAt.value, [sb.id]: null }
+      shotScanFailedAt.value = { ...shotScanFailedAt.value, [sb.id]: resolveLlmTimestamp() }
+      shotScanError.value = { ...shotScanError.value, [sb.id]: llmErrorMessage(e) }
+      toast.error(e.message)
+    }
   } finally {
     pendingShotScanIds.value = pendingShotScanIds.value.filter(id => id !== sb.id)
   }
@@ -5844,6 +6117,12 @@ async function clearAllNarrationImageDetect() {
     narrationImageAuditPanel.value = null
     persistNarrationBreakdownSummary({
       image_detect_cleared: true,
+      image_audit_at: null,
+      image_audit_failed_at: null,
+      image_audit_error: null,
+      image_audit_shots_with_issues: null,
+      image_audit_issue_count: null,
+      image_optimize_at: null,
     })
     toast.success(`已清除 ${res?.cleared ?? count} 段配图换镜检测分镜`)
     await refresh()
@@ -5870,6 +6149,12 @@ async function clearAllNarrationImagePrompts() {
       prompts_generated: 0,
       image_prompt_at: null,
       image_prompt_source: null,
+      image_audit_at: null,
+      image_audit_failed_at: null,
+      image_audit_error: null,
+      image_audit_shots_with_issues: null,
+      image_audit_issue_count: null,
+      image_optimize_at: null,
     })
     toast.success(`已清除 ${res?.cleared ?? count} 条配图文案`)
     await refresh()
@@ -6309,12 +6594,16 @@ async function genCharImg(id) {
       try {
         const gen = await imageAPI.get(genId)
         const err = gen?.error_msg || gen?.errorMsg
-        if (err) toast.error(err)
+        if (err) {
+          stampCharImageFailure(id, err)
+          toast.error(err)
+        }
       } catch {}
     }
   } catch (e) {
     pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-    toast.error(e.message)
+    stampCharImageFailure(id, e)
+    if (!isLlmCancelled(e)) toast.error(e.message)
   }
 }
 
@@ -6322,6 +6611,12 @@ async function recognizeCharPortrait(id) {
   try {
     if (!isPendingCharRecognize(id)) pendingCharRecognizeIds.value.push(id)
     const result = await characterAPI.recognizePortrait(id, epId.value)
+    charRecognizeGeneratedAt.value = {
+      ...charRecognizeGeneratedAt.value,
+      [id]: pickLlmGeneratedAt(result) ?? resolveLlmTimestamp(),
+    }
+    charRecognizeFailedAt.value = { ...charRecognizeFailedAt.value, [id]: null }
+    charRecognizeError.value = { ...charRecognizeError.value, [id]: null }
     toast.success('外貌描述已更新')
     if (result?.character) {
       const idx = chars.value.findIndex(c => c.id === id)
@@ -6329,7 +6624,12 @@ async function recognizeCharPortrait(id) {
     }
     await refresh()
   } catch (e) {
-    toast.error(e.message)
+    if (!isLlmCancelled(e)) {
+      charRecognizeGeneratedAt.value = { ...charRecognizeGeneratedAt.value, [id]: null }
+      charRecognizeFailedAt.value = { ...charRecognizeFailedAt.value, [id]: resolveLlmTimestamp() }
+      charRecognizeError.value = { ...charRecognizeError.value, [id]: llmErrorMessage(e) }
+      toast.error(e.message)
+    }
   } finally {
     pendingCharRecognizeIds.value = pendingCharRecognizeIds.value.filter(item => item !== id)
   }
@@ -6346,6 +6646,12 @@ async function generateCharAppearance(id) {
       text_thinking: episodeTextThinking.value,
       image_style: getNarrationImageStyle(),
     })
+    charAppearanceGeneratedAt.value = {
+      ...charAppearanceGeneratedAt.value,
+      [id]: pickLlmGeneratedAt(result) ?? resolveLlmTimestamp(),
+    }
+    charAppearanceFailedAt.value = { ...charAppearanceFailedAt.value, [id]: null }
+    charAppearanceError.value = { ...charAppearanceError.value, [id]: null }
     const appearance = result?.appearance || ''
     if (appearance) {
       const c = chars.value.find(ch => ch.id === id)
@@ -6357,7 +6663,12 @@ async function generateCharAppearance(id) {
     }
     toast.success('AI 外貌描述已生成（含 English tags）')
   } catch (e) {
-    toast.error(e.message)
+    if (!isLlmCancelled(e)) {
+      charAppearanceGeneratedAt.value = { ...charAppearanceGeneratedAt.value, [id]: null }
+      charAppearanceFailedAt.value = { ...charAppearanceFailedAt.value, [id]: resolveLlmTimestamp() }
+      charAppearanceError.value = { ...charAppearanceError.value, [id]: llmErrorMessage(e) }
+      toast.error(e.message)
+    }
   } finally {
     pendingCharAppearanceIds.value = pendingCharAppearanceIds.value.filter(item => item !== id)
   }
@@ -8257,6 +8568,7 @@ onMounted(() => {
     formatBgmModelLabel,
     formatBreakdownTime,
     formatCharacterDisplayName,
+    formatCharacterRoleSubtitle,
     formatComposeTimecode,
     formatComposeUnitDuration,
     formatSrtRaw,
@@ -8495,6 +8807,25 @@ onMounted(() => {
     narrationEditDialogue,
     narrationEditDuration,
     narrationExtracting,
+    narrationExtractGeneratedAt,
+    narrationExtractFailedAt,
+    narrationExtractError,
+    charAppearanceGeneratedAt,
+    charAppearanceFailedAt,
+    charAppearanceError,
+    charImageGeneratedAt,
+    charImageFailedAt,
+    charImageError,
+    resolveCharImageDisplayTime,
+    charRecognizeGeneratedAt,
+    charRecognizeFailedAt,
+    charRecognizeError,
+    shotScanGeneratedAt,
+    shotScanFailedAt,
+    shotScanError,
+    bgmDescGeneratedAt,
+    bgmDescFailedAt,
+    bgmDescError,
     narrationIconMap,
     narrationImageAuditPanel,
     narrationImageAuditRestorableCount,

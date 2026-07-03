@@ -92,11 +92,21 @@ export const MOTION_COMIC_STYLE_FORBIDDEN =
 export const MOTION_COMIC_SCENE_SUFFIX =
   '单张完整漫画插画，绝对无文字无水印，画面干净'
 
-/** 角色定妆参考图：与分镜配图一致为 16:9 横屏 */
-export const MOTION_COMIC_PORTRAIT_SIZE = '1920x1080'
+import {
+  THREE_VIEW_PORTRAIT_SIZE,
+  THREE_VIEW_PORTRAIT_SCENE_CN,
+  THREE_VIEW_PORTRAIT_PLOT_MOTION_COMIC_CN,
+  THREE_VIEW_PORTRAIT_FRAMING,
+  NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
+} from './portrait-reference.js'
 
-export const MOTION_COMIC_PORTRAIT_FRAMING =
-  '16:9 widescreen horizontal character reference sheet, single character centered on plain light gray studio background, full-body or three-quarter view with outfit and small props visible, cinematic widescreen composition, NOT square portrait, NOT vertical poster, NOT movie poster, NOT scenic background'
+export {
+  THREE_VIEW_PORTRAIT_SIZE as MOTION_COMIC_PORTRAIT_SIZE,
+  THREE_VIEW_PORTRAIT_SCENE_CN as MOTION_COMIC_PORTRAIT_SCENE_CN,
+  THREE_VIEW_PORTRAIT_PLOT_MOTION_COMIC_CN as MOTION_COMIC_PORTRAIT_PLOT_CN,
+  THREE_VIEW_PORTRAIT_FRAMING as MOTION_COMIC_PORTRAIT_FRAMING,
+  NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
+}
 
 export const MOTION_COMIC_NEGATIVE_PROMPT =
   '3D建模、真人照片、厚涂肌理、像素风、Q版三头身、水印、文字、血腥、gore、blood、斩首、尸体'
@@ -104,12 +114,13 @@ export const MOTION_COMIC_NEGATIVE_PROMPT =
 export const MOTION_COMIC_SIX_DIM_LLM_RULE = [
   '【六维结构】每条 image_prompt 必须含：',
   '【画风规格】现代国漫条漫，粗黑线描，平涂赛璐璐，正常头身比，表情夸张，16:9横屏',
-  '【画面主体】写清人物位置、服装主色、表情',
-  '【年代场景】地点与时代氛围',
-  '【核心细节动作】具体动作与互动；打斗镜须写动态姿势与漫画速度线',
+  '【画面主体】写清人物位置、服装主色、表情；有定妆时须对照 portrait_label',
+  '【年代场景】地点与时代氛围；有载体时须写至少2个具体物件名（含材质或颜色）',
+  '【核心细节动作】具体动作与互动；打斗镜须写动态姿势与漫画速度线；手持物写在此维',
   '【光影色调】漫画式简化光影',
   '【镜头视角】平视/低角度/特写等',
   '【质感要求】平涂赛璐璐，线条清晰，无文字无水印',
+  NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
 ].join('\n')
 
 export const MOTION_COMIC_ACTION_LLM_RULE =
@@ -155,14 +166,14 @@ export function isMajorSupportingCharacter(char: { name?: string | null; role?: 
 
 export function buildMotionComicCharacterExtractSystem(): string {
   return [
-    '你是漫画解说项目的角色设定师。画面采用现代国漫条漫画风（正常头身比、粗黑线描、平涂赛璐璐、16:9横屏），须为「主人公」和「主要配角」分别做 16:9 横屏定妆参考图。',
+    '你是漫画解说项目的角色设定师。画面采用现代国漫条漫画风（正常头身比、粗黑线描、平涂赛璐璐、16:9横屏），须为「主人公」和「主要配角」分别做 16:9 横屏三视图定妆参考图（纯白色背景、清晰脸型、英俊帅气动漫五官）。',
     '规则：',
     '1) 提取主人公（男主/女主/主角）及主要配角：反复出场、有专名、有对白或推动剧情的角色（反派、师父、挚友、恋人、宿敌、师兄师姐等）',
     '2) 不要提取一次性路人/群众/店员/衙役/无名弟子等龙套；不要提取「旁白」「解说员」',
     '3) 输出字段：name、variant_label、role、appearance、personality',
     '4) role：主人公写「主角/男主/女主」；主要配角写「主要配角·身份」（如 主要配角·反派、主要配角·师父）',
     '5) variant_label：人生阶段或形态（童年/青年/老年等）；全篇单形态可留空或「常态」；主人公多阶段须拆多条',
-    '6) appearance：中英混合，只写人物本身（年龄、性别、发型、五官、服装主色#hex、标志特征）；正常头身比漫画人物，禁止 Q 版三头身与胖瘦体型词',
+    '6) appearance：中英混合，只写人物本身（年龄、性别、发型、脸型五官、服装主色#hex、标志特征）；须写清动漫脸型（男：英俊帅气/棱角分明；女：清秀美丽/精致五官）；正常头身比漫画人物，禁止 Q 版三头身与胖瘦体型词',
     '7) 主要配角 appearance 须与主人公明显区分（不同发型、服装配色、体型或标志配饰），便于定妆参考图一致',
     '8) 禁止画风词：retro style, chibi, 3D, 真人, 厚涂, Q版, 条漫, pixel',
     '9) 示例 appearance：25岁男性反派，剑眉冷目，黑长发束冠，穿#1e293b深灰长袍，瘦高。\nEnglish tags: black long hair, topknot, dark gray robe, cold eyes',
@@ -174,7 +185,7 @@ export function buildMotionComicCharacterExtractSystem(): string {
 export function buildMotionComicCharacterAppearanceSystem(): string {
   return [
     '你是漫画解说项目的角色定妆造型设计助手。',
-    '画风：现代国漫条漫，正常头身比，粗线平涂，表情可夸张，16:9横屏定妆参考构图；禁止 Q 版、3D、真人写实。',
+    '画风：现代国漫条漫，正常头身比，粗线平涂，16:9横屏三视图定妆（正面/侧面/背面、纯白色背景、清晰脸型、双手自然下垂不拿道具）；男性英俊帅气、女性清秀美丽，动漫形式立体五官；禁止 Q 版、3D、真人写实；手持物留到分镜配图文案。',
     '须根据漫剧旁白稿中该角色的出场情节、对白、行为推断外貌，与故事时代、题材一致。',
     '不写胖瘦体型词；人物统一为正常头身比漫画审美，禁止素体份数、三头身、圆头直径等计量词。',
     '主人公与主要配角之间、各主要配角之间须有清晰视觉区分（发型、服装主色、标志配饰）。',
@@ -608,7 +619,7 @@ export function motionComicStylePrompt(context: 'scene' | 'diptych' | 'title' | 
     return `${base}, atmospheric comic background, dramatic lighting`
   }
   if (context === 'portrait') {
-    return `${base}, 16:9 widescreen character design reference sheet, plain light gray background, full body, cinematic horizontal framing`
+    return `${base}, handsome attractive anime facial features, character turnaround design sheet three views front side back, pure white background, 16:9 widescreen, full body, clear face structure`
   }
   if (context === 'diptych') {
     return `${base}, horizontal two-panel comic layout, before and after action`
@@ -634,7 +645,7 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
     '分析须结合 full_narration 与 prior_narration 丰富场景与动作，以 narration_lines 整段为叙事锚点。',
     'layout=single：单张完整漫画插画，禁止 grid/collage/multi-panel（diptych 除外）。',
     options?.hasDiptych ? 'layout=diptych：【左格】【右格】各写完整六维，适合动作前后对比。' : '',
-    options?.hasCharacters ? `characters 提供外貌，写入【画面主体】。${MOTION_COMIC_MAJOR_SUPPORTING_LLM_RULE}` : MOTION_COMIC_CROWD_LLM_RULE,
+    options?.hasCharacters ? `characters 提供 portrait_label、has_portrait 与外貌，写入【画面主体】并对照定妆。${MOTION_COMIC_MAJOR_SUPPORTING_LLM_RULE}` : MOTION_COMIC_CROWD_LLM_RULE,
     `示例：${MOTION_COMIC_SCENE_BODY_EXAMPLE}，${MOTION_COMIC_SCENE_SUFFIX}`,
     MOTION_COMIC_STYLE_FORBIDDEN,
     '只输出 JSON，不要解释。',

@@ -4,6 +4,7 @@
 import { Hono } from 'hono'
 import { createAgent, validAgentTypes } from '../agents/index.js'
 import { success, badRequest } from '../utils/response.js'
+import { llmGeneratedAt } from '../utils/llm-meta.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -85,6 +86,7 @@ app.post('/:type/chat', async (c) => {
       text: result.text || '',
       toolCalls: normalizedToolCalls,
       toolResults: normalizedToolResults,
+      generated_at: llmGeneratedAt(),
     })
   } catch (err: any) {
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(1)

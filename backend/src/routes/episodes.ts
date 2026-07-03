@@ -276,6 +276,7 @@ app.post('/:id/extract-narration-characters', async (c) => {
       characters: toSnakeCaseArray(result.characters),
       linked_storyboard_count: result.linked.linkedStoryboardCount,
       storyboard_count: result.linked.storyboardCount,
+      generated_at: result.generated_at,
     })
   } catch (err: any) {
     return badRequest(c, err.message)
@@ -406,7 +407,7 @@ app.post('/:id/narration-script-chat', async (c) => {
   if (!wantsStream) {
     try {
       const result = await chatNarrationScript(chatParams)
-      return success(c, result)
+      return success(c, { ...result, generated_at: now() })
     } catch (err: any) {
       return badRequest(c, err.message)
     }
@@ -428,6 +429,7 @@ app.post('/:id/narration-script-chat', async (c) => {
         )
         send({
           type: 'done',
+          generated_at: now(),
           reply: result.reply,
           model: result.model,
           text_thinking: result.text_thinking,
@@ -468,6 +470,7 @@ app.post('/:id/narration-script-emphasis', async (c) => {
     return success(c, {
       script: marked,
       model: resolveNarrationScriptChatTextModel(body.text_model ?? body.textModel),
+      generated_at: now(),
     })
   } catch (err: any) {
     return badRequest(c, err.message)
@@ -681,7 +684,7 @@ function imageChatSseResponse(handler: (send: (payload: Record<string, unknown>)
       }
       try {
         const result = await handler(send)
-        send({ type: 'done', ...result })
+        send({ type: 'done', generated_at: now(), ...result })
         controller.close()
       } catch (err: any) {
         send({ type: 'error', message: String(err?.message || err || '生成失败') })
