@@ -36,6 +36,142 @@ function linkSceneToEpisode(episodeId: number, sceneId: number) {
   }
 }
 
+export function readEpisodeScriptContent(episodeId: number): string {
+  const [ep] = db.select().from(schema.episodes)
+    .where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return ''
+  return String(ep.scriptContent || ep.content || '').trim()
+}
+
+export function listDramaCharactersForExtraction(episodeId: number, dramaId: number) {
+  const linkedIds = new Set(
+    db.select().from(schema.episodeCharacters)
+      .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
+      .map(link => link.characterId),
+  )
+  const characters = db.select().from(schema.characters)
+    .where(eq(schema.characters.dramaId, dramaId)).all()
+    .filter(c => !c.deletedAt)
+  return {
+    count: characters.length,
+    characters,
+    current_episode_characters: characters.filter(c => linkedIds.has(c.id)),
+  }
+}
+
+export function listDramaScenesForExtraction(episodeId: number, dramaId: number) {
+  const linkedIds = new Set(
+    db.select().from(schema.episodeScenes)
+      .where(eq(schema.episodeScenes.episodeId, episodeId)).all()
+      .map(link => link.sceneId),
+  )
+  const scenes = db.select().from(schema.scenes)
+    .where(eq(schema.scenes.dramaId, dramaId)).all()
+    .filter(s => !s.deletedAt)
+  return {
+    count: scenes.length,
+    scenes,
+    current_episode_scenes: scenes.filter(s => linkedIds.has(s.id)),
+  }
+}
+
+export function saveDedupExtractedCharacters(
+  episodeId: number,
+  dramaId: number,
+  characters: Array<{
+    name: string
+    role?: string
+    description?: string
+    appearance?: string
+    personality?: string
+  }>,
+) {
+  const ts = now()
+  const results = { created: 0, merged: 0 }
+  logTaskProgress('ExtractTool', 'save-characters-begin', {
+    episodeId,
+    dramaId,
+    names: characters.map(char => char.name).join(','),
+  })
+
+  for (const char of characters) {
+    const existing = db.select().from(schema.characters)
+      .where(eq(schema.characters.dramaId, dramaId)).all()
+      .filter(c => !c.deletedAt)
+      .find(c => c.name === char.name)
+
+    if (existing) {
+      db.update(schema.characters).set({
+        role: char.role || existing.role,
+        description: char.description || existing.description,
+        appearance: sanitizeCharacterAppearance(char.appearance || existing.appearance),
+        personality: char.personality || existing.personality,
+        updatedAt: ts,
+      }).where(eq(schema.characters.id, existing.id)).run()
+      linkCharToEpisode(episodeId, existing.id)
+      results.merged++
+    } else {
+      const res = db.insert(schema.characters).values({
+        name: char.name,
+        role: char.role || '',
+        description: char.description || '',
+        appearance: sanitizeCharacterAppearance(char.appearance || ''),
+        personality: char.personality || '',
+        dramaId,
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      const charId = Number(res.lastInsertRowid)
+      linkCharToEpisode(episodeId, charId)
+      results.created++
+    }
+  }
+
+  logTaskSuccess('ExtractTool', 'save-characters-complete', { episodeId, ...results })
+  return results
+}
+
+export function saveDedupExtractedScenes(
+  episodeId: number,
+  dramaId: number,
+  scenes: Array<{ location: string; time?: string; prompt?: string }>,
+) {
+  const ts = now()
+  const results = { created: 0, reused: 0 }
+  logTaskProgress('ExtractTool', 'save-scenes-begin', {
+    episodeId,
+    dramaId,
+    scenes: scenes.map(scene => `${scene.location}@${scene.time || ''}`).join(','),
+  })
+
+  for (const scene of scenes) {
+    const existing = db.select().from(schema.scenes)
+      .where(eq(schema.scenes.dramaId, dramaId)).all()
+      .filter(s => !s.deletedAt)
+      .find(s => s.location === scene.location && s.time === (scene.time || ''))
+
+    if (existing) {
+      linkSceneToEpisode(episodeId, existing.id)
+      results.reused++
+    } else {
+      const res = db.insert(schema.scenes).values({
+        dramaId,
+        location: scene.location,
+        time: scene.time || '',
+        prompt: scene.prompt || scene.location,
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      const sceneId = Number(res.lastInsertRowid)
+      linkSceneToEpisode(episodeId, sceneId)
+      results.created++
+    }
+  }
+
+  logTaskSuccess('ExtractTool', 'save-scenes-complete', { episodeId, ...results })
+  return results
+}
+
 export function createExtractTools(episodeId: number, dramaId: number) {
 
   // 1. 读取剧本内容
@@ -44,11 +180,11 @@ export function createExtractTools(episodeId: number, dramaId: number) {
     description: 'Read the formatted screenplay for character/scene extraction.',
     inputSchema: z.object({}),
     execute: async () => {
-      const [ep] = db.select().from(schema.episodes)
-        .where(eq(schema.episodes.id, episodeId)).all()
-      if (!ep) return { error: 'Episode not found' }
-      const content = ep.scriptContent || ep.content
-      if (!content) return { error: 'Episode has no script content' }
+      const content = readEpisodeScriptContent(episodeId)
+      if (!content) {
+        logTaskProgress('ExtractTool', 'read-script-empty', { episodeId, dramaId })
+        return { error: '当前集剧本为空，请先在剧本步骤填写并保存内容' }
+      }
       logTaskSuccess('ExtractTool', 'read-script', { episodeId, dramaId, scriptLength: content.length })
       return { script: content }
     },
@@ -60,19 +196,7 @@ export function createExtractTools(episodeId: number, dramaId: number) {
     description: 'Read all characters already existing in this drama project (for deduplication).',
     inputSchema: z.object({}),
     execute: async () => {
-      const linkedIds = new Set(
-        db.select().from(schema.episodeCharacters)
-          .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
-          .map(link => link.characterId),
-      )
-      const chars = db.select().from(schema.characters)
-        .where(eq(schema.characters.dramaId, dramaId)).all()
-        .filter(c => !c.deletedAt)
-      const payload = {
-        count: chars.length,
-        characters: chars,
-        current_episode_characters: chars.filter(c => linkedIds.has(c.id)),
-      }
+      const payload = listDramaCharactersForExtraction(episodeId, dramaId)
       logTaskSuccess('ExtractTool', 'read-characters', {
         episodeId,
         dramaId,
@@ -89,19 +213,7 @@ export function createExtractTools(episodeId: number, dramaId: number) {
     description: 'Read all scenes already existing in this drama project (for deduplication).',
     inputSchema: z.object({}),
     execute: async () => {
-      const linkedIds = new Set(
-        db.select().from(schema.episodeScenes)
-          .where(eq(schema.episodeScenes.episodeId, episodeId)).all()
-          .map(link => link.sceneId),
-      )
-      const scenes = db.select().from(schema.scenes)
-        .where(eq(schema.scenes.dramaId, dramaId)).all()
-        .filter(s => !s.deletedAt)
-      const payload = {
-        count: scenes.length,
-        scenes,
-        current_episode_scenes: scenes.filter(s => linkedIds.has(s.id)),
-      }
+      const payload = listDramaScenesForExtraction(episodeId, dramaId)
       logTaskSuccess('ExtractTool', 'read-scenes', {
         episodeId,
         dramaId,
@@ -126,55 +238,11 @@ export function createExtractTools(episodeId: number, dramaId: number) {
       })),
     }),
     execute: async ({ characters }) => {
-      const ts = now()
-      const results = { created: 0, merged: 0 }
-      logTaskProgress('ExtractTool', 'save-characters-begin', {
-        episodeId,
-        dramaId,
-        names: characters.map(char => char.name).join(','),
-      })
-
-      for (const char of characters) {
-        const existing = db.select().from(schema.characters)
-          .where(eq(schema.characters.dramaId, dramaId)).all()
-          .filter(c => !c.deletedAt)
-          .find(c => c.name === char.name)
-
-        if (existing) {
-          // 已存在：合并信息，保留 ID
-          db.update(schema.characters).set({
-            role: char.role || existing.role,
-            description: char.description || existing.description,
-            appearance: sanitizeCharacterAppearance(char.appearance || existing.appearance),
-            personality: char.personality || existing.personality,
-            updatedAt: ts,
-          }).where(eq(schema.characters.id, existing.id)).run()
-          linkCharToEpisode(episodeId, existing.id)
-          results.merged++
-        } else {
-          // 新增角色
-          const res = db.insert(schema.characters).values({
-            name: char.name,
-            role: char.role || '',
-            description: char.description || '',
-            appearance: sanitizeCharacterAppearance(char.appearance || ''),
-            personality: char.personality || '',
-            dramaId,
-            createdAt: ts,
-            updatedAt: ts,
-          }).run()
-          const charId = Number(res.lastInsertRowid)
-          linkCharToEpisode(episodeId, charId)
-          results.created++
-        }
-      }
-
-      const payload = {
+      const results = saveDedupExtractedCharacters(episodeId, dramaId, characters)
+      return {
         message: `角色保存完成：新增 ${results.created}，合并更新 ${results.merged}`,
         ...results,
       }
-      logTaskSuccess('ExtractTool', 'save-characters-complete', { episodeId, ...results })
-      return payload
     },
   })
 
@@ -190,52 +258,11 @@ export function createExtractTools(episodeId: number, dramaId: number) {
       })),
     }),
     execute: async ({ scenes }) => {
-      const ts = now()
-      const results = { created: 0, reused: 0 }
-      logTaskProgress('ExtractTool', 'save-scenes-begin', {
-        episodeId,
-        dramaId,
-        scenes: scenes.map(scene => `${scene.location}@${scene.time || ''}`).join(','),
-      })
-
-      for (const scene of scenes) {
-        // 按地点+时间段精确匹配
-        const existing = db.select().from(schema.scenes)
-          .where(eq(schema.scenes.dramaId, dramaId)).all()
-          .filter(s => !s.deletedAt)
-          .find(s => s.location === scene.location && s.time === (scene.time || ''))
-
-        if (existing) {
-          // 已存在完全匹配的场景：直接关联
-          linkSceneToEpisode(episodeId, existing.id)
-          results.reused++
-        } else {
-          // 检查是否有同地点不同时段（保留现有，新增独立场景）
-          const sameLocation = db.select().from(schema.scenes)
-            .where(eq(schema.scenes.dramaId, dramaId)).all()
-            .filter(s => !s.deletedAt)
-            .find(s => s.location === scene.location)
-
-          const res = db.insert(schema.scenes).values({
-            dramaId,
-            location: scene.location,
-            time: scene.time || '',
-            prompt: scene.prompt || scene.location,
-            createdAt: ts,
-            updatedAt: ts,
-          }).run()
-          const sceneId = Number(res.lastInsertRowid)
-          linkSceneToEpisode(episodeId, sceneId)
-          results.created++
-        }
-      }
-
-      const payload = {
+      const results = saveDedupExtractedScenes(episodeId, dramaId, scenes)
+      return {
         message: `场景保存完成：新增 ${results.created}，复用已有 ${results.reused}`,
         ...results,
       }
-      logTaskSuccess('ExtractTool', 'save-scenes-complete', { episodeId, ...results })
-      return payload
     },
   })
 

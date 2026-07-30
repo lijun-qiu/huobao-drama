@@ -6,13 +6,33 @@ export type NarrationTtsMode = 'new' | 'inherit' | 'copy'
 const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
 const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需对白|none|null|n\/a|na|环境音|环境声|音效|效果音|纯音效|纯环境音|只有环境音|仅环境音|背景音|背景音乐|bgm|sfx|ambient)$/i
 
+/** 像「角色名：台词」的说话人；拒绝把整句旁白当成角色名 */
+export function isPlausibleDialogueSpeaker(speaker?: string | null): boolean {
+  const name = String(speaker || '').trim()
+  if (!name) return false
+  if (name === '旁白' || name === '剧中' || name === '解说') return true
+  if (name.length > 12) return false
+  // 含句读/逗号等多半是叙述句被误切
+  if (/[，,。！？!?；;、：:\n]/.test(name)) return false
+  // 过长描述或明显叙述口吻
+  if (name.length >= 8 && /[的了着过]|他|她|我|这|那|就|又|却|把|被|让/.test(name)) return false
+  if (/^(借着|顺着|看着|听着|想到|只见|忽然|突然|于是|然后|接着)/.test(name)) return false
+  return true
+}
+
 export function parseDialogueForTTS(dialogue?: string | null) {
   const raw = dialogue?.trim() || ''
   if (!raw) return { speaker: '', pureText: '', markedText: '', ignorable: true }
   const speakerMatch = raw.match(/^(.+?)[:：]/)
   let speaker = speakerMatch ? speakerMatch[1].replace(/[（(].+?[)）]/g, '').trim() : ''
+  let body = speakerMatch ? raw.replace(/^.+?[:：]\s*/, '') : raw
+  // 「叙述句：后文」误切：整句当旁白，不剥前缀
+  if (speaker && !isPlausibleDialogueSpeaker(speaker)) {
+    speaker = '旁白'
+    body = raw
+  }
   const markedText = limitEmphasisMarkers(
-    raw.replace(/^.+?[:：]\s*/, '').replace(/[（(].+?[)）]/g, '').replace(/\s+/g, ' ').trim(),
+    body.replace(/[（(].+?[)）]/g, '').replace(/\s+/g, ' ').trim(),
     1,
   )
   const pureText = stripEmphasisMarkers(markedText)

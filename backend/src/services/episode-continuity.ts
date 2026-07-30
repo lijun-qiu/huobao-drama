@@ -1,5 +1,6 @@
 import { and, asc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
+import { resolveStoryboardNarrationText } from '../constants/motion-comic.js'
 import { parseNarrationImageMeta } from './narration-image.js'
 
 export type EpisodeContinuityContext = {
@@ -12,9 +13,7 @@ function storyboardNarrationSentence(sb: {
   description?: string | null
   dialogue?: string | null
 }): string {
-  const desc = String(sb.description || '').trim()
-  if (desc) return desc
-  return String(sb.dialogue || '').trim().replace(/^旁白[：:]\s*/, '')
+  return resolveStoryboardNarrationText(sb)
 }
 
 /** 读取上集正文旁白句（不含片头标题镜），供本集 LLM 连贯上下文 */

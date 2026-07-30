@@ -6,6 +6,8 @@ import {
   hasNarrationForbiddenStyleIssue,
   hasNarrationMultipleProtagonistIssue,
   hasNarrationPartialCloseupIssue,
+  hasNarrationFaceCloseupVsActionIssue,
+  repairNarrationFaceCloseupVsActionPrompt,
   hasNarrationRedundantTextureIssue,
   hasNarrationSixDimOrderIssue,
   hasNarrationSixDimStructure,
@@ -13,6 +15,7 @@ import {
   hasNarrationUniversalPrefixIssue,
   isNarrationMinimalStyle,
   isNarrationStructuredStyle,
+  isMotionComicStyle,
   NARRATION_UNIVERSAL_SCENE_SUFFIX,
   VIOLENCE_IMAGE_DETECT_RE,
   sanitizeSceneImagePrompt,
@@ -69,6 +72,7 @@ export function auditNarrationImagePromptText(
 
   const minimal = isNarrationMinimalStyle(style)
   const structured = isNarrationStructuredStyle(style)
+  const motionComic = isMotionComicStyle(style)
   const issues: NarrationPromptAuditIssue[] = []
 
   if (VIOLENCE_IMAGE_DETECT_RE.test(text)) {
@@ -80,7 +84,8 @@ export function auditNarrationImagePromptText(
     })
   }
 
-  if (structured) {
+  // 漫画解说改为整段文案：不再审计【】六维标签结构
+  if (structured && !motionComic) {
     if (!hasNarrationSixDimStructure(text)) {
       issues.push({
         code: 'missing_six_dim',
@@ -136,6 +141,14 @@ export function auditNarrationImagePromptText(
         severity: 'warn',
       })
     }
+    if (hasNarrationFaceCloseupVsActionIssue(text)) {
+      issues.push({
+        code: 'face_closeup_vs_action',
+        label: '近景/面部特写/头高过高，与坐姿・手部动作・道具冲突（易只出脸）',
+        category: 'format',
+        severity: 'warn',
+      })
+    }
     if (/黑色素体/.test(text)) {
       issues.push({
         code: 'black_body',
@@ -170,6 +183,25 @@ export function auditNarrationImagePromptText(
       severity: 'warn',
     })
   }
+  if (
+    /CRT|显像管|米色(?:厚)?显示器|厚显示器/.test(text)
+    && /全面屏|智能手机|超薄键盘|巧克力键盘|薄边框笔记本/.test(text)
+  ) {
+    issues.push({
+      code: 'era_prop_clash',
+      label: '电子产品跨代混搭（如CRT与现代智能机/超薄键鼠同框）',
+      category: 'style',
+      severity: 'warn',
+    })
+  }
+  if (/手机背面|机箱背面|摄像头模组朝向|只露背面/.test(text)) {
+    issues.push({
+      code: 'screen_back',
+      label: '带屏设备写成背面朝向镜头（应正面或略侧可见屏幕）',
+      category: 'style',
+      severity: 'warn',
+    })
+  }
   if (hasNarrationForbiddenStyleIssue(text)) {
     issues.push({
       code: 'forbidden_style',
@@ -196,8 +228,9 @@ export function optimizeNarrationImagePromptText(
 ): string {
   const raw = String(prompt || '').trim()
   if (!raw) return ''
-  if (isNarrationStructuredStyle(style)) return resolveLLMImagePrompt(raw, style)
-  return sanitizeSceneImagePrompt(raw)
+  const repaired = repairNarrationFaceCloseupVsActionPrompt(raw)
+  if (isNarrationStructuredStyle(style)) return resolveLLMImagePrompt(repaired, style)
+  return sanitizeSceneImagePrompt(repaired)
 }
 
 function listEpisodeImageAnchors(episodeId: number) {

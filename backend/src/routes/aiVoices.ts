@@ -9,11 +9,22 @@ import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { joinProviderUrl } from '../services/adapters/url.js'
 import { EDGE_VOICE_OPTIONS, resolveEdgeVoice } from '../services/edge-tts-local.js'
+import {
+  checkGptSovitsHealth,
+  deleteGptSovitsVoice,
+  getGptSovitsConfigSummary,
+  listGptSovitsVoices,
+  saveGptSovitsRefAudio,
+  toGptSovitsVoiceRef,
+  upsertGptSovitsVoice,
+} from '../services/gpt-sovits-tts.js'
 import { checkVoiceboxHealth, listVoiceboxVoiceOptions, resolveVoiceboxProfileId } from '../services/voicebox-tts.js'
+import { checkIndexTtsHealth, getIndexTtsConfigSummary } from '../services/index-tts-tts.js'
 import { generateTTS } from '../services/tts-generation.js'
 import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
+import { DEFAULT_CLONED_TTS_VOICE, DEFAULT_LOCAL_TTS_ENGINE } from '../constants/local-comic.js'
 import { listLocalCastVoiceCandidates } from '../services/local-voice-assign.js'
 
 const DEFAULT_LOCAL_TTS_PREVIEW_TEXT = '这是一段旁白试听，用于感受当前音色、语速和感情效果。'
@@ -24,6 +35,89 @@ const app = new Hono()
 app.get('/voicebox/health', async (c) => {
   const health = await checkVoiceboxHealth()
   return success(c, health)
+})
+
+// GET /ai-voices/gptsovits/health
+app.get('/gptsovits/health', async (c) => {
+  const health = await checkGptSovitsHealth()
+  return success(c, { ...health, ...getGptSovitsConfigSummary() })
+})
+
+// GET /ai-voices/indextts/health
+app.get('/indextts/health', async (c) => {
+  const health = await checkIndexTtsHealth({ force: true })
+  return success(c, { ...health, ...getIndexTtsConfigSummary() })
+})
+
+// GET /ai-voices/gptsovits/config
+app.get('/gptsovits/config', async (c) => {
+  return success(c, getGptSovitsConfigSummary())
+})
+
+// GET /ai-voices/gptsovits/voices — 本地音色库（不依赖 GPT-SoVITS 服务在线）
+app.get('/gptsovits/voices', async (c) => {
+  const voices = await listGptSovitsVoices()
+  return success(c, {
+    voices: voices.map(v => ({
+      voice_id: toGptSovitsVoiceRef(v.voice_id),
+      voice_name: v.voice_name,
+      description: v.description || [],
+      language: v.language || '中文',
+      provider: 'gptsovits',
+      prompt_text: v.prompt_text || '',
+      ref_audio_path: v.ref_audio_path,
+    })),
+    voice_count: voices.length,
+  })
+})
+
+// POST /ai-voices/gptsovits/voices — 新增或更新音色
+app.post('/gptsovits/voices', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>
+  try {
+    const voice = await upsertGptSovitsVoice({
+      voice_id: String(body.voice_id || body.voiceId || '').trim(),
+      voice_name: String(body.voice_name || body.voiceName || '').trim(),
+      ref_audio_path: String(body.ref_audio_path || body.refAudioPath || '').trim(),
+      prompt_text: String(body.prompt_text || body.promptText || '').trim(),
+      prompt_lang: String(body.prompt_lang || body.promptLang || 'zh').trim(),
+      language: String(body.language || '中文').trim(),
+      description: Array.isArray(body.description) ? body.description as string[] : [],
+      gpt_weights: body.gpt_weights ? String(body.gpt_weights) : body.gptWeights ? String(body.gptWeights) : undefined,
+      sovits_weights: body.sovits_weights ? String(body.sovits_weights) : body.sovitsWeights ? String(body.sovitsWeights) : undefined,
+      text_split_method: body.text_split_method ? String(body.text_split_method) : body.textSplitMethod ? String(body.textSplitMethod) : undefined,
+    })
+    return success(c, {
+      ...voice,
+      voice_id: toGptSovitsVoiceRef(voice.voice_id),
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// DELETE /ai-voices/gptsovits/voices/:id
+app.delete('/gptsovits/voices/:id', async (c) => {
+  const id = c.req.param('id')
+  const ok = await deleteGptSovitsVoice(id)
+  if (!ok) return badRequest(c, '音色不存在')
+  return success(c, { deleted: true, voice_id: id })
+})
+
+// POST /ai-voices/gptsovits/upload-ref — 上传参考音频
+app.post('/gptsovits/upload-ref', async (c) => {
+  const body = await c.req.parseBody()
+  const file = body['file']
+  if (!file || !(file instanceof File)) {
+    return badRequest(c, 'file is required')
+  }
+  try {
+    const buffer = Buffer.from(await file.arrayBuffer())
+    const absPath = await saveGptSovitsRefAudio(buffer, file.name || 'ref.wav')
+    return success(c, { ref_audio_path: absPath, file_name: file.name })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
 })
 
 // GET /ai-voices/local-cast — Kokoro + Edge 本地选角音色池
@@ -72,6 +166,18 @@ app.get('/', async (c) => {
       return badRequest(c, err.message)
     }
   }
+  if (provider === 'gptsovits') {
+    const voices = await listGptSovitsVoices()
+    return success(c, voices.map(v => ({
+      voice_id: toGptSovitsVoiceRef(v.voice_id),
+      voice_name: v.voice_name,
+      description: v.description || [],
+      language: v.language || '中文',
+      provider: 'gptsovits',
+      prompt_text: v.prompt_text || '',
+      ref_audio_path: v.ref_audio_path,
+    })))
+  }
   if (provider === 'edge') {
     return success(c, EDGE_VOICE_OPTIONS.map(v => ({
       voice_id: v.voice_id,
@@ -111,17 +217,29 @@ app.post('/preview', async (c) => {
   const text = String(body?.text || DEFAULT_LOCAL_TTS_PREVIEW_TEXT).trim()
   if (!text) return badRequest(c, '配音文本为空')
 
-  const ttsSpeed = resolveTtsSpeed(body?.tts_speed ?? body?.ttsSpeed)
+  const speedRaw = body?.tts_speed ?? body?.ttsSpeed
+  const ttsSpeed = resolveTtsSpeed(typeof speedRaw === 'number' || typeof speedRaw === 'string' ? speedRaw : undefined)
   const isLocal = resolvePreviewUsesLocalTts(body)
 
   let voice = ''
-  let localTtsEngine: 'edge' | 'voicebox' = 'edge'
+  let localTtsEngine: 'edge' | 'voicebox' | 'gptsovits' | 'indextts' = DEFAULT_LOCAL_TTS_ENGINE
   let voiceboxInstruct: string | undefined
   let voiceboxModelSize: ReturnType<typeof resolveVoiceboxModelSize> | undefined
 
   if (isLocal) {
-    localTtsEngine = body?.local_tts_engine === 'voicebox' || body?.localTtsEngine === 'voicebox' ? 'voicebox' : 'edge'
-    const localVoice = String(body?.local_voice || body?.localVoice || '').trim()
+    const engineRaw = String(body?.local_tts_engine ?? body?.localTtsEngine ?? DEFAULT_LOCAL_TTS_ENGINE).trim().toLowerCase()
+    if (engineRaw === 'indextts') {
+      localTtsEngine = 'indextts'
+    } else if (engineRaw === 'gptsovits') {
+      localTtsEngine = 'gptsovits'
+    } else if (engineRaw === 'voicebox') {
+      localTtsEngine = 'voicebox'
+    } else if (engineRaw === 'edge') {
+      localTtsEngine = 'edge'
+    }
+    const localVoiceRaw = String(body?.local_voice || body?.localVoice || '').trim()
+    const localVoice = localVoiceRaw
+      || ((localTtsEngine === 'gptsovits' || localTtsEngine === 'indextts') ? DEFAULT_CLONED_TTS_VOICE : '')
     if (!localVoice) return badRequest(c, '请选择音色')
 
     if (localTtsEngine === 'voicebox') {
@@ -130,17 +248,31 @@ app.post('/preview', async (c) => {
         return badRequest(c, health.error || 'Voicebox 未运行，请先启动 Voicebox')
       }
     }
+    if (localTtsEngine === 'gptsovits') {
+      const health = await checkGptSovitsHealth()
+      if (!health.ok) {
+        return badRequest(c, health.error || 'GPT-SoVITS 未运行，请先启动 api_v2.py')
+      }
+    }
+    if (localTtsEngine === 'indextts') {
+      const health = await checkIndexTtsHealth({ force: true })
+      if (!health.ok) {
+        return badRequest(c, health.error || 'IndexTTS2 未就绪，请运行 scripts/setup-index-tts.ps1')
+      }
+    }
 
-    voiceboxInstruct = localTtsEngine === 'voicebox'
-      ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
+    voiceboxInstruct = (localTtsEngine === 'voicebox' || localTtsEngine === 'indextts')
+      ? resolveVoiceboxInstruct(String(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct ?? ''))
       : undefined
     voiceboxModelSize = localTtsEngine === 'voicebox'
-      ? resolveVoiceboxModelSize(body?.voicebox_model_size ?? body?.voiceboxModelSize)
+      ? resolveVoiceboxModelSize(String(body?.voicebox_model_size ?? body?.voiceboxModelSize ?? ''))
       : undefined
 
     voice = localTtsEngine === 'voicebox'
       ? await resolveVoiceboxProfileId(localVoice)
-      : resolveEdgeVoice(localVoice)
+      : (localTtsEngine === 'gptsovits' || localTtsEngine === 'indextts')
+        ? localVoice
+        : resolveEdgeVoice(localVoice)
   } else {
     voice = String(body?.voice_id || body?.voiceId || 'alloy').trim()
     if (!voice) return badRequest(c, '请选择音色')

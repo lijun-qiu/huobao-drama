@@ -8,23 +8,23 @@ export const NARRATION_MINIMAL_STYLE = 'narration-minimal'
 /** 解说配图动漫风格（正常头身比 2D 动漫，七维结构与素体相同） */
 export const NARRATION_ANIME_STYLE = 'narration-anime'
 
-/** 漫画解说（条漫平涂 + 上下运镜） */
+/** 漫画解说（高对比国漫 + 运镜） */
 export const MOTION_COMIC_STYLE = 'motion-comic'
 
 export const MOTION_COMIC_DEFAULT_STYLE = MOTION_COMIC_STYLE
 
-/** 解说动漫 / 漫画解说共用：三视图定妆 */
+/** 解说动漫 / 漫画解说共用：正面全身定妆 */
 export const THREE_VIEW_PORTRAIT_SCENE_CN =
-  '纯白色背景，动漫三视图定妆参考图（正面/侧面/背面同一角色同屏），清晰展示脸型五官与发型，无环境无场景元素'
+  '纯白色背景，单张正面全身定妆参考图，清晰展示脸型五官、发型与全身服装，无环境无场景元素'
 
 export const THREE_VIEW_PORTRAIT_PLOT_ANIME_CN =
-  '英俊帅气动漫脸型，五官立体清晰，正常头身比，清晰线稿赛璐璐平涂，三视图全身站姿，服装与标志配饰在各角度均可见'
+  '英俊帅气动漫脸型，五官立体清晰，正常头身比，正面全身站姿，服装与标志配饰清晰可见'
 
 export const THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN =
-  '白色素体小人，正常卡通脸圆眼带高光，三视图全身站姿，简化年代服装简笔轮廓，各角度可见体型比例与标志道具'
+  '白色素体小人，正常卡通脸圆眼带高光，正面全身站姿，简化年代服装简笔轮廓，体型比例清晰可见'
 
 export const THREE_VIEW_PORTRAIT_SCENE_MINIMAL_CN =
-  '纯白色背景，素体小人三视图定妆参考图（正面/侧面/背面同一角色同屏），清晰展示正常卡通脸与体型比例，无环境无场景元素'
+  '纯白色背景，单张正面全身素体小人定妆参考图，清晰展示正常卡通脸与体型比例，无环境无场景元素'
 
 /** 解说配图可选画风（定妆参考与配图共用） */
 export const NARRATION_IMAGE_STYLE_OPTIONS = [
@@ -296,8 +296,8 @@ export const ART_STYLES = [
   },
   {
     value: MOTION_COMIC_STYLE,
-    label: '漫画解说（条漫平涂）',
-    description: '国漫条漫风，粗线平涂，静图快切+打斗动效，适合逆袭/短剧',
+    label: '漫画解说（高对比国漫）',
+    description: '锋利线稿、硬边赛璐璐、冷色戏剧光，静图+运镜，按场景换图',
   },
   {
     value: 'webtoon',
@@ -352,11 +352,11 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
     agent: `${NARRATION_ANIME_STYLE_SPEC_BODY}，禁止Q版三头身、3D渲染、真人照片`,
   },
   [MOTION_COMIC_STYLE]: {
-    scene: 'modern Chinese webtoon comic style, bold black outlines, flat cel-shaded colors, normal body proportions, expressive exaggerated faces, manhua illustration, dynamic action lines for fight scenes, cinematic composition, NOT chibi, NOT 3D',
-    diptych: 'modern Chinese webtoon comic style, horizontal two-panel before/after action, bold outlines, flat cel colors, normal proportions, manhua illustration',
-    title: 'modern Chinese webtoon comic style, atmospheric background, bold outlines, dramatic lighting, no text',
-    portrait: 'modern Chinese webtoon comic character turnaround reference sheet, three views front side back, bold black outlines, flat cel colors, normal body proportions, handsome attractive anime face, clear facial features, 16:9 widescreen horizontal framing, pure white background',
-    agent: 'modern Chinese webtoon comic style, bold outlines, flat cel colors, expressive faces, action lines allowed, NOT chibi',
+    scene: 'Chinese short-drama manhua key visual, high-fidelity digital anime, sharp clean thin lineart, hard-edge cel shading, deep chiaroscuro, high contrast cool blue purple grey night tones, strong side key light with deep face shadows, cool white rim light on hair, intense expressive anime eyes, dark shallow-DOF bokeh background, normal young adult body proportions, NOT Makoto Shinkai soft golden hour, NOT watercolor blur, NOT chibi, NOT thick webtoon outlines, NOT speed lines',
+    diptych: 'Chinese short-drama manhua illustration, horizontal two-panel before/after action, sharp clean thin lineart, hard-edge cel shading, high contrast cool tones, dramatic chiaroscuro lighting, NOT chibi, NOT Makoto Shinkai',
+    title: 'Chinese short-drama manhua illustration, atmospheric dark background, sharp thin lineart, hard-edge cel shading, dramatic chiaroscuro lighting, cool blue purple tones, no text',
+    portrait: 'Chinese short-drama manhua key visual, sharp clean thin lineart, hard-edge cel shading, deep chiaroscuro, high contrast cool blue purple grey night tones, strong side key light with deep face shadows, cool white rim light on hair, vertical half-body portrait, chest-up, neutral face no expression, dark cool soft-blur background, NOT Makoto Shinkai, NOT pure white flat studio light, NOT watercolor, NOT chibi, NOT speed lines',
+    agent: 'Chinese short-drama manhua illustration, sharp clean thin lineart, hard-edge cel shading, high contrast cool tones, dynamic clear body language, NOT chibi, NOT speed lines, NOT Makoto Shinkai',
   },
   'short-drama': {
     scene: 'Chinese short drama 2D animation style, normal realistic body proportions, clean consistent line art, soft cel shading, expressive anime faces, Douyin storytelling animation aesthetic, school drama illustration, cinematic composition, NOT chibi, NOT Q-version',

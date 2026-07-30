@@ -4,7 +4,11 @@ import { fileURLToPath } from 'url'
 import { logTaskWarn } from './task-logger.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const defaultEnvPath = path.resolve(__dirname, '../../../.env.local')
+const projectRoot = path.resolve(__dirname, '../../..')
+const defaultEnvPaths = [
+  path.resolve(projectRoot, '.env.local'),
+  path.resolve(projectRoot, '.env'),
+]
 
 /** 修正粘贴时误带入的 AI_API_KEY=sk- 重复前缀 */
 export function normalizeEnvApiKey(raw: string): string {
@@ -27,7 +31,7 @@ export function normalizeEnvApiKey(raw: string): string {
   return key
 }
 
-export function loadEnvLocal(envPath = defaultEnvPath): void {
+function applyEnvFile(envPath: string): void {
   if (!existsSync(envPath)) return
   for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const trimmed = line.trim()
@@ -36,7 +40,32 @@ export function loadEnvLocal(envPath = defaultEnvPath): void {
     if (idx === -1) continue
     const key = trimmed.slice(0, idx).trim()
     let value = trimmed.slice(idx + 1).trim()
-    if (key === 'AI_API_KEY') value = normalizeEnvApiKey(value)
-    process.env[key] = value
+    if (
+      (value.startsWith('"') && value.endsWith('"'))
+      || (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
+    if (key === 'AI_API_KEY'
+      || key === 'OPENROUTER_API_KEY'
+      || key === 'OPENROUTER_API_KEY_FREE'
+      || key === 'OPENROUTER_API_KEY_PAID'
+      || key === 'DEEPSEEK_API_KEY'
+      || key === 'AI_DEEPSEEK_API_KEY'
+    ) {
+      value = normalizeEnvApiKey(value)
+    }
+    // 已有环境变量优先，不覆盖
+    if (process.env[key] == null || process.env[key] === '') {
+      process.env[key] = value
+    }
   }
+}
+
+export function loadEnvLocal(envPath?: string): void {
+  if (envPath) {
+    applyEnvFile(envPath)
+    return
+  }
+  for (const p of defaultEnvPaths) applyEnvFile(p)
 }

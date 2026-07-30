@@ -21,7 +21,16 @@ import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta, resolveStoryboardImageAnchorShot, resolveStoryboardVisualSource, resolveStoryboardSubtitleNarration, sortStoryboardsByOrder } from './narration-image.js'
 import { deleteEpisodeAssetFileIfUnreferenced } from './storyboard-asset-replace.js'
 import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
-import { parseProductionMode, isMotionComicMode } from '../constants/production-mode.js'
+import { parseProductionMode, usesMotionComicVisuals, isDialoguePortraitMode } from '../constants/production-mode.js'
+import {
+  DIALOGUE_PORTRAIT_CANVAS,
+  buildDialoguePortraitBgFilter,
+  buildDialoguePortraitOverlayXy,
+  buildDialoguePortraitSpriteFilter,
+  resolveDialoguePortraitBgPath,
+  resolveDialoguePortraitOverlayLayers,
+  resolveMouthEnableExpr,
+} from './dialogue-portrait-compose.js'
 import { parseMotionComicPreset } from '../constants/motion-comic.js'
 import { resolveMotionComicComposeOptions } from './motion-comic-meta.js'
 import { buildMotionComicComposeFilter, resolveMotionComicMotionScale } from './motion-comic-camera.js'
@@ -588,6 +597,64 @@ async function isValidVideoFile(filePath: string): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+/**
+ * 轻量动态：配图轻微 Ken Burns 推镜（与镜头合成同级，不做大幅扫镜）。
+ */
+export type KenBurnsMotionStyle = 'zoom_in' | 'zoom_out'
+
+export function pickKenBurnsMotionStyle(seed?: number | null): KenBurnsMotionStyle {
+  const n = Number.isFinite(Number(seed)) ? Math.abs(Math.floor(Number(seed))) : 0
+  return n % 2 === 0 ? 'zoom_in' : 'zoom_out'
+}
+
+export async function renderKenBurnsClip(
+  imageAbsPath: string,
+  durationSec: number,
+  outputAbsPath: string,
+  options?: { fps?: number; pushIn?: boolean; style?: KenBurnsMotionStyle; seed?: number },
+): Promise<void> {
+  if (!fs.existsSync(imageAbsPath)) throw new Error(`配图不存在: ${imageAbsPath}`)
+  const fps = Math.max(12, options?.fps ?? COMPOSE_FPS)
+  const sec = Math.max(1, Number(durationSec) || 3)
+  const frames = durationToFrameCount(sec, fps)
+  const style = options?.style
+    || (options?.pushIn === false ? 'zoom_out' : undefined)
+    || pickKenBurnsMotionStyle(options?.seed)
+  const pushIn = style !== 'zoom_out'
+  const startZ = pushIn ? 1 : 1.08
+  const endZ = pushIn ? 1.08 : 1
+  const delta = endZ - startZ
+  const filter = [
+    'scale=8000:-1',
+    `zoompan=z='${startZ}+${delta}*on/${frames - 1}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=1280x720:fps=${fps}`,
+    'format=yuv420p',
+  ].join(',')
+
+  fs.mkdirSync(path.dirname(outputAbsPath), { recursive: true })
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(imageAbsPath)
+      .inputOptions(['-loop', '1'])
+      .videoFilters(filter)
+      .outputOptions([
+        '-t', String(sec),
+        '-r', String(fps),
+        '-an',
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '20',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+      ])
+      .output(outputAbsPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+  if (!(await isValidVideoFile(outputAbsPath))) {
+    throw new Error('轻量动态视频生成失败（输出无效）')
   }
 }
 
@@ -1409,7 +1476,7 @@ async function composeSameImageGroup(
       const [drama] = ep
         ? db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
         : [undefined]
-      const motionComicMode = isMotionComicMode(parseProductionMode(drama?.metadata))
+      const motionComicMode = usesMotionComicVisuals(parseProductionMode(drama?.metadata))
       const motionPreset = parseMotionComicPreset(drama?.metadata)
 
       await renderSameImageGroupSegment(
@@ -1457,7 +1524,8 @@ async function composeSameImageGroup(
 }
 
 /**
- * 合成镜头：配图段内多句合并一条成片；单句段则一镜一条
+ * 合成镜头：配图段内多句合并一条成片；单句段则一镜一条。
+ * 对话立绘：始终单镜合成（同背景不同叠层/表情），禁止同图 group。
  */
 export async function composeStoryboard(storyboardId: number): Promise<string> {
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboardId)).all()
@@ -1465,6 +1533,14 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
   ensureEpisodeComposeRun(sb.episodeId)
   throwIfComposeCancelled(sb.episodeId)
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  const [drama] = ep
+    ? db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+    : [undefined]
+  if (isDialoguePortraitMode(parseProductionMode(drama?.metadata))) {
+    return composeStoryboardSingle(storyboardId)
+  }
 
   const episodeStoryboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, sb.episodeId))
@@ -1512,7 +1588,8 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
   const [drama] = ep
     ? db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
     : [undefined]
-  const motionComicMode = isMotionComicMode(parseProductionMode(drama?.metadata))
+  const motionComicMode = usesMotionComicVisuals(parseProductionMode(drama?.metadata))
+  const dialoguePortraitMode = isDialoguePortraitMode(parseProductionMode(drama?.metadata))
   const motionPreset = parseMotionComicPreset(drama?.metadata)
   const watermarkText = resolveWatermarkText(ep?.watermarkText)
   const watermarkAnimated = resolveWatermarkAnimated(ep?.watermarkAnimated)
@@ -1614,7 +1691,7 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
       }
     }
 
-    if (!visual && !audioPath && !bgmPath) {
+    if (!visual && !audioPath && !bgmPath && !dialoguePortraitMode) {
       throw new Error(`Storyboard ${storyboardId} has no video, image, narration audio, or BGM`)
     }
 
@@ -1659,9 +1736,88 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
     await new Promise<void>(async (resolve, reject) => {
       throwIfComposeCancelled(sb.episodeId)
       const isTitleShot = isStoryboardTitleShot(sb)
-      const filters: string[] = []
 
       let cmd = ffmpeg()
+      const complexParts: string[] = []
+      let videoInputCount = 1
+      let stillImageTune = false
+
+      if (dialoguePortraitMode && ep) {
+        const bgPath = resolveDialoguePortraitBgPath(sb, ep.dramaId, STORAGE_ROOT)
+        const overlays = resolveDialoguePortraitOverlayLayers(sb, ep.dramaId, STORAGE_ROOT)
+        const useBlackBg = !bgPath || !fs.existsSync(bgPath)
+        const mouthEnable = resolveMouthEnableExpr(audioPath, clipDuration)
+
+        if (useBlackBg) {
+          cmd = cmd.input(`color=c=black:s=${DIALOGUE_PORTRAIT_CANVAS.width}x${DIALOGUE_PORTRAIT_CANVAS.height}:r=${COMPOSE_FPS}:d=${clipDuration}`)
+            .inputOptions(['-f', 'lavfi'])
+          complexParts.push(`[0:v]fps=${COMPOSE_FPS},format=yuv420p[bg]`)
+        } else {
+          cmd = cmd.input(bgPath!).inputOptions(['-loop', '1', '-t', String(clipDuration)])
+          complexParts.push(buildDialoguePortraitBgFilter(0, 'bg', COMPOSE_FPS))
+        }
+
+        let currentLabel = 'bg'
+        let nextInputIndex = 1
+        overlays.forEach((layer) => {
+          const xy = buildDialoguePortraitOverlayXy(layer.slot)
+          const closedIdx = nextInputIndex++
+          cmd = cmd.input(layer.absPath).inputOptions(['-loop', '1', '-t', String(clipDuration)])
+          const closedLabel = `c${closedIdx}`
+          complexParts.push(buildDialoguePortraitSpriteFilter(closedIdx, closedLabel))
+          const afterClosed = `t${closedIdx}`
+          complexParts.push(
+            `[${currentLabel}][${closedLabel}]overlay=x=${xy.x}:y=${xy.y}:format=auto[${afterClosed}]`,
+          )
+          currentLabel = afterClosed
+
+          if (layer.isSpeaker && layer.openAbsPath && mouthEnable) {
+            const openIdx = nextInputIndex++
+            cmd = cmd.input(layer.openAbsPath).inputOptions(['-loop', '1', '-t', String(clipDuration)])
+            const openLabel = `o${openIdx}`
+            complexParts.push(buildDialoguePortraitSpriteFilter(openIdx, openLabel))
+            const afterOpen = `to${openIdx}`
+            complexParts.push(
+              `[${currentLabel}][${openLabel}]overlay=x=${xy.x}:y=${xy.y}:enable='${mouthEnable}':format=auto[${afterOpen}]`,
+            )
+            currentLabel = afterOpen
+          }
+        })
+
+        videoInputCount = nextInputIndex
+        stillImageTune = true
+        const postFilters: string[] = []
+        appendComposeVideoPostFilters(
+          postFilters,
+          subtitlePath,
+          !!isTitleShot,
+          transitionPads,
+          watermarkText,
+          watermarkAnimated,
+        )
+        if (postFilters.length) {
+          complexParts.push(`[${currentLabel}]${postFilters.join(',')}[vout]`)
+        } else {
+          complexParts.push(`[${currentLabel}]null[vout]`)
+        }
+
+        logTaskProgress('ComposeTask', 'dialogue-portrait-overlay', {
+          storyboardId,
+          duration: clipDuration,
+          bg: useBlackBg ? 'black' : bgPath,
+          lipsync: !!mouthEnable,
+          overlays: overlays.map(o => ({
+            characterId: o.characterId,
+            slot: o.slot,
+            expression: o.expression,
+            speaker: o.isSpeaker,
+            mouthOpen: !!(o.isSpeaker && o.openAbsPath && mouthEnable),
+          })),
+          videoInputCount,
+        })
+      } else {
+      const filters: string[] = []
+
       if (useBlackFrame) {
         cmd = cmd.input(`color=c=black:s=1280x720:r=25:d=${clipDuration}`).inputOptions(['-f', 'lavfi'])
         filters.push('fps=25,format=yuv420p')
@@ -1754,6 +1910,10 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
         watermarkText,
         watermarkAnimated,
       )
+      complexParts.push(`[0:v]${filters.join(',')}[vout]`)
+      videoInputCount = 1
+      stillImageTune = visual?.type === 'image'
+      } // end non-dialogue-portrait branch
 
       if (audioPath) {
         cmd = cmd.input(audioPath)
@@ -1766,28 +1926,26 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
       const hasVoice = !!audioPath
       const hasBgm = !!bgmPath
       const outputDurationStr = fmtComposeFilterSec(outputDuration)
-      const videoChain = `[0:v]${filters.join(',')}[vout]`
-      const complexParts: string[] = [videoChain]
+      const voiceInput = videoInputCount
+      const bgmInput = videoInputCount + (hasVoice ? 1 : 0)
 
       if (hasVoice && hasBgm) {
-        const voiceInput = 1
-        const bgmInput = 2
         complexParts.push(buildComposeTransitionAudioPadFilter(voiceInput, 'voice', transitionPads))
         complexParts.push(`[${bgmInput}:a]volume=${BGM_VOICE_MIX_VOLUME},atrim=0:${outputDurationStr}[bgm]`)
         complexParts.push('[voice][bgm]amix=inputs=2:duration=longest:dropout_transition=2:normalize=0[aout]')
         outputOptions.push('-map', '[vout]', '-map', '[aout]', '-c:a', 'aac')
       } else if (hasVoice) {
-        complexParts.push(buildComposeTransitionAudioPadFilter(1, 'aout', transitionPads))
+        complexParts.push(buildComposeTransitionAudioPadFilter(voiceInput, 'aout', transitionPads))
         outputOptions.push('-map', '[vout]', '-map', '[aout]', '-c:a', 'aac')
       } else if (hasBgm) {
-        complexParts.push(`[1:a]volume=${BGM_SOLO_VOLUME},atrim=0:${outputDurationStr}[aout]`)
+        complexParts.push(`[${bgmInput}:a]volume=${BGM_SOLO_VOLUME},atrim=0:${outputDurationStr}[aout]`)
         outputOptions.push('-map', '[vout]', '-map', '[aout]', '-c:a', 'aac')
       } else {
         outputOptions.push('-map', '[vout]', '-an')
       }
 
       outputOptions.push('-t', outputDurationStr, '-vsync', 'cfr', '-r', '25')
-      if (visual?.type === 'image') {
+      if (stillImageTune || visual?.type === 'image') {
         outputOptions.push('-g', '1', '-keyint_min', '1', '-tune', 'stillimage')
       }
 

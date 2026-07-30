@@ -41,6 +41,71 @@
       </button>
     </div>
 
+    <!-- 小说漫画讲解：原文 + 章节大纲 -->
+    <div v-if="isNovelComic" class="novel-comic-panel card">
+      <div class="nc-head">
+        <div>
+          <div class="nc-kicker">小说漫画讲解</div>
+          <h2 class="nc-title">粘贴小说 → 章节大纲 → 一章一集</h2>
+          <p class="nc-sub">确认大纲后按章创建各集；每集旁白朗读该章、出漫画配图。</p>
+        </div>
+        <span v-if="outlineConfirmedAt" class="nc-badge">已确认 {{ outlineConfirmedAt.slice(0, 16).replace('T', ' ') }}</span>
+      </div>
+
+      <label class="field nc-field">
+        <span class="field-label">小说原文</span>
+        <textarea
+          v-model="sourceNovel"
+          class="input nc-textarea"
+          rows="8"
+          placeholder="粘贴完整小说原文…"
+        />
+        <span class="field-hint">约 {{ sourceNovel.length }} 字</span>
+      </label>
+      <div class="nc-actions">
+        <button class="btn" :disabled="savingSource || !sourceNovel.trim()" @click="saveSourceNovel">
+          {{ savingSource ? '保存中…' : '保存原文' }}
+        </button>
+        <label class="nc-chapters">
+          目标章数
+          <input v-model.number="targetChapters" class="input nc-num" type="number" min="2" max="12" />
+        </label>
+        <button class="btn btn-primary" :disabled="generatingOutline || !sourceNovel.trim()" @click="generateOutline">
+          {{ generatingOutline ? '生成中…' : '生成章节大纲' }}
+        </button>
+      </div>
+
+      <div v-if="chapterOutline.length" class="nc-outline">
+        <div class="nc-outline-head">
+          <span class="section-label-inline">章节大纲（可编辑）</span>
+          <button class="btn" :disabled="savingOutline" @click="saveOutline">
+            {{ savingOutline ? '保存中…' : '保存大纲' }}
+          </button>
+        </div>
+        <div v-for="(ch, idx) in chapterOutline" :key="idx" class="nc-chapter card">
+          <div class="nc-chapter-row">
+            <span class="nc-ch-num">第 {{ idx + 1 }} 章</span>
+            <input v-model="ch.title" class="input" placeholder="章标题" />
+            <button class="btn btn-ghost" type="button" @click="removeChapter(idx)" :disabled="chapterOutline.length <= 2">删</button>
+          </div>
+          <textarea v-model="ch.summary" class="input nc-summary" rows="2" placeholder="本章摘要" />
+          <input
+            class="input"
+            :value="(ch.key_beats || []).join('；')"
+            placeholder="情节点（用；分隔）"
+            @change="e => setChapterBeats(idx, e.target.value)"
+          />
+        </div>
+        <button class="btn" type="button" @click="addChapter">+ 加一章</button>
+        <div class="nc-apply">
+          <button class="btn btn-primary" :disabled="applyingOutline || !chapterOutline.length" @click="applyOutline">
+            {{ applyingOutline ? '建集中（按章写朗读稿）…' : '确认并创建各集' }}
+          </button>
+          <span class="field-hint">空集将按大纲重建；已有分镜的集不会被删除，仅追加缺失章。</span>
+        </div>
+      </div>
+    </div>
+
     <!-- Episode List -->
     <div class="section-label">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -164,8 +229,8 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, dramaAPI, episodeAPI } from '~/composables/useApi'
+import { DEFAULT_IMAGE_MODEL, DEFAULT_LOCAL_IMAGE_MODEL, DEFAULT_LOCAL_TEXT_MODEL, imageModelOptionsForMode, parseProductionMode, usesLocalModelPipeline } from '~/composables/useEpisodeWorkflow'
 import { artStyleLabel, artStyleSelectOptions, normalizeArtStyle } from '~/composables/useArtStyles'
-import { DEFAULT_IMAGE_MODEL, IMAGE_MODEL_OPTIONS } from '~/composables/useEpisodeWorkflow'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 const route = useRoute()
@@ -179,10 +244,126 @@ const videoConfigs = ref([])
 const audioConfigs = ref([])
 const newEpisodeImageConfigId = ref(null)
 const newEpisodeImageModel = ref(DEFAULT_IMAGE_MODEL)
+const newEpisodeTextModel = ref('')
 const newEpisodeVideoConfigId = ref(null)
 const newEpisodeAudioConfigId = ref(null)
 
-function hasScript(ep) { return !!(ep.script_content || ep.scriptContent) }
+const isNovelComic = computed(() => parseProductionMode(drama.value) === 'novel_comic')
+const sourceNovel = ref('')
+const chapterOutline = ref([])
+const outlineConfirmedAt = ref(null)
+const targetChapters = ref(4)
+const savingSource = ref(false)
+const generatingOutline = ref(false)
+const savingOutline = ref(false)
+const applyingOutline = ref(false)
+
+function hasScript(ep) { return !!(ep.script_content || ep.scriptContent || ep.content) }
+
+async function loadNovelComic() {
+  if (!isNovelComic.value) return
+  try {
+    const state = await dramaAPI.novelComic.get(dramaId)
+    sourceNovel.value = state.source_novel || ''
+    chapterOutline.value = (state.chapter_outline || []).map((c, i) => ({
+      number: c.number || i + 1,
+      title: c.title || '',
+      summary: c.summary || '',
+      key_beats: Array.isArray(c.key_beats) ? [...c.key_beats] : [],
+      approx_chars: c.approx_chars,
+    }))
+    outlineConfirmedAt.value = state.outline_confirmed_at || null
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function saveSourceNovel() {
+  savingSource.value = true
+  try {
+    await dramaAPI.novelComic.saveSource(dramaId, { source_novel: sourceNovel.value })
+    outlineConfirmedAt.value = null
+    toast.success('小说原文已保存')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    savingSource.value = false
+  }
+}
+
+async function generateOutline() {
+  generatingOutline.value = true
+  try {
+    if (sourceNovel.value.trim()) {
+      await dramaAPI.novelComic.saveSource(dramaId, { source_novel: sourceNovel.value })
+    }
+    const res = await dramaAPI.novelComic.generateOutline(dramaId, {
+      target_chapters: targetChapters.value,
+    })
+    chapterOutline.value = (res.chapter_outline || []).map((c, i) => ({
+      number: c.number || i + 1,
+      title: c.title || '',
+      summary: c.summary || '',
+      key_beats: Array.isArray(c.key_beats) ? [...c.key_beats] : [],
+      approx_chars: c.approx_chars,
+    }))
+    outlineConfirmedAt.value = null
+    toast.success(`已生成 ${chapterOutline.value.length} 章大纲`)
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    generatingOutline.value = false
+  }
+}
+
+async function saveOutline() {
+  savingOutline.value = true
+  try {
+    const payload = chapterOutline.value.map((c, i) => ({
+      number: i + 1,
+      title: c.title,
+      summary: c.summary,
+      key_beats: c.key_beats || [],
+      approx_chars: c.approx_chars,
+    }))
+    await dramaAPI.novelComic.saveOutline(dramaId, { chapter_outline: payload })
+    outlineConfirmedAt.value = null
+    toast.success('大纲已保存')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    savingOutline.value = false
+  }
+}
+
+async function applyOutline() {
+  applyingOutline.value = true
+  try {
+    await saveOutline()
+    const res = await dramaAPI.novelComic.applyOutline(dramaId)
+    outlineConfirmedAt.value = res.outline_confirmed_at || new Date().toISOString()
+    toast.success(`已落地 ${res.results?.length || 0} 章（一章一集）`)
+    await load()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    applyingOutline.value = false
+  }
+}
+
+function addChapter() {
+  const n = chapterOutline.value.length + 1
+  chapterOutline.value.push({ number: n, title: '', summary: '', key_beats: [] })
+}
+
+function removeChapter(idx) {
+  chapterOutline.value.splice(idx, 1)
+}
+
+function setChapterBeats(idx, raw) {
+  const beats = String(raw || '').split(/[；;]/).map(s => s.trim()).filter(Boolean)
+  if (chapterOutline.value[idx]) chapterOutline.value[idx].key_beats = beats
+}
 
 function configLabel(config) {
   if (!config) return ''
@@ -192,7 +373,10 @@ function configLabel(config) {
 }
 
 const imageConfigOptions = computed(() => imageConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
-const imageModelOptions = computed(() => IMAGE_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
+const imageModelOptions = computed(() => {
+  const mode = parseProductionMode(drama.value)
+  return imageModelOptionsForMode(mode).map(item => ({ label: item.label, value: item.value }))
+})
 const videoConfigOptions = computed(() => videoConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const audioConfigOptions = computed(() => audioConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const canCreateEpisode = computed(() => !!(newEpisodeImageConfigId.value && newEpisodeVideoConfigId.value && newEpisodeAudioConfigId.value))
@@ -204,6 +388,7 @@ async function load() {
   try {
     drama.value = await dramaAPI.get(dramaId)
     dramaStyle.value = normalizeArtStyle(drama.value?.style)
+    await loadNovelComic()
   } catch (e) {
     toast.error(e.message)
   }
@@ -232,9 +417,17 @@ async function loadConfigs() {
     imageConfigs.value = imgs || []
     videoConfigs.value = vids || []
     audioConfigs.value = auds || []
-    if (!newEpisodeImageConfigId.value && imageConfigs.value.length) newEpisodeImageConfigId.value = imageConfigs.value[0].id
-    if (!newEpisodeVideoConfigId.value && videoConfigs.value.length) newEpisodeVideoConfigId.value = videoConfigs.value[0].id
-    if (!newEpisodeAudioConfigId.value && audioConfigs.value.length) newEpisodeAudioConfigId.value = audioConfigs.value[0].id
+    const mode = parseProductionMode(drama.value)
+    const pick = (rows, provider) => rows.find(c => c.provider === provider)?.id || rows[0]?.id
+    if (usesLocalModelPipeline(mode)) {
+      newEpisodeImageConfigId.value = pick(imageConfigs.value, 'comfyui')
+      newEpisodeVideoConfigId.value = pick(videoConfigs.value, 'comfyui')
+      newEpisodeAudioConfigId.value = pick(audioConfigs.value, 'edge') || pick(audioConfigs.value, 'minimax')
+    } else {
+      if (!newEpisodeImageConfigId.value && imageConfigs.value.length) newEpisodeImageConfigId.value = imageConfigs.value[0].id
+      if (!newEpisodeVideoConfigId.value && videoConfigs.value.length) newEpisodeVideoConfigId.value = videoConfigs.value[0].id
+      if (!newEpisodeAudioConfigId.value && audioConfigs.value.length) newEpisodeAudioConfigId.value = audioConfigs.value[0].id
+    }
   } catch (e) {
     toast.error(e.message)
   }
@@ -242,7 +435,9 @@ async function loadConfigs() {
 
 function openAddEpisode() {
   newEpisodeTitle.value = ''
-  newEpisodeImageModel.value = DEFAULT_IMAGE_MODEL
+  const mode = parseProductionMode(drama.value)
+  newEpisodeImageModel.value = usesLocalModelPipeline(mode) ? DEFAULT_LOCAL_IMAGE_MODEL : DEFAULT_IMAGE_MODEL
+  newEpisodeTextModel.value = usesLocalModelPipeline(mode) ? DEFAULT_LOCAL_TEXT_MODEL : ''
   addDialog.value = true
 }
 
@@ -254,6 +449,7 @@ async function addEpisode() {
       title: newEpisodeTitle.value || undefined,
       image_config_id: newEpisodeImageConfigId.value,
       image_model: newEpisodeImageModel.value,
+      text_model: newEpisodeTextModel.value || undefined,
       video_config_id: newEpisodeVideoConfigId.value,
       audio_config_id: newEpisodeAudioConfigId.value,
     })
@@ -317,6 +513,41 @@ onMounted(() => { load(); loadConfigs() })
   display: flex; align-items: center; gap: 5px;
   font-size: 12px; color: var(--text-2);
 }
+
+.novel-comic-panel {
+  max-width: 760px;
+  margin-bottom: 28px;
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.nc-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.nc-kicker { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; color: var(--text-3); text-transform: uppercase; }
+.nc-title { font-size: 18px; font-weight: 700; margin: 4px 0; }
+.nc-sub { font-size: 13px; color: var(--text-2); margin: 0; }
+.nc-badge {
+  font-size: 11px; padding: 4px 10px; border-radius: 99px;
+  background: var(--accent-bg); color: var(--accent-text); white-space: nowrap;
+}
+.nc-field { display: flex; flex-direction: column; gap: 6px; }
+.nc-textarea { min-height: 160px; resize: vertical; font-family: inherit; line-height: 1.55; }
+.nc-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.nc-chapters { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); }
+.nc-num { width: 64px; }
+.nc-outline { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+.nc-outline-head { display: flex; justify-content: space-between; align-items: center; }
+.section-label-inline { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.nc-chapter { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.nc-chapter-row { display: flex; gap: 8px; align-items: center; }
+.nc-ch-num { font-size: 12px; font-weight: 600; color: var(--text-3); white-space: nowrap; }
+.nc-summary { resize: vertical; }
+.nc-apply { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; margin-top: 4px; }
+.btn-ghost {
+  background: transparent; border: 1px solid var(--border); color: var(--text-2);
+  padding: 6px 10px; border-radius: var(--radius); cursor: pointer;
+}
+.btn-ghost:hover { background: var(--bg-hover); }
 
 /* Section label */
 .section-label {

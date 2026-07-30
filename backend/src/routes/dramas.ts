@@ -1,9 +1,17 @@
 import { Hono } from 'hono'
-import { eq, isNull, like, desc } from 'drizzle-orm'
+import { eq, isNull, desc } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, notFound, created, now } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
-import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
+import { isNovelComicMode, parseProductionMode } from '../constants/production-mode.js'
+import {
+  applyNovelComicOutline,
+  generateNovelComicOutline,
+  getNovelComicState,
+  saveNovelComicOutline,
+  saveNovelComicSource,
+} from '../services/novel-comic-outline.js'
+import type { NovelComicChapterOutline } from '../constants/novel-comic.js'
 
 const app = new Hono()
 
@@ -75,7 +83,6 @@ app.post('/', async (c) => {
       dramaId: result.id,
       episodeNumber: i,
       title: `第${i}集`,
-      imageModel: DEFAULT_IMAGE_MODEL,
       status: 'draft',
       createdAt: ts,
       updatedAt: ts,
@@ -144,6 +151,94 @@ app.delete('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   await db.update(schema.dramas).set({ deletedAt: now() }).where(eq(schema.dramas.id, id))
   return success(c)
+})
+
+function requireNovelComicDramaOr404(c: any, id: number) {
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, id)).all()
+  if (!drama || drama.deletedAt) return { error: notFound(c, '剧本不存在') as any }
+  if (!isNovelComicMode(parseProductionMode(drama.metadata))) {
+    return { error: badRequest(c, '当前项目不是「小说漫画讲解」模式') as any }
+  }
+  return { drama }
+}
+
+// GET /dramas/:id/novel-comic — 小说原文 / 大纲 / 集状态
+app.get('/:id/novel-comic', async (c) => {
+  const id = Number(c.req.param('id'))
+  try {
+    return success(c, getNovelComicState(id))
+  } catch (e: any) {
+    const msg = String(e?.message || e)
+    if (msg.includes('不存在')) return notFound(c, msg)
+    return badRequest(c, msg)
+  }
+})
+
+// PUT /dramas/:id/novel-comic/source — 保存小说原文
+app.put('/:id/novel-comic/source', async (c) => {
+  const id = Number(c.req.param('id'))
+  const gate = requireNovelComicDramaOr404(c, id)
+  if (gate.error) return gate.error
+  const body = await c.req.json().catch(() => ({}))
+  try {
+    const meta = saveNovelComicSource(id, String(body.source_novel || body.sourceNovel || ''))
+    return success(c, meta)
+  } catch (e: any) {
+    return badRequest(c, String(e?.message || e))
+  }
+})
+
+// POST /dramas/:id/novel-comic/outline — AI 生成章节大纲
+app.post('/:id/novel-comic/outline', async (c) => {
+  const id = Number(c.req.param('id'))
+  const gate = requireNovelComicDramaOr404(c, id)
+  if (gate.error) return gate.error
+  const body = await c.req.json().catch(() => ({}))
+  try {
+    const result = await generateNovelComicOutline({
+      dramaId: id,
+      targetChapters: body.target_chapters ?? body.targetChapters ?? null,
+      model: body.model,
+      thinkingEnabled: body.thinking_enabled ?? body.thinkingEnabled,
+    })
+    return success(c, result)
+  } catch (e: any) {
+    return badRequest(c, String(e?.message || e))
+  }
+})
+
+// PUT /dramas/:id/novel-comic/outline — 用户编辑后保存大纲
+app.put('/:id/novel-comic/outline', async (c) => {
+  const id = Number(c.req.param('id'))
+  const gate = requireNovelComicDramaOr404(c, id)
+  if (gate.error) return gate.error
+  const body = await c.req.json().catch(() => ({}))
+  const chapters = (body.chapter_outline || body.chapters || []) as NovelComicChapterOutline[]
+  try {
+    const meta = saveNovelComicOutline(id, chapters)
+    return success(c, meta)
+  } catch (e: any) {
+    return badRequest(c, String(e?.message || e))
+  }
+})
+
+// POST /dramas/:id/novel-comic/apply-outline — 确认大纲并一章一集落地
+app.post('/:id/novel-comic/apply-outline', async (c) => {
+  const id = Number(c.req.param('id'))
+  const gate = requireNovelComicDramaOr404(c, id)
+  if (gate.error) return gate.error
+  const body = await c.req.json().catch(() => ({}))
+  try {
+    const result = await applyNovelComicOutline({
+      dramaId: id,
+      model: body.model,
+      thinkingEnabled: body.thinking_enabled ?? body.thinkingEnabled,
+      chapterNumbers: body.chapter_numbers ?? body.chapterNumbers ?? null,
+    })
+    return success(c, result)
+  } catch (e: any) {
+    return badRequest(c, String(e?.message || e))
+  }
 })
 
 // PUT /dramas/:id/characters - Save characters

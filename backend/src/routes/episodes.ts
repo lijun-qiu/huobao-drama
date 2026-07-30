@@ -11,8 +11,9 @@ import {
   restoreEpisodeNarrationImagePrompts,
 } from '../services/narration-image-prompt-audit.js'
 import { unifyEpisodeParagraphOutfits } from '../services/narration-outfit-continuity.js'
-import { getNarrationImageBreakdownProgress, acquireNarrationImageBreakdownJob, releaseNarrationImageBreakdownJob } from '../services/narration-image-breakdown-progress.js'
+import { getNarrationImageBreakdownProgress, acquireNarrationImageBreakdownJob, releaseNarrationImageBreakdownJob, requestNarrationImageBreakdownCancel } from '../services/narration-image-breakdown-progress.js'
 import { sortStoryboardsByOrder } from '../services/narration-image.js'
+import { translateEpisodeFluxPrompts, clearEpisodeFluxPrompts, getEpisodeFluxTranslateProgress, beginFluxTranslateOllamaBatch, endFluxTranslateOllamaBatch, repairEpisodeFluxPromptArtifacts } from '../services/flux-storyboard-translate.js'
 import { cropEpisodeNarrationImageWatermarks, restoreEpisodeNarrationImageWatermarks } from '../services/narration-image-crop.js'
 import {
   clearEpisodeComposedVideos,
@@ -23,10 +24,13 @@ import {
   clearEpisodeStoryboards,
 } from '../services/episode-asset-clear.js'
 import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters, syncMotionComicCharactersFromSpeakers } from '../services/narration-characters.js'
-import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
-import { DEFAULT_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel } from '../constants/text-models.js'
+import { extractDramaEpisodeAssets } from '../services/drama-extract.js'
+import { breakdownDramaEpisodeStoryboards } from '../services/drama-storyboard-breakdown.js'
+import { DEFAULT_IMAGE_MODEL, DEFAULT_LOCAL_IMAGE_MODEL, resolveEpisodeImageModel } from '../constants/image-models.js'
+import { DEFAULT_TEXT_MODEL, DEFAULT_LOCAL_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel } from '../constants/text-models.js'
+import { parseProductionMode, isMotionComicMode, usesMotionComicStoryboardRules, resolveEpisodeProductionMode, usesLocalModelPipeline } from '../constants/production-mode.js'
+import { DEFAULT_CLONED_TTS_VOICE, DEFAULT_LOCAL_TTS_ENGINE } from '../constants/local-comic.js'
 import { resolveEpisodeVisualStyle, resolveNarrationImageStyle } from '../constants/art-styles.js'
-import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration, parseOpeningPickedImages, buildOpeningPickedImagesZip, pickAndSaveOpeningImages } from '../services/ffmpeg-opening.js'
 import fs from 'fs'
 import { isTitleVideoProcessing, startTitleSegmentVideoGeneration } from '../services/ffmpeg-title-segment.js'
@@ -62,13 +66,16 @@ app.post('/', async (c) => {
     .orderBy(schema.episodes.episodeNumber).all()
   const nextNum = existing.length ? Math.max(...existing.map(e => e.episodeNumber)) + 1 : 1
 
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, body.drama_id)).all()
+  const productionMode = parseProductionMode(drama?.metadata)
+
   const res = db.insert(schema.episodes).values({
     dramaId: body.drama_id,
     episodeNumber: nextNum,
     title: body.title || `第${nextNum}集`,
     imageConfigId: body.image_config_id,
-    imageModel: body.image_model || DEFAULT_IMAGE_MODEL,
-    textModel: body.text_model || DEFAULT_TEXT_MODEL,
+    imageModel: body.image_model || (usesLocalModelPipeline(productionMode) ? DEFAULT_LOCAL_IMAGE_MODEL : DEFAULT_IMAGE_MODEL),
+    textModel: body.text_model || (usesLocalModelPipeline(productionMode) ? DEFAULT_LOCAL_TEXT_MODEL : DEFAULT_TEXT_MODEL),
     textThinking: resolveEpisodeTextThinking(undefined, body.text_thinking),
     videoConfigId: body.video_config_id,
     audioConfigId: body.audio_config_id,
@@ -95,7 +102,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model', 'text_thinking', 'watermark_text', 'watermark_animated', 'refer_previous_episode']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'image_model', 'text_model', 'text_thinking', 'watermark_text', 'watermark_animated', 'refer_previous_episode', 'video_config_id', 'audio_config_id']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -125,6 +132,8 @@ app.put('/:id', async (c) => {
       || updates.refer_previous_episode === 1
       || updates.refer_previous_episode === '1'
   }
+  if ('video_config_id' in updates) drizzleUpdates.videoConfigId = Number(updates.video_config_id) || null
+  if ('audio_config_id' in updates) drizzleUpdates.audioConfigId = Number(updates.audio_config_id) || null
 
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
   return success(c)
@@ -261,13 +270,21 @@ app.post('/:id/extract-narration-characters', async (c) => {
   }
 
   try {
+    const productionMode = resolveEpisodeProductionMode(episodeId)
+    // 本地流水线角色提取默认开思考（Qwen 3.5）；显式传 false 才关闭
+    const textThinking = body.text_thinking === false || body.textThinking === false
+      ? false
+      : (usesLocalModelPipeline(productionMode)
+        ? true
+        : resolveEpisodeTextThinking(ep, body.text_thinking ?? body.textThinking))
+
     const result = await extractNarrationCharacters(
       episodeId,
       ep.dramaId,
       script,
       style,
-      resolveEpisodeTextModel(ep, body.text_model),
-      resolveEpisodeTextThinking(ep, body.text_thinking),
+      resolveEpisodeTextModel(ep, body.text_model, productionMode),
+      textThinking,
     )
     return success(c, {
       created: result.created,
@@ -283,6 +300,60 @@ app.post('/:id/extract-narration-characters', async (c) => {
   }
 })
 
+// POST /episodes/:id/extract — 本地漫剧/短剧：LLM 结构化提取角色与场景（不依赖 Agent 工具）
+app.post('/:id/extract', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await extractDramaEpisodeAssets({
+      episodeId,
+      dramaId: ep.dramaId,
+      script: typeof body.script === 'string' ? body.script : undefined,
+      textModel: body.text_model ?? body.textModel,
+      textThinking: resolveEpisodeTextThinking(ep, body.text_thinking ?? body.textThinking),
+    })
+    return success(c, {
+      characters: result.characters,
+      scenes: result.scenes,
+      extracted_characters: result.extracted_characters,
+      extracted_scenes: result.extracted_scenes,
+      model: result.model,
+      generated_at: now(),
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/storyboard-breakdown — 本地短剧：LLM 结构化分镜拆解（不依赖 Agent 工具）
+app.post('/:id/storyboard-breakdown', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = await breakdownDramaEpisodeStoryboards({
+      episodeId,
+      dramaId: ep.dramaId,
+      script: typeof body.script === 'string' ? body.script : undefined,
+      textModel: body.text_model ?? body.textModel,
+      videoModelLabel: body.video_model_label ?? body.videoModelLabel,
+    })
+    return success(c, {
+      count: result.count,
+      total_duration: result.total_duration,
+      model: result.model,
+      generated_at: now(),
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
 // POST /episodes/:id/link-narration-characters — 按文案重新关联分镜角色
 app.post('/:id/link-narration-characters', async (c) => {
   const episodeId = Number(c.req.param('id'))
@@ -290,7 +361,7 @@ app.post('/:id/link-narration-characters', async (c) => {
   if (!ep) return notFound(c)
 
   let speakerSync: ReturnType<typeof syncMotionComicCharactersFromSpeakers> | null = null
-  if (isMotionComicMode(resolveEpisodeProductionMode(episodeId))) {
+  if (usesMotionComicStoryboardRules(resolveEpisodeProductionMode(episodeId))) {
     speakerSync = syncMotionComicCharactersFromSpeakers(episodeId, ep.dramaId)
   }
   const linked = linkAllNarrationStoryboardCharacters(episodeId, ep.dramaId)
@@ -425,7 +496,10 @@ app.post('/:id/narration-script-chat', async (c) => {
           chatParams,
           (_delta, full) => send({ type: 'delta', content: full }),
           c.req.raw.signal,
-          (_delta, full) => send({ type: 'thinking', content: full }),
+          {
+            onThinkingDelta: (_delta, full) => send({ type: 'thinking', content: full }),
+            onStatus: message => send({ type: 'status', message }),
+          },
         )
         send({
           type: 'done',
@@ -433,6 +507,19 @@ app.post('/:id/narration-script-chat', async (c) => {
           reply: result.reply,
           model: result.model,
           text_thinking: result.text_thinking,
+          char_count: result.char_count,
+          min_chars: result.min_chars,
+          max_chars: result.max_chars,
+          target_chars: result.target_chars,
+          user_length_specified: result.user_length_specified,
+          below_min: result.below_min,
+          auto_expanded: result.auto_expanded,
+          expand_rounds: result.expand_rounds,
+          narration_lines: result.narration_lines,
+          dialogue_lines: result.dialogue_lines,
+          narration_ratio: result.narration_ratio,
+          dialogue_ratio: result.dialogue_ratio,
+          dialogue_ratio_repaired: result.dialogue_ratio_repaired,
         })
         controller.close()
       } catch (err: any) {
@@ -469,7 +556,7 @@ app.post('/:id/narration-script-emphasis', async (c) => {
     })
     return success(c, {
       script: marked,
-      model: resolveNarrationScriptChatTextModel(body.text_model ?? body.textModel),
+      model: resolveNarrationScriptChatTextModel(body.text_model ?? body.textModel, resolveEpisodeProductionMode(episodeId), ep),
       generated_at: now(),
     })
   } catch (err: any) {
@@ -570,6 +657,19 @@ app.get('/:id/narration-image-breakdown-status', async (c) => {
     })
   }
   return success(c, progress)
+})
+
+// POST /episodes/:id/narration-image-breakdown/cancel — 取消进行中的配图分镜任务
+app.post('/:id/narration-image-breakdown/cancel', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  const cancelled = requestNarrationImageBreakdownCancel(episodeId)
+  if (!cancelled) {
+    return badRequest(c, '当前没有进行中的配图任务')
+  }
+  return success(c, { cancelled: true })
 })
 
 // POST /episodes/:id/narration-image-detect — ① LLM 检测需配图镜头
@@ -896,15 +996,108 @@ app.post('/:id/restore-narration-images', async (c) => {
   }
 })
 
-// POST /episodes/:id/clear-narration-images — 清除本集全部配图（含 AI/上传）并删文件
+// POST /episodes/:id/flux-translate-session/start — 逐镜翻译前预加载 Ollama（整批只加载一次）
+app.post('/:id/flux-translate-session/start', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  try {
+    await beginFluxTranslateOllamaBatch()
+    return success(c, { started: true })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/flux-translate-session/end — 逐镜翻译结束后释放 Ollama
+app.post('/:id/flux-translate-session/end', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  try {
+    await endFluxTranslateOllamaBatch()
+    return success(c, { ended: true })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// GET /episodes/:id/flux-translate-progress — 批量 Flux 英文翻译进度（轮询）
+app.get('/:id/flux-translate-progress', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  return success(c, getEpisodeFluxTranslateProgress(episodeId))
+})
+
+// POST /episodes/:id/translate-flux-prompts — 批量规则/有道翻译配图文案为 Flux 英文
+app.post('/:id/translate-flux-prompts', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const ids = Array.isArray(body.storyboard_ids) ? body.storyboard_ids.map(Number).filter(Boolean) : undefined
+    const result = await translateEpisodeFluxPrompts(episodeId, ids)
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/repair-flux-prompts — 修复已译英文误译（如 Contrasting makeup）
+app.post('/:id/repair-flux-prompts', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    return success(c, repairEpisodeFluxPromptArtifacts(episodeId))
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/clear-flux-prompts — 清除本集 Flux 英文（保留中文配图文案）
+app.post('/:id/clear-flux-prompts', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+
+  try {
+    const result = clearEpisodeFluxPrompts(episodeId)
+    if (!result.cleared) return badRequest(c, '本集暂无 Flux 英文可清除')
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/clear-narration-images — 清除本集配图（可按 character_ids / storyboard_ids 过滤）
 app.post('/:id/clear-narration-images', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c)
 
   try {
-    const result = await clearEpisodeNarrationImages(episodeId)
-    if (!result.cleared) return badRequest(c, '本集暂无配图可清除')
+    const body = await c.req.json().catch(() => ({})) as {
+      character_ids?: number[]
+      characterIds?: number[]
+      storyboard_ids?: number[]
+      storyboardIds?: number[]
+    }
+    const characterIds = body.character_ids || body.characterIds
+    const storyboardIds = body.storyboard_ids || body.storyboardIds
+    const result = await clearEpisodeNarrationImages(episodeId, { characterIds, storyboardIds })
+    if (!result.cleared) {
+      return badRequest(
+        c,
+        (characterIds?.length || storyboardIds?.length)
+          ? '所选范围内暂无配图可清除'
+          : '本集暂无配图可清除',
+      )
+    }
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)
@@ -1048,10 +1241,17 @@ app.post('/:id/generate-opening-audio', async (c) => {
   )
   if (!subtitleText) return badRequest(c, '请填写字幕文案')
 
-  const localTtsEngine = body?.local_tts_engine === 'voicebox' ? 'voicebox' : 'edge'
-  const localVoice = String(body?.local_voice || body?.localVoice || '').trim()
+  const localTtsEngineRaw = String(body?.local_tts_engine || body?.localTtsEngine || DEFAULT_LOCAL_TTS_ENGINE).trim().toLowerCase()
+  const localTtsEngine: 'edge' | 'voicebox' | 'gptsovits' | 'indextts' =
+    localTtsEngineRaw === 'indextts' ? 'indextts'
+      : localTtsEngineRaw === 'gptsovits' ? 'gptsovits'
+        : localTtsEngineRaw === 'voicebox' ? 'voicebox'
+          : 'edge'
+  const localVoiceRaw = String(body?.local_voice || body?.localVoice || '').trim()
+  const localVoice = localVoiceRaw
+    || ((localTtsEngine === 'gptsovits' || localTtsEngine === 'indextts') ? DEFAULT_CLONED_TTS_VOICE : '')
   const ttsSpeed = resolveTtsSpeed(body?.tts_speed ?? body?.ttsSpeed)
-  const voiceboxInstruct = localTtsEngine === 'voicebox'
+  const voiceboxInstruct = (localTtsEngine === 'voicebox' || localTtsEngine === 'indextts')
     ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
     : undefined
   const voiceboxModelSize = localTtsEngine === 'voicebox'
@@ -1059,7 +1259,9 @@ app.post('/:id/generate-opening-audio', async (c) => {
     : undefined
   const ttsVoice = localTtsEngine === 'voicebox'
     ? await resolveVoiceboxProfileId(localVoice)
-    : resolveEdgeVoice(localVoice)
+    : (localTtsEngine === 'gptsovits' || localTtsEngine === 'indextts')
+      ? localVoice
+      : resolveEdgeVoice(localVoice)
 
   logTaskStart('EpisodeAPI', 'generate-opening-audio', {
     episodeId,

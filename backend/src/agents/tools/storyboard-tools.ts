@@ -55,93 +55,174 @@ function validateStoryboardBindings(episodeId: number, sceneId: number | null | 
   }
 }
 
+export type DramaStoryboardInput = {
+  shot_number: number
+  title?: string
+  shot_type?: string
+  angle?: string
+  movement?: string
+  location?: string
+  time?: string
+  action?: string
+  dialogue?: string
+  description?: string
+  result?: string
+  atmosphere?: string
+  image_prompt?: string
+  video_prompt?: string
+  bgm_prompt?: string
+  sound_effect?: string
+  duration?: number
+  scene_id?: number | null
+  character_ids?: number[]
+}
+
+export function readStoryboardContextData(episodeId: number, dramaId: number) {
+  const [ep] = db.select().from(schema.episodes)
+    .where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) throw new Error('Episode not found')
+  const script = String(ep.scriptContent || ep.content || '').trim()
+  if (!script) throw new Error('Episode has no script')
+
+  const charLinks = db.select().from(schema.episodeCharacters)
+    .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
+  const sceneLinks = db.select().from(schema.episodeScenes)
+    .where(eq(schema.episodeScenes.episodeId, episodeId)).all()
+
+  const linkedCharacterIds = new Set(charLinks.map(link => link.characterId))
+  const linkedSceneIds = new Set(sceneLinks.map(link => link.sceneId))
+
+  const chars = db.select().from(schema.characters)
+    .where(eq(schema.characters.dramaId, dramaId)).all()
+  const scns = db.select().from(schema.scenes)
+    .where(eq(schema.scenes.dramaId, dramaId)).all()
+  const existingStoryboards = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, episodeId)).all()
+
+  const characters = chars
+    .filter(c => !c.deletedAt)
+    .filter(c => !linkedCharacterIds.size || linkedCharacterIds.has(c.id))
+    .map(c => ({
+      id: c.id,
+      name: c.name,
+      role: c.role || '',
+      description: c.description || '',
+      appearance: c.appearance || '',
+      personality: c.personality || '',
+      voice_style: c.voiceStyle || '',
+      image_url: c.imageUrl || '',
+      reference_images: c.referenceImages || '',
+    }))
+
+  const scenes = scns
+    .filter(s => !s.deletedAt)
+    .filter(s => !linkedSceneIds.size || linkedSceneIds.has(s.id))
+    .map(s => ({
+      id: s.id,
+      location: s.location,
+      time: s.time,
+      prompt: s.prompt || '',
+      image_url: s.imageUrl || '',
+      storyboard_count: s.storyboardCount || 0,
+    }))
+
+  return {
+    episode: {
+      id: ep.id,
+      title: ep.title,
+      episode_number: ep.episodeNumber,
+      description: ep.description || '',
+    },
+    script,
+    characters,
+    scenes,
+    existing_storyboards: existingStoryboards
+      .filter(sb => !sb.deletedAt)
+      .map(sb => ({
+        id: sb.id,
+        shot_number: sb.storyboardNumber,
+        title: sb.title || '',
+        scene_id: sb.sceneId,
+        character_ids: db.select().from(schema.storyboardCharacters)
+          .where(eq(schema.storyboardCharacters.storyboardId, sb.id)).all()
+          .map(link => link.characterId),
+        shot_type: sb.shotType || '',
+        duration: sb.duration || 0,
+      })),
+  }
+}
+
+export function saveStoryboardsForEpisode(episodeId: number, dramaId: number, storyboards: DramaStoryboardInput[]) {
+  const ts = now()
+  logTaskProgress('StoryboardTool', 'save-begin', {
+    episodeId,
+    dramaId,
+    count: storyboards.length,
+    shotNumbers: storyboards.map(sb => sb.shot_number).join(','),
+  })
+  const existingStoryboardIds = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, episodeId)).all()
+    .map(sb => sb.id)
+  for (const storyboardId of existingStoryboardIds) {
+    db.delete(schema.storyboardCharacters)
+      .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
+      .run()
+  }
+  db.delete(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId)).run()
+
+  let totalDuration = 0
+  for (const sb of storyboards) {
+    validateStoryboardBindings(episodeId, sb.scene_id, sb.character_ids)
+    const res = db.insert(schema.storyboards).values({
+      episodeId,
+      storyboardNumber: sb.shot_number,
+      title: sb.title, shotType: sb.shot_type,
+      angle: sb.angle, movement: sb.movement,
+      location: sb.location, time: sb.time,
+      action: sb.action, dialogue: sb.dialogue,
+      description: sb.description, result: sb.result,
+      atmosphere: sb.atmosphere, imagePrompt: sb.image_prompt,
+      videoPrompt: sb.video_prompt, bgmPrompt: sb.bgm_prompt,
+      soundEffect: sb.sound_effect,
+      sceneId: sb.scene_id, duration: sb.duration || 10,
+      createdAt: ts, updatedAt: ts,
+    }).run()
+    syncStoryboardCharacters(Number(res.lastInsertRowid), sb.character_ids || [])
+    totalDuration += sb.duration || 10
+  }
+
+  db.update(schema.episodes)
+    .set({ duration: Math.ceil(totalDuration / 60), updatedAt: ts })
+    .where(eq(schema.episodes.id, episodeId)).run()
+
+  logTaskSuccess('StoryboardTool', 'save-complete', {
+    episodeId,
+    count: storyboards.length,
+    totalDuration,
+  })
+  return { message: `Saved ${storyboards.length} storyboards`, count: storyboards.length, total_duration: totalDuration }
+}
+
 export function createStoryboardTools(episodeId: number, dramaId: number) {
   const readStoryboardContext = createTool({
     id: 'read_storyboard_context',
     description: 'Read the screenplay, characters, and scenes for storyboard breakdown.',
     inputSchema: z.object({}),
     execute: async () => {
-      const [ep] = db.select().from(schema.episodes)
-        .where(eq(schema.episodes.id, episodeId)).all()
-      if (!ep) return { error: 'Episode not found' }
-      const script = ep.scriptContent || ep.content
-      if (!script) return { error: 'Episode has no script' }
-
-      const charLinks = db.select().from(schema.episodeCharacters)
-        .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
-      const sceneLinks = db.select().from(schema.episodeScenes)
-        .where(eq(schema.episodeScenes.episodeId, episodeId)).all()
-
-      const linkedCharacterIds = new Set(charLinks.map(link => link.characterId))
-      const linkedSceneIds = new Set(sceneLinks.map(link => link.sceneId))
-
-      const chars = db.select().from(schema.characters)
-        .where(eq(schema.characters.dramaId, dramaId)).all()
-      const scns = db.select().from(schema.scenes)
-        .where(eq(schema.scenes.dramaId, dramaId)).all()
-      const existingStoryboards = db.select().from(schema.storyboards)
-        .where(eq(schema.storyboards.episodeId, episodeId)).all()
-
-      const characters = chars
-        .filter(c => !c.deletedAt)
-        .filter(c => !linkedCharacterIds.size || linkedCharacterIds.has(c.id))
-        .map(c => ({
-          id: c.id,
-          name: c.name,
-          role: c.role || '',
-          description: c.description || '',
-          appearance: c.appearance || '',
-          personality: c.personality || '',
-          voice_style: c.voiceStyle || '',
-          image_url: c.imageUrl || '',
-          reference_images: c.referenceImages || '',
-        }))
-
-      const scenes = scns
-        .filter(s => !s.deletedAt)
-        .filter(s => !linkedSceneIds.size || linkedSceneIds.has(s.id))
-        .map(s => ({
-          id: s.id,
-          location: s.location,
-          time: s.time,
-          prompt: s.prompt || '',
-          image_url: s.imageUrl || '',
-          storyboard_count: s.storyboardCount || 0,
-        }))
-
-      const payload = {
-        episode: {
-          id: ep.id,
-          title: ep.title,
-          episode_number: ep.episodeNumber,
-          description: ep.description || '',
-        },
-        script,
-        characters,
-        scenes,
-        existing_storyboards: existingStoryboards
-          .filter(sb => !sb.deletedAt)
-          .map(sb => ({
-            id: sb.id,
-            shot_number: sb.storyboardNumber,
-            title: sb.title || '',
-            scene_id: sb.sceneId,
-            character_ids: db.select().from(schema.storyboardCharacters)
-              .where(eq(schema.storyboardCharacters.storyboardId, sb.id)).all()
-              .map(link => link.characterId),
-            shot_type: sb.shotType || '',
-            duration: sb.duration || 0,
-          })),
+      try {
+        const payload = readStoryboardContextData(episodeId, dramaId)
+        logTaskSuccess('StoryboardTool', 'read-context', {
+          episodeId,
+          dramaId,
+          characters: payload.characters.length,
+          scenes: payload.scenes.length,
+          existingStoryboards: payload.existing_storyboards.length,
+          scriptLength: payload.script.length,
+        })
+        return payload
+      } catch (err: any) {
+        return { error: err.message || 'Failed to read storyboard context' }
       }
-      logTaskSuccess('StoryboardTool', 'read-context', {
-        episodeId,
-        dramaId,
-        characters: characters.length,
-        scenes: scenes.length,
-        existingStoryboards: payload.existing_storyboards.length,
-        scriptLength: script.length,
-      })
-      return payload
     },
   })
 
@@ -171,56 +252,7 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         character_ids: z.array(z.number()).optional(),
       })),
     }),
-    execute: async ({ storyboards }) => {
-      const ts = now()
-      logTaskProgress('StoryboardTool', 'save-begin', {
-        episodeId,
-        dramaId,
-        count: storyboards.length,
-        shotNumbers: storyboards.map(sb => sb.shot_number).join(','),
-      })
-      const existingStoryboardIds = db.select().from(schema.storyboards)
-        .where(eq(schema.storyboards.episodeId, episodeId)).all()
-        .map(sb => sb.id)
-      for (const storyboardId of existingStoryboardIds) {
-        db.delete(schema.storyboardCharacters)
-          .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
-          .run()
-      }
-      db.delete(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId)).run()
-
-      let totalDuration = 0
-      for (const sb of storyboards) {
-        validateStoryboardBindings(episodeId, sb.scene_id, sb.character_ids)
-        const res = db.insert(schema.storyboards).values({
-          episodeId,
-          storyboardNumber: sb.shot_number,
-          title: sb.title, shotType: sb.shot_type,
-          angle: sb.angle, movement: sb.movement,
-          location: sb.location, time: sb.time,
-          action: sb.action, dialogue: sb.dialogue,
-          description: sb.description, result: sb.result,
-          atmosphere: sb.atmosphere, imagePrompt: sb.image_prompt,
-          videoPrompt: sb.video_prompt, bgmPrompt: sb.bgm_prompt,
-          soundEffect: sb.sound_effect,
-          sceneId: sb.scene_id, duration: sb.duration || 10,
-          createdAt: ts, updatedAt: ts,
-        }).run()
-        syncStoryboardCharacters(Number(res.lastInsertRowid), sb.character_ids || [])
-        totalDuration += sb.duration || 10
-      }
-
-      db.update(schema.episodes)
-        .set({ duration: Math.ceil(totalDuration / 60), updatedAt: ts })
-        .where(eq(schema.episodes.id, episodeId)).run()
-
-      logTaskSuccess('StoryboardTool', 'save-complete', {
-        episodeId,
-        count: storyboards.length,
-        totalDuration,
-      })
-      return { message: `Saved ${storyboards.length} storyboards`, count: storyboards.length, total_duration: totalDuration }
-    },
+    execute: async ({ storyboards }) => saveStoryboardsForEpisode(episodeId, dramaId, storyboards),
   })
 
   const updateStoryboard = createTool({

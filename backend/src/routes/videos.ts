@@ -10,7 +10,9 @@ const app = new Hono()
 // POST /videos — Generate video
 app.post('/', async (c) => {
   const body = await c.req.json()
-  if (!body.prompt) return badRequest(c, 'prompt is required')
+  if (!body.prompt && !body.storyboard_id) {
+    return badRequest(c, 'prompt or storyboard_id is required')
+  }
 
   try {
     let configId: number | undefined = body.config_id
@@ -27,6 +29,7 @@ app.post('/', async (c) => {
       dramaId: body.drama_id,
       referenceMode: body.reference_mode,
       duration: body.duration,
+      model: body.model,
     })
     logTaskPayload('VideoAPI', 'request body', body)
     const id = await generateVideo({

@@ -12,8 +12,10 @@ import { VolcEngineVideoAdapter } from './volcengine-video'
 import { ViduVideoAdapter } from './vidu-video'
 import { AliImageAdapter } from './ali-image'
 import { AliVideoAdapter } from './ali-video'
-import { KlingImageAdapter } from './kling-image'
-import type { ImageProviderAdapter, VideoProviderAdapter, TTSProviderAdapter, AIConfig } from './types'
+import { ZhipuImageAdapter } from './zhipu-image'
+import { ZhipuVideoAdapter } from './zhipu-video'
+import { AgnesImageAdapter } from './agnes-image'
+import type { ImageProviderAdapter, VideoProviderAdapter, TTSProviderAdapter } from './types'
 
 // 图片 Adapter 注册表
 export const imageAdapters: Record<string, ImageProviderAdapter> = {
@@ -22,9 +24,11 @@ export const imageAdapters: Record<string, ImageProviderAdapter> = {
   gemini: new GeminiImageAdapter(),
   volcengine: new VolcEngineImageAdapter(),
   ali: new AliImageAdapter(),
-  kling: new KlingImageAdapter(),
-  // Chatfire 豆包绘画仍走 OpenAI 兼容格式
+  // Chatfire - 待确认 API 格式，暂用 OpenAI
   chatfire: new OpenAIImageAdapter(),
+  zhipu: new ZhipuImageAdapter(),
+  bigmodel: new ZhipuImageAdapter(),
+  agnes: new AgnesImageAdapter(),
 }
 
 // 视频 Adapter 注册表
@@ -33,7 +37,8 @@ export const videoAdapters: Record<string, VideoProviderAdapter> = {
   volcengine: new VolcEngineVideoAdapter(),
   vidu: new ViduVideoAdapter(),
   ali: new AliVideoAdapter(),
-  // Chatfire 视频 - 待确认 API 格式
+  zhipu: new ZhipuVideoAdapter(),
+  bigmodel: new ZhipuVideoAdapter(),
 }
 
 // TTS Adapter 注册表
@@ -52,58 +57,6 @@ export function getTTSAdapter(provider: string): TTSProviderAdapter {
  */
 export function getImageAdapter(provider: string): ImageProviderAdapter {
   return imageAdapters[provider.toLowerCase()] || imageAdapters['minimax']
-}
-
-function isQwenGatewayBaseUrl(baseUrl?: string | null) {
-  const base = String(baseUrl || '').toLowerCase()
-  return base.includes('4022543') || base.includes('4022')
-}
-
-function isDashscopeBaseUrl(baseUrl?: string | null) {
-  return String(baseUrl || '').toLowerCase().includes('dashscope.aliyuncs.com')
-}
-
-/** 按模型名自动选择适配器（剧集可单独选模型，与全局 provider 可不一致） */
-export function resolveImageAdapter(config: AIConfig, model?: string | null): ImageProviderAdapter {
-  const m = String(model || config.model || '').toLowerCase()
-  if (m.startsWith('kling-')) {
-    return imageAdapters.kling
-  }
-  if (m.startsWith('gpt-image')) {
-    return imageAdapters.chatfire
-  }
-  if (m.startsWith('doubao-seedream') || m.startsWith('seedream')) {
-    return imageAdapters.chatfire
-  }
-  if (m.startsWith('qwen-image')) {
-    if (isDashscopeBaseUrl(config.baseUrl) || config.provider.toLowerCase() === 'ali') {
-      return imageAdapters.ali
-    }
-    if (isQwenGatewayBaseUrl(config.baseUrl)) {
-      return imageAdapters.chatfire
-    }
-  }
-  if (m.includes('gemini') && m.includes('image')) {
-    return imageAdapters.gemini
-  }
-  if (config.provider.toLowerCase() === 'kling') {
-    return imageAdapters.kling
-  }
-  return getImageAdapter(config.provider)
-}
-
-export function resolveImageProvider(config: AIConfig, model?: string | null): string {
-  const m = String(model || config.model || '').toLowerCase()
-  if (m.startsWith('kling-')) return 'kling'
-  if (m.startsWith('gpt-image')) return 'chatfire'
-  if (m.startsWith('doubao-seedream') || m.startsWith('seedream')) return 'chatfire'
-  if (m.startsWith('qwen-image')) {
-    if (isDashscopeBaseUrl(config.baseUrl) || config.provider.toLowerCase() === 'ali') return 'ali'
-    if (isQwenGatewayBaseUrl(config.baseUrl)) return 'chatfire'
-  }
-  if (m.includes('gemini') && m.includes('image')) return 'gemini'
-  if (config.provider.toLowerCase() === 'kling') return 'kling'
-  return config.provider
 }
 
 /**

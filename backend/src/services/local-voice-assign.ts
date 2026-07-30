@@ -23,7 +23,7 @@ export function inferVoiceGenderFromLabel(label: string): VoiceGender {
   if (!text) return 'neutral'
   if (/(?:^|[\s:/_-])(?:preset:kokoro:)?female(?:[-_]|$)/i.test(text)) return 'female'
   if (/(?:^|[\s:/_-])(?:preset:kokoro:)?male(?:[-_]|$)/i.test(text)) return 'male'
-  if (/(女|娘|姐|妹|母|妻|少女|御姐|奶奶|晓晓|晓伊|晓北|晓妮|\bgirl\b|\bwoman\b|\bfemale\b|xiaoxiao|xiaoyi|anna|sohee|serena|vivian)/i.test(text)) {
+  if (/(女|娘|姐|妹|母|妻|少女|御姐|奶奶|晓晨|晨宝|笑笑|翠兰|老板娘|晓晓|晓伊|晓北|晓妮|\bgirl\b|\bwoman\b|\bfemale\b|xiaoxiao|xiaoyi|anna|sohee|serena|vivian)/i.test(text)) {
     return 'female'
   }
   if (/(男|爷|爸|兄|弟|青年|大爷|学长|云希|云扬|云健|\bboy\b|\bman\b|\bmale\b|yunxi|yunjian|yunyang|uncle|dylan|eric|ryan|aiden|fu)/i.test(text)) {
@@ -121,11 +121,17 @@ function pickVoiceFromPool(
   pool: LocalVoiceCandidate[],
   targetGender: VoiceGender,
   usedVoiceIds: Set<string>,
+  options?: { allowReuse?: boolean; requireGenderMatch?: boolean },
 ): LocalVoiceCandidate | null {
+  const allowReuse = !!options?.allowReuse
+  const requireGenderMatch = options?.requireGenderMatch !== false && targetGender !== 'neutral'
   const ranked = pool
-    .filter(v => !usedVoiceIds.has(v.voice_id))
+    .filter(v => allowReuse || !usedVoiceIds.has(v.voice_id))
     .map(v => ({ v, score: voiceGenderScore(v.gender, targetGender) }))
-    .sort((a, b) => b.score - a.score || a.v.source.localeCompare(b.v.source))
+    .filter(item => !requireGenderMatch || item.score > 0)
+    .sort((a, b) => b.score - a.score
+      || Number(usedVoiceIds.has(a.v.voice_id)) - Number(usedVoiceIds.has(b.v.voice_id))
+      || a.v.source.localeCompare(b.v.source))
   return ranked[0]?.v || null
 }
 
@@ -222,10 +228,15 @@ export async function assignLocalVoicesToDrama(options: {
     }
 
     const gender = inferCharacterGender(char)
-    let picked = pickVoiceFromPool(kokoroPool, gender, usedVoiceIds)
-      || pickVoiceFromPool(edgePool, gender, usedVoiceIds)
+    // 优先未使用的同性别；不够则复用同性别；绝不在有同性别音色时落到异性
+    let picked = pickVoiceFromPool(kokoroPool, gender, usedVoiceIds, { requireGenderMatch: true })
+      || pickVoiceFromPool(edgePool, gender, usedVoiceIds, { requireGenderMatch: true })
+      || pickVoiceFromPool(kokoroPool, gender, usedVoiceIds, { allowReuse: true, requireGenderMatch: true })
+      || pickVoiceFromPool(edgePool, gender, usedVoiceIds, { allowReuse: true, requireGenderMatch: true })
       || pickVoiceFromPool(kokoroPool, 'neutral', usedVoiceIds)
       || pickVoiceFromPool(edgePool, 'neutral', usedVoiceIds)
+      || pickVoiceFromPool(kokoroPool, gender, usedVoiceIds, { allowReuse: true, requireGenderMatch: false })
+      || pickVoiceFromPool(edgePool, gender, usedVoiceIds, { allowReuse: true, requireGenderMatch: false })
 
     if (!picked) {
       skipped++

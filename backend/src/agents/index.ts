@@ -8,8 +8,6 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { eq, isNull, and } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
-import { resolveEpisodeTextThinking } from '../constants/text-models.js'
-import { createTextThinkingFetch } from '../services/text-chat.js'
 import { logTaskProgress } from '../utils/task-logger.js'
 import { createScriptTools } from './tools/script-tools.js'
 import { createExtractTools } from './tools/extract-tools.js'
@@ -17,6 +15,23 @@ import { createStoryboardTools } from './tools/storyboard-tools.js'
 import { createVoiceTools } from './tools/voice-tools.js'
 import { createGridPromptTools } from './tools/grid-prompt-tools.js'
 import { loadAgentSkills } from './skills.js'
+import { DEFAULT_LOCAL_AGENT_MODEL } from '../constants/text-models.js'
+
+const CLOUD_AGENT_MODELS = new Set([
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'openrouter/deepseek-v4-flash:free',
+  'openrouter/deepseek-v4-flash',
+  'openrouter/deepseek-v4-pro',
+  'deepseek-v4-flash:free',
+  'deepseek-v4-flash',
+  'deepseek-v4-pro',
+  'qwen3.5-plus',
+  'gpt-4o',
+  'gemini-3-pro-preview',
+  'gemini-3-flash-preview',
+  'google/gemini-3-flash-preview',
+  'gpt-4.1-mini',
+])
 
 // Default prompts (used when DB has no config)
 const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = {
@@ -178,32 +193,37 @@ function getAgentConfig(agentType: string) {
   return rows.find(r => r.isActive) || rows[0] || null
 }
 
-function getModel(dbConfig: any, episodeId: number) {
-  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
-  const textThinking = resolveEpisodeTextThinking(ep)
-  const textConfig = getTextConfig()
+export function getAgentModelName(agentType: string): string {
+  const dbConfig = getAgentConfig(agentType)
+  const model = String(dbConfig?.model || '').trim()
+  if (model && !CLOUD_AGENT_MODELS.has(model)) return model
+  return DEFAULT_LOCAL_AGENT_MODEL
+}
+
+function getModel(dbConfig: any, modelOverride?: string) {
+  const rawModel = String(modelOverride || '').trim() || String(dbConfig?.model || '').trim()
+  const textConfig = getTextConfig(rawModel || undefined)
   const resolvedBaseURL = getTextProviderBaseUrl(textConfig)
+  const modelName = textConfig.model
   logTaskProgress('AIConfig', 'text-model-endpoint', {
     provider: textConfig.provider,
     baseUrl: resolvedBaseURL,
-    model: dbConfig?.model || textConfig.model,
-    textThinking,
+    model: modelName,
+    appModel: rawModel || '',
   })
   const provider = createOpenAI({
     baseURL: resolvedBaseURL,
-    apiKey: textConfig.apiKey,
-    fetch: createTextThinkingFetch(textThinking),
+    apiKey: textConfig.apiKey || 'ollama',
   } as any)
-  const modelName = dbConfig?.model || textConfig.model
   return provider.chat(modelName)
 }
 
-export function createAgent(type: string, episodeId: number, dramaId: number): Agent | null {
+export function createAgent(type: string, episodeId: number, dramaId: number, modelOverride?: string): Agent | null {
   const defaults = DEFAULT_PROMPTS[type]
   if (!defaults) return null
 
   const dbConfig = getAgentConfig(type)
-  const model = getModel(dbConfig, episodeId)
+  const model = getModel(dbConfig, modelOverride)
   const baseInstructions = dbConfig?.systemPrompt?.trim() || defaults.instructions
   const skillInstructions = loadAgentSkills(type)
   const instructions = skillInstructions

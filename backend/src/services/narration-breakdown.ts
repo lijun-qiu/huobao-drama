@@ -4,7 +4,7 @@ import {
   motionComicShotDescription,
   type MotionComicStoryboardShot,
 } from '../constants/motion-comic.js'
-import { parseProductionMode, isMotionComicMode } from '../constants/production-mode.js'
+import { isDialoguePortraitMode, parseProductionMode, usesMotionComicStoryboardRules } from '../constants/production-mode.js'
 import {
   buildMotionComicStoryboardMetaFromShot,
   buildMotionComicSegmentMotionMeta,
@@ -407,9 +407,19 @@ export async function breakdownNarrationStoryboards(
 
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
   const script = (scriptOverride || ep.scriptContent || ep.content || '').trim()
-  if (!script) throw new Error('请先填写解说文案')
+  if (!script) {
+    const mode = parseProductionMode(drama?.metadata)
+    throw new Error(isDialoguePortraitMode(mode) ? '请先填写对话脚本' : '请先填写解说文案')
+  }
 
-  if (isMotionComicMode(parseProductionMode(drama?.metadata))) {
+  const productionMode = parseProductionMode(drama?.metadata)
+  if (isDialoguePortraitMode(productionMode)) {
+    const { breakdownDialoguePortraitStoryboards } = await import('./dialogue-portrait-breakdown.js')
+    return breakdownDialoguePortraitStoryboards(episodeId, script, {
+      onProgress: options?.onProgress,
+    })
+  }
+  if (usesMotionComicStoryboardRules(productionMode)) {
     return breakdownMotionComicStoryboards(episodeId, script, ep, options)
   }
 

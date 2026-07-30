@@ -25,7 +25,13 @@ import {
   parsePixverseSubmitResponse,
   PIXVERSE_SOUND_MODEL,
 } from './adapters/pixverse-sound.js'
-import { saveRemoteMediaAsBgmAudio } from './bgm-audio.js'
+import { saveRemoteMediaAsBgmAudio, saveBase64MediaAsBgmAudio } from './bgm-audio.js'
+import {
+  ACE_STEP_DEFAULT_MODEL,
+  checkAceStepHealth,
+  generateAceStepMusic,
+  isAceStepMusicModel,
+} from './adapters/ace-step-music.js'
 import { now } from '../utils/response.js'
 import { downloadFile, getAbsolutePath } from '../utils/storage.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
@@ -114,6 +120,7 @@ export function assertPixverseVideoAvailable(storyboard?: typeof schema.storyboa
 }
 
 export function resolveBgmProvider(model: string) {
+  if (isAceStepMusicModel(model)) return 'acestep'
   return isPixverseSoundModel(model) ? 'pixverse' : 'suno'
 }
 
@@ -131,8 +138,13 @@ interface GenerateBgmParams {
 
 export async function generateBgm(params: GenerateBgmParams): Promise<number[]> {
   const ts = now()
-  const config = getMusicConfig(params.configId)
-  const model = params.model || config.model || SUNO_DEFAULT_MODEL
+  const requestedModel = String(params.model || '').trim()
+  const providerHint = resolveBgmProvider(requestedModel || ACE_STEP_DEFAULT_MODEL)
+  // ACE-Step 本地不依赖 music AI 配置 / API Key
+  const config = providerHint === 'acestep' && !params.configId
+    ? { provider: 'acestep', baseUrl: '', apiKey: '', model: ACE_STEP_DEFAULT_MODEL }
+    : getMusicConfig(params.configId)
+  const model = requestedModel || config.model || SUNO_DEFAULT_MODEL
   const provider = resolveBgmProvider(model)
 
   let storyboard: typeof schema.storyboards.$inferSelect | undefined
@@ -161,11 +173,22 @@ export async function generateBgm(params: GenerateBgmParams): Promise<number[]> 
     assertPixverseVideoAvailable(storyboard)
   }
 
+  if (provider === 'acestep') {
+    const health = await checkAceStepHealth()
+    if (!health.ok) {
+      throw new Error(health.error || 'ACE-Step 未启动，请运行 scripts/start-ace-step.ps1')
+    }
+  }
+
   const placeholder = db.insert(schema.musicGenerations).values({
     dramaId,
     episodeId,
     storyboardId: params.storyboardId,
-    provider: provider === 'pixverse' ? 'pixverse' : (config.provider || 'chatfire'),
+    provider: provider === 'pixverse'
+      ? 'pixverse'
+      : provider === 'acestep'
+        ? 'acestep'
+        : (config.provider || 'chatfire'),
     model,
     prompt,
     description: params.description || storyboard?.bgmPrompt || null,
@@ -199,7 +222,11 @@ export async function generateBgm(params: GenerateBgmParams): Promise<number[]> 
     autoApply: params.autoApply,
   }
 
-  const runner = provider === 'pixverse' ? processPixverseBgm : processSunoBgm
+  const runner = provider === 'pixverse'
+    ? processPixverseBgm
+    : provider === 'acestep'
+      ? processAceStepBgm
+      : processSunoBgm
   runner(processArgs).catch(err => {
     logTaskError('BgmTask', 'process', { id: leadId, error: err.message })
     db.update(schema.musicGenerations)
@@ -209,6 +236,62 @@ export async function generateBgm(params: GenerateBgmParams): Promise<number[]> 
   })
 
   return [leadId]
+}
+
+async function processAceStepBgm(args: {
+  leadId: number
+  batchId: string
+  config: AIConfig
+  model: string
+  prompt: string
+  dramaId?: number
+  episodeId?: number
+  storyboardId?: number
+  description?: string | null
+  autoApply?: boolean
+}) {
+  const { leadId, batchId, prompt } = args
+  const taskId = `acestep-${leadId}-${batchId.slice(0, 8)}`
+  db.update(schema.musicGenerations)
+    .set({ taskId, batchId, status: 'processing', updatedAt: now() })
+    .where(eq(schema.musicGenerations.id, leadId))
+    .run()
+
+  if (!tryBeginBgmTask(taskId)) {
+    logTaskWarn('BgmTask', 'skip-duplicate-task', { id: leadId, taskId })
+    return
+  }
+
+  try {
+    logTaskProgress('BgmTask', 'acestep-generate', { id: leadId, prompt: prompt.slice(0, 120) })
+    const result = await generateAceStepMusic({
+      prompt,
+      durationSec: 60,
+      instrumental: true,
+    })
+    const localPath = saveBase64MediaAsBgmAudio(result.audioDataUrl, 'mp3')
+    db.update(schema.musicGenerations)
+      .set({
+        title: `ACE-Step BGM ${leadId}`,
+        audioUrl: localPath,
+        localPath,
+        status: 'completed',
+        completedAt: now(),
+        updatedAt: now(),
+      })
+      .where(eq(schema.musicGenerations.id, leadId))
+      .run()
+    logTaskSuccess('BgmTask', 'acestep-done', { id: leadId, localPath })
+    if (args.autoApply && args.storyboardId) {
+      applyBgmToStoryboard(args.storyboardId, leadId)
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    markBgmTaskFailed(leadId, taskId, message)
+    throw err
+  } finally {
+    endBgmTask(taskId)
+  }
 }
 
 async function processSunoBgm(args: {

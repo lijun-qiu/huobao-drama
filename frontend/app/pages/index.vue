@@ -139,25 +139,29 @@
 
 <script setup>
 import { toast } from 'vue-sonner'
-import { dramaAPI } from '~/composables/useApi'
-import { NARRATION_MINIMAL_STYLE, MOTION_COMIC_DEFAULT_STYLE, artStyleLabel, artStyleSelectOptions } from '~/composables/useArtStyles'
+import { aiConfigAPI, dramaAPI } from '~/composables/useApi'
+import { NARRATION_ANIME_STYLE, NARRATION_MINIMAL_STYLE, MOTION_COMIC_DEFAULT_STYLE, artStyleLabel, artStyleSelectOptions } from '~/composables/useArtStyles'
 import { buildDramaMetadata, productionModeLabel as motionComicModeLabel } from '~/composables/useMotionComic'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 const dramas = ref([])
 const loading = ref(false)
 const showCreate = ref(false)
-const form = ref({ title: '', total_episodes: 1, style: NARRATION_MINIMAL_STYLE, production_mode: 'narration' })
+const form = ref({ title: '', total_episodes: 1, style: NARRATION_ANIME_STYLE, production_mode: 'narration' })
 const styleSelectOptions = artStyleSelectOptions
 const modeSelectOptions = [
   { label: '解说视频（配图+旁白）', value: 'narration' },
-  { label: '漫画解说（条漫+上下运镜）', value: 'motion_comic' },
+  { label: '漫画解说（电影感日系·本地模型）', value: 'motion_comic' },
+  { label: '小说漫画讲解（贴小说·分章·旁白漫画）', value: 'novel_comic' },
+  { label: '对话立绘（视觉小说·静底+立绘对话）', value: 'dialogue_portrait' },
+  { label: '本地短剧（完整流程·全本地模型）', value: 'local_comic' },
   { label: '漫剧短剧（完整流程）', value: 'drama' },
 ]
 
 watch(() => form.value.production_mode, (mode) => {
-  if (mode === 'narration') form.value.style = NARRATION_MINIMAL_STYLE
-  if (mode === 'motion_comic') form.value.style = MOTION_COMIC_DEFAULT_STYLE
+  if (mode === 'narration') form.value.style = NARRATION_ANIME_STYLE
+  if (mode === 'motion_comic' || mode === 'novel_comic') form.value.style = MOTION_COMIC_DEFAULT_STYLE
+  if (mode === 'dialogue_portrait') form.value.style = NARRATION_ANIME_STYLE
 })
 
 async function load() {
@@ -176,6 +180,9 @@ async function create() {
   if (!form.value.title?.trim()) return
   try {
     const { production_mode, ...rest } = form.value
+    if (production_mode === 'local_comic' || production_mode === 'novel_comic' || production_mode === 'motion_comic' || production_mode === 'narration' || production_mode === 'dialogue_portrait') {
+      try { await aiConfigAPI.localPreset() } catch { /* 本地服务未配置时仍可创建项目 */ }
+    }
     const d = await dramaAPI.create({
       ...rest,
       metadata: buildDramaMetadata(production_mode || 'drama'),

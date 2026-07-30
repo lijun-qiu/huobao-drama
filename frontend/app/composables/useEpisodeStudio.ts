@@ -3,7 +3,7 @@ import { toast } from 'vue-sonner'
 import {
   Users, MapPin, Video, ImageIcon, Layers, Mic2, Music, FileText, FolderKanban, Clapperboard, Download, Film, Sparkles, Loader2,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, musicAPI, uploadAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, musicAPI, uploadAPI, localModelAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import {
   parseProductionMode,
@@ -22,14 +22,34 @@ import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_TEXT_MODEL,
   DEFAULT_NARRATION_SCRIPT_CHAT_MODEL,
+  DEFAULT_LOCAL_TEXT_MODEL,
+  resolveLocalScriptChatTextModel,
+  resolveScriptChatTextThinking,
+  DEFAULT_LOCAL_AGENT_MODEL,
+  CLOUD_TEXT_MODELS,
   DEFAULT_TEXT_THINKING,
-  IMAGE_MODEL_OPTIONS,
+  textModelLabel,
   TEXT_MODEL_OPTIONS,
+  LOCAL_TEXT_MODEL_OPTIONS,
+  normalizeTextModelId,
+  imageModelOptionsForMode,
+  textModelOptionsForMode,
+  resolveEpisodeTextModelForMode,
+  resolveEpisodeImageModelForMode,
+  resolveLocalEpisodeTextModel,
+  resolveActiveLocalLlmModel,
+  resolveLocalExtractModel,
+  isLocalAgentToolModel,
+  isLocalOllamaTextModel,
+  isCloudImageModel,
+  needsLocalImageHardware,
+  needsLocalVideoHardware,
   resolveEpisodeTextModel,
   resolveNarrationEpisodeTextModel,
   resolveEpisodeTextThinking,
   textModelSupportsThinking,
   textModelSupportsVision,
+  DEFAULT_LOCAL_VISION_MODEL,
   BGM_MODEL_OPTIONS,
   DEFAULT_BGM_MODEL,
   bgmModelLabel,
@@ -53,9 +73,15 @@ import {
   isNarrationTtsUnitLeader,
   formatComposeTimecode,
   formatComposeUnitDuration,
+  getComposeUnitMergedTtsText,
+  getComposeUnitTotalDurationSec,
   getComposeUnitShotRangeLabel,
+  cleanVideoPromptText,
+  buildVideoPromptFromParagraphAndImage,
+  resolveNarrationImageAnchorShot,
   getComposedVideoUrl as getStoryboardComposedVideoUrl,
   collectComposeScopeStoryboardIds,
+  getStoryboardCharacterIdsFromShot,
   narrationShotsNeedingImage,
   narrationImageDetectAnchorCount,
   narrationShotsPendingImage,
@@ -86,11 +112,42 @@ import {
   findDramaStyleAnchorCharacter,
   sortCharactersForPortraitGeneration,
   dramaStoryboardStep,
+  dramaStoryboardStepForMode,
+  dramaRawStepForMode,
+  dramaRewriteStepForMode,
+  dramaExtractStepForMode,
+  dramaVoiceStepForMode,
+  LOCAL_DRAMA_SCRIPT_CHAT_STEP,
+  LOCAL_DRAMA_RAW_STEP,
+  LOCAL_DRAMA_REWRITE_STEP,
+  LOCAL_DRAMA_EXTRACT_STEP,
+  LOCAL_DRAMA_VOICE_STEP,
+  LOCAL_DRAMA_STORYBOARD_STEP,
   narrationScriptChatStep,
   narrationRawContentStep,
   narrationStoryboardStep,
+  usesMotionComicStoryboardRules,
+  usesLocalModelPipeline as usesLocalModelPipelineForMode,
+  isNarrationLikeMode as isNarrationLikeModeForMode,
+  isDialoguePortraitMode as isDialoguePortraitModeForMode,
+  usesDialogueSpeakers as usesDialogueSpeakersForMode,
+  DIALOGUE_PORTRAIT_EXPRESSIONS,
+  DIALOGUE_PORTRAIT_EXPRESSION_LABELS,
+  DIALOGUE_PORTRAIT_MAX_CHARS,
+  getDialoguePortraitExpressions,
+  dialoguePortraitExpressionSrc,
+  dialoguePortraitExpressionsReady,
+  parseCharacterReferenceImages,
+  resolveLocalModelStageFromNav,
+  localModelStageLabel,
+  LOCAL_VIDEO_MODEL_OPTIONS,
+  DEFAULT_LOCAL_VIDEO_MODEL,
+  FLUX_PROMPT_EN_VERSION,
+  repairFluxEnglishForPendingCheck,
+  isFluxEnglishPromptInaccurate,
+  type LocalModelStage,
 } from '~/composables/useEpisodeWorkflow'
-import { artStyleLabel, NARRATION_MINIMAL_STYLE, MOTION_COMIC_STYLE, MOTION_COMIC_DEFAULT_STYLE, NARRATION_IMAGE_STYLE_OPTIONS, resolveNarrationImageStyle, normalizeArtStyle } from '~/composables/useArtStyles'
+import { artStyleLabel, ART_STYLES, NARRATION_MINIMAL_STYLE, MOTION_COMIC_STYLE, MOTION_COMIC_DEFAULT_STYLE, NARRATION_IMAGE_STYLE_OPTIONS, resolveNarrationImageStyle, normalizeArtStyle } from '~/composables/useArtStyles'
 import { buildFolderUploadSlots, isImageUploadFile, parseShotImageFilename } from '~/utils/shotImageFilename'
 import { hasEmphasisMarkers, stripEmphasisMarkers } from '~/utils/subtitle-emphasis'
 import { stampChatAssistantGeneratedAt, stampChatAssistantFailed, pickLlmGeneratedAt, resolveLlmTimestamp, isLlmCancelled, llmErrorMessage } from '~/utils/llm-timestamp'
@@ -120,26 +177,597 @@ function findNarratorChar(list = chars.value) {
 
 const productionMode = computed(() => parseProductionMode(drama.value))
 const isMotionComicMode = computed(() => productionMode.value === 'motion_comic')
-const isNarrationLikeMode = computed(() => productionMode.value === 'narration' || productionMode.value === 'motion_comic')
+const isNovelComicMode = computed(() => productionMode.value === 'novel_comic')
+const isLocalComicMode = computed(() => productionMode.value === 'local_comic')
+const isDialoguePortraitMode = computed(() => isDialoguePortraitModeForMode(productionMode.value))
+const usesLocalModelPipeline = computed(() => usesLocalModelPipelineForMode(productionMode.value))
+const isNarrationLikeMode = computed(() => isNarrationLikeModeForMode(productionMode.value))
+const isDramaLikeMode = computed(() => productionMode.value === 'drama' || productionMode.value === 'local_comic')
 const isNarrationMode = isNarrationLikeMode
+const usesDialogueSpeakers = computed(() => usesDialogueSpeakersForMode(productionMode.value))
+const usesComicStoryboardRules = computed(() => usesMotionComicStoryboardRules(productionMode.value))
+const usesComicVisuals = computed(() => productionMode.value === 'motion_comic' || productionMode.value === 'novel_comic')
+const isComicStoryboardMode = computed(() => isNarrationLikeMode.value)
+const isComicCharPortraitMode = computed(() => isNarrationLikeMode.value)
+
+const dramaRawStep = computed(() => dramaRawStepForMode(productionMode.value))
+const dramaRewriteStep = computed(() => dramaRewriteStepForMode(productionMode.value))
+const dramaExtractStep = computed(() => dramaExtractStepForMode(productionMode.value))
+const dramaVoiceStep = computed(() => dramaVoiceStepForMode(productionMode.value))
+
+const localModelStatus = ref(null)
+const localModelSwitching = ref(false)
+const localModelPrepareHint = ref('')
+const localModelStage = computed(() => String(localModelStatus.value?.stage || 'idle'))
+const localModelLoadedStages = computed(() => {
+  const raw = localModelStatus.value?.loaded_stages
+  if (Array.isArray(raw) && raw.length) return raw.map(String)
+  const stage = localModelStage.value
+  return stage && stage !== 'idle' ? [stage] : []
+})
+
+const localModelLoadedStageText = computed(() => {
+  const stages = localModelLoadedStages.value
+  if (!stages.length) return ''
+  return stages.map(s => localModelStageLabel(s)).join(' + ')
+})
+
+const localModelStageText = computed(() => {
+  const base = localModelStageLabel(localModelStage.value)
+  if (localModelStage.value === 'llm') {
+    const model = String(localModelStatus.value?.ollama_model || episodeTextModel.value || '').trim()
+    return model ? `LLM · ${model}` : base
+  }
+  if (localModelStage.value !== 'audio') return base
+  const engine = resolveActiveLocalTtsEngine()
+  const voiceId = String(localEdgeVoiceId.value || '')
+  if (engine === 'edge') return '配音·Edge'
+  if (engine === 'indextts') return '配音·IndexTTS2'
+  if (engine === 'gptsovits' || /^gsv:/i.test(voiceId)) return '配音·GPT-SoVITS'
+  if (/^preset:kokoro:/i.test(voiceId)) return '配音·Kokoro'
+  if (/^preset:qwen/i.test(voiceId)) return '配音·Qwen'
+  const meta = findLocalVoiceProfile(localEdgeVoiceId.value)
+  if (meta?.source === 'kokoro') return '配音·Kokoro'
+  if (meta?.source === 'cloned') return '配音·克隆'
+  return '配音·Voicebox'
+})
+const localModelOnline = computed(() => ({
+  ollama: !!localModelStatus.value?.ollama_online,
+  comfyui: !!localModelStatus.value?.comfyui_online,
+  edgeTts: !!localModelStatus.value?.edge_tts_online,
+  voicebox: !!localModelStatus.value?.voicebox_online,
+  gptsovits: !!localModelStatus.value?.gptsovits_online,
+  indextts: !!localModelStatus.value?.indextts_online,
+}))
+const localModelStatusHint = computed(() => {
+  const auto = localModelStatus.value?.automation
+  const online = [
+    `Ollama ${localModelOnline.value.ollama ? '在线' : '离线'}`,
+    `ComfyUI ${localModelOnline.value.comfyui ? '在线' : '离线'}`,
+    `Edge TTS ${localModelOnline.value.edgeTts ? '可用' : '不可用'}`,
+    `Voicebox ${localModelOnline.value.voicebox ? '在线' : '离线'}`,
+    `GPT-SoVITS ${localModelOnline.value.gptsovits ? '在线' : '离线'}`,
+    `IndexTTS2 ${localModelOnline.value.indextts ? '在线' : '离线'}`,
+  ].join(' · ')
+  if (!auto) return online
+  const stageKey = localModelStage.value === 'idle' ? 'idle' : localModelStage.value
+  const rule = auto[stageKey] || ''
+  return rule ? `${online}\n${rule}` : online
+})
+
+const LOCAL_MODEL_BAR_STAGE_KEY = 'huobao:local-model-bar:stage'
+const LOCAL_MODEL_BAR_VIDEO_KEY = 'huobao:local-model-bar:video'
+
+const LOCAL_MODEL_BAR_STAGE_OPTIONS = [
+  { value: 'llm', label: 'LLM（写稿 / Agent）' },
+  { value: 'image', label: '生图（ComfyUI）' },
+  { value: 'video', label: '生视频（ComfyUI）' },
+  { value: 'audio', label: '配音（TTS）' },
+] as const
+
+function readLocalModelBarStage(): LocalModelStage {
+  if (typeof window === 'undefined') return 'llm'
+  const saved = window.localStorage.getItem(LOCAL_MODEL_BAR_STAGE_KEY)
+  if (saved === 'llm' || saved === 'image' || saved === 'video' || saved === 'audio') return saved
+  return 'llm'
+}
+
+const localModelBarStage = ref<LocalModelStage>(readLocalModelBarStage())
+const localModelBarVideoModel = ref((() => {
+  if (typeof window === 'undefined') return DEFAULT_LOCAL_VIDEO_MODEL
+  const saved = String(window.localStorage.getItem(LOCAL_MODEL_BAR_VIDEO_KEY) || '').trim()
+  if (LOCAL_VIDEO_MODEL_OPTIONS.some(item => item.value === saved)) return saved
+  return DEFAULT_LOCAL_VIDEO_MODEL
+})())
+let localModelBarPollTimer: ReturnType<typeof setInterval> | null = null
+
+const localModelBarModelOptions = computed(() => {
+  const stage = localModelBarStage.value
+  if (stage === 'llm') return localLlmModelOptions.value
+  if (stage === 'image') return imageModelOptions.value
+  if (stage === 'video') {
+    return LOCAL_VIDEO_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value }))
+  }
+  if (stage === 'audio') return localTtsEngineOptions
+  return []
+})
+
+const localModelBarModelValue = computed(() => {
+  const stage = localModelBarStage.value
+  if (stage === 'llm') return episodeTextModel.value
+  if (stage === 'image') return episodeImageModel.value
+  if (stage === 'video') return localModelBarVideoModel.value
+  if (stage === 'audio') return localTtsEngine.value
+  return ''
+})
+
+const localModelBarModelDisabled = computed(() => localModelSwitching.value)
+
+const localModelBarStageBadge = computed(() => {
+  const loaded = localModelLoadedStageText.value
+  if (loaded) {
+    const llmModel = String(localModelStatus.value?.ollama_model || episodeTextModel.value || '').trim()
+    if (localModelLoadedStages.value.includes('llm') && llmModel) {
+      return `${loaded} · ${llmModel}`
+    }
+    return loaded
+  }
+  const stage = localModelStageLabel(localModelStage.value)
+  if (localModelStage.value === 'llm') {
+    const model = String(localModelStatus.value?.ollama_model || episodeTextModel.value || '').trim()
+    return model ? `${stage} · ${model}` : stage
+  }
+  if (localModelStage.value === 'image') {
+    const model = String(episodeImageModel.value || '').trim()
+    return model ? `${stage} · ${model}` : stage
+  }
+  if (localModelStage.value === 'video') {
+    const model = String(localModelBarVideoModel.value || '').trim()
+    return model ? `${stage} · ${model}` : stage
+  }
+  if (localModelStage.value === 'audio') return localModelStageText.value
+  return stage
+})
+
+const localModelBarStatusText = computed(() => {
+  if (localModelSwitching.value) {
+    return localModelPrepareHint.value || '正在加载模型，请稍候…'
+  }
+  if (!stageNeedsLocalHardware(localModelBarStage.value)) {
+    if (localModelBarStage.value === 'llm') return '云端文本（智谱），无需加载显存'
+    if (localModelBarStage.value === 'image') return '云端生图，无需加载显存'
+    if (localModelBarStage.value === 'video') return '云端/轻量视频，无需加载 Wan'
+  }
+  const loaded = localModelLoadedStageText.value
+  if (loaded) return `已加载：${loaded}`
+  if (localModelStage.value && localModelStage.value !== 'idle') {
+    return `已加载：${localModelStageLabel(localModelStage.value)}`
+  }
+  return '云端模型就绪（无需本地预加载）'
+})
+
+const localModelBarHint = computed(() => {
+  const llmModel = String(episodeTextModel.value || localModelStatus.value?.ollama_model || '未选择')
+  const imageModel = String(episodeImageModel.value || '未选择')
+  const videoModel = String(localModelBarVideoModel.value || '未选择')
+  const audioLabel = localTtsEngineLabel.value
+  if (!stageNeedsLocalHardware(localModelBarStage.value)) {
+    return '当前为云端 API，切换步骤不会再自动加载 Ollama/ComfyUI'
+  }
+  if (isLocalOllamaTextModel(llmModel) && !localModelOnline.value.ollama) return 'Ollama 离线，请先启动 Ollama 服务'
+  if (localModelBarStage.value === 'image' && needsLocalImageHardware(imageModel) && !localModelOnline.value.comfyui) {
+    return `ComfyUI 离线 · 当前：文本 ${llmModel} · 生图 ${imageModel} · 视频 ${videoModel} · 配音 ${audioLabel}`
+  }
+  if (localModelBarStage.value === 'video' && needsLocalVideoHardware(videoModel) && !localModelOnline.value.comfyui) {
+    return `ComfyUI 离线 · 当前：文本 ${llmModel} · 生图 ${imageModel} · 视频 ${videoModel} · 配音 ${audioLabel}`
+  }
+  if (localModelBarStage.value === 'audio') {
+    const engine = localTtsEngine.value
+    if (engine === 'indextts' && !localModelOnline.value.indextts) {
+      return `IndexTTS2 离线 · 当前配音引擎：${audioLabel}`
+    }
+    if (engine === 'gptsovits' && !localModelOnline.value.gptsovits) {
+      return `GPT-SoVITS 离线 · 当前配音引擎：${audioLabel}`
+    }
+    if (engine === 'voicebox' && !localModelOnline.value.voicebox) {
+      return `Voicebox 离线 · 当前配音引擎：${audioLabel}`
+    }
+  }
+  return `文本 ${llmModel} · 生图 ${imageModel} · 生视频 ${videoModel} · 配音 ${audioLabel} — 本地阶段互斥加载`
+})
+
+/** 云端智谱/Agnes 等：不需要 Ollama/Comfy 预加载到显存 */
+function stageNeedsLocalHardware(stage: string, opts?: { ollamaModel?: string; comfyVideoModel?: string }): boolean {
+  if (stage === 'llm') {
+    const model = opts?.ollamaModel || resolveActiveLocalLlmModel(episodeTextModel.value)
+    return isLocalOllamaTextModel(model)
+  }
+  if (stage === 'image') {
+    return needsLocalImageHardware(episodeImageModel.value)
+  }
+  if (stage === 'video') {
+    const vm = opts?.comfyVideoModel || localModelBarVideoModel.value
+    return needsLocalVideoHardware(vm)
+  }
+  if (stage === 'audio') {
+    // Edge TTS 无需预加载；其它本地引擎才检查/拉起
+    const engine = String(opts?.ttsEngine || resolveActiveLocalTtsEngine() || '').trim()
+    return engine === 'indextts' || engine === 'gptsovits' || engine === 'voicebox'
+  }
+  return false
+}
+
+const localModelBarNeedsHardware = computed(() => stageNeedsLocalHardware(localModelBarStage.value))
+
+function onLocalModelBarStageChange(stage: string) {
+  if (stage !== 'llm' && stage !== 'image' && stage !== 'video' && stage !== 'audio') return
+  localModelBarStage.value = stage
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(LOCAL_MODEL_BAR_STAGE_KEY, stage)
+  }
+}
+
+function onLocalModelBarVideoChange(value: string) {
+  if (!value || value === localModelBarVideoModel.value) return
+  localModelBarVideoModel.value = value
+  if (typeof window !== 'undefined') window.localStorage.setItem(LOCAL_MODEL_BAR_VIDEO_KEY, value)
+  if (!usesLocalModelPipeline.value) return
+  // 轻量动态不占 Comfy；仅 Wan 才写入视频阶段模型
+  if (!/wan/i.test(value)) return
+  void localModelAPI.setStage(localModelStage.value || 'idle', {
+    ...localModelRequestOpts(localModelStage.value || 'idle'),
+    comfyVideoModel: value,
+  }).then(status => {
+    localModelStatus.value = status
+  }).catch(() => {})
+}
+
+async function onLocalModelBarModelChange(value: string) {
+  const stage = localModelBarStage.value
+  if (stage === 'llm') {
+    await onEpisodeTextModelChange(value)
+    return
+  }
+  if (stage === 'image') {
+    await onEpisodeImageModelChange(value)
+    return
+  }
+  if (stage === 'video') {
+    localModelBarVideoModel.value = value
+    if (typeof window !== 'undefined') window.localStorage.setItem(LOCAL_MODEL_BAR_VIDEO_KEY, value)
+    return
+  }
+  if (stage === 'audio') {
+    await onLocalTtsEngineChange(value)
+  }
+}
+
+async function onLocalModelBarLoad() {
+  const stage = localModelBarStage.value
+  if (stage === 'llm' || stage === 'image' || stage === 'video' || stage === 'audio') {
+    await runLocalModelStage(stage)
+  }
+}
+
+function startLocalModelBarPolling() {
+  if (localModelBarPollTimer) clearInterval(localModelBarPollTimer)
+  if (!usesLocalModelPipeline.value) return
+  const tick = () => { void refreshLocalModelStatus() }
+  localModelBarPollTimer = setInterval(tick, localModelSwitching.value ? 2000 : 15000)
+}
+
+function stopLocalModelBarPolling() {
+  if (localModelBarPollTimer) {
+    clearInterval(localModelBarPollTimer)
+    localModelBarPollTimer = null
+  }
+}
+
+function findLocalVoiceProfile(voiceId) {
+  if (!voiceId) return null
+  return edgeVoiceProfiles.value.find(v => v.id === voiceId)
+    || localCastVoiceProfiles.value.find(v => v.id === voiceId)
+    || null
+}
+
+function usesGsvClonedVoices(engine?: string) {
+  return engine === 'gptsovits' || engine === 'indextts'
+}
+
+function ttsEngineSupportsEmotionInstruct(engine?: string) {
+  return engine === 'voicebox' || engine === 'indextts'
+}
+
+/** Kokoro / Qwen 预设与克隆音色必须走 Voicebox；Edge 音色走 edge-tts；gsv 克隆走 GPT-SoVITS 或 IndexTTS2 */
+function resolveActiveLocalTtsEngine() {
+  const voiceId = String(localEdgeVoiceId.value || '').trim()
+  if (/^gsv:/i.test(voiceId)) {
+    if (localTtsEngine.value === 'indextts' && indexttsAvailable.value) return 'indextts'
+    if (gptsovitsAvailable.value) return 'gptsovits'
+    if (indexttsAvailable.value) return 'indextts'
+  }
+  if (/^preset:/i.test(voiceId)) return 'voicebox'
+  const meta = findLocalVoiceProfile(voiceId)
+  if (meta?.source === 'kokoro' || meta?.source === 'cloned') return 'voicebox'
+  if (localTtsEngine.value === 'indextts' && indexttsAvailable.value) return 'indextts'
+  if (localTtsEngine.value === 'gptsovits' && gptsovitsAvailable.value) return 'gptsovits'
+  if (localTtsEngine.value === 'voicebox' && voiceboxAvailable.value) return 'voicebox'
+  return 'edge'
+}
+
+function localModelRequestOpts(stage) {
+  const opts: { ollamaModel?: string; ttsEngine?: string; comfyVideoModel?: string; lightMotion?: boolean } = {}
+  if (stage === 'llm') {
+    opts.ollamaModel = resolveActiveLocalLlmModel(episodeTextModel.value)
+  }
+  if (stage === 'audio') {
+    opts.ttsEngine = resolveActiveLocalTtsEngine()
+  }
+  if (stage === 'video') {
+    const vm = String(localModelBarVideoModel.value || '')
+    if (/wan/i.test(vm)) {
+      opts.comfyVideoModel = vm
+    } else {
+      // glide / kenburns：不拉 Comfy、不加载 Wan
+      opts.lightMotion = true
+    }
+  }
+  return opts
+}
+
+async function refreshLocalModelStatus() {
+  if (!usesLocalModelPipeline.value) return
+  try {
+    localModelStatus.value = await localModelAPI.status()
+    const savedVideo = String(localModelStatus.value?.comfy_video_model || '').trim()
+    // 勿用后端 Wan 默认覆盖用户已选的轻量动态
+    if (
+      savedVideo
+      && /wan/i.test(savedVideo)
+      && /wan/i.test(String(localModelBarVideoModel.value || ''))
+      && headerVideoModelOptions.value.some(o => o.value === savedVideo)
+    ) {
+      localModelBarVideoModel.value = savedVideo
+    }
+  } catch {
+    // 静默：本地服务可能未启动
+  }
+}
+
+async function syncLocalModelStage(navKey) {
+  if (!usesLocalModelPipeline.value) return
+  const stage = resolveLocalModelStageFromNav(navKey)
+  if (stage === 'idle') return
+  // 云端智谱/Agnes/CogView：不自动拉 Ollama/Comfy，避免顶栏一直转圈
+  if (!stageNeedsLocalHardware(stage)) return
+  // 本地视频生成中勿切到配音等阶段，否则 Comfy /interrupt 会打断 Wan
+  if (
+    pendingVideoIds.value.length > 0
+    && (localModelStage.value === 'video' || localModelLoadedStages.value.includes('video'))
+    && stage !== 'video'
+  ) {
+    return
+  }
+  // 定妆/分镜生图中勿切到 LLM/配音，否则 /interrupt 会导致 execution_interrupted
+  const imageBusy = pendingCharImageIds.value.length > 0
+    || pendingNarrationShotIds.value.length > 0
+    || isBatchRunning('charImages')
+    || isBatchRunning('sceneImages')
+    || isBatchRunning('narrationImages')
+  if (
+    imageBusy
+    && (localModelStage.value === 'image' || localModelLoadedStages.value.includes('image'))
+    && stage !== 'image'
+  ) {
+    return
+  }
+  const loaded = localModelLoadedStages.value
+  if (loaded.includes(stage) && stage !== 'audio') return
+  localModelSwitching.value = true
+  try {
+    localModelStatus.value = await localModelAPI.setStage(stage, localModelRequestOpts(stage))
+  } catch (err) {
+    console.warn('local model stage switch failed', err)
+  } finally {
+    localModelSwitching.value = false
+  }
+}
+
+/** 生成任务完成后释放大模型显存（配音/合成等不需要 LLM/ComfyUI 时） */
+async function releaseLocalModelsAfterTask() {
+  if (!usesLocalModelPipeline.value) return
+  if (localModelStage.value === 'idle') return
+  // 仍有生图任务时不要 idle 卸载，否则会 interrupt 正在跑的定妆/配图
+  if (
+    pendingCharImageIds.value.length
+    || pendingNarrationShotIds.value.length
+    || pendingVideoIds.value.length
+    || isBatchRunning('charImages')
+    || isBatchRunning('sceneImages')
+    || isBatchRunning('narrationImages')
+  ) {
+    return
+  }
+  try {
+    localModelStatus.value = await localModelAPI.setStage('idle')
+  } catch {
+    // 释放失败不阻断主流程
+  }
+}
+function localModelPrepareBaseLabel(stage) {
+  if (stage === 'llm') return '正在启动 Ollama 并加载 LLM 到显存'
+  if (stage === 'image') return '正在启动 ComfyUI 并准备生图环境'
+  if (stage === 'video') return '正在启动 ComfyUI 并准备视频模型'
+  if (stage === 'audio') {
+    const engine = resolveActiveLocalTtsEngine()
+    if (engine === 'indextts') return '正在检查 IndexTTS2 配音环境'
+    if (engine === 'gptsovits') return '正在启动 GPT-SoVITS 配音服务'
+    if (engine === 'voicebox') return '正在检查 Voicebox 配音服务'
+    return '正在检查 Edge TTS'
+  }
+  return '正在准备本地模型'
+}
+
+async function ensureLocalModelForTask(stage, opts) {
+  if (!usesLocalModelPipeline.value) return
+  const requestOpts = { ...localModelRequestOpts(stage) }
+  if (opts?.ollamaModel) requestOpts.ollamaModel = opts.ollamaModel
+  if (opts?.ttsEngine) requestOpts.ttsEngine = opts.ttsEngine
+  // 云端模型：跳过本地预加载，避免无意义转圈
+  if (!stageNeedsLocalHardware(stage, requestOpts)) return
+  localModelSwitching.value = true
+  const base = localModelPrepareBaseLabel(stage)
+  const started = Date.now()
+  const emitProgress = () => {
+    const sec = Math.floor((Date.now() - started) / 1000)
+    const text = sec > 0 ? `${base}…（已等待 ${sec}s）` : `${base}…`
+    localModelPrepareHint.value = text
+    opts?.onProgress?.(text)
+  }
+  emitProgress()
+  const timer = setInterval(emitProgress, 1000)
+  try {
+    localModelStatus.value = await localModelAPI.ensure(stage, requestOpts)
+  } catch (err) {
+    toast.error(err.message || '本地模型切换失败')
+    throw err
+  } finally {
+    clearInterval(timer)
+    localModelPrepareHint.value = ''
+    localModelSwitching.value = false
+  }
+}
+
+async function runLocalModelStage(stage) {
+  if (!usesLocalModelPipeline.value) return
+  if (!stageNeedsLocalHardware(stage, localModelRequestOpts(stage))) {
+    toast.success(
+      stage === 'llm' ? '云端文本已就绪（智谱，无需加载显存）'
+        : stage === 'image' ? '云端生图已就绪（无需加载 Comfy）'
+          : stage === 'video' ? '云端/轻量视频已就绪（无需加载 Wan）'
+            : '当前阶段无需本地预加载',
+    )
+    return
+  }
+  try {
+    const opts = localModelRequestOpts(stage)
+    await ensureLocalModelForTask(stage, opts)
+    await refreshLocalModelStatus()
+    const modelHint = stage === 'llm'
+      ? `（${resolveActiveLocalLlmModel(episodeTextModel.value)}）`
+      : stage === 'image'
+        ? `（${episodeImageModel.value}）`
+      : stage === 'video'
+        ? `（${localModelBarVideoModel.value}）`
+      : stage === 'audio'
+        ? `（${localTtsEngineLabel.value}）`
+        : ''
+    toast.success(
+      stage === 'video' && opts.lightMotion
+        ? `轻量运镜就绪（${localModelBarVideoModel.value}，未加载 Wan/Comfy）`
+        : `${localModelStageLabel(stage)} 模型已就绪${modelHint}`,
+    )
+  } catch {
+    // ensureLocalModelForTask 已 toast
+  }
+}
+
+async function unloadLocalModels() {
+  if (!usesLocalModelPipeline.value) return
+  if (
+    pendingCharImageIds.value.length
+    || pendingNarrationShotIds.value.length
+    || pendingVideoIds.value.length
+    || isBatchRunning('charImages')
+    || isBatchRunning('sceneImages')
+    || isBatchRunning('narrationImages')
+  ) {
+    toast.warning('仍有生图/视频任务进行中，请等待完成后再卸载本地模型')
+    return
+  }
+  localModelSwitching.value = true
+  try {
+    localModelStatus.value = await localModelAPI.setStage('idle')
+    toast.success('已卸载本地模型，显存已释放')
+  } catch (err) {
+    toast.error(err.message || '卸载失败')
+  } finally {
+    localModelSwitching.value = false
+  }
+}
+
+const currentLocalModelStage = computed(() => {
+  if (!usesLocalModelPipeline.value) return null
+  if (panel.value === 'script') {
+    const navKey = resolveActiveSubStepKey(productionMode.value, panel.value, scriptStep.value, prodTab.value, exportTab.value)
+    const stage = resolveLocalModelStageFromNav(navKey)
+    return stage === 'idle' ? null : stage
+  }
+  if (panel.value === 'production') {
+    const stage = resolveLocalModelStageFromNav(`prod:${prodTab.value}`)
+    return stage === 'idle' ? null : stage
+  }
+  return null
+})
+
+const showCharsDualLocalModelControls = computed(() =>
+  isLocalComicMode.value && panel.value === 'production' && prodTab.value === 'chars',
+)
+
+async function runLocalComicAgent(type, message, onDone) {
+  const llmModel = resolveActiveLocalLlmModel(episodeTextModel.value)
+  if (isLocalComicMode.value) {
+    const needsTools = type === 'extractor' || type === 'script_rewriter' || type === 'storyboard_breaker' || type === 'voice_assigner' || type === 'grid_prompt_generator'
+    if (needsTools && !isLocalAgentToolModel(llmModel)) {
+      toast.warning(`「${llmModel}」不支持 Agent 工具调用，提取/改写等将自动改用 ${DEFAULT_LOCAL_AGENT_MODEL}`)
+    }
+    const preloadModel = needsTools && !isLocalAgentToolModel(llmModel)
+      ? DEFAULT_LOCAL_AGENT_MODEL
+      : llmModel
+    try {
+      await ensureLocalModelForTask('llm', { ollamaModel: preloadModel })
+    } catch {
+      return
+    }
+  }
+  const agentModel = isLocalComicMode.value
+    ? ((type === 'extractor' || type === 'script_rewriter' || type === 'storyboard_breaker' || type === 'voice_assigner' || type === 'grid_prompt_generator') && !isLocalAgentToolModel(llmModel)
+      ? DEFAULT_LOCAL_AGENT_MODEL
+      : llmModel)
+    : undefined
+  await runAgent(type, message, dramaId, epId.value, onDone, agentModel)
+}
 
 function isNarratorCharacter(char) {
   const text = `${char?.name || ''} ${char?.role || ''}`.toLowerCase()
   return text.includes('旁白') || text.includes('narrator') || text.includes('画外音')
 }
 
+/** 与后端 isPlausibleDialogueSpeaker 对齐：拒绝把叙述句误当成角色名 */
+function isPlausibleDialogueSpeaker(speaker) {
+  const name = String(speaker || '').trim()
+  if (!name) return false
+  if (name === '旁白' || name === '剧中' || name === '解说') return true
+  if (name.length > 12) return false
+  if (/[，,。！？!?；;、：:\n]/.test(name)) return false
+  if (name.length >= 8 && /[的了着过]|他|她|我|这|那|就|又|却|把|被|让/.test(name)) return false
+  if (/^(借着|顺着|看着|听着|想到|只见|忽然|突然|于是|然后|接着)/.test(name)) return false
+  return true
+}
+
 function parseStoryboardSpeaker(dialogue) {
   const raw = String(dialogue || '').trim()
   if (!raw) return ''
   const speakerMatch = raw.match(/^(.+?)[:：]/)
-  const speaker = speakerMatch
+  let speaker = speakerMatch
     ? speakerMatch[1].replace(/[（(].+?[)）]/g, '').trim()
     : '旁白'
+  if (speaker && !isPlausibleDialogueSpeaker(speaker)) speaker = '旁白'
   return speaker === '剧中' ? '旁白' : speaker
 }
 
 const motionComicStoryboardSpeakers = computed(() => {
-  if (!isMotionComicMode.value) return new Set<string>()
+  if (!usesDialogueSpeakers.value) return new Set<string>()
   const speakers = new Set<string>()
   for (const sb of sbs.value) {
     const speaker = parseStoryboardSpeaker(sb.dialogue)
@@ -149,11 +777,11 @@ const motionComicStoryboardSpeakers = computed(() => {
 })
 
 const motionComicVoiceChars = computed(() => {
-  if (!isMotionComicMode.value) return []
+  if (!usesDialogueSpeakers.value) return []
   const speakers = motionComicStoryboardSpeakers.value
   const list = speakers.size
     ? chars.value.filter(c => speakers.has(String(c.name || '').trim()) || (isNarratorCharacter(c) && speakers.has('旁白')))
-    : chars.value
+    : chars.value.filter(c => !isNarratorCharacter(c) || isMotionComicMode.value)
   return [...list].sort((a, b) => {
     const pa = isNarratorCharacter(a) ? 0 : 1
     const pb = isNarratorCharacter(b) ? 0 : 1
@@ -166,10 +794,13 @@ const motionComicCharsVoiced = computed(() =>
   motionComicVoiceChars.value.filter(c => c.voice_style || c.voiceStyle).length,
 )
 
-const storyboardStep = computed(() => isNarrationLikeMode.value ? narrationStoryboardStep() : dramaStoryboardStep())
+const storyboardStep = computed(() => {
+  if (isNarrationLikeMode.value) return narrationStoryboardStep()
+  return dramaStoryboardStepForMode(productionMode.value)
+})
 const narratorChar = computed(() => findNarratorChar(chars.value))
 const narratorReady = computed(() => {
-  if (isMotionComicMode.value) {
+  if (usesDialogueSpeakers.value) {
     return localTtsEnabled.value
       ? motionComicCharsVoiced.value > 0 && motionComicCharsVoiced.value >= motionComicVoiceChars.value.length
       : motionComicCharsVoiced.value > 0
@@ -179,15 +810,41 @@ const narratorReady = computed(() => {
 const narratorVoiceId = ref('')
 const narratorVoiceDirty = ref(false)
 const DEFAULT_LOCAL_EDGE_VOICE = 'zh-CN-YunxiNeural'
+const DEFAULT_LOCAL_TTS_ENGINE = 'indextts'
+const DEFAULT_CLONED_VOICE_ID = 'gsv:008' // 云希
 const localTtsEnabled = ref(true)
-const localTtsEngine = ref('edge')
-const localEdgeVoiceId = ref(DEFAULT_LOCAL_EDGE_VOICE)
+const localTtsEngine = ref(DEFAULT_LOCAL_TTS_ENGINE)
+const localEdgeVoiceId = ref(DEFAULT_CLONED_VOICE_ID)
 const edgeVoiceProfiles = ref([])
 const voiceboxAvailable = ref(false)
 const voiceboxModelLoaded = ref(false)
+const gptsovitsAvailable = ref(false)
+const indexttsAvailable = ref(false)
+const gsvCatalogVoices = ref([])
+const gsvLoading = ref(false)
+const gsvSaving = ref(false)
+const gsvUploading = ref(false)
+const gsvPreviewing = ref(false)
+const gsvDeletingId = ref('')
+const gsvEditingId = ref('')
+const gsvPreviewUrl = ref('')
+const gsvPanelOpen = ref(false)
+const gsvFileInputRef = ref(null)
+const gsvForm = reactive({
+  voice_id: '',
+  voice_name: '',
+  ref_audio_path: '',
+  prompt_text: '',
+  prompt_lang: 'zh',
+  language: '中文',
+  gpt_weights: '',
+  sovits_weights: '',
+})
 const localTtsEngineOptions = [
-  { label: 'Voicebox（声音克隆）', value: 'voicebox' },
-  { label: 'Edge TTS（系统音色）', value: 'edge' },
+  { label: 'IndexTTS2（情感克隆 · 复用 GPT-SoVITS 参考音）', value: 'indextts' },
+  { label: 'GPT-SoVITS（音色克隆）', value: 'gptsovits' },
+  { label: 'Voicebox（Kokoro / Qwen / 克隆）', value: 'voicebox' },
+  { label: 'Edge TTS（微软系统音色）', value: 'edge' },
 ]
 const DEFAULT_TTS_SPEED = 1
 const localTtsSpeedOptions = [
@@ -237,6 +894,11 @@ const localVoiceboxInstructCustom = ref('')
 const LOCAL_TTS_PREVIEW_DEFAULT = '这是一段旁白试听，用于感受当前音色、语速和感情效果。'
 const TTS_BATCH_CONCURRENCY_EDGE = 4
 const TTS_BATCH_CONCURRENCY_VOICEBOX = 4
+const TTS_BATCH_CONCURRENCY_GPTSOVITS = 1
+/** Agnes / 智谱云端生图批量并发（后端无本地队列限制） */
+const IMAGE_BATCH_CONCURRENCY_AGNES = 4
+const IMAGE_BATCH_CONCURRENCY_CLOUD = 4
+const IMAGE_BATCH_CONCURRENCY_LOCAL = 1
 const localTtsPreviewing = ref(false)
 const localTtsPreviewUrl = ref('')
 const localTtsPreviewSrc = computed(() => {
@@ -250,7 +912,7 @@ const customTtsVoiceId = ref('alloy')
 const customTtsAudioUrl = ref('')
 const customTtsGenerating = ref(false)
 const customTtsPreviewBump = ref(0)
-const customTtsUsesLocal = computed(() => isNarrationMode.value && localTtsEnabled.value !== false)
+const customTtsUsesLocal = computed(() => (isNarrationMode.value || isLocalComicMode.value) && localTtsEnabled.value !== false)
 const customTtsPreviewSrc = computed(() => {
   if (!customTtsAudioUrl.value) return ''
   const path = customTtsAudioUrl.value.replace(/^\//, '')
@@ -271,8 +933,12 @@ const localTtsSpeedLabel = computed(() => {
 })
 const localTtsEngineLabel = computed(() => {
   if (!localTtsEnabled.value) return lockedAudioConfigLabel.value
+  if (localTtsEngine.value === 'indextts') return '本地 IndexTTS2'
+  if (localTtsEngine.value === 'gptsovits') return '本地 GPT-SoVITS'
   return localTtsEngine.value === 'voicebox' ? '本地 Voicebox' : '本地 Edge TTS'
 })
+const localTtsSupportsEmotionInstruct = computed(() => ttsEngineSupportsEmotionInstruct(localTtsEngine.value))
+const localTtsUsesGsvVoices = computed(() => usesGsvClonedVoices(localTtsEngine.value))
 const selectedVoiceSupportsInstruct = computed(() => {
   if (localTtsEngine.value !== 'voicebox') return false
   const row = edgeVoiceProfiles.value.find(p => p.id === localEdgeVoiceId.value)
@@ -286,8 +952,8 @@ function resolveVoiceboxInstructText() {
   return String(localVoiceboxInstructPreset.value || '').trim()
 }
 const localVoiceboxInstructLabel = computed(() => {
-  if (localTtsEngine.value !== 'voicebox') return ''
-  if (!selectedVoiceSupportsInstruct.value) return ''
+  if (!ttsEngineSupportsEmotionInstruct(localTtsEngine.value)) return ''
+  if (localTtsEngine.value === 'voicebox' && !selectedVoiceSupportsInstruct.value) return ''
   const instruct = resolveVoiceboxInstructText()
   if (!instruct) return ''
   if (localVoiceboxInstructPreset.value === VOICEBOX_INSTRUCT_CUSTOM) {
@@ -305,6 +971,7 @@ const pipelineStepTotal = computed(() => workflowStepTotal(productionMode.value)
 const panel = ref('script')
 const { running: rn, runningType: rt, run: runAgent } = useAgent()
 const narrationBreaking = ref(false)
+const storyboardBreaking = ref(false)
 const narrationImageBreaking = ref(false)
 const narrationImageStep = ref(null)
 const narrationImagePromptTestActive = ref(false)
@@ -342,8 +1009,13 @@ const imageDetectBatchThreshold = ref(80)
 const imageDetectBatchSize = ref(30)
 const narrationImageStyle = ref(NARRATION_ANIME_STYLE)
 const narrationImageStyleOptions = computed(() => {
-  if (isMotionComicMode.value) {
-    return [{ value: MOTION_COMIC_STYLE, label: '漫画解说' }]
+  if (isMotionComicMode.value || isNovelComicMode.value) {
+    return [{ value: MOTION_COMIC_STYLE, label: isNovelComicMode.value ? '小说漫画' : '漫画解说' }]
+  }
+  if (isDramaLikeMode.value) {
+    return ART_STYLES
+      .filter(item => item.value !== MOTION_COMIC_STYLE)
+      .map(item => ({ value: item.value, label: item.label }))
   }
   return NARRATION_IMAGE_STYLE_OPTIONS.map(item => ({
     value: item.value,
@@ -351,19 +1023,39 @@ const narrationImageStyleOptions = computed(() => {
   }))
 })
 
+function narrationImageStyleStorageKey() {
+  if (isDramaLikeMode.value && dramaId) return `huobao-drama-image-style-${dramaId}`
+  return 'huobao-narration-image-style'
+}
+
+function readSavedNarrationImageStyle() {
+  if (typeof window === 'undefined') return null
+  const key = narrationImageStyleStorageKey()
+  let saved = window.localStorage.getItem(key)
+  if (!saved && isLocalComicMode.value) {
+    saved = window.localStorage.getItem('huobao-local-drama-image-style')
+    if (saved) window.localStorage.setItem(key, saved)
+  }
+  return saved
+}
+
 function syncNarrationImageStyleFromDrama() {
   if (!drama.value) return
-  if (isMotionComicMode.value) {
+  if (isMotionComicMode.value || isNovelComicMode.value) {
     narrationImageStyle.value = MOTION_COMIC_STYLE
     return
   }
   // 集内「画风风格」优先于项目级 drama.style（用户切换后会写入 localStorage）
-  if (typeof window !== 'undefined') {
-    const saved = window.localStorage.getItem('huobao-narration-image-style')
-    if (saved) {
-      narrationImageStyle.value = resolveNarrationImageStyle(saved)
-      return
-    }
+  const saved = readSavedNarrationImageStyle()
+  if (saved) {
+    narrationImageStyle.value = isDramaLikeMode.value
+      ? normalizeArtStyle(saved)
+      : resolveNarrationImageStyle(saved)
+    return
+  }
+  if (isDramaLikeMode.value) {
+    narrationImageStyle.value = normalizeArtStyle(drama.value.style)
+    return
   }
   const dramaStyle = normalizeArtStyle(drama.value.style)
   if (dramaStyle === NARRATION_MINIMAL_STYLE || dramaStyle === NARRATION_ANIME_STYLE) {
@@ -374,22 +1066,28 @@ function syncNarrationImageStyleFromDrama() {
 }
 
 function getNarrationImageStyle() {
+  if (isDramaLikeMode.value) return normalizeArtStyle(narrationImageStyle.value)
   return resolveNarrationImageStyle(narrationImageStyle.value)
 }
 
 function onNarrationImageStyleChange(value) {
-  narrationImageStyle.value = resolveNarrationImageStyle(value)
+  narrationImageStyle.value = isDramaLikeMode.value
+    ? normalizeArtStyle(value)
+    : resolveNarrationImageStyle(value)
   persistNarrationImageStylePref()
 }
 
 function restoreNarrationImageStylePref() {
   if (typeof window === 'undefined') return
-  if (isMotionComicMode.value) {
+  if (isMotionComicMode.value || isNovelComicMode.value) {
     narrationImageStyle.value = MOTION_COMIC_STYLE
     return
   }
-  const saved = window.localStorage.getItem('huobao-narration-image-style')
-  if (saved) narrationImageStyle.value = resolveNarrationImageStyle(saved)
+  const saved = readSavedNarrationImageStyle()
+  if (!saved) return
+  narrationImageStyle.value = isDramaLikeMode.value
+    ? normalizeArtStyle(saved)
+    : resolveNarrationImageStyle(saved)
 }
 
 function portraitImageStyleOptions() {
@@ -398,15 +1096,27 @@ function portraitImageStyleOptions() {
 
 function persistNarrationImageStylePref() {
   if (typeof window === 'undefined') return
-  window.localStorage.setItem('huobao-narration-image-style', getNarrationImageStyle())
+  window.localStorage.setItem(narrationImageStyleStorageKey(), getNarrationImageStyle())
 }
-const imagePromptBatchSize = ref(6)
+  const imagePromptBatchSize = ref(5)
 
 const localRaw = ref(''), localScript = ref('')
 
-const SCRIPT_CHAT_WELCOME = computed(() => isMotionComicMode.value
-  ? '我是漫画解说编剧。每行须「说话人：台词」（旁白/角色名/我/剧中）；一句一行，完整稿 3000～8000 字。支持多轮改稿：写完可说「补说话人」「去片尾关注句」等，我会输出改后的完整稿。「直接输入」里已保存的文案会自动带入上下文。'
-  : '描述你想让观众体验的「一段人生」。默认第二人称「你」、语言亲民真实；完整稿 3000～10000 字。支持多轮改稿；「直接输入」里的文案会自动带入。也可切「直接输入」粘贴自备稿。')
+const SCRIPT_CHAT_WELCOME = computed(() => {
+  if (isLocalComicMode.value) {
+    return '我是本地短剧编剧，使用 Ollama 本地模型写短剧剧本。描述题材与梗概即可生成完整稿；写完后可填入「原始内容」继续 AI 改写、提取角色与分镜。支持多轮改稿。「直接输入」可粘贴小说/大纲。'
+  }
+  if (isDialoguePortraitMode.value) {
+    return '我是对话立绘编剧（视觉小说式：背景不动，立绘说话/微动作）。请写 1～2 个角色对白，每行「角色名：台词」；可写（点头）（挥手）等短动作；段间空行或「【场景】」换景。写完后填入文案，再进入「对话分镜」。'
+  }
+  if (isNovelComicMode.value) {
+    return '我是小说漫画讲解助手。请先在剧集页粘贴小说并确认章节大纲（一章一集）。本页改的是「本章旁白朗读稿」：叙述为主，可少量讲解衔接；写完后进旁白分镜 → 漫画配图 → TTS。'
+  }
+  if (isMotionComicMode.value) {
+    return '我是漫画解说编剧。每行须「说话人：台词」（旁白/角色名/我/剧中）；一句一行；目标约旁白 30% / 对白 70%。篇幅以你指定为准（如写1000字），未指定时默认 3000～8000 字。支持多轮改稿：写完可说「补说话人」「压旁白」「去片尾关注句」等。「直接输入」里已保存的文案会自动带入上下文。'
+  }
+  return '描述你想让观众体验的「一段人生」。默认第二人称「你」、语言亲民真实。篇幅以你指定为准（如写1000字），未指定时默认 3000～10000 字。支持多轮改稿；「直接输入」里的文案会自动带入。也可切「直接输入」粘贴自备稿。'
+})
 const SCRIPT_CHAT_STORAGE_PREFIX = 'huobao:narration-script-chat:'
 
 function defaultScriptChatMessages() {
@@ -459,28 +1169,143 @@ const scriptChatMessages = ref(defaultScriptChatMessages())
 const scriptChatInput = ref('')
 const scriptChatGenerating = ref(false)
 const scriptChatModel = ref(DEFAULT_NARRATION_SCRIPT_CHAT_MODEL)
+
+function syncScriptChatModel(ep) {
+  scriptChatModel.value = isLocalComicMode.value
+    ? resolveLocalScriptChatTextModel(ep)
+    : DEFAULT_NARRATION_SCRIPT_CHAT_MODEL
+}
+
+function syncScriptChatThinking(ep) {
+  const enabled = resolveScriptChatTextThinking(ep)
+  scriptChatThinking.value = enabled
+  episodeTextThinking.value = enabled
+}
 const scriptChatThinking = ref(DEFAULT_TEXT_THINKING)
 const scriptChatScrollRef = ref(null)
 const scriptChatAbortController = ref(null)
-const scriptChatQuickHints = computed(() => isMotionComicMode.value
-  ? [
-    '按悬疑快切模板写完整稿：每行「说话人：台词」，片头「剧中：本期故事：…」',
-    '帮我把当前文案补全说话人前缀（旁白/角色名/我），输出完整稿',
-    '去掉片尾关注引流句，保留剧情余韵，输出完整稿',
-    '按悬疑快切模板写完整稿：大学生算卦救邻居，警察从怀疑到信任',
-  ]
-  : [
+const scriptChatQuickHints = computed(() => {
+  if (isLocalComicMode.value) {
+    return [
+      '写一篇都市悬疑短剧：盲眼大学生算卦救卤肉店，连环杀人犯破门而入',
+      '写一篇甜宠短剧：外卖员误送蛋糕到总裁办公室，引发误会与心动',
+      '把下面大纲扩成完整剧本：小镇青年返乡创业，遭遇阻力后逆袭',
+      '语气更紧凑、对白更利落，补第二幕冲突，扩写到 3000 字以上',
+    ]
+  }
+  if (isNovelComicMode.value) {
+    return [
+      '把本章稿压缩到约 1200 字，保留关键情节点，口语化便于旁白',
+      '补两三句短讲解衔接，不要改成角色对白台本',
+      '按场景换段，一句别太长，方便拆镜配音',
+      '去掉说教与引流句，只保留小说叙述与必要讲解',
+    ]
+  }
+  if (isMotionComicMode.value) {
+    return [
+      '按悬疑快切模板写完整稿：每行「说话人：台词」，片头「剧中：本期故事：…」',
+      '帮我把当前文案补全说话人前缀（旁白/角色名/我），输出完整稿',
+      '去掉片尾关注引流句，保留剧情余韵，输出完整稿',
+      '按悬疑快切模板写完整稿：大学生算卦救邻居，警察从怀疑到信任',
+    ]
+  }
+  return [
     '写一篇完整稿（3000～10000 字）：八十年代进城摆夜市摊，从穷到翻身又跌入谷底，写足内心活动',
     '写一篇完整稿（3000～10000 字）：九十年代小镇青年第一次进城打工，犹豫与期待交织',
     '把下面大纲扩成 3000～10000 字完整解说稿：职高辍学→进厂→摆摊→被骗',
     '语气更沉静、更亲民，补内心戏，扩写到 3000 字以上',
-  ])
+  ]
+})
+const showScriptChatPanel = computed(() => {
+  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep()) return true
+  if (isLocalComicMode.value && scriptStep.value === LOCAL_DRAMA_SCRIPT_CHAT_STEP) return true
+  return false
+})
+const extractRunning = computed(() => isBatchRunning('extract') || (rn.value && rt.value === 'extractor'))
+const scriptChatStepTitle = computed(() => (isNovelComicMode.value ? '本章朗读稿' : '剧本生成'))
+const scriptChatGenModeHint = computed(() => {
+  if (isLocalComicMode.value) {
+    return scriptGenMode.value === 'chat' ? 'AI 对话 · 本地 Ollama 写剧本' : '直接输入 · 粘贴小说/大纲/剧本'
+  }
+  if (isDialoguePortraitMode.value) {
+    return scriptGenMode.value === 'chat' ? 'AI 对话 · 写双人对话稿' : '直接输入 · 粘贴「角色名：台词」'
+  }
+  if (isNovelComicMode.value) {
+    return scriptGenMode.value === 'chat' ? 'AI 对话 · 改本章旁白朗读稿' : '直接输入 · 编辑本章朗读正文'
+  }
+  if (isMotionComicMode.value) {
+    return scriptGenMode.value === 'chat' ? 'AI 对话 · 漫画解说写稿' : '直接输入 · 粘贴或编写解说稿'
+  }
+  return scriptGenMode.value === 'chat' ? 'AI 对话 · 体验人生解说稿' : '直接输入 · 粘贴或编写解说稿'
+})
+const scriptChatAssistantLabel = computed(() => {
+  if (isDialoguePortraitMode.value) return '对话编剧'
+  if (isNovelComicMode.value) return '小说讲解'
+  if (isMotionComicMode.value) return '解说大师'
+  if (isLocalComicMode.value) return '编剧'
+  return 'AI'
+})
+const scriptChatManualPlaceholder = computed(() => {
+  if (isLocalComicMode.value) {
+    return '粘贴小说原文、故事大纲或分镜描述…\n对话建议「角色名：台词」格式，段间空行换场景'
+  }
+  if (isDialoguePortraitMode.value) {
+    return '粘贴对话脚本，每行「角色名：台词」；本集 1～2 人；段间空行换场景'
+  }
+  if (isNovelComicMode.value) {
+    return '本章旁白朗读正文（叙述为主）…\n可从剧集页「确认大纲」自动填入，再在此微调'
+  }
+  if (isMotionComicMode.value) {
+    return '粘贴或编写快切解说稿…\n首行：本期故事：…\n一句一行，段间空行换场景'
+  }
+  return '粘贴或编写完整解说稿…\n首行建议：今天体验的人生剧本是，…\n也可从 Word / 备忘录直接粘贴'
+})
+const scriptChatManualHint = computed(() => {
+  if (isLocalComicMode.value) {
+    return '自备稿可直接编辑保存，进入「AI 改写」继续；或在 AI 对话中多轮改稿后点「填入文案」。'
+  }
+  if (isDialoguePortraitMode.value) {
+    return '对话立绘须用「角色名：台词」；本集 1～2 人。保存后进「对话分镜」。'
+  }
+  if (isNovelComicMode.value) {
+    return '小说漫画讲解：旁白念本章小说。请先在剧集页完成「粘贴小说 → 章节大纲 → 确认建集」。保存后进旁白分镜。'
+  }
+  if (isMotionComicMode.value) {
+    return '漫画解说须用快切解说稿（每行说话人：台词；约旁白 30% / 对白 70%）；保存后进分镜。在 AI 对话里说「补说话人」「压旁白」可改已保存文案。'
+  }
+  return '自备稿可直接在此编辑；保存后进入「文案输入」或「旁白分镜」继续。字幕 ** 强调在分镜时由 Qwen 自动标注。'
+})
+const scriptChatInputPlaceholder = computed(() => {
+  if (isLocalComicMode.value) {
+    return '描述短剧题材与梗概，或多轮改稿…（直接输入里的文案会自动带入）'
+  }
+  if (isDialoguePortraitMode.value) {
+    return '写一段双人对话（角色名：台词），或多轮改稿…'
+  }
+  if (isNovelComicMode.value) {
+    return '改本章朗读稿：压缩、口语化、补短讲解句…（直接输入里的文案会自动带入）'
+  }
+  if (isMotionComicMode.value) {
+    return '写完整稿，或多轮改稿：补说话人、压旁白、去片尾…（直接输入里的文案会自动带入）'
+  }
+  return '描述本期人生，例如：十八岁职高辍学，八十年代进城摆夜市摊…'
+})
+/** 最近一次生成返回的字数下限（用户指定如「写1000字」时以后端为准） */
+const scriptChatResolvedMinChars = ref<number | null>(null)
+const scriptChatMinChars = computed(() => (
+  scriptChatResolvedMinChars.value
+  ?? (isLocalComicMode.value ? 2000 : (isDialoguePortraitMode.value ? 800 : (isNovelComicMode.value ? 400 : 3000)))
+))
+const scriptChatModelOptionsForPicker = computed(() => (
+  usesLocalModelPipeline.value ? localLlmModelOptions.value : textModelOptions.value
+))
+const scriptChatModelSupportsThinking = computed(() => textModelSupportsThinking(scriptChatModel.value))
 
-const IMAGE_DETECT_CHAT_WELCOME = computed(() => isMotionComicMode.value
-  ? '我是漫画配图换镜检测助手。可讨论哪些镜头需要单独漫画配图（1～2 镜一段一图、换人说话须换图、整段一种运镜）；说「开始检测」或点快捷按钮，我会流式展示检测过程。'
+const IMAGE_DETECT_CHAT_WELCOME = computed(() => usesComicVisuals.value
+  ? '我是漫画配图换镜检测助手。可讨论哪些镜头需要单独配图（约 2～4 镜一图、按场景/动作换图、换人不强制换图、整段一种运镜）；说「开始检测」或点快捷按钮，我会流式展示检测过程。'
   : '我是配图换镜检测助手。可讨论哪些镜头需要单独配图；说「开始检测」或点下方快捷按钮，我会流式展示检测过程。检测完成后可继续多轮调整策略并重新检测。')
-const IMAGE_PROMPT_CHAT_WELCOME = computed(() => isMotionComicMode.value
-  ? '我是漫画配图文案助手。须先完成换镜检测；说「开始生成文案」或点快捷按钮，我会流式展示六维漫画 prompt 生成过程。主要配角须写定妆外貌。'
+const IMAGE_PROMPT_CHAT_WELCOME = computed(() => usesComicVisuals.value
+  ? '我是漫画配图文案助手。须先完成换镜检测；说「开始生成文案」或点快捷按钮，我会流式展示整段国漫配图文案生成过程。主要配角须写定妆外貌。'
   : '我是配图文案助手。需先完成换镜检测；说「开始生成文案」或点快捷按钮，我会流式展示六维文案生成过程。生成后可逐段讨论修改，或补全缺失文案。')
 const IMAGE_DETECT_CHAT_STORAGE_PREFIX = 'huobao:narration-image-detect-chat:'
 const IMAGE_PROMPT_CHAT_STORAGE_PREFIX = 'huobao:narration-image-prompt-chat:'
@@ -569,8 +1394,8 @@ const imagePromptChatQuickHints = [
   '第5段改成夜市全景，突出霓虹灯牌',
 ]
 
-const STORYBOARD_CHAT_WELCOME = computed(() => isMotionComicMode.value
-  ? '我是旁白分镜助手。整稿按句拆镜、自动标注 ** 强调、片头单独处理；配图 1～2 镜一段一图、换人说话须换图，同图整段一种运镜。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程。'
+const STORYBOARD_CHAT_WELCOME = computed(() => usesComicStoryboardRules.value
+  ? '我是旁白分镜助手。整稿按句拆镜、自动标注 ** 强调、片头单独处理；配图约 2～4 镜一图、按场景/动作换图（换人不强制换图），同图整段一种运镜。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程。'
   : '我是旁白分镜助手。整稿拆镜：按句分镜、自动标注 ** 强调、片头单独处理。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程；完成后可继续多轮讨论并重新分镜。')
 const STORYBOARD_CHAT_STORAGE_PREFIX = 'huobao:narration-storyboard-chat:'
 
@@ -599,9 +1424,29 @@ const storyboardChatQuickHints = [
 
 const rawContent = computed(() => episode.value?.content || '')
 const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
+
+function resolveEpisodeScriptDraft() {
+  return (localScript.value || localRaw.value || scriptContent.value || rawContent.value || '').trim()
+}
+
+async function ensureEpisodeScriptPersisted() {
+  const script = resolveEpisodeScriptDraft()
+  if (!script) {
+    throw new Error('请先在「原始内容」或「AI 改写」步骤填写剧本')
+  }
+  if (!epId.value) throw new Error('集信息加载中，请稍后重试')
+  localScript.value = script
+  localRaw.value = script
+  await episodeAPI.update(epId.value, { content: script, script_content: script })
+  episode.value.content = script
+  episode.value.script_content = script
+  return script
+}
+
 const epId = computed(() => episode.value?.id || 0)
 const rawLen = computed(() => localRaw.value.replace(/\s/g, '').length || 0)
 const scriptLen = computed(() => localScript.value.replace(/\s/g, '').length || 0)
+const hasEpisodeScriptDraft = computed(() => !!resolveEpisodeScriptDraft())
 const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.voiceStyle).length)
 const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
 const composableShots = computed(() => sbs.value.filter(sb => isComposeScopeStoryboard(sb, sbs.value)))
@@ -683,6 +1528,153 @@ const narrationImageBreakdownProgressMessage = computed(() => {
   }
   return progress.message || '配图分镜进行中…'
 })
+const narrationImageBreakdownModalOpen = ref(false)
+const narrationShotImageModalOpen = ref(false)
+const narrationShotImageModalTitle = computed(() => {
+  if (narrationShotImageModalFailed.value) return '配图生成失败'
+  if (narrationShotImageModalDone.value) return '配图生成完成'
+  const model = String(episodeImageModel.value || '').toLowerCase()
+  if (model.includes('q4')) return '正在生成配图 · Qwen Q4'
+  if (model.includes('q3') || model.includes('qwen')) return '正在生成配图 · Qwen Q3'
+  return '正在生成配图'
+})
+const narrationShotImageModalJobs = computed(() =>
+  Object.values(narrationShotImageJobs.value || {}).filter(Boolean) as Array<{
+    status?: string
+    percent?: number
+    message?: string
+    error?: string
+  }>,
+)
+const narrationShotImageModalProcessing = computed(() =>
+  pendingNarrationShotIds.value.length > 0
+  || narrationShotImageModalJobs.value.some(j => j.status === 'processing' || j.status === 'submitting'),
+)
+const narrationShotImageModalDone = computed(() => {
+  if (narrationShotImageModalProcessing.value) return false
+  return narrationShotImageModalJobs.value.some(j => j.status === 'completed')
+    && !narrationShotImageModalJobs.value.some(j => j.status === 'failed')
+})
+const narrationShotImageModalFailed = computed(() => {
+  if (narrationShotImageModalProcessing.value) return false
+  return narrationShotImageModalJobs.value.some(j => j.status === 'failed')
+})
+const narrationShotImageModalPercent = computed(() => {
+  const jobs = narrationShotImageModalJobs.value
+  if (!jobs.length) return pendingNarrationShotIds.value.length ? 8 : 0
+  const sum = jobs.reduce((acc, j) => acc + (Number(j.percent) || 0), 0)
+  return Math.min(100, Math.max(0, Math.round(sum / jobs.length)))
+})
+const narrationShotImageModalSummary = computed(() => {
+  const pending = pendingNarrationShotIds.value.length
+  const jobs = narrationShotImageModalJobs.value
+  const failed = jobs.filter(j => j.status === 'failed')
+  const completed = jobs.filter(j => j.status === 'completed')
+  if (failed.length && !narrationShotImageModalProcessing.value) {
+    return failed[0]?.error || failed[0]?.message || '生成失败，请检查 ComfyUI / 模型权重'
+  }
+  if (narrationShotImageModalDone.value) {
+    return completed.length > 1 ? `已完成 ${completed.length} 张配图` : '配图已写入镜头，可关闭此窗口'
+  }
+  const latest = [...jobs].reverse().find(j => j.message)?.message || 'ComfyUI 生图中…'
+  const model = String(episodeImageModel.value || '')
+  const modelHint = model.includes('q4')
+    ? 'Q4_K_M'
+    : (model.includes('q3') || model.includes('qwen') ? 'Q3_K_M' : (model || 'ComfyUI'))
+  return pending > 1
+    ? `${modelHint} · ${latest}（进行中 ${pending}）`
+    : `${modelHint} · ${latest}`
+})
+function openNarrationShotImageProgressModal() {
+  narrationShotImageModalOpen.value = true
+}
+function closeNarrationShotImageProgressModal() {
+  narrationShotImageModalOpen.value = false
+  // 关掉弹窗后再清掉已结束任务，避免进度条一闪而空
+  const jobs = { ...narrationShotImageJobs.value }
+  let changed = false
+  for (const [id, job] of Object.entries(jobs)) {
+    const status = String((job as any)?.status || '')
+    if (status === 'completed' || status === 'failed') {
+      delete jobs[id]
+      changed = true
+    }
+  }
+  if (changed) narrationShotImageJobs.value = jobs
+}
+
+const narrationImageBreakdownModalTitle = computed(() => {
+  const progress = narrationImageBreakdownProgress.value
+  const phase = progress?.phase
+  const status = progress?.status
+  if (status === 'completed') {
+    return phase === 'detecting' ? '配图检测完成' : '配图文案生成完成'
+  }
+  if (status === 'failed' || status === 'cancelled') {
+    return phase === 'detecting' ? '配图检测失败' : '配图文案生成失败'
+  }
+  return phase === 'detecting' ? '正在检测换镜配图' : '正在生成配图文案'
+})
+const narrationImageBreakdownModalProcessing = computed(() => {
+  const status = narrationImageBreakdownProgress.value?.status
+  return status === 'processing' || (!status && narrationImageBreaking.value)
+})
+const narrationImageBreakdownModalDone = computed(() =>
+  narrationImageBreakdownProgress.value?.status === 'completed',
+)
+const narrationImageBreakdownModalFailed = computed(() => {
+  const status = narrationImageBreakdownProgress.value?.status
+  return status === 'failed' || status === 'cancelled'
+})
+const narrationImageBreakdownModalBatchLabel = computed(() => {
+  const progress = narrationImageBreakdownProgress.value
+  const batch = progress?.batch ?? progress?.batchCount
+  const batchCount = progress?.batch_count ?? progress?.batchCount
+  if (batch && batchCount) return `第 ${batch} / ${batchCount} 批`
+  return ''
+})
+const narrationImageBreakdownModalSummary = computed(() => {
+  const progress = narrationImageBreakdownProgress.value
+  if (narrationImageBreakdownModalFailed.value) {
+    return progress?.message || progress?.error || '任务失败，请查看错误信息后重试'
+  }
+  if (narrationImageBreakdownModalDone.value) {
+    if (progress?.phase === 'detecting') {
+      const count = narrationDetectDisplayCount.value || progress?.paragraph_count
+      return count ? `共 ${count} 张镜头需配图` : (progress?.message || '检测完成')
+    }
+    const total = narrationDetectDisplayCount.value
+    const done = narrationPromptDisplayCount.value
+    const missing = narrationMissingPromptCount.value
+    if (missing > 0) return `已生成 ${done}/${total} 条，仍有 ${missing} 段可点「补全缺失」`
+    return total ? `全部 ${done}/${total} 条配图文案已就绪` : `共 ${done} 条配图文案已就绪`
+  }
+  return narrationImageBreakdownProgressMessage.value
+})
+function openNarrationImageBreakdownModal(phase: 'detecting' | 'prompts') {
+  narrationImageBreakdownModalOpen.value = true
+  if (!narrationImageBreakdownProgress.value || narrationImageBreakdownProgress.value.status !== 'processing') {
+    narrationImageBreakdownProgress.value = {
+      status: 'processing',
+      phase,
+      message: phase === 'detecting' ? '正在检测换镜配图…' : '正在生成配图文案…',
+      percent: 1,
+    }
+  }
+}
+function closeNarrationImageBreakdownModal() {
+  narrationImageBreakdownModalOpen.value = false
+}
+async function cancelNarrationImageBreakdown() {
+  if (!epId.value) return
+  try {
+    await episodeAPI.cancelNarrationImageBreakdown(epId.value)
+    imageDetectChatAbortController.value?.abort()
+    imagePromptChatAbortController.value?.abort()
+  } catch (e: any) {
+    toast.error(e?.message || '取消失败')
+  }
+}
 let mergePollTimer = null
 let composePollTimer = null
 let composePollAborted = false
@@ -818,6 +1810,10 @@ const bgmGenerating = ref(false)
 const bgmUploading = ref(false)
 const bgmUploadInput = ref(null)
 const narrationAssetClearing = ref(false)
+const fluxPromptTranslating = ref(false)
+const fluxPromptTranslatingShotIds = ref([])
+const fluxPromptClearing = ref(false)
+const fluxPromptTranslateProgress = ref({ done: 0, total: 0, status: 'idle', currentNo: null as number | null })
 const storyboardClearing = ref(false)
 const narrationCropWatermarkProcessing = ref(false)
 const narrationRestoreWatermarkProcessing = ref(false)
@@ -896,15 +1892,23 @@ const fallbackVoiceProfiles = [
 const voiceProfiles = ref(fallbackVoiceProfiles)
 const localCastVoiceProfiles = ref([])
 const localCastVoiceSelectOptions = computed(() => {
+  const gptsovits = localCastVoiceProfiles.value.filter(v => v.source === 'gptsovits')
   const kokoro = localCastVoiceProfiles.value.filter(v => v.source === 'kokoro')
   const cloned = localCastVoiceProfiles.value.filter(v => v.source === 'cloned')
   const edge = localCastVoiceProfiles.value.filter(v => v.source === 'edge')
-  const suffix = (v) => v.source === 'kokoro' ? ' · Kokoro' : v.source === 'cloned' ? ' · 克隆' : ' · Edge'
+  const suffix = (v) => {
+    if (v.source === 'gptsovits') return ' · GPT-SoVITS 克隆'
+    if (v.source === 'kokoro') return ' · Kokoro'
+    if (v.source === 'cloned') return ' · 克隆'
+    return ' · Edge'
+  }
   const mapOption = (v) => ({
     label: `${v.gender ? `[${v.gender}] ` : ''}${v.label}${suffix(v)}`,
     value: v.id,
   })
   return [
+    ...(gptsovits.length ? [{ label: '── GPT-SoVITS 克隆 ──', value: '', disabled: true }] : []),
+    ...gptsovits.map(mapOption),
     ...(kokoro.length ? [{ label: '── Kokoro ──', value: '', disabled: true }] : []),
     ...kokoro.map(mapOption),
     ...(cloned.length ? [{ label: '── Voicebox 克隆 ──', value: '', disabled: true }] : []),
@@ -914,6 +1918,15 @@ const localCastVoiceSelectOptions = computed(() => {
   ]
 })
 const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({ label: `${v.label} · ${v.traits}`, value: v.id })))
+const scriptVoiceSelectOptions = computed(() => {
+  if (!usesLocalModelPipeline.value) return voiceSelectOptions.value
+  if (localCastVoiceProfiles.value.length) return localCastVoiceSelectOptions.value
+  return edgeVoiceSelectOptions.value
+})
+const scriptVoiceProfiles = computed(() => {
+  if (!usesLocalModelPipeline.value) return voiceProfiles.value
+  return localCastVoiceProfiles.value.length ? localCastVoiceProfiles.value : edgeVoiceProfiles.value
+})
 const narratorVoiceSelectOptions = computed(() => {
   const api = voiceSelectOptions.value
   const cloned = localCastVoiceProfiles.value.filter(v => v.source === 'cloned')
@@ -931,19 +1944,56 @@ const charVoicePreviewingId = ref(null)
 const charVoicePreviewUrls = ref({})
 const charVoicePreviewBump = ref(0)
 const localVoiceAssigning = ref(false)
-const edgeVoiceSelectOptions = computed(() => edgeVoiceProfiles.value.map(v => ({ label: v.label, value: v.id })))
+function buildGsvVoiceSelectOptions(profiles = edgeVoiceProfiles.value) {
+  return profiles.map(v => ({
+    label: v.suitable ? `${v.label} · ${v.suitable}` : v.label,
+    value: v.id,
+  }))
+}
+
+function localTtsVoicePlaceholder() {
+  if (localTtsEngine.value === 'indextts') return '选择 IndexTTS2 克隆音色（GPT-SoVITS 库）'
+  if (localTtsEngine.value === 'gptsovits') return '选择 GPT-SoVITS 克隆音色'
+  if (localTtsEngine.value === 'voicebox') return '选择 Voicebox 音色'
+  if (localTtsEngine.value === 'edge') return '选择微软 Edge TTS 音色'
+  return '选择本地音色'
+}
+
+function localTtsEngineReady() {
+  if (localTtsEngine.value === 'indextts') return indexttsAvailable.value
+  if (localTtsEngine.value === 'gptsovits') return gptsovitsAvailable.value
+  if (localTtsEngine.value === 'voicebox') return voiceboxAvailable.value
+  return true
+}
+
+const edgeVoiceSelectOptions = computed(() => buildGsvVoiceSelectOptions(edgeVoiceProfiles.value))
+
+function resolveLocalTtsEnginePayload() {
+  const engine = localTtsEngine.value
+  if (engine === 'voicebox' || engine === 'gptsovits' || engine === 'indextts') return engine
+  return 'edge'
+}
+
+function localTtsEngineDisplayName() {
+  if (localTtsEngine.value === 'indextts') return 'IndexTTS2'
+  if (localTtsEngine.value === 'gptsovits') return 'GPT-SoVITS'
+  if (localTtsEngine.value === 'voicebox') return 'Voicebox'
+  return 'Edge'
+}
 
 function buildLocalTtsPreviewPayload(textOverride) {
   const text = String(textOverride || '').trim() || LOCAL_TTS_PREVIEW_DEFAULT
   const payload = {
-    local_tts_engine: localTtsEngine.value === 'voicebox' ? 'voicebox' : 'edge',
+    local_tts_engine: resolveLocalTtsEnginePayload(),
     local_voice: localEdgeVoiceId.value,
     tts_speed: localTtsSpeed.value,
     text,
   }
-  if (localTtsEngine.value === 'voicebox') {
+  if (ttsEngineSupportsEmotionInstruct(localTtsEngine.value)) {
     const instruct = resolveVoiceboxInstructText()
     if (instruct) payload.voicebox_instruct = instruct
+  }
+  if (localTtsEngine.value === 'voicebox') {
     payload.voicebox_model_size = localVoiceboxModelSize.value
   }
   return payload
@@ -957,11 +2007,19 @@ function selectedVoiceboxVoiceReady() {
 
 async function previewLocalTtsVoice(textOverride) {
   if (!localEdgeVoiceId.value) {
-    toast.warning(localTtsEngine.value === 'voicebox' ? '请选择 Voicebox 音色' : '请选择本地音色')
+    toast.warning(localTtsVoicePlaceholder())
     return
   }
   if (localTtsEngine.value === 'voicebox' && !voiceboxAvailable.value) {
     toast.warning('Voicebox 未运行，请先启动 Voicebox')
+    return
+  }
+  if (localTtsEngine.value === 'gptsovits' && !gptsovitsAvailable.value) {
+    toast.warning('GPT-SoVITS 未运行，请先启动 api_v2.py（默认端口 9880）')
+    return
+  }
+  if (localTtsEngine.value === 'indextts' && !indexttsAvailable.value) {
+    toast.warning('IndexTTS2 未就绪，请运行 scripts/setup-index-tts.ps1')
     return
   }
   if (!selectedVoiceboxVoiceReady()) {
@@ -970,6 +2028,7 @@ async function previewLocalTtsVoice(textOverride) {
     return
   }
   try {
+    if (usesLocalModelPipeline.value) await ensureLocalModelForTask('audio')
     localTtsPreviewing.value = true
     const res = await voicesAPI.previewLocal(buildLocalTtsPreviewPayload(textOverride))
     const path = res?.audio_url || res?.audioUrl
@@ -1044,19 +2103,36 @@ async function generateCustomTts() {
 function ttsGenerateOptions(force = false, sb = null) {
   const opts = {}
   if (force) opts.force = true
+  if (isLocalComicMode.value) {
+    opts.local_tts = true
+    opts.local_tts_engine = resolveActiveLocalTtsEngine()
+    opts.async = false
+    opts.use_speaker_voice = true
+    opts.tts_speed = localTtsSpeed.value
+    if (ttsEngineSupportsEmotionInstruct(localTtsEngine.value)) {
+      const instruct = resolveVoiceboxInstructText()
+      if (instruct) opts.voicebox_instruct = instruct
+    }
+    if (localTtsEngine.value === 'voicebox') {
+      opts.voicebox_model_size = localVoiceboxModelSize.value
+    }
+    return opts
+  }
   if (isNarrationMode.value && localTtsEnabled.value !== false) {
     opts.local_tts = true
-    opts.local_tts_engine = localTtsEngine.value === 'voicebox' ? 'voicebox' : 'edge'
+    opts.local_tts_engine = resolveActiveLocalTtsEngine()
     opts.async = false
-    if (isMotionComicMode.value) {
+    if (isMotionComicMode.value || isDialoguePortraitMode.value) {
       opts.use_speaker_voice = true
     } else if (localEdgeVoiceId.value) {
       opts.local_voice = localEdgeVoiceId.value
     }
     opts.tts_speed = localTtsSpeed.value
-    if (localTtsEngine.value === 'voicebox') {
+    if (ttsEngineSupportsEmotionInstruct(localTtsEngine.value)) {
       const instruct = resolveVoiceboxInstructText()
       if (instruct) opts.voicebox_instruct = instruct
+    }
+    if (localTtsEngine.value === 'voicebox') {
       opts.voicebox_model_size = localVoiceboxModelSize.value
     }
   } else if (!isNarrationMode.value) {
@@ -1069,14 +2145,90 @@ function ttsGenerateOptions(force = false, sb = null) {
 }
 
 async function ensureLocalTtsEngineForBatch() {
+  if (isLocalComicMode.value || (isNarrationMode.value && localTtsEnabled.value !== false)) {
+    await refreshLocalModelStatus()
+    if (localTtsEngine.value === 'indextts' && !indexttsAvailable.value) {
+      if (gptsovitsAvailable.value) {
+        localTtsEngine.value = 'gptsovits'
+        persistLocalTtsPrefs()
+        toast.warning('IndexTTS2 未就绪，已自动改用 GPT-SoVITS')
+      } else if (voiceboxAvailable.value) {
+        localTtsEngine.value = 'voicebox'
+        persistLocalTtsPrefs()
+        toast.warning('IndexTTS2 未就绪，已自动改用 Voicebox')
+      } else {
+        localTtsEngine.value = 'edge'
+        persistLocalTtsPrefs()
+        await refreshLocalVoices()
+        toast.warning('IndexTTS2 未就绪，已自动改用 Edge TTS')
+      }
+    }
+    if (localTtsEngine.value === 'gptsovits' && !gptsovitsAvailable.value) {
+      if (voiceboxAvailable.value) {
+        localTtsEngine.value = 'voicebox'
+        persistLocalTtsPrefs()
+        toast.warning('GPT-SoVITS 未运行，已自动改用 Voicebox')
+      } else {
+        localTtsEngine.value = 'edge'
+        persistLocalTtsPrefs()
+        await refreshLocalVoices()
+        toast.warning('GPT-SoVITS 未运行，已自动改用 Edge TTS')
+      }
+    }
+    if (localTtsEngine.value === 'voicebox') {
+      await loadVoiceboxVoices()
+      if (!voiceboxAvailable.value && edgeVoiceProfiles.value.length) {
+        localTtsEngine.value = 'edge'
+        persistLocalTtsPrefs()
+        toast.warning('Voicebox 未响应，已自动改用 Edge TTS')
+      }
+    }
+    if (usesLocalModelPipeline.value) {
+      await ensureLocalModelForTask('audio', { ttsEngine: resolveActiveLocalTtsEngine() })
+    }
+    return
+  }
   if (!isNarrationMode.value || localTtsEnabled.value === false) return
-  if (localTtsEngine.value !== 'voicebox') return
-  await loadVoiceboxVoices()
-  if (voiceboxAvailable.value) return
-  localTtsEngine.value = 'edge'
-  persistLocalTtsPrefs()
-  await refreshLocalVoices()
-  toast.warning('Voicebox 未响应，已自动改用 Edge TTS 继续生成（按角色性别匹配音色）')
+  if (localTtsEngine.value === 'voicebox') {
+    await loadVoiceboxVoices()
+    if (voiceboxAvailable.value) return
+    localTtsEngine.value = 'edge'
+    persistLocalTtsPrefs()
+    await refreshLocalVoices()
+    toast.warning('Voicebox 未响应，已自动改用 Edge TTS 继续生成（按角色性别匹配音色）')
+    return
+  }
+  if (localTtsEngine.value === 'gptsovits') {
+    await loadGptSovitsVoices()
+    if (gptsovitsAvailable.value) return
+    if (indexttsAvailable.value) {
+      localTtsEngine.value = 'indextts'
+      persistLocalTtsPrefs()
+      await refreshLocalVoices()
+      toast.warning('GPT-SoVITS 未响应，已自动改用 IndexTTS2')
+      return
+    }
+    localTtsEngine.value = 'edge'
+    persistLocalTtsPrefs()
+    await refreshLocalVoices()
+    toast.warning('GPT-SoVITS 未响应，已自动改用 Edge TTS 继续生成')
+    return
+  }
+  if (localTtsEngine.value === 'indextts') {
+    await loadGptSovitsVoices()
+    if (indexttsAvailable.value) return
+    if (gptsovitsAvailable.value) {
+      localTtsEngine.value = 'gptsovits'
+      persistLocalTtsPrefs()
+      await refreshLocalVoices()
+      toast.warning('IndexTTS2 未响应，已自动改用 GPT-SoVITS')
+      return
+    }
+    localTtsEngine.value = 'edge'
+    persistLocalTtsPrefs()
+    await refreshLocalVoices()
+    toast.warning('IndexTTS2 未响应，已自动改用 Edge TTS 继续生成')
+  }
 }
 
 function persistOpeningPickPrefs() {
@@ -1106,9 +2258,20 @@ function restoreLocalTtsPrefs() {
   const stored = window.localStorage.getItem(`episode-${epId.value}-local-tts`)
   localTtsEnabled.value = stored === null ? true : stored === '1'
   const engine = window.localStorage.getItem(`episode-${epId.value}-local-tts-engine`)
-  if (engine === 'edge' || engine === 'voicebox') localTtsEngine.value = engine
+  if (engine === 'indextts' || engine === 'gptsovits' || engine === 'voicebox' || engine === 'edge') {
+    localTtsEngine.value = engine
+  } else {
+    // null / 未知 → 默认 IndexTTS2
+    localTtsEngine.value = DEFAULT_LOCAL_TTS_ENGINE
+  }
   const voice = window.localStorage.getItem(`episode-${epId.value}-local-voice`)
-  if (voice) localEdgeVoiceId.value = voice
+  if (voice && !(localTtsEngine.value !== 'edge' && (/^zh-/i.test(voice) || voice === DEFAULT_LOCAL_EDGE_VOICE))) {
+    localEdgeVoiceId.value = voice
+  } else if (localTtsEngine.value === 'indextts' || localTtsEngine.value === 'gptsovits') {
+    localEdgeVoiceId.value = DEFAULT_CLONED_VOICE_ID
+  } else if (localTtsEngine.value === 'edge') {
+    localEdgeVoiceId.value = DEFAULT_LOCAL_EDGE_VOICE
+  }
   const speed = Number(window.localStorage.getItem(`episode-${epId.value}-local-tts-speed`))
   if (Number.isFinite(speed) && speed >= 0.5 && speed <= 2) localTtsSpeed.value = speed
   const instructPreset = window.localStorage.getItem(`episode-${epId.value}-voicebox-instruct-preset`)
@@ -1253,6 +2416,7 @@ function getTestMergeTargets(limit = normalizedMergeTestClipLimit()) {
 
 function isTestComposeUnitReady(sb) {
   if (hasVid(sb)) return true
+  if (isDialoguePortraitMode.value) return hasComposeTts(sb) && hasDialogueForCompose(sb)
   if (isNarrationMode.value) return hasImg(sb) && hasComposeTts(sb) && hasDialogueForCompose(sb)
   return hasImg(sb)
 }
@@ -1309,22 +2473,31 @@ const audioConfigs = ref([])
 const pendingCharImageIds = ref([])
 const charPortraitUseReferenceById = ref({})
 const pendingCharRecognizeIds = ref([])
+const pendingCharStyleValidateIds = ref([])
+const charStyleValidateResult = ref({})
 const pendingCharAppearanceIds = ref([])
 const pendingSceneImageIds = ref([])
 const pendingShotFrameKeys = ref([])
 const pendingNarrationShotIds = ref([])
+const narrationShotImageJobs = ref({})
+const narrationShotImagePollers = new Set()
 const pendingTtsShotIds = ref([])
 const ttsBatchActive = ref(false)
 const pendingShotScanIds = ref([])
+const shotScanResult = ref({})
+const shotImageValidatePanel = ref(null)
 const pendingVideoIds = ref([])
 const pendingComposeIds = ref([])
 const PROD_SHOT_PAGE_SIZE = 24
 const NARRATION_SHOT_PAGE_SIZE = 6
 const SCRIPT_STORYBOARD_PAGE_SIZE = 24
 const COMPOSE_LIST_PAGE_SIZE = 8
+const VIDEO_LIST_PAGE_SIZE = 8
 const DUBBING_LIST_PAGE_SIZE = 6
 const composeListPage = ref(1)
 const composeListFilter = ref('all')
+const videosListPage = ref(1)
+const videosListFilter = ref('all')
 const dubbingListPage = ref(1)
 const shotsListPage = ref(1)
 const shotsListFilter = ref('all')
@@ -1332,6 +2505,7 @@ const scriptStoryboardPage = ref(1)
 const composeVideoViewer = ref({ open: false, src: '', title: '' })
 const batchRunning = ref(new Set())
 const failedVideoMessages = ref({})
+const videoProgressMessages = ref({})
 const failedComposeMessages = ref({})
 const imageViewer = ref({ open: false, src: '', title: '' })
 const shotEditor = ref({
@@ -1852,6 +3026,10 @@ function isPendingCharImage(id) {
 function isPendingCharRecognize(id) {
   return pendingCharRecognizeIds.value.includes(id)
 }
+
+function isPendingCharStyleValidate(id) {
+  return pendingCharStyleValidateIds.value.includes(id)
+}
 function isPendingCharAppearance(id) {
   return pendingCharAppearanceIds.value.includes(id)
 }
@@ -1945,6 +3123,9 @@ function isPendingVideo(id) {
 function videoFailMessage(id) {
   return failedVideoMessages.value[id] || ''
 }
+function videoProgressMessage(id) {
+  return videoProgressMessages.value[id] || ''
+}
 
 function isPendingCompose(id) {
   if (pendingComposeIds.value.includes(id)) return true
@@ -1963,7 +3144,7 @@ function formatLocalVoiceLabel(char) {
     || voiceProfiles.value.find(v => v.id === voiceId)
   if (found) return `${found.gender ? `[${found.gender}] ` : ''}${found.label}`
   if (/^preset:kokoro:/.test(voiceId)) return `Kokoro · ${voiceId.split(':').pop()}`
-  if (/^[0-9a-f-]{36}$/i.test(voiceId)) return `克隆 · ${voiceId.slice(0, 8)}`
+  if (/^gsv:/i.test(voiceId)) return `克隆 · ${stripGsvId(voiceId)}`
   if (/^(zh|en|ja|ko)-/i.test(voiceId)) return `Edge · ${voiceId}`
   return voiceId
 }
@@ -2036,22 +3217,120 @@ const episodeImageModel = ref(DEFAULT_IMAGE_MODEL)
 const episodeTextModel = ref(DEFAULT_TEXT_MODEL)
 const episodeTextThinking = ref(DEFAULT_TEXT_THINKING)
 const referPreviousEpisode = ref(false)
-const imageModelOptions = computed(() => IMAGE_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
-const textModelOptions = computed(() => TEXT_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })))
+const imageModelOptions = computed(() =>
+  imageModelOptionsForMode(productionMode.value).map(item => ({ label: item.label, value: item.value })),
+)
+const textModelOptions = computed(() =>
+  textModelOptionsForMode(productionMode.value).map(item => ({ label: item.label, value: item.value })),
+)
+const localLlmModelOptions = computed(() => {
+  // 本地短剧也可切 OpenRouter / 官网 DeepSeek；智谱与已安装 Ollama 一并列出
+  const cloud = TEXT_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value }))
+  const local = LOCAL_TEXT_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value }))
+  const installed = (localModelStatus.value?.ollama_models || []).map(String)
+  const known = new Set([...cloud, ...local].map(item => item.value))
+  const ollamaExtras = installed
+    .filter(name => name && !known.has(name))
+    .map(name => ({ label: `Ollama · ${name}`, value: name }))
+  const merged: Array<{ label: string; value: string }> = []
+  const seen = new Set<string>()
+  for (const item of [...cloud, ...local, ...ollamaExtras]) {
+    if (seen.has(item.value)) continue
+    seen.add(item.value)
+    merged.push(item)
+  }
+  const current = normalizeTextModelId(episodeTextModel.value)
+  if (current && !seen.has(current)) {
+    merged.unshift({ label: textModelLabel(current), value: current })
+  }
+  return merged
+})
 const episodeTextModelSupportsThinking = computed(() => textModelSupportsThinking(episodeTextModel.value))
 const showReferPreviousEpisodeToggle = computed(() => episodeNumber.value > 1 && showTextModelPicker.value)
 const showImageModelPicker = computed(() => ['chars', 'scenes', 'shots'].includes(prodTab.value))
-const showTextModelPicker = computed(() => ['chars', 'shots'].includes(prodTab.value))
+const showImageStylePicker = computed(() =>
+  showImageModelPicker.value && (isDramaLikeMode.value || isNarrationMode.value),
+)
+const showTextModelPicker = computed(() => {
+  // 云端始终可在顶部模型栏切换；本地管线同样开放
+  if (prodTab.value === 'bgm' && isLocalComicMode.value) return true
+  if (isDialoguePortraitMode.value) return ['chars', 'scenes'].includes(prodTab.value)
+  if (!usesLocalModelPipeline.value) return true
+  return ['chars', 'shots', 'scenes', 'script'].includes(prodTab.value) || panel.value === 'script'
+})
 const showBgmModelPicker = computed(() => prodTab.value === 'bgm')
 
+const headerTextModelOptions = computed(() =>
+  usesLocalModelPipeline.value ? localLlmModelOptions.value : textModelOptions.value,
+)
+const headerImageModelOptions = computed(() => imageModelOptions.value)
+const headerVideoModelOptions = computed(() =>
+  LOCAL_VIDEO_MODEL_OPTIONS.map(item => ({ label: item.label, value: item.value })),
+)
+
+const audioConfigSelectOptions = computed(() => audioConfigs.value.map(c => {
+  let modelName = ''
+  try {
+    const m = JSON.parse(c.model || '[]')
+    modelName = Array.isArray(m) ? (m[0] || '') : (m || '')
+  } catch {
+    modelName = c.model || ''
+  }
+  const label = modelName ? `${modelName} (${c.provider})` : `${c.name} (${c.provider})`
+  return { label, value: c.id }
+}))
+
+const studioHeaderModelHint = computed(() => {
+  const parts = [
+    `文本：${textModelLabel(episodeTextModel.value)}`,
+    `生图：${episodeImageModel.value || '未选'}`,
+  ]
+  if (isLocalComicMode.value) {
+    parts.push(`生视频：${localModelBarVideoModel.value || '未选'}`)
+    parts.push(`配音：${localTtsEngineLabel.value}`)
+    return `${parts.join(' · ')} — 切换模型即时生效；点「加载到显存」按阶段预热 Ollama / ComfyUI / TTS`
+  }
+  parts.push(`生视频：${lockedVideoConfigLabel.value || '未选'}`)
+  parts.push(`配音：${lockedAudioConfigLabel.value || '未选'}`)
+  if (panel.value === 'script' && showScriptChatPanel.value) {
+    return `${parts.join(' · ')} — 写稿 / 改稿使用顶部文本模型`
+  }
+  if (panel.value === 'production') {
+    if (prodTab.value === 'chars') return `${parts.join(' · ')} — 定妆 / 角色提取`
+    if (prodTab.value === 'shots') return `${parts.join(' · ')} — 镜头图 / 视频 / 配音`
+    if (prodTab.value === 'dubbing') return `${parts.join(' · ')} — 本集配音合成`
+  }
+  return parts.join(' · ')
+})
+
 function syncEpisodeImageModel(ep) {
-  episodeImageModel.value = resolveEpisodeImageModel(ep)
+  const resolved = resolveEpisodeImageModelForMode(productionMode.value, ep)
+  episodeImageModel.value = resolved
+  // 旧 id qwen_image_edit 映射为 q3，写回分集避免下拉仍显示无效值
+  const stored = String(ep?.image_model || ep?.imageModel || '').trim()
+  if (epId.value && stored === 'qwen_image_edit' && resolved === 'qwen_image_edit_q3') {
+    void episodeAPI.update(epId.value, { image_model: resolved }).then(() => {
+      if (episode.value) {
+        episode.value.image_model = resolved
+        episode.value.imageModel = resolved
+      }
+    }).catch(() => {})
+  }
 }
 
 function syncEpisodeTextModel(ep) {
-  episodeTextModel.value = isNarrationMode.value
-    ? resolveNarrationEpisodeTextModel(ep)
-    : resolveEpisodeTextModel(ep)
+  const next = resolveEpisodeTextModelForMode(productionMode.value, ep)
+  episodeTextModel.value = next
+  // 旧别名 deepseek-v4-flash:free → openrouter/... 写回，避免顶栏显示裸 ID
+  const stored = String(ep?.text_model || ep?.textModel || '').trim()
+  if (epId.value && stored && stored !== next && stored === 'deepseek-v4-flash:free') {
+    void episodeAPI.update(epId.value, { text_model: next }).then(() => {
+      if (episode.value) {
+        episode.value.text_model = next
+        episode.value.textModel = next
+      }
+    }).catch(() => {})
+  }
 }
 
 function narrationTextModelParams() {
@@ -2089,6 +3368,7 @@ async function setReferPreviousEpisode(enabled) {
 async function setEpisodeTextThinking(enabled) {
   if (enabled === episodeTextThinking.value) return
   episodeTextThinking.value = enabled
+  scriptChatThinking.value = enabled
   if (!epId.value) return
   try {
     await episodeAPI.update(epId.value, { text_thinking: enabled })
@@ -2130,9 +3410,42 @@ async function onEpisodeImageModelChange(model) {
       episode.value.image_model = model
       episode.value.imageModel = model
     }
-    toast.success('配图模型已保存')
+    toast.success('生图模型已保存')
   } catch (e) {
     syncEpisodeImageModel(episode.value)
+    toast.error(e.message)
+  }
+}
+
+async function onEpisodeVideoConfigChange(configId: number | string) {
+  const id = Number(configId)
+  if (!id || id === lockedVideoConfigId.value) return
+  if (!epId.value) return
+  try {
+    await episodeAPI.update(epId.value, { video_config_id: id })
+    if (episode.value) {
+      episode.value.video_config_id = id
+      episode.value.videoConfigId = id
+    }
+    toast.success('生视频服务已切换')
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function onEpisodeAudioConfigChange(configId: number | string) {
+  const id = Number(configId)
+  if (!id || id === lockedAudioConfigId.value) return
+  if (!epId.value) return
+  try {
+    await episodeAPI.update(epId.value, { audio_config_id: id })
+    if (episode.value) {
+      episode.value.audio_config_id = id
+      episode.value.audioConfigId = id
+    }
+    toast.success('配音服务已切换')
+    await loadVoices()
+  } catch (e) {
     toast.error(e.message)
   }
 }
@@ -2344,8 +3657,11 @@ function goNextProd() {
 
 // Script step navigation
 const stepLabels = computed(() => {
+  if (isDialoguePortraitMode.value) return ['剧本生成', '文案输入', '对话分镜']
+  if (isNovelComicMode.value) return ['本章朗读稿', '文案输入', '旁白分镜']
   if (isMotionComicMode.value) return ['剧本生成', '文案输入', '旁白分镜']
-  if (isNarrationLikeMode.value) return ['剧本生成', '文案输入', '旁白分镜']
+  if (isNarrationMode.value) return ['剧本生成', '文案输入', '旁白分镜']
+  if (isLocalComicMode.value) return ['剧本生成', '原始内容', 'AI 改写', '提取', '音色', '分镜']
   return ['原始内容', 'AI 改写', '提取', '音色', '分镜']
 })
 const prevStepLabel = computed(() => scriptStep.value > 0 ? stepLabels.value[scriptStep.value - 1] : '')
@@ -2354,42 +3670,66 @@ const nextStepLabel = computed(() => {
   return stepLabels.value[scriptStep.value + 1] || ''
 })
 const canGoNext = computed(() => {
+  if (isLocalComicMode.value && scriptStep.value === LOCAL_DRAMA_SCRIPT_CHAT_STEP) {
+    return !!localRaw.value.trim() || !!lastScriptChatDraft.value || scriptGenMode.value === 'chat'
+  }
   if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep()) {
     return !!localRaw.value.trim() || !!lastScriptChatDraft.value || scriptGenMode.value === 'chat'
   }
   if (isNarrationMode.value && scriptStep.value === narrationRawContentStep()) return !!localRaw.value.trim()
   if (isNarrationMode.value && scriptStep.value === narrationStoryboardStep()) return sbs.value.length > 0
-  if (scriptStep.value === 0) return !!localRaw.value.trim()
-  if (scriptStep.value === 1) return !!localScript.value.trim() || !!scriptContent.value
-  if (scriptStep.value === 2) return chars.value.length > 0
-  if (scriptStep.value === 3) return charsVoiced.value > 0
+  if (scriptStep.value === dramaRawStep.value) return !!localRaw.value.trim()
+  if (scriptStep.value === dramaRewriteStep.value) return !!localScript.value.trim() || !!scriptContent.value
+  if (scriptStep.value === dramaExtractStep.value) return chars.value.length > 0
+  if (scriptStep.value === dramaVoiceStep.value) return charsVoiced.value > 0
   if (scriptStep.value === storyboardStep.value) return sbs.value.length > 0
   return false
 })
 function goPrevStep() { if (scriptStep.value > 0) scriptStep.value-- }
 function goNextStep() {
-  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep() && localRaw.value.trim()) {
-    saveRaw()
-    localScript.value = localRaw.value
-    saveScr()
-  }
-  if (isNarrationMode.value && scriptStep.value === narrationRawContentStep() && localRaw.value.trim()) {
-    saveRaw()
-    localScript.value = localRaw.value
-    saveScr()
-  }
-  if (!isNarrationMode.value && scriptStep.value === 0 && localRaw.value.trim()) {
-    saveRaw()
-  }
-  if (!isNarrationMode.value && scriptStep.value === 1 && localScript.value.trim()) { saveScr() }
-  if (scriptStep.value === storyboardStep.value) {
-    panel.value = 'production'
-    prodTab.value = isNarrationMode.value
-      ? (visualCharTotal.value && charImgCount.value < visualCharTotal.value ? 'chars' : 'voice')
-      : 'chars'
-    return
-  }
-  if (canGoNext.value) scriptStep.value++
+  void (async () => {
+    if (isLocalComicMode.value && scriptStep.value === LOCAL_DRAMA_SCRIPT_CHAT_STEP && localRaw.value.trim()) {
+      await ensureEpisodeScriptPersisted()
+    }
+    if (isLocalComicMode.value && scriptStep.value === LOCAL_DRAMA_RAW_STEP && localRaw.value.trim()) {
+      try {
+        await ensureEpisodeScriptPersisted()
+      } catch (e) {
+        toast.error(e.message)
+        return
+      }
+    }
+    if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep() && localRaw.value.trim()) {
+      await ensureEpisodeScriptPersisted()
+    }
+    if (isNarrationMode.value && scriptStep.value === narrationRawContentStep() && localRaw.value.trim()) {
+      await ensureEpisodeScriptPersisted()
+    }
+    if (!isNarrationMode.value && !isLocalComicMode.value && scriptStep.value === dramaRawStep.value && localRaw.value.trim()) {
+      try {
+        await ensureEpisodeScriptPersisted()
+      } catch (e) {
+        toast.error(e.message)
+        return
+      }
+    }
+    if (!isNarrationMode.value && scriptStep.value === dramaRewriteStep.value && (localScript.value.trim() || scriptContent.value)) {
+      try {
+        await ensureEpisodeScriptPersisted()
+      } catch (e) {
+        toast.error(e.message)
+        return
+      }
+    }
+    if (scriptStep.value === storyboardStep.value) {
+      panel.value = 'production'
+      prodTab.value = isNarrationMode.value
+        ? (visualCharTotal.value && charImgCount.value < visualCharTotal.value ? 'chars' : 'voice')
+        : 'chars'
+      return
+    }
+    if (canGoNext.value) scriptStep.value++
+  })()
 }
 
 function gridSelectAll() {
@@ -2559,9 +3899,13 @@ async function startGridGen() {
   gridStep.value = 2
   gridStatusText.value = '提交生成请求...'
   try {
+    if (usesLocalModelPipeline.value) {
+      await ensureLocalModelForTask('image')
+    }
     const res = await gridAPI.generate({
       storyboard_ids: ids,
       drama_id: dramaId,
+      episode_id: epId.value,
       rows,
       cols,
       mode: gridMode.value,
@@ -2673,6 +4017,16 @@ async function doGridSplit() {
 
 const charImgCount = computed(() => visualChars.value.filter(c => c.image_url || c.imageUrl).length)
 const sceneImgCount = computed(() => scenes.value.filter(s => s.image_url || s.imageUrl).length)
+const dialoguePortraitExpressionReadyCount = computed(() =>
+  visualChars.value.filter(c => dialoguePortraitExpressionsReady(c)).length,
+)
+const dialoguePortraitCharOverLimit = computed(() =>
+  isDialoguePortraitMode.value && visualChars.value.length > DIALOGUE_PORTRAIT_MAX_CHARS,
+)
+const pendingDialogueExpressionIds = ref<number[]>([])
+function isPendingDialogueExpression(id: number) {
+  return pendingDialogueExpressionIds.value.includes(id)
+}
 const ttsEligibleCount = computed(() =>
   isNarrationMode.value ? listNarrationTtsUnits(sbs.value).length : sbs.value.filter(s => hasDialogue(s)).length,
 )
@@ -2869,17 +4223,84 @@ const ttsPendingCount = computed(() => {
   return sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb)).length
 })
 const narrationImagesPendingCount = computed(() =>
-  narrationShotsPendingImage(sbs.value).length,
+  narrationImagesPendingShotsFiltered.value.length,
 )
-const nextPendingNarrationShot = computed(() => narrationShotsPendingImage(sbs.value)[0] || null)
+const nextPendingNarrationShot = computed(() => narrationImagesPendingShotsFiltered.value[0] || null)
+
+/** 配图清除/重生：多角色时可选指定角色（空=全部） */
+const narrationImageCharFilterIds = ref([])
+
+function toggleNarrationImageCharFilter(charId) {
+  const id = Number(charId)
+  if (!Number.isFinite(id) || id <= 0) return
+  const cur = narrationImageCharFilterIds.value
+  narrationImageCharFilterIds.value = cur.includes(id)
+    ? cur.filter(x => x !== id)
+    : [...cur, id]
+}
+
+function clearNarrationImageCharFilter() {
+  narrationImageCharFilterIds.value = []
+}
+
+function selectAllNarrationImageCharFilter() {
+  narrationImageCharFilterIds.value = visualChars.value.map(c => c.id).filter(Boolean)
+}
+
+function storyboardMatchesNarrationImageCharFilter(sb, selectedIds = narrationImageCharFilterIds.value) {
+  if (!selectedIds?.length) return true
+  const ids = getStoryboardCharacterIdsFromShot(sb).map(Number)
+  if (ids.some(id => selectedIds.includes(id))) return true
+  const blob = [
+    sb?.image_prompt,
+    sb?.imagePrompt,
+    sb?.description,
+    sb?.dialogue,
+    sb?.narration_text,
+    sb?.narrationText,
+  ].map(x => String(x || '')).join('\n')
+  for (const c of visualChars.value) {
+    if (!selectedIds.includes(c.id)) continue
+    const name = String(c.name || '').trim()
+    if (!name) continue
+    if (blob.includes(name)) return true
+    const stage = String(c.variant_label || c.variantLabel || '').trim()
+    if (stage && blob.includes(`${name}·${stage}`)) return true
+  }
+  return false
+}
+
+const narrationImageCharFilterActive = computed(() => narrationImageCharFilterIds.value.length > 0)
+const narrationImageCharFilterLabel = computed(() => {
+  if (!narrationImageCharFilterActive.value) return '全部角色'
+  const names = visualChars.value
+    .filter(c => narrationImageCharFilterIds.value.includes(c.id))
+    .map(c => formatCharacterDisplayName(c))
+  return names.length ? names.join('、') : '所选角色'
+})
+const showNarrationImageCharFilter = computed(() =>
+  isNarrationLikeMode.value && visualChars.value.length > 1,
+)
+
 const narrationOwnImageCount = computed(() => {
   const paths = new Set()
   for (const sb of sbs.value) {
+    if (!storyboardMatchesNarrationImageCharFilter(sb)) continue
     const p = getNarrationShotOwnImage(sb)
     if (p) paths.add(p)
   }
   return paths.size
 })
+const narrationImagesPendingShotsFiltered = computed(() =>
+  narrationShotsPendingImage(sbs.value).filter(sb => storyboardMatchesNarrationImageCharFilter(sb)),
+)
+/** 所选角色下已有配图、可强制重生成的镜头 */
+const narrationImagesRegenShotsFiltered = computed(() =>
+  narrationShotsNeedingImage(sbs.value).filter(sb =>
+    storyboardMatchesNarrationImageCharFilter(sb) && !!getNarrationShotOwnImage(sb),
+  ),
+)
+const narrationImagesRegenCount = computed(() => narrationImagesRegenShotsFiltered.value.length)
 const ttsAssignedCount = computed(() =>
   sbs.value.filter(sb => getNarrationShotOwnTts(sb) || sb.tts_audio_url || sb.ttsAudioUrl).length,
 )
@@ -2907,12 +4328,19 @@ const narrationWmCroppedImageCount = computed(() => {
   }
   return paths.size
 })
-const narrationImagesPendingShots = computed(() => narrationShotsPendingImage(sbs.value))
+const narrationImagesPendingShots = computed(() => narrationImagesPendingShotsFiltered.value)
 const narrationImagesPendingLabel = computed(() => formatNarrationShotDisplayList(narrationImagesPendingShots.value))
-const narrationImagesPendingHint = computed(() => formatNarrationPendingImageHint(sbs.value))
+const narrationImagesPendingHint = computed(() => {
+  const pending = narrationImagesPendingShotsFiltered.value
+  if (!pending.length) return ''
+  const label = formatNarrationShotDisplayList(pending)
+  if (pending.length === 1) return `${label}（最后一镜）`
+  return label
+})
 const narrationImagesPendingTitle = computed(() => {
   if (!narrationImagesPendingCount.value) return ''
-  return `生成剩余 ${narrationImagesPendingShots.value.length} 张：${narrationImagesPendingLabel.value}`
+  const scope = narrationImageCharFilterActive.value ? `（${narrationImageCharFilterLabel.value}）` : ''
+  return `生成剩余 ${narrationImagesPendingShots.value.length} 张${scope}：${narrationImagesPendingLabel.value}`
 })
 const composePendingCount = computed(() =>
   composeUnitShots.value.filter(sb => !hasComposedStoryboard(sb, sbs.value, composeUnitGroups.value)).length,
@@ -3005,10 +4433,111 @@ const shotsPendingCount = computed(() => {
 const charImagesPendingCount = computed(() =>
   visualChars.value.filter(c => !(c.image_url || c.imageUrl)).length,
 )
+const charAppearancesPendingCount = computed(() =>
+  visualChars.value.filter(c => !(String(c.appearance || '').trim())).length,
+)
 const sceneImagesPendingCount = computed(() =>
   scenes.value.filter(s => !(s.image_url || s.imageUrl)).length,
 )
-const videosPendingCount = computed(() => sbs.value.filter(s => !hasVid(s)).length)
+/** 解说模式按合成单元生成；剧场模式按镜头 */
+const videoGenTargets = computed(() => {
+  if (isNarrationMode.value) return composeUnitShots.value.filter(sb => !isNarrationTitleShot(sb))
+  return sbs.value
+})
+
+const videosPendingCount = computed(() =>
+  videoGenTargets.value.filter(s => hasImg(s) && !hasVid(s)).length,
+)
+const videosDoneCount = computed(() =>
+  videoGenTargets.value.filter(s => hasVid(s)).length,
+)
+const videosProcessingCount = computed(() =>
+  videoGenTargets.value.filter(s => isPendingVideo(s.id)).length,
+)
+const videosFilteredTargets = computed(() => {
+  const list = videoGenTargets.value
+  if (videosListFilter.value === 'pending') {
+    return list.filter(s => hasImg(s) && !hasVid(s) && !isPendingVideo(s.id))
+  }
+  if (videosListFilter.value === 'processing') {
+    return list.filter(s => isPendingVideo(s.id))
+  }
+  if (videosListFilter.value === 'failed') {
+    return list.filter(s => !!videoFailMessage(s.id))
+  }
+  if (videosListFilter.value === 'done') {
+    return list.filter(s => hasVid(s))
+  }
+  return list
+})
+const videosPageCount = computed(() =>
+  Math.max(1, Math.ceil(videosFilteredTargets.value.length / VIDEO_LIST_PAGE_SIZE)),
+)
+const videosPageShots = computed(() => {
+  const page = Math.min(Math.max(1, videosListPage.value), videosPageCount.value)
+  const start = (page - 1) * VIDEO_LIST_PAGE_SIZE
+  return videosFilteredTargets.value.slice(start, start + VIDEO_LIST_PAGE_SIZE)
+})
+
+/** 与镜头合成一致：同配图段多句旁白合并文案 */
+function getVideoUnitMergedText(sb) {
+  if (isNarrationMode.value || isLocalComicMode.value) {
+    const merged = String(getComposeUnitMergedTtsText(sb, sbs.value) || '').trim()
+    if (merged) return merged
+  }
+  return String(getDialogueText(sb) || '').trim()
+}
+
+function estimateVideoDurationSec(sb) {
+  // 与镜头合成同一套：同配图段多句累加（有 TTS duration 用实测，否则按字数估）
+  if (isNarrationMode.value || isLocalComicMode.value) {
+    const unitSec = getComposeUnitTotalDurationSec(sb, sbs.value, composeUnitGroups.value)
+    if (Number.isFinite(unitSec) && unitSec > 0) {
+      return Math.max(2, Math.round(unitSec * 10) / 10)
+    }
+  }
+  const fromField = Number(sb?.duration)
+  if (Number.isFinite(fromField) && fromField > 0) return fromField
+  const text = getVideoUnitMergedText(sb)
+  if (text) {
+    const chars = text.replace(/\s/g, '').length
+    return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
+  }
+  return 3
+}
+
+function buildLocalVideoPrompt(sb) {
+  const existing = String(sb?.video_prompt || sb?.videoPrompt || '').trim()
+  if (existing) return existing
+  const anchor = resolveNarrationImageAnchorShot(sbs.value, sb) || sb
+  const meta = parseNarrationImageMeta(anchor)
+  const paragraph = getVideoUnitMergedText(sb)
+  const imageScene = String(
+    anchor?.image_prompt
+    || anchor?.imagePrompt
+    || meta?.image_prompt_llm_raw
+    || meta?.scene_content
+    || getNarrationImagePromptText(anchor)
+    || anchor?.description
+    || '',
+  ).trim()
+  return buildVideoPromptFromParagraphAndImage(imageScene, paragraph)
+}
+
+function resolveVideoReferenceImage(sb) {
+  const anchor = resolveNarrationImageAnchorShot(sbs.value, sb) || sb
+  return getFirstFrame(anchor)
+    || anchor?.composed_image
+    || anchor?.composedImage
+    || getNarrationDisplayImage(anchor)
+    || getStoryboardCover(anchor)
+    || getFirstFrame(sb)
+    || sb?.composed_image
+    || sb?.composedImage
+    || getNarrationDisplayImage(sb)
+    || getStoryboardCover(sb)
+    || null
+}
 
 function getNarrationImagePromptText(sb, style = getNarrationImageStyle()) {
   const stored = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
@@ -3026,7 +4555,87 @@ function getNarrationImagePromptForCopy(sb, style = getNarrationImageStyle()) {
 function updateNarrationImagePrompt(sb, value) {
   const trimmed = String(value || '').trim()
   if (!trimmed) return
+  const prev = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
   updateField(sb, 'image_prompt', trimmed)
+  if (prev !== trimmed) clearShotFluxPromptMetaLocal(sb)
+}
+
+async function updateNarrationFluxPromptEn(sb, value) {
+  const trimmed = String(value || '').trim()
+  if (!trimmed) return
+  const prev = getNarrationFluxPromptEn(sb)
+  if (prev === trimmed) return
+  applyShotFluxPromptMeta(sb, null, trimmed, new Date().toISOString())
+  try {
+    await storyboardAPI.update(sb.id, { flux_prompt_en: trimmed })
+  } catch (e) {
+    toast.error(e?.message || '保存英文 prompt 失败')
+  }
+}
+
+function isKolorsEpisodeImageModel() {
+  return String(episodeImageModel.value || '').toLowerCase() === 'kolors'
+}
+
+function isQwenEpisodeImageModel() {
+  const m = String(episodeImageModel.value || '').toLowerCase()
+  return m === 'qwen_image_edit' || m.startsWith('qwen_image')
+}
+
+function isInstantIdEpisodeImageModel() {
+  return String(episodeImageModel.value || '').toLowerCase() === 'sdxl_instantid'
+}
+
+function needsEnglishImagePromptModel() {
+  return isFluxEpisodeImageModel() || isInstantIdEpisodeImageModel()
+}
+
+function isFluxEpisodeImageModel() {
+  return String(episodeImageModel.value || '').toLowerCase().includes('flux')
+}
+
+function getNarrationFluxPromptEn(sb) {
+  return String(parseNarrationImageMeta(sb).flux_prompt_en || '').trim()
+}
+
+function normalizeFluxEnForPendingCheck(en: string): string {
+  return repairFluxEnglishForPendingCheck(en)
+}
+
+function needsFluxEnglishTranslate(sb) {
+  if (!needsEnglishImagePromptModel()) return false
+  const prompt = getNarrationImagePromptText(sb)
+  if (!prompt || !/[\u4e00-\u9fff]/.test(prompt)) return false
+  const en = normalizeFluxEnForPendingCheck(getNarrationFluxPromptEn(sb))
+  if (!en) return true
+  // 已有英文且通过准确性判定即视为完成（不再仅因 version 落后显示剩余 1）
+  return isFluxEnglishPromptInaccurate(en, prompt)
+}
+
+function clearShotFluxPromptMetaLocal(sb) {
+  const meta = parseNarrationImageMeta(sb)
+  if (!meta.flux_prompt_en && !meta.flux_prompt_en_at) return
+  delete meta.flux_prompt_en
+  delete meta.flux_prompt_en_at
+  delete meta.flux_prompt_en_version
+  const json = JSON.stringify(meta)
+  sb.reference_images = json
+  sb.referenceImages = json
+}
+
+function applyShotFluxPromptMeta(sb, referenceImages, fluxPromptEn, fluxPromptEnAt) {
+  if (referenceImages) {
+    sb.reference_images = referenceImages
+    sb.referenceImages = referenceImages
+  } else if (fluxPromptEn) {
+    const meta = parseNarrationImageMeta(sb)
+    meta.flux_prompt_en = fluxPromptEn
+    if (fluxPromptEnAt) meta.flux_prompt_en_at = fluxPromptEnAt
+    meta.flux_prompt_en_version = FLUX_PROMPT_EN_VERSION
+    const json = JSON.stringify(meta)
+    sb.reference_images = json
+    sb.referenceImages = json
+  }
 }
 
 function updateNarrationImagePromptById(id, value) {
@@ -3296,15 +4905,47 @@ const shotVidCount = computed(() => sbs.value.filter(s => s.video_url || s.video
 const visualCharTotal = computed(() => visualChars.value.length)
 
 const prodTabDefs = computed(() => {
-  if (isNarrationMode.value) {
+  if (isDialoguePortraitMode.value) {
     return [
-      { id: 'voice', label: isMotionComicMode.value ? '角色音色' : '旁白音色', icon: Mic2, badge: isMotionComicMode.value ? (motionComicVoiceChars.value.length ? `${motionComicCharsVoiced.value}/${motionComicVoiceChars.value.length}` : '') : (narratorReady.value ? '✓' : '') },
-      { id: 'chars', label: '定妆参考', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
-      { id: 'shots', label: '生成配图', icon: ImageIcon, badge: narrationNeedImageCount.value ? `${shotImgCount.value}/${narrationNeedImageCount.value}` : '' },
+      { id: 'voice', label: '角色音色', icon: Mic2, badge: narratorReady.value ? '✓' : '' },
+      {
+        id: 'chars',
+        label: '定妆/表情包',
+        icon: Users,
+        badge: visualCharTotal.value
+          ? `${dialoguePortraitExpressionReadyCount.value}/${visualCharTotal.value}`
+          : '',
+      },
+      {
+        id: 'scenes',
+        label: '场景背景',
+        icon: MapPin,
+        badge: scenes.value.length ? `${sceneImgCount.value}/${scenes.value.length}` : '',
+      },
       { id: 'dubbing', label: '生成配音', icon: Mic2, badge: ttsEligibleCount.value ? `${ttsGeneratedCount.value}/${ttsEligibleCount.value}` : '' },
-      { id: 'bgm', label: 'BGM 配乐', icon: Music, badge: sbs.value.length ? `${bgmAppliedCount.value}/${sbs.value.length}` : '' },
       { id: 'compose', label: '镜头合成', icon: Layers, badge: composableCount.value ? `${composedCount.value}/${composableCount.value}` : '' },
     ]
+  }
+  if (isNarrationMode.value) {
+    const tabs = [
+      { id: 'voice', label: '旁白音色', icon: Mic2, badge: narratorReady.value ? '✓' : '' },
+      { id: 'chars', label: '定妆参考', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
+      { id: 'shots', label: '生成配图', icon: ImageIcon, badge: narrationNeedImageCount.value ? `${shotImgCount.value}/${narrationNeedImageCount.value}` : '' },
+    ]
+    tabs.push(
+      { id: 'dubbing', label: '生成配音', icon: Mic2, badge: ttsEligibleCount.value ? `${ttsGeneratedCount.value}/${ttsEligibleCount.value}` : '' },
+      { id: 'bgm', label: 'BGM 配乐', icon: Music, badge: sbs.value.length ? `${bgmAppliedCount.value}/${sbs.value.length}` : '' },
+      {
+        id: 'videos',
+        label: '本地视频（可选）',
+        icon: Video,
+        badge: composeUnitShots.value.length
+          ? `${composeUnitShots.value.filter(hasVid).length}/${composeUnitShots.value.length}`
+          : '',
+      },
+      { id: 'compose', label: '镜头合成', icon: Layers, badge: composableCount.value ? `${composedCount.value}/${composableCount.value}` : '' },
+    )
+    return tabs
   }
   return [
     { id: 'chars', label: '角色形象', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
@@ -3343,6 +4984,10 @@ const workflowState = computed(() => ({
   openingVideoUrl: !!openingVideoUrl.value,
   titleVideoUrl: !!titleVideoUrl.value,
   bgmAppliedCount: bgmAppliedCount.value,
+  scenesCount: scenes.value.length,
+  sceneImgCount: sceneImgCount.value,
+  scenesReady: scenes.value.length > 0 && sceneImgCount.value === scenes.value.length,
+  expressionPackReadyCount: dialoguePortraitExpressionReadyCount.value,
 }))
 
 const narrationIconMap = {
@@ -3351,9 +4996,11 @@ const narrationIconMap = {
   'script:storyboard': Clapperboard,
   'prod:voice': Mic2,
   'prod:chars': Users,
+  'prod:scenes': MapPin,
   'prod:dubbing': Mic2,
   'prod:bgm': Music,
   'prod:shots': ImageIcon,
+  'prod:videos': Video,
   'prod:compose': Layers,
   'export:opening': Film,
   'export:title': Clapperboard,
@@ -3374,8 +5021,11 @@ const sidebarSections = computed(() => {
   return [
     {
       id: 'script',
-      label: '剧本',
+      label: isLocalComicMode.value ? '本地短剧' : '剧本',
       items: [
+        ...(isLocalComicMode.value ? [
+          { key: 'script:chat', label: '剧本生成', desc: 'Ollama 写稿', icon: Sparkles, done: !!rawContent.value },
+        ] : []),
         { key: 'script:raw', label: '原始内容', desc: '', icon: FileText, done: !!rawContent.value },
         { key: 'script:rewrite', label: 'AI 改写', desc: '', icon: FileText, done: !!scriptContent.value },
         { key: 'script:extract', label: '提取', desc: '', icon: Users, done: !!chars.value.length },
@@ -3491,6 +5141,7 @@ const activeSubSteps = computed(() => {
         { key: 'prod:shots', label: '生成配图', done: !!sbs.value.length && narrationImageReady.value },
         { key: 'prod:dubbing', label: '生成配音', done: isNarrationMode.value ? narrationTtsReady.value : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value) },
         { key: 'prod:bgm', label: 'BGM 配乐', done: bgmAppliedCount.value > 0 },
+        { key: 'prod:videos', label: '本地视频', done: !!sbs.value.length && shotVidCount.value > 0 },
         { key: 'prod:compose', label: '镜头合成', done: composableCount.value > 0 && composedCount.value === composableCount.value },
       ]
     }
@@ -3577,26 +5228,33 @@ function goSubStep(key) {
   if (key.startsWith('script:')) {
     panel.value = 'script'
     scriptStep.value = resolveScriptStep(productionMode.value, key)
+    if (usesLocalModelPipeline.value) syncLocalModelStage(key)
     return
   }
   if (key.startsWith('prod:')) {
     panel.value = 'production'
     prodTab.value = key.replace('prod:', '')
+    if (usesLocalModelPipeline.value) syncLocalModelStage(key)
     return
   }
   if (key.startsWith('export:')) {
     panel.value = 'export'
     exportTab.value = key.replace('export:', '')
+    if (usesLocalModelPipeline.value) syncLocalModelStage(key)
     return
   }
   panel.value = 'export'
   exportTab.value = 'merge'
+  if (usesLocalModelPipeline.value) syncLocalModelStage('export:merge')
 }
 
 const pipelineProgress = computed(() => workflowProgress(productionMode.value, workflowState.value))
 
 const currentStageLabel = computed(() => {
   if (panel.value === 'script') {
+    if (isLocalComicMode.value) return `本地短剧 · ${stepLabels.value[scriptStep.value] || ''}`
+    if (isDialoguePortraitMode.value) return `对话立绘 · ${stepLabels.value[scriptStep.value] || ''}`
+    if (isNovelComicMode.value) return `小说漫画讲解 · ${stepLabels.value[scriptStep.value] || ''}`
     if (isMotionComicMode.value) return `漫画解说 · ${stepLabels.value[scriptStep.value] || ''}`
     return `${isNarrationLikeMode.value ? '解说' : '剧本'}阶段 · ${stepLabels.value[scriptStep.value] || ''}`
   }
@@ -3624,11 +5282,13 @@ function inferLocalVoiceProvider(voiceId) {
   const raw = String(voiceId || '').trim()
   if (!raw) return ''
   if (/^(zh|en|ja|ko)-/i.test(raw)) return 'edge'
+  if (/^gsv:/i.test(raw)) return localTtsEngine.value === 'indextts' ? 'indextts' : 'gptsovits'
   if (/^preset:/i.test(raw) || /^[0-9a-f-]{36}$/i.test(raw)) return 'voicebox'
   return ''
 }
 
 function updateCharVoice(charId, voiceId) {
+  if (!voiceId) return
   const provider = inferLocalVoiceProvider(voiceId) || lockedAudioProvider.value || undefined
   characterAPI.update(charId, { voice_style: voiceId, voice_provider: provider || undefined })
   const c = chars.value.find(ch => ch.id === charId)
@@ -3647,8 +5307,14 @@ function updateCharVoice(charId, voiceId) {
   }
 }
 function getVoiceProfile(voiceId) {
+  if (isLocalComicMode.value) {
+    return localCastVoiceProfiles.value.find(v => v.id === voiceId)
+      || scriptVoiceProfiles.value.find(v => v.id === voiceId)
+      || null
+  }
   return voiceProfiles.value.find(v => v.id === voiceId)
     || localCastVoiceProfiles.value.find(v => v.id === voiceId)
+    || edgeVoiceProfiles.value.find(v => v.id === voiceId)
     || null
 }
 const totalDuration = computed(() => sbs.value.reduce((s, sb) => s + (sb.duration || 10), 0))
@@ -3733,6 +5399,16 @@ const scriptSteps = computed(() => {
   const hasChars = chars.value.length > 0 && hasScript
   const hasVoice = charsVoiced.value > 0 && hasChars
   const hasSbs = sbs.value.length > 0
+  if (isLocalComicMode.value) {
+    return [
+      { label: '剧本生成', state: rawContent.value ? 'done' : 'active', spinning: false },
+      { label: '原始内容', state: rawContent.value ? 'done' : '', spinning: false },
+      { label: 'AI 改写', state: hasScript ? 'done' : (rawContent.value ? 'active' : ''), spinning: rt.value === 'script_rewriter' },
+      { label: '提取', state: hasChars ? 'done' : (hasScript ? 'active' : ''), spinning: rt.value === 'extractor' },
+      { label: '音色', state: hasVoice ? 'done' : (hasChars ? 'active' : ''), spinning: rt.value === 'voice_assigner' },
+      { label: '分镜', state: hasSbs ? 'done' : (hasVoice ? 'active' : ''), spinning: rt.value === 'storyboard_breaker' },
+    ]
+  }
   return [
     { label: '原始内容', state: rawContent.value ? 'done' : 'active', spinning: false },
     { label: 'AI 改写', state: hasScript ? 'done' : (rawContent.value ? 'active' : ''), spinning: rt.value === 'script_rewriter' },
@@ -3887,11 +5563,17 @@ async function refreshBgmLibrary() {
 async function generateBgmDescription() {
   bgmDescGenerating.value = true
   try {
+    if (usesLocalModelPipeline.value) {
+      await ensureLocalModelForTask('llm', { ollamaModel: resolveActiveLocalLlmModel(episodeTextModel.value) })
+    }
     const sb = bgmTargetSbId.value ? sbs.value.find(s => s.id === bgmTargetSbId.value) : null
     const result = await musicAPI.suggestDescription({
       episode_id: epId.value,
       storyboard_id: sb?.id,
       model: bgmModel.value,
+      text_model: usesLocalModelPipeline.value
+        ? resolveActiveLocalLlmModel(episodeTextModel.value)
+        : undefined,
       description: bgmDesc.value.trim() || undefined,
       content: sb ? getDialogueText(sb) : (localScript.value || scriptContent.value || localRaw.value || ''),
     })
@@ -3980,6 +5662,8 @@ function applyEpisodeFromDrama() {
   openingSubtitleText.value = resolveOpeningSubtitleText(ep.opening_subtitle_text || ep.openingSubtitleText)
   syncEpisodeImageModel(ep)
   syncEpisodeTextModel(ep)
+  syncScriptChatModel(ep)
+  syncScriptChatThinking(ep)
   syncEpisodeTextThinking(ep)
   syncReferPreviousEpisode(ep)
   return ep
@@ -3997,6 +5681,14 @@ function applyEpisodeDataAfterLoad(ep) {
     restoreImagePromptChatForEpisode(ep.id)
     restoreStoryboardChatForEpisode(ep.id)
     void ensureNarratorCharacter().catch(() => {})
+  } else if (isLocalComicMode.value) {
+    if (epHasSbs) scriptStep.value = LOCAL_DRAMA_STORYBOARD_STEP
+    else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = LOCAL_DRAMA_VOICE_STEP
+    else if (epHasScript && chars.value.length) scriptStep.value = LOCAL_DRAMA_EXTRACT_STEP
+    else if (epHasScript) scriptStep.value = LOCAL_DRAMA_REWRITE_STEP
+    else if (epHasContent) scriptStep.value = LOCAL_DRAMA_RAW_STEP
+    else scriptStep.value = LOCAL_DRAMA_SCRIPT_CHAT_STEP
+    restoreScriptChatForEpisode(ep.id)
   } else if (epHasSbs) scriptStep.value = 4
   else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
   else if (epHasScript && chars.value.length) scriptStep.value = 2
@@ -4004,8 +5696,23 @@ function applyEpisodeDataAfterLoad(ep) {
   else scriptStep.value = 0
 
   syncNarrationBreakdownImageCount()
-  if (isNarrationMode.value && panel.value === 'production' && !['voice', 'chars', 'dubbing', 'bgm', 'shots', 'compose'].includes(prodTab.value)) {
-    prodTab.value = 'voice'
+  // 旁白类各模式 prodTab 不同（对话立绘含 scenes，不含 shots/videos）；按当前模式合法 tab 校正
+  if (isNarrationMode.value && panel.value === 'production') {
+    const allowed = new Set(prodTabDefs.value.map(t => t.id))
+    if (!allowed.has(prodTab.value)) {
+      prodTab.value = prodTabDefs.value[0]?.id || 'voice'
+    }
+  }
+}
+
+async function repairFluxPromptsSilently() {
+  if (!usesLocalModelPipeline.value || !epId.value) return
+  if (!sbs.value.some(sb => getNarrationFluxPromptEn(sb))) return
+  try {
+    const res = await episodeAPI.repairFluxPrompts(epId.value)
+    if (res?.repaired) await refreshStoryboardsOnly()
+  } catch {
+    /* 静默修复，失败忽略 */
   }
 }
 
@@ -4023,6 +5730,8 @@ async function refreshSecondary() {
       }
     }).catch(() => {}),
     resumeNarrationImageBreakdownPollIfNeeded().catch(() => {}),
+    resumeCharImagePollIfNeeded().catch(() => {}),
+    resumeNarrationShotImagePollIfNeeded().catch(() => {}),
     resumeComposePollIfNeeded().catch(() => {}),
   )
   await Promise.allSettled(tasks)
@@ -4053,6 +5762,38 @@ function resolveCharImageDisplayTime(c: { id: number; image_url?: string; imageU
   if (stamped) return stamped
   if (c.image_url || c.imageUrl) return c.updated_at || c.updatedAt || null
   return null
+}
+
+function charPortraitImageSrc(c: { image_url?: string; imageUrl?: string; updated_at?: string; updatedAt?: string }) {
+  const path = String(c?.image_url || c?.imageUrl || '').replace(/^\//, '')
+  if (!path) return ''
+  const v = c?.updated_at || c?.updatedAt || ''
+  return v ? `/${path}?v=${encodeURIComponent(String(v))}` : `/${path}`
+}
+
+/** 从 generation 立即写回角色定妆，避免 refresh 竞态 / 浏览器缓存旧图 */
+function applyCharPortraitFromGeneration(charId, gen) {
+  const path = String(gen?.local_path || gen?.localPath || gen?.image_url || gen?.imageUrl || '').trim()
+  if (!path || !charId) return false
+  const stamp = String(
+    gen?.completed_at || gen?.completedAt || gen?.updated_at || gen?.updatedAt || '',
+  ) || new Date().toISOString()
+  const bust = `${stamp}|${path}`
+  const next = chars.value.map((row) => {
+    if (row.id !== charId) return row
+    return {
+      ...row,
+      image_url: path,
+      imageUrl: path,
+      local_path: path,
+      localPath: path,
+      updated_at: bust,
+      updatedAt: bust,
+    }
+  })
+  chars.value = next
+  stampCharImageSuccess(charId, bust)
+  return true
 }
 
 function syncCharImageTimestampsFromChars() {
@@ -4094,12 +5835,14 @@ async function refresh(options?: { deferSecondary?: boolean; skipDramaRefetch?: 
     sbs.value = sortStoryboards(sbsRes || [])
     syncCharImageTimestampsFromChars()
     syncSelectedStoryboardFromList()
+    if (isNarrationMode.value) reconcileNarrationShotImageState()
 
     applyEpisodeDataAfterLoad(ep)
 
     if (hasDuplicateStoryboardNumbers(sbs.value)) {
       void fixDuplicateStoryboardNumbers()
     }
+    void repairFluxPromptsSilently()
   } catch (e: any) {
     toast.error(e.message)
   } finally {
@@ -4125,6 +5868,9 @@ const lastScriptChatDraft = computed(() => {
   return ''
 })
 
+const lastScriptChatDraftExtracted = computed(() => extractScriptFromChat(lastScriptChatDraft.value))
+const lastScriptChatDraftCharCount = computed(() => countScriptChars(lastScriptChatDraftExtracted.value))
+
 const scriptChatDraftHasEmphasis = computed(() => hasEmphasisMarkers(lastScriptChatDraft.value))
 const rawHasEmphasis = computed(() => hasEmphasisMarkers(localRaw.value))
 
@@ -4141,35 +5887,55 @@ function replaceLastScriptChatDraft(content) {
   return false
 }
 
-function extractScriptFromChat(text) {
-  const raw = String(text || '').trim()
-  const fenced = raw.match(/```(?:markdown|text)?\s*([\s\S]*?)```/i)
-  if (fenced?.[1]?.trim()) return fenced[1].trim()
-  const lines = raw.split('\n')
-  const idx = lines.findIndex(line => {
-    const t = line.trim()
-    return /^今天体验的人生剧本是/.test(t)
-      || /^(?:剧中\s*[:：]\s*)?(?:本期|本集)?故事\s*[:：]/.test(t)
-      || /^标题\s*[:：]/.test(t)
-  })
-  if (idx >= 0) return lines.slice(idx).join('\n').trim()
-  // 多轮改稿：助手可能先一句确认再空行输出正文
-  const blankSplit = raw.split(/\n\s*\n+/)
-  for (const block of blankSplit) {
-    const t = block.trim()
+function findScriptStartLineIndex(lines: string[]): number {
+  const trimmedLines = lines.map(l => l.trim())
+  const hookIdx = trimmedLines.findIndex(t =>
+    /^今天体验的人生剧本是/.test(t)
+    || /^(?:剧中\s*[:：]\s*)?(?:本期|本集)?故事\s*[:：]/.test(t)
+    || /^标题\s*[:：]/.test(t),
+  )
+  if (hookIdx >= 0) return hookIdx
+
+  for (let i = 0; i < trimmedLines.length; i++) {
+    const t = trimmedLines[i]
     if (!t) continue
-    const blockLines = t.split('\n')
-    const hookIdx = blockLines.findIndex(line => {
-      const s = line.trim()
-      return /^(?:剧中\s*[:：]\s*)?(?:本期|本集)?故事\s*[:：]/.test(s)
-        || /^今天体验的人生剧本是/.test(s)
-        || /^[^：:\n]{1,8}[:：]/.test(s)
-    })
-    if (hookIdx >= 0 && blockLines.length >= 4) {
-      return blockLines.slice(hookIdx).join('\n').trim()
+    if (/^[^：:\n]{1,12}[:：]/.test(t)) {
+      const following = trimmedLines.slice(i).filter(Boolean)
+      const speakerLines = following.filter(l => /^[^：:\n]{1,12}[:：]/.test(l))
+      if (speakerLines.length >= 3 && following.length >= 4) return i
     }
   }
+  return -1
+}
+
+function extractScriptFromChat(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return ''
+
+  const fenced = raw.match(/```(?:markdown|text)?\s*([\s\S]*?)```/i)
+  if (fenced?.[1]?.trim()) return fenced[1].trim()
+
+  const lines = raw.split('\n')
+  const startIdx = findScriptStartLineIndex(lines)
+  if (startIdx >= 0) return lines.slice(startIdx).join('\n').trim()
+
+  // 多轮改稿：助手可能先一句确认，再空行输出正文；段间空行不能把后文截掉
+  const blocks = raw.split(/\n\s*\n+/)
+  for (let bi = 0; bi < blocks.length; bi++) {
+    const blockLines = blocks[bi].split('\n')
+    const relStart = findScriptStartLineIndex(blockLines)
+    if (relStart >= 0) {
+      const head = blockLines.slice(relStart).join('\n').trim()
+      const tailBlocks = blocks.slice(bi + 1).map(b => b.trim()).filter(Boolean)
+      return tailBlocks.length ? [head, ...tailBlocks].join('\n\n').trim() : head
+    }
+  }
+
   return raw
+}
+
+function countScriptChars(text) {
+  return String(text || '').replace(/\s/g, '').length
 }
 
 function scrollScriptChatToBottom() {
@@ -4181,6 +5947,7 @@ function scrollScriptChatToBottom() {
 function clearScriptChat() {
   if (scriptChatGenerating.value) scriptChatAbortController.value?.abort()
   scriptChatMessages.value = defaultScriptChatMessages()
+  scriptChatResolvedMinChars.value = null
   if (epId.value && typeof sessionStorage !== 'undefined') {
     sessionStorage.removeItem(`${SCRIPT_CHAT_STORAGE_PREFIX}${epId.value}`)
   }
@@ -4188,19 +5955,24 @@ function clearScriptChat() {
 }
 
 function applyScriptChatToEditor(mode = 'replace', navigateToRaw = false) {
-  const draft = extractScriptFromChat(lastScriptChatDraft.value)
+  const draft = lastScriptChatDraftExtracted.value
   if (!draft) {
-    toast.warning(isMotionComicMode.value ? '暂无可填入的漫剧稿' : '暂无可填入的解说稿')
+    toast.warning(isLocalComicMode.value ? '暂无可填入的剧本' : (isMotionComicMode.value ? '暂无可填入的漫剧稿' : '暂无可填入的解说稿'))
     return
   }
+  const chars = countScriptChars(draft)
+  const minChars = scriptChatMinChars.value
   if (mode === 'append' && localRaw.value.trim()) {
     localRaw.value = `${localRaw.value.trim()}\n\n${draft}`
   } else {
     localRaw.value = draft
   }
   saveRaw()
-  toast.success(mode === 'append' ? '已追加到文案' : '已填入文案')
-  if (navigateToRaw) goSubStep('script:raw')
+  toast.success(mode === 'append' ? `已追加到文案（约 ${chars} 字）` : `已填入文案（约 ${chars} 字）`)
+  if (chars < minChars) {
+    toast.warning(`当前稿不足 ${minChars} 字，可在对话中说「扩写到 ${minChars} 字以上」让 AI 继续补全`)
+  }
+  if (navigateToRaw && isNarrationMode.value) goSubStep('script:raw')
 }
 
 function doScriptChatStripEmphasis() {
@@ -4246,29 +6018,55 @@ async function sendScriptChat() {
   scriptChatMessages.value.push({ role: 'assistant', content: '', thinking: '' })
   const assistantIdx = scriptChatMessages.value.length - 1
 
-  const controller = new AbortController()
-  scriptChatAbortController.value = controller
   await nextTick()
   scrollScriptChatToBottom()
 
+  const controller = new AbortController()
+  scriptChatAbortController.value = controller
+
   try {
+    const scriptModel = usesLocalModelPipeline.value
+      ? resolveLocalScriptChatTextModel(episode.value)
+      : scriptChatModel.value
+    scriptChatModel.value = scriptModel
+
+    if (usesLocalModelPipeline.value) {
+      await ensureLocalModelForTask('llm', {
+        ollamaModel: scriptModel,
+        onProgress: (hint) => {
+          scriptChatMessages.value[assistantIdx].statusText = hint
+          scrollScriptChatToBottom()
+        },
+      })
+      scriptChatMessages.value[assistantIdx].statusText = 'LLM 已就绪，正在连接模型…'
+      scrollScriptChatToBottom()
+    }
+
     const payloadMessages = scriptChatMessages.value
       .filter(msg => !msg.local)
       .slice(0, -1)
       .map(({ role, content }) => ({ role, content }))
 
+    const scriptThinking = resolveScriptChatTextThinking(episode.value, episodeTextThinking.value)
+
     const result = await episodeAPI.narrationScriptChatStream(epId.value, {
       messages: payloadMessages,
-      text_model: scriptChatModel.value,
-      text_thinking: scriptChatThinking.value,
+      text_model: scriptModel,
+      text_thinking: scriptThinking,
       script: (localRaw.value || localScript.value || '').trim() || undefined,
     }, {
       signal: controller.signal,
       onThinking: thinking => {
+        scriptChatMessages.value[assistantIdx].statusText = ''
         scriptChatMessages.value[assistantIdx].thinking = thinking
         scrollScriptChatToBottom()
       },
+      onStatus: statusText => {
+        scriptChatMessages.value[assistantIdx].statusText = statusText
+        scrollScriptChatToBottom()
+      },
       onDelta: content => {
+        scriptChatMessages.value[assistantIdx].statusText = ''
         scriptChatMessages.value[assistantIdx].content = content
         scrollScriptChatToBottom()
       },
@@ -4276,11 +6074,40 @@ async function sendScriptChat() {
     if (result?.reply) {
       scriptChatMessages.value[assistantIdx].content = result.reply
     }
+    scriptChatMessages.value[assistantIdx].statusText = ''
     stampChatAssistantGeneratedAt(scriptChatMessages.value, assistantIdx, result)
+    const extracted = extractScriptFromChat(scriptChatMessages.value[assistantIdx].content || result?.reply || '')
+    const chars = result?.char_count ?? countScriptChars(extracted)
+    if (typeof result?.min_chars === 'number') {
+      scriptChatResolvedMinChars.value = result.min_chars
+    }
+    const minChars = result?.min_chars ?? scriptChatMinChars.value
+    const maxChars = result?.max_chars
+    const targetChars = result?.target_chars
+    if (result?.auto_expanded && chars >= minChars) {
+      toast.success(`已自动扩写至约 ${chars} 字`)
+    } else if (chars > 0 && chars < minChars) {
+      toast.warning(`生成完成约 ${chars} 字，未达 ${minChars} 字要求。可说「扩写到 ${minChars} 字以上」继续补全。`)
+    } else if (
+      result?.user_length_specified
+      && typeof maxChars === 'number'
+      && chars > maxChars
+    ) {
+      const targetHint = typeof targetChars === 'number' ? targetChars : minChars
+      toast.warning(`约 ${chars} 字，超出目标上限 ${maxChars}。可说「精简到约 ${targetHint} 字」`)
+    }
+    if (isMotionComicMode.value && typeof result?.narration_ratio === 'number') {
+      const nPct = Math.round(result.narration_ratio * 100)
+      if (result.narration_ratio > 0.35) {
+        toast.warning(`旁白仍约占 ${nPct}%，可说「压旁白、多写对白」继续改到约 30/70`)
+      } else if (result.dialogue_ratio_repaired) {
+        toast.success(`已自动压旁白至约 ${nPct}%`)
+      }
+    }
   } catch (e) {
     if (!stampChatAssistantFailed(scriptChatMessages.value, assistantIdx, e)) {
       const msg = scriptChatMessages.value[assistantIdx]
-      if (!msg?.content && !msg?.thinking) {
+      if (!msg?.content && !msg?.thinking && !msg?.statusText) {
         scriptChatMessages.value.splice(assistantIdx, 1)
       }
     }
@@ -4342,10 +6169,27 @@ async function sendImageDetectChat(explicitAction?: 'run') {
   if (!text && !action) return
   if (imageDetectChatGenerating.value || !epId.value) return
 
+  try {
+    await ensureLocalModelForTask('llm')
+  } catch {
+    return
+  }
+
   const userText = text || '开始检测配图'
   imageDetectChatMessages.value.push({ role: 'user', content: userText })
   imageDetectChatInput.value = ''
   imageDetectChatGenerating.value = true
+  if (action === 'run') {
+    openNarrationImageBreakdownModal('detecting')
+    narrationImageBreaking.value = true
+    narrationImageBreakdownProgress.value = {
+      status: 'processing',
+      phase: 'detecting',
+      message: '正在检测换镜配图…',
+      percent: 1,
+    }
+    startNarrationImageBreakdownPoll()
+  }
   imageDetectChatMessages.value.push({
     role: 'assistant',
     content: '',
@@ -4364,10 +6208,13 @@ async function sendImageDetectChat(explicitAction?: 'run') {
       .slice(0, -1)
       .map(({ role, content }) => ({ role, content }))
 
+    const detectThinking = textModelSupportsThinking(episodeTextModel.value)
+      ? episodeTextThinking.value
+      : false
     const result = await episodeAPI.narrationImageDetectChatStream(epId.value, {
       messages: payloadMessages,
       text_model: episodeTextModel.value,
-      text_thinking: episodeTextThinking.value,
+      text_thinking: detectThinking,
       action: action ?? undefined,
       style: getNarrationImageStyle(),
       image_detect_mode: imageDetectMode.value === 'conservative' ? 'conservative' : 'paragraph',
@@ -4416,13 +6263,20 @@ async function sendImageDetectChat(explicitAction?: 'run') {
         pickLlmGeneratedAt(result),
         narrationBreakdownSummary.value?.image_detect_at,
       )
+      const source = narrationBreakdownSummary.value?.image_detect_source
+        || result?.image_detect_source
+        || result?.imageDetectSource
+        || 'llm'
       persistNarrationBreakdownSummary({
         ...narrationBreakdownSummary.value,
         image_needed_count: count,
         paragraph_count: count,
         image_detect_at: ts,
-        image_detect_source: 'llm',
+        image_detect_source: source,
       })
+      if (source && source !== 'llm') {
+        toast.warning('LLM 检测未完全成功，已用规则兜底分段（可稍后再试 AI 检测）')
+      }
     }
   } catch (e) {
     if (action === 'run') persistLlmBreakdownFailure('detect', e)
@@ -4436,6 +6290,13 @@ async function sendImageDetectChat(explicitAction?: 'run') {
   } finally {
     imageDetectChatGenerating.value = false
     imageDetectChatAbortController.value = null
+    if (action === 'run') {
+      stopNarrationImageBreakdownPoll()
+      narrationImageBreaking.value = false
+      try {
+        narrationImageBreakdownProgress.value = await episodeAPI.narrationImageBreakdownStatus(epId.value)
+      } catch {}
+    }
     await nextTick()
     scrollImageDetectChatToBottom()
   }
@@ -4447,10 +6308,27 @@ async function sendImagePromptChat(explicitAction?: 'run' | 'retry_missing') {
   if (!text && !action) return
   if (imagePromptChatGenerating.value || !epId.value) return
 
+  try {
+    await ensureLocalModelForTask('llm')
+  } catch {
+    return
+  }
+
   const userText = text || (action === 'retry_missing' ? '补全缺失配图文案' : '开始生成配图文案')
   imagePromptChatMessages.value.push({ role: 'user', content: userText })
   imagePromptChatInput.value = ''
   imagePromptChatGenerating.value = true
+  if (action) {
+    openNarrationImageBreakdownModal('prompts')
+    narrationImageBreaking.value = true
+    narrationImageBreakdownProgress.value = {
+      status: 'processing',
+      phase: 'prompts',
+      message: action === 'retry_missing' ? '正在补全缺失配图文案…' : '正在生成配图文案…',
+      percent: 1,
+    }
+    startNarrationImageBreakdownPoll()
+  }
   imagePromptChatMessages.value.push({
     role: 'assistant',
     content: '',
@@ -4469,10 +6347,13 @@ async function sendImagePromptChat(explicitAction?: 'run' | 'retry_missing') {
       .slice(0, -1)
       .map(({ role, content }) => ({ role, content }))
 
+    const promptThinking = textModelSupportsThinking(episodeTextModel.value)
+      ? episodeTextThinking.value
+      : false
     const result = await episodeAPI.narrationImagePromptChatStream(epId.value, {
       messages: payloadMessages,
       text_model: episodeTextModel.value,
-      text_thinking: episodeTextThinking.value,
+      text_thinking: promptThinking,
       action: action ?? undefined,
       style: getNarrationImageStyle(),
       prompt_batch_size: imagePromptBatchSize.value,
@@ -4491,6 +6372,10 @@ async function sendImagePromptChat(explicitAction?: 'run' | 'retry_missing') {
         scrollImagePromptChatToBottom()
       },
       onProgress: payload => {
+        if (payload?.type === 'prompts_saved') {
+          void refreshStoryboardsOnly()
+          return
+        }
         if (payload?.type === 'prompt_done' && action) {
           const ts = resolveLlmTimestamp(pickLlmGeneratedAt(payload), payload?.image_prompt_at)
           persistNarrationBreakdownSummary({
@@ -4523,6 +6408,10 @@ async function sendImagePromptChat(explicitAction?: 'run' | 'retry_missing') {
         image_prompt_at: ts,
         image_prompt_source: 'llm_raw',
       })
+      const missing = narrationMissingPromptCount.value
+      if (missing > 0) {
+        toast.warning(`仍有 ${missing} 段文案未生成，请点「补全缺失文案」继续（已自动跳过失败批次）`)
+      }
     }
   } catch (e) {
     if (action) persistLlmBreakdownFailure('prompt', e)
@@ -4536,6 +6425,13 @@ async function sendImagePromptChat(explicitAction?: 'run' | 'retry_missing') {
   } finally {
     imagePromptChatGenerating.value = false
     imagePromptChatAbortController.value = null
+    if (action) {
+      stopNarrationImageBreakdownPoll()
+      narrationImageBreaking.value = false
+      try {
+        narrationImageBreakdownProgress.value = await episodeAPI.narrationImageBreakdownStatus(epId.value)
+      } catch {}
+    }
     await nextTick()
     scrollImagePromptChatToBottom()
   }
@@ -4585,6 +6481,17 @@ async function sendStoryboardChat(explicitAction?: 'run') {
   scrollStoryboardChatToBottom()
 
   try {
+    if (usesLocalModelPipeline.value) {
+      await ensureLocalModelForTask('llm', {
+        onProgress: (hint) => {
+          storyboardChatMessages.value[assistantIdx].statusText = hint
+          scrollStoryboardChatToBottom()
+        },
+      })
+      storyboardChatMessages.value[assistantIdx].statusText = 'LLM 已就绪，正在连接模型…'
+      scrollStoryboardChatToBottom()
+    }
+
     let script: string | undefined
     if (action === 'run') {
       script = await saveNarrationScript()
@@ -4603,10 +6510,12 @@ async function sendStoryboardChat(explicitAction?: 'run') {
     }, {
       signal: controller.signal,
       onThinking: thinking => {
+        storyboardChatMessages.value[assistantIdx].statusText = ''
         storyboardChatMessages.value[assistantIdx].thinking = thinking
         scrollStoryboardChatToBottom()
       },
       onDelta: content => {
+        storyboardChatMessages.value[assistantIdx].statusText = ''
         storyboardChatMessages.value[assistantIdx].content = content
         scrollStoryboardChatToBottom()
       },
@@ -4649,8 +6558,15 @@ async function sendStoryboardChat(explicitAction?: 'run') {
 }
 
 watch(() => scriptStep.value, step => {
-  if (isNarrationMode.value && step === narrationStoryboardStep()) {
+  if (isComicStoryboardMode.value && step === storyboardStep.value) {
     nextTick(() => scrollStoryboardChatToBottom())
+  }
+  if (isLocalComicMode.value && step === LOCAL_DRAMA_VOICE_STEP) {
+    void loadLocalCastVoices()
+    void refreshLocalVoices()
+  }
+  if (usesLocalModelPipeline.value) {
+    syncLocalModelStage(resolveActiveSubStepKey(productionMode.value, 'script', step, prodTab.value, exportTab.value))
   }
 })
 
@@ -4658,12 +6574,16 @@ watch(() => scriptStep.value, step => {
   if (isNarrationMode.value && step === narrationScriptChatStep()) {
     nextTick(() => scrollScriptChatToBottom())
   }
+  if (isLocalComicMode.value && step === LOCAL_DRAMA_SCRIPT_CHAT_STEP) {
+    nextTick(() => scrollScriptChatToBottom())
+  }
 })
 
-function saveScr() { episodeAPI.update(epId.value, { script_content: localScript.value }); episode.value.script_content = localScript.value }
 async function saveNarrationScript() {
   const script = (localRaw.value || localScript.value || '').trim()
-  if (!script) throw new Error('请先填写解说文案')
+  if (!script) {
+    throw new Error(isLocalComicMode.value ? '请先填写剧本' : (usesComicStoryboardRules.value ? '请先填写漫剧旁白稿' : '请先填写解说文案'))
+  }
   localScript.value = script
   localRaw.value = script
   await Promise.all([
@@ -4673,7 +6593,22 @@ async function saveNarrationScript() {
   episode.value.script_content = script
   return script
 }
-function doRewrite() { saveRaw(); runAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', dramaId, epId.value, refresh) }
+
+function saveScr() {
+  void ensureEpisodeScriptPersisted().catch((e) => toast.error(e.message))
+}
+
+function doRewrite() {
+  void (async () => {
+    try {
+      await ensureEpisodeScriptPersisted()
+    } catch (e) {
+      toast.error(e.message)
+      return
+    }
+    await runLocalComicAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', refresh)
+  })()
+}
 function skipRewrite() {
   const raw = (localRaw.value || rawContent.value || '').trim()
   if (!raw) {
@@ -4681,17 +6616,66 @@ function skipRewrite() {
     return
   }
   localScript.value = raw
-  saveScr()
-  toast.success('已跳过 AI 改写，当前将直接使用原始内容')
-  scriptStep.value = 2
+  void ensureEpisodeScriptPersisted()
+    .then(() => toast.success('已跳过 AI 改写，当前将直接使用原始内容'))
+    .then(() => { scriptStep.value = isLocalComicMode.value ? dramaExtractStep.value : 2 })
+    .catch((e) => toast.error(e.message))
 }
-function doExtract() { saveScr(); runAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', dramaId, epId.value, refresh) }
-function doVoice() { runAgent('voice_assigner', '请为所有角色分配合适的音色', dramaId, epId.value, refresh) }
+function doExtract() {
+  void (async () => {
+    try {
+      await ensureEpisodeScriptPersisted()
+    } catch (e) {
+      toast.error(e.message)
+      return
+    }
+    if (usesLocalModelPipeline.value) {
+      const llmModel = resolveLocalExtractModel(episodeTextModel.value)
+      try {
+        await ensureLocalModelForTask('llm', { ollamaModel: llmModel })
+      } catch (e) {
+        toast.error(e?.message || '本地 LLM 未就绪，请确认 Ollama 已启动')
+        return
+      }
+      if (!tryBeginBatch('extract', '正在提取角色与场景…')) return
+      try {
+        const script = resolveEpisodeScriptDraft()
+        const result = await episodeAPI.extract(epId.value, {
+          script,
+          text_model: llmModel,
+          text_thinking: false,
+        })
+        const charsTotal = Number(result?.characters?.created || 0) + Number(result?.characters?.merged || 0)
+        const scenesTotal = Number(result?.scenes?.created || 0) + Number(result?.scenes?.reused || 0)
+        if (!charsTotal && !scenesTotal) {
+          toast.warning('未从剧本中识别到角色或场景，请检查剧本内容后重试')
+        } else {
+          toast.success(`提取完成：${charsTotal} 个角色 · ${scenesTotal} 个场景`)
+        }
+        await refresh()
+      } catch (e) {
+        toast.error(e.message)
+      } finally {
+        endBatch('extract')
+      }
+      return
+    }
+    await runLocalComicAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', refresh)
+  })()
+}
+function doVoice() { runLocalComicAgent('voice_assigner', '请为所有角色分配合适的音色', refresh) }
 async function batchGenSamples() {
   const pending = chars.value.filter(c => (c.voice_style || c.voiceStyle) && !(c.voice_sample_url || c.voiceSampleUrl))
   if (!pending.length) {
     toast.info(charsVoiced.value ? '所有角色的试听文件已生成' : '请先分配音色')
     return
+  }
+  if (usesLocalModelPipeline.value) {
+    try {
+      await ensureLocalModelForTask('audio')
+    } catch {
+      return
+    }
   }
   if (!tryBeginBatch('voiceSamples', '正在批量生成试听文件…')) return
   try {
@@ -4706,9 +6690,59 @@ async function batchGenSamples() {
   }
 }
 function doBreakdown() {
-  const cfg = videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)
-  const label = cfg ? `${cfg.name} (${cfg.provider})` : '默认'
-  runAgent('storyboard_breaker', `请拆解分镜并生成视频提示词。视频模型：${label}，请根据该模型的特性和时长限制生成合适的视频提示词。`, dramaId, epId.value, refresh)
+  void (async () => {
+    try {
+      await ensureEpisodeScriptPersisted()
+    } catch (e) {
+      toast.error(e.message)
+      return
+    }
+    if (!chars.value.length) {
+      toast.warning('请先在「提取」步骤提取角色与场景，再拆解分镜')
+      return
+    }
+    const cfg = videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)
+    const label = cfg ? `${cfg.name} (${cfg.provider})` : '默认'
+
+    if (usesLocalModelPipeline.value) {
+      const llmModel = resolveLocalExtractModel(episodeTextModel.value)
+      try {
+        await ensureLocalModelForTask('llm', { ollamaModel: llmModel })
+      } catch (e) {
+        toast.error(e?.message || '本地 LLM 未就绪，请确认 Ollama 已启动')
+        return
+      }
+      if (!tryBeginBatch('storyboardBreakdown', '正在拆解分镜并生成提示词…')) return
+      storyboardBreaking.value = true
+      try {
+        const script = resolveEpisodeScriptDraft()
+        const result = await episodeAPI.storyboardBreakdown(epId.value, {
+          script,
+          text_model: llmModel,
+          video_model_label: label,
+        })
+        const count = Number(result?.count || 0)
+        if (!count) {
+          toast.warning('未生成有效分镜，请确认剧本含场景与对白后重试')
+        } else {
+          toast.success(`分镜拆解完成：${count} 镜`)
+        }
+        await refresh()
+      } catch (e) {
+        toast.error(e.message)
+      } finally {
+        storyboardBreaking.value = false
+        endBatch('storyboardBreakdown')
+      }
+      return
+    }
+
+    await runLocalComicAgent(
+      'storyboard_breaker',
+      `请读取剧本上下文，拆解分镜并生成视频提示词，完成后务必调用 save_storyboards 保存。视频模型：${label}，请根据该模型的特性和时长限制生成合适的视频提示词。`,
+      refresh,
+    )
+  })()
 }
 function restoreImageDetectModePrefs() {
   if (typeof window === 'undefined' || !epId.value) return
@@ -4729,9 +6763,14 @@ function restoreImageDetectBatchPrefs() {
     const n = Number(sz)
     if (Number.isFinite(n) && n >= 10) imageDetectBatchSize.value = Math.round(n)
   }
+  // 默认每批 5 段（与后端对齐）；旧 localStorage=1 视为误设，升到 5
   if (psz !== null) {
     const n = Number(psz)
-    if (Number.isFinite(n) && n >= 1 && n <= 20) imagePromptBatchSize.value = Math.round(n)
+    if (Number.isFinite(n) && n >= 1 && n <= 20) {
+      imagePromptBatchSize.value = n === 1 ? 5 : Math.round(n)
+    }
+  } else {
+    imagePromptBatchSize.value = 5
   }
 }
 
@@ -4788,10 +6827,10 @@ function doNarrationBreakdown() {
       const sentenceCount = res?.sentence_count ?? res?.sentenceCount ?? 0
       const titleHint = titleCount
         ? `，片头 ${titleCount} 镜${titleHook ? `（${titleHook}）` : ''}`
-        : isMotionComicMode.value
+        : usesComicStoryboardRules.value
           ? '，未识别片头（首行请写「标题：」或「本期故事：…」）'
           : '，未识别片头标题（首行请写「标题：」或「今天体验的人生剧本是…」）'
-      const sbLabel = '旁白分镜'
+      const sbLabel = usesComicStoryboardRules.value ? '旁白分镜' : '旁白分镜'
       toast.success(`${sbLabel}：${sentenceCount} 句 → ${res?.count || 0} 镜${titleHint}`)
       await finalizeStoryboardBreakdown(res)
     } catch (e) {
@@ -4815,10 +6854,20 @@ async function pollNarrationImageBreakdownProgress() {
   try {
     const progress = await episodeAPI.narrationImageBreakdownStatus(epId.value)
     const localStepActive = !!narrationImageStep.value
+    const prevSeq = narrationImageBreakdownProgress.value?.prompts_saved_seq
+    const prevSaved = narrationImageBreakdownProgress.value?.prompts_saved
 
     if (progress?.status === 'processing') {
       narrationImageBreakdownProgress.value = progress
       narrationImageBreaking.value = true
+      // 每段落库后刷新，页面左右中英文文案即时出现
+      if (
+        progress.phase === 'prompts'
+        && (progress.prompts_saved_seq !== prevSeq || progress.prompts_saved !== prevSaved)
+        && (progress.prompts_saved != null || progress.prompts_saved_seq != null)
+      ) {
+        void refreshStoryboardsOnly()
+      }
       return
     }
 
@@ -4829,6 +6878,9 @@ async function pollNarrationImageBreakdownProgress() {
     if (progress?.status === 'completed' || progress?.status === 'failed' || progress?.status === 'idle') {
       stopNarrationImageBreakdownPoll()
       narrationImageBreaking.value = false
+      if (progress?.status === 'completed' && progress.phase === 'done') {
+        void refreshStoryboardsOnly()
+      }
     }
   } catch {}
 }
@@ -4847,6 +6899,7 @@ async function resumeNarrationImageBreakdownPollIfNeeded() {
   narrationImageBreakdownProgress.value = progress
   if (progress?.status === 'processing') {
     narrationImageBreaking.value = true
+    openNarrationImageBreakdownModal(progress.phase === 'detecting' ? 'detecting' : 'prompts')
     startNarrationImageBreakdownPoll()
   }
 }
@@ -4888,7 +6941,7 @@ function doNarrationImagePrompts() {
     prompt_batch_size: imagePromptBatchSize.value,
     ...narrationTextModelParams(),
   }), {
-    onSuccess: () => {
+    onSuccess: (progress) => {
       const count = narrationPromptDisplayCount.value
       const missing = narrationMissingPromptCount.value
       if (missing > 0) {
@@ -4909,8 +6962,8 @@ function doNarrationImagePrompts() {
       })
     },
     startMessage: narrationMissingPromptCount.value && narrationPromptDisplayCount.value
-      ? `正在补全 ${narrationMissingPromptCount.value} 段缺失配图文案…`
-      : '正在生成纯 LLM 配图文案…',
+      ? `正在补全 ${narrationMissingPromptCount.value} 段缺失配图文案${wantEn ? '（同步英文）' : ''}…`
+      : `正在生成配图文案${wantEn ? '（同步英文）' : ''}…`,
   })
 }
 
@@ -4991,6 +7044,7 @@ async function waitForNarrationImageBreakdownDone() {
 function runNarrationImageStep(step, apiCall, { onSuccess, startMessage }) {
   narrationImageStep.value = step
   narrationImageBreaking.value = true
+  openNarrationImageBreakdownModal(step === 'detect' ? 'detecting' : 'prompts')
   narrationImageBreakdownProgress.value = {
     status: 'processing',
     phase: step === 'detect' ? 'detecting' : 'prompts',
@@ -5002,6 +7056,9 @@ function runNarrationImageStep(step, apiCall, { onSuccess, startMessage }) {
     let jobStarted = false
     let stepResult = null
     try {
+      if (usesLocalModelPipeline.value) {
+        await ensureLocalModelForTask(step === 'detect' || step === 'prompts' ? 'llm' : 'image')
+      }
       stepResult = await apiCall()
       jobStarted = true
       const progress = await waitForNarrationImageBreakdownDone()
@@ -5234,10 +7291,61 @@ async function onStoryboardDescUploadSelected(event) {
 }
 
 async function loadLocalCastVoices() {
+  if (usesLocalModelPipeline.value) {
+    try {
+      const profiles = await loadGptSovitsVoices()
+      const gsvMapped = profiles.map(v => ({
+        id: v.id,
+        label: String(v.label || '').replace(/（GPT-SoVITS）$/, ''),
+        gender: v.gender,
+        traits: v.traits || 'GPT-SoVITS 克隆',
+        suitable: v.suitable || '参考音频克隆',
+        source: 'gptsovits',
+        provider: 'gptsovits',
+      }))
+      const edgeMapped = (await loadEdgeVoices()).map(v => ({
+        id: v.id,
+        label: v.label,
+        gender: v.gender,
+        traits: v.traits || '微软 Edge TTS',
+        suitable: v.suitable || '系统音色 · 免本地模型',
+        source: 'edge',
+        provider: 'edge',
+      }))
+      localCastVoiceProfiles.value = [...gsvMapped, ...edgeMapped]
+    } catch (e) {
+      console.error('Failed to load GPT-SoVITS / Edge voices for local comic', e)
+      try {
+        const edgeMapped = (await loadEdgeVoices()).map(v => ({
+          id: v.id,
+          label: v.label,
+          gender: v.gender,
+          traits: v.traits || '微软 Edge TTS',
+          suitable: v.suitable || '系统音色 · 免本地模型',
+          source: 'edge',
+          provider: 'edge',
+        }))
+        localCastVoiceProfiles.value = edgeMapped
+      } catch {
+        localCastVoiceProfiles.value = []
+      }
+    }
+    return
+  }
   try {
     const res = await voicesAPI.localCast({ model_size: localVoiceboxModelSize.value })
     const rows = res?.voices || []
-    localCastVoiceProfiles.value = rows.map(v => ({
+    const gsvProfiles = await loadGptSovitsVoices().catch(() => [])
+    const gsvMapped = gsvProfiles.map(v => ({
+      id: v.id,
+      label: v.label,
+      gender: v.gender,
+      traits: v.traits || 'GPT-SoVITS 克隆',
+      suitable: v.suitable || '参考音频克隆',
+      source: 'gptsovits',
+      provider: 'gptsovits',
+    }))
+    const castMapped = rows.map(v => ({
       id: v.voice_id,
       label: v.voice_name,
       gender: v.gender === 'female' ? '女声' : v.gender === 'male' ? '男声' : '中性',
@@ -5246,6 +7354,7 @@ async function loadLocalCastVoices() {
       source: v.source,
       provider: v.provider,
     }))
+    localCastVoiceProfiles.value = [...gsvMapped, ...castMapped.filter(v => v.source !== 'gptsovits')]
   } catch (e) {
     console.error('Failed to load local cast voices', e)
     localCastVoiceProfiles.value = []
@@ -5287,6 +7396,17 @@ async function syncMotionComicVoicesAfterScript(options?: { silent?: boolean }) 
 }
 
 async function doExtractNarrationCharacters() {
+  const extractModel = usesLocalModelPipeline.value
+    ? resolveLocalExtractModel(episodeTextModel.value)
+    : episodeTextModel.value
+  if (usesLocalModelPipeline.value) {
+    try {
+      await ensureLocalModelForTask('llm', { ollamaModel: extractModel })
+    } catch (e) {
+      toast.error(e?.message || '本地 LLM 未就绪，请确认 Ollama 已启动')
+      return
+    }
+  }
   narrationExtracting.value = true
   try {
     const script = await saveNarrationScript()
@@ -5294,8 +7414,9 @@ async function doExtractNarrationCharacters() {
     const res = await episodeAPI.extractNarrationCharacters(epId.value, {
       script,
       style,
-      text_model: episodeTextModel.value,
-      text_thinking: episodeTextThinking.value,
+      text_model: extractModel,
+      // 漫画解说提取只拿名单，不必开思考（定妆文案另点「一键生成 AI 配图描述」）
+      text_thinking: isMotionComicMode.value ? false : true,
     })
     narrationExtractGeneratedAt.value = pickLlmGeneratedAt(res) ?? resolveLlmTimestamp()
     narrationExtractFailedAt.value = null
@@ -5307,7 +7428,11 @@ async function doExtractNarrationCharacters() {
       const total = (res?.characters || []).length
       const archiveHint = archived ? `，已移除 ${archived} 个过期定妆` : ''
       const roleLabel = isMotionComicMode.value ? '角色（含主要配角）' : '主角'
-      toast.success(`已提取${roleLabel} ${total} 条定妆：新增 ${created}，更新 ${updated}${archiveHint}`)
+      toast.success(
+        isMotionComicMode.value
+          ? `已提取${roleLabel} ${total} 人：新增 ${created}，更新 ${updated}${archiveHint}。定妆文案请点「一键生成 AI 配图描述」`
+          : `已提取${roleLabel} ${total} 条定妆：新增 ${created}，更新 ${updated}${archiveHint}`,
+      )
     } else if (archived) {
       toast.success(`已移除 ${archived} 个过期定妆，保留 ${(res?.characters || []).length} 条`)
     } else if ((res?.characters || []).length) {
@@ -5341,6 +7466,10 @@ async function doExtractNarrationCharacters() {
 }
 
 async function addNarrationCharacter() {
+  if (isDialoguePortraitMode.value && visualChars.value.length >= DIALOGUE_PORTRAIT_MAX_CHARS) {
+    toast.warning(`对话立绘本集最多 ${DIALOGUE_PORTRAIT_MAX_CHARS} 个角色（1 人居中 / 2 人左右）`)
+    return
+  }
   const name = window.prompt('角色姓名')
   if (!name?.trim()) return
   try {
@@ -5372,7 +7501,7 @@ function onNarratorVoiceChange(voiceId) {
 function syncNarratorVoiceFromChar(narrator) {
   if (narratorVoiceDirty.value) return
   const voice = narrator?.voice_style || narrator?.voiceStyle
-  if (voice) narratorVoiceId.value = voice
+  narratorVoiceId.value = voice || DEFAULT_CLONED_VOICE_ID
 }
 
 async function ensureNarratorCharacter() {
@@ -5391,9 +7520,9 @@ async function ensureNarratorCharacter() {
     episode_id: epId.value,
     name: '旁白',
     role: '旁白',
-    voice_style: narratorVoiceId.value || dramaNarrator?.voice_style || dramaNarrator?.voiceStyle || undefined,
-    voice_provider: inferLocalVoiceProvider(narratorVoiceId.value || dramaNarrator?.voice_style || dramaNarrator?.voiceStyle)
-      || lockedAudioProvider.value || undefined,
+    voice_style: narratorVoiceId.value || dramaNarrator?.voice_style || dramaNarrator?.voiceStyle || DEFAULT_CLONED_VOICE_ID,
+    voice_provider: inferLocalVoiceProvider(narratorVoiceId.value || dramaNarrator?.voice_style || dramaNarrator?.voiceStyle || DEFAULT_CLONED_VOICE_ID)
+      || DEFAULT_LOCAL_TTS_ENGINE,
   })
   try { chars.value = await episodeAPI.characters(epId.value) } catch { chars.value = [] }
   narrator = findNarratorChar(chars.value)
@@ -5434,7 +7563,16 @@ async function saveNarratorVoice() {
     toast.error(e.message || '旁白音色保存失败')
   }
 }
-async function genSample(id) { try { await characterAPI.voiceSample(id, epId.value); toast.success('试听已生成'); refresh() } catch (e) { toast.error(e.message) } }
+async function genSample(id) {
+  try {
+    if (usesLocalModelPipeline.value) await ensureLocalModelForTask('audio')
+    await characterAPI.voiceSample(id, epId.value)
+    toast.success('试听已生成')
+    refresh()
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
 async function addShot() { await storyboardAPI.create({ episode_id: epId.value, storyboard_number: sbs.value.length + 1, title: `镜头${sbs.value.length + 1}`, duration: 10 }); refresh() }
 
 function isBatchRunning(key) {
@@ -5492,18 +7630,39 @@ async function mapWithConcurrency(items, limit, worker) {
 }
 
 function resolveTtsBatchConcurrency() {
+  if (localTtsEnabled.value && (localTtsEngine.value === 'gptsovits' || localTtsEngine.value === 'indextts')) return TTS_BATCH_CONCURRENCY_GPTSOVITS
   if (localTtsEnabled.value && localTtsEngine.value === 'voicebox') return TTS_BATCH_CONCURRENCY_VOICEBOX
   return TTS_BATCH_CONCURRENCY_EDGE
 }
 
+/** 定妆：Comfy 本地串行；Agnes / 其它云端并发生成 */
+function resolveCharImageBatchConcurrency() {
+  const m = String(episodeImageModel.value || '').trim().toLowerCase()
+  if (m.startsWith('agnes-image')) return IMAGE_BATCH_CONCURRENCY_AGNES
+  if (needsLocalImageHardware(m)) return IMAGE_BATCH_CONCURRENCY_LOCAL
+  // 分集选 CogView 时定妆仍走 Agnes，可并发
+  return IMAGE_BATCH_CONCURRENCY_AGNES
+}
+
+/** 分镜/场景配图：Agnes/CogView 并发，Comfy 串行 */
+function resolveStoryboardImageBatchConcurrency() {
+  const m = String(episodeImageModel.value || '').trim().toLowerCase()
+  if (m.startsWith('agnes-image')) return IMAGE_BATCH_CONCURRENCY_AGNES
+  if (m.startsWith('cogview')) return IMAGE_BATCH_CONCURRENCY_CLOUD
+  if (needsLocalImageHardware(m)) return IMAGE_BATCH_CONCURRENCY_LOCAL
+  return IMAGE_BATCH_CONCURRENCY_CLOUD
+}
+
 const ttsBatchConcurrencyLabel = computed(() => {
   if (!localTtsEnabled.value) return `${TTS_BATCH_CONCURRENCY_EDGE} 路并发`
+  if (localTtsEngine.value === 'indextts') return `${TTS_BATCH_CONCURRENCY_GPTSOVITS} 路并发（IndexTTS2）`
+  if (localTtsEngine.value === 'gptsovits') return `${TTS_BATCH_CONCURRENCY_GPTSOVITS} 路并发（GPT-SoVITS）`
   if (localTtsEngine.value === 'voicebox') return `${TTS_BATCH_CONCURRENCY_VOICEBOX} 路并发（Voicebox）`
   return `${TTS_BATCH_CONCURRENCY_EDGE} 路并发`
 })
 
 function resolveTtsWatchOptions() {
-  if (localTtsEnabled.value && localTtsEngine.value === 'voicebox') {
+  if (localTtsEnabled.value && (localTtsEngine.value === 'voicebox' || localTtsEngine.value === 'gptsovits' || localTtsEngine.value === 'indextts')) {
     return { attempts: 180, delay: 2000 }
   }
   return { attempts: 90, delay: 2000 }
@@ -5539,13 +7698,17 @@ function watchAsyncResult(check, attempts = 24, delay = 2500) {
   })()
 }
 
-async function watchCharImageResult(charId, generationId, attempts = 36, delay = 2500, baseline = null) {
+const charImagePollers = new Set()
+
+async function pollCharImageJob(charId, generationId, baseline = null, options = {}) {
+  const attempts = options.attempts ?? 240
+  const delay = options.delay ?? 3000
   const startChar = chars.value.find(c => c.id === charId)
-  const startUrl = baseline?.startUrl ?? (startChar?.image_url || startChar?.imageUrl || '')
-  const startUpdatedAt = baseline?.startUpdatedAt ?? (startChar?.updated_at || startChar?.updatedAt || '')
+  const startUrl = String(baseline?.startUrl ?? (startChar?.image_url || startChar?.imageUrl || '')).trim()
+  const hadExistingPortrait = !!startUrl
 
   for (let i = 0; i < attempts; i++) {
-    await sleep(i === 0 ? 1500 : delay)
+    await sleep(i === 0 ? 800 : delay)
 
     if (generationId) {
       try {
@@ -5557,29 +7720,80 @@ async function watchCharImageResult(charId, generationId, attempts = 36, delay =
           return false
         }
         if (gen?.status === 'completed') {
-          const ts = gen?.updated_at || gen?.updatedAt || gen?.completed_at || gen?.completedAt
-          stampCharImageSuccess(charId, ts ? String(ts) : null)
-          await refresh()
+          const genPath = String(gen?.local_path || gen?.localPath || gen?.image_url || gen?.imageUrl || '').trim()
+          // 重生成必须落到新路径；若仍是旧图则继续等（避免假完成）
+          if (hadExistingPortrait && genPath && genPath === startUrl) {
+            continue
+          }
+          applyCharPortraitFromGeneration(charId, gen)
+          await refresh({ skipDramaRefetch: true }).catch(() => {})
+          const after = chars.value.find(c => c.id === charId)
+          const afterPath = String(after?.image_url || after?.imageUrl || '').trim()
+          if (genPath && afterPath !== genPath) applyCharPortraitFromGeneration(charId, gen)
           pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
           return true
         }
-      } catch {}
+        // 有 generationId 时，任务未完成前不根据 refresh/updatedAt 提前成功
+        // （生成接口可能改 appearance.updatedAt，会误判为定妆已替换）
+        continue
+      } catch {
+        // 拉取 generation 失败时再走下方 refresh 兜底
+      }
     }
 
-    await refresh()
+    await refresh({ skipDramaRefetch: true })
     const char = chars.value.find(c => c.id === charId)
-    const url = char?.image_url || char?.imageUrl || ''
-    const updatedAt = char?.updated_at || char?.updatedAt || ''
-    if (url && (url !== startUrl || updatedAt !== startUpdatedAt)) {
-      stampCharImageSuccess(charId, updatedAt ? String(updatedAt) : null)
+    const url = String(char?.image_url || char?.imageUrl || '').trim()
+    // 重生成：必须路径变化；首次生成：有图即可
+    if (url && (!hadExistingPortrait || url !== startUrl)) {
+      stampCharImageSuccess(charId, char?.updated_at || char?.updatedAt ? String(char.updated_at || char.updatedAt) : null)
       pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
       return true
     }
   }
+
+  if (generationId) {
+    try {
+      const gen = await imageAPI.get(generationId)
+      if (gen?.status === 'processing' || gen?.status === 'pending') {
+        toast.info('定妆仍在 ComfyUI 生成中，完成后会自动替换原图（刷新页面也会继续等待）')
+        return false
+      }
+      if (gen?.status === 'completed') {
+        applyCharPortraitFromGeneration(charId, gen)
+        pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
+        return true
+      }
+    } catch {}
+  }
+
   pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== charId)
   stampCharImageFailure(charId, '定妆生成超时或失败，请重试')
   toast.warning('定妆生成超时或失败，请重试')
   return false
+}
+
+function scheduleCharImagePoll(charId, generationId, baseline = null) {
+  const key = `${charId}:${generationId || 'unknown'}`
+  if (charImagePollers.has(key)) return
+  charImagePollers.add(key)
+  void pollCharImageJob(charId, generationId, baseline).finally(() => {
+    charImagePollers.delete(key)
+  })
+}
+
+async function watchCharImageResult(charId, generationId, attempts = 240, delay = 3000, baseline = null) {
+  const done = await pollCharImageJob(charId, generationId, baseline, { attempts, delay })
+  if (done) return true
+  if (generationId) {
+    try {
+      const gen = await imageAPI.get(generationId)
+      if (gen?.status === 'processing' || gen?.status === 'pending') {
+        scheduleCharImagePoll(charId, generationId, baseline)
+      }
+    } catch {}
+  }
+  return done
 }
 
 async function copyTextToClipboard(text) {
@@ -5823,18 +8037,22 @@ async function generateOpeningAudio() {
     toast.error('Voicebox 未运行，请先启动 Voicebox（默认端口 17493）')
     return
   }
+  if (localTtsEngine.value === 'indextts' && !indexttsAvailable.value) {
+    toast.error('IndexTTS2 未就绪，请运行 scripts/setup-index-tts.ps1')
+    return
+  }
   if (!localEdgeVoiceId.value) {
-    toast.warning(localTtsEngine.value === 'voicebox' ? '请选择 Voicebox 音色' : '请选择本地音色')
+    toast.warning(localTtsVoicePlaceholder())
     return
   }
   try {
     openingAudioGenerating.value = true
     await episodeAPI.generateOpeningAudio(epId.value, {
       subtitle_text: text,
-      local_tts_engine: localTtsEngine.value === 'voicebox' ? 'voicebox' : 'edge',
+      local_tts_engine: resolveLocalTtsEnginePayload(),
       local_voice: localEdgeVoiceId.value,
       tts_speed: localTtsSpeed.value,
-      ...(localTtsEngine.value === 'voicebox' && resolveVoiceboxInstructText()
+      ...(ttsEngineSupportsEmotionInstruct(localTtsEngine.value) && resolveVoiceboxInstructText()
         ? { voicebox_instruct: resolveVoiceboxInstructText() }
         : {}),
       ...(localTtsEngine.value === 'voicebox'
@@ -6028,20 +8246,21 @@ function syncShotUploadedImageLocal(sbId, path, referenceImages) {
   if (referenceImages) row.reference_images = referenceImages
 }
 
-async function scanNarrationShotImage(sb) {
+async function scanNarrationShotImage(sb, options = {}) {
   if (!hasNarrationShotImage(sb)) {
     toast.warning('请先上传或生成配图')
     return
   }
-  if (!textModelSupportsVision(episodeTextModel.value)) {
-    toast.warning('请先将文本模型设为 qwen3.5-plus 或 gpt-4o')
-    return
+  const quiet = !!options.quiet
+  const skipEnsure = !!options.skipEnsure
+  if (usesLocalModelPipeline.value && !skipEnsure) {
+    await ensureLocalModelForTask('llm', { ollamaModel: DEFAULT_LOCAL_VISION_MODEL })
   }
-  pendingShotScanIds.value.push(sb.id)
+  if (!pendingShotScanIds.value.includes(sb.id)) pendingShotScanIds.value.push(sb.id)
   try {
     const res = await storyboardAPI.scanNarrationImage(sb.id, {
-      text_model: episodeTextModel.value,
-      text_thinking: episodeTextThinking.value,
+      vision_model: DEFAULT_LOCAL_VISION_MODEL,
+      text_thinking: false,
     })
     shotScanGeneratedAt.value = {
       ...shotScanGeneratedAt.value,
@@ -6049,24 +8268,209 @@ async function scanNarrationShotImage(sb) {
     }
     shotScanFailedAt.value = { ...shotScanFailedAt.value, [sb.id]: null }
     shotScanError.value = { ...shotScanError.value, [sb.id]: null }
-    const score = res?.match_score ?? '—'
-    const summary = res?.summary || '扫描完成'
-    const issues = (res?.issues || []).filter(Boolean)
-    if (issues.length) {
-      toast.warning(`${summary}（${score}分）\n${issues.join('；')}`)
-    } else {
-      toast.success(`${summary}（${score}分）`)
+    shotScanResult.value = {
+      ...shotScanResult.value,
+      [sb.id]: {
+        is_suitable: res?.is_suitable === true,
+        match_score: res?.match_score ?? null,
+        summary: res?.summary || '',
+        issues: Array.isArray(res?.issues) ? res.issues : [],
+        suggestions: Array.isArray(res?.suggestions) ? res.suggestions : [],
+        at: res?.image_validate_at || pickLlmGeneratedAt(res) || resolveLlmTimestamp(),
+      },
     }
+    // 后端已写入 reference_images，同步到本地分镜列表
+    if (res?.reference_images) {
+      const row = sbs.value.find(item => item.id === sb.id)
+      if (row) {
+        row.reference_images = res.reference_images
+        row.referenceImages = res.reference_images
+      }
+    }
+    rebuildShotImageValidatePanel()
+    if (!quiet) {
+      const score = res?.match_score ?? '—'
+      const summary = res?.summary || '校验完成'
+      const issues = (res?.issues || []).filter(Boolean)
+      const detail = issues.length ? `\n问题：${issues.join('；')}` : ''
+      const tips = (res?.suggestions || []).filter(Boolean)
+      const tipLine = tips.length ? `\n建议：${tips.join('；')}` : ''
+      if (res?.is_suitable === true && !issues.length) {
+        toast.success(`#${getNarrationShotDisplayNo(sb)} ${summary}（${score}分）${detail}${tipLine}`, { duration: 8000 })
+      } else {
+        toast.warning(`#${getNarrationShotDisplayNo(sb)} ${summary}（${score}分）${detail || '\n配图不合适'}${tipLine}`, { duration: 10000 })
+      }
+    }
+    return res
   } catch (e) {
     if (!isLlmCancelled(e)) {
       shotScanGeneratedAt.value = { ...shotScanGeneratedAt.value, [sb.id]: null }
       shotScanFailedAt.value = { ...shotScanFailedAt.value, [sb.id]: resolveLlmTimestamp() }
       shotScanError.value = { ...shotScanError.value, [sb.id]: llmErrorMessage(e) }
-      toast.error(e.message)
+      if (!quiet) toast.error(e.message)
+      throw e
     }
   } finally {
     pendingShotScanIds.value = pendingShotScanIds.value.filter(id => id !== sb.id)
   }
+}
+
+function rebuildShotImageValidatePanel() {
+  const items = Object.entries(shotScanResult.value || {})
+    .map(([id, r]) => {
+      const sbId = Number(id)
+      const sb = sbs.value.find(item => item.id === sbId)
+      return {
+        storyboard_id: sbId,
+        shot_no: sb ? getNarrationShotDisplayNo(sb) : sbId,
+        is_suitable: !!r?.is_suitable,
+        match_score: r?.match_score ?? null,
+        summary: r?.summary || '',
+        issues: Array.isArray(r?.issues) ? r.issues : [],
+        suggestions: Array.isArray(r?.suggestions) ? r.suggestions : [],
+        at: r?.at || null,
+      }
+    })
+    .sort((a, b) => Number(a.shot_no) - Number(b.shot_no))
+  if (!items.length) {
+    shotImageValidatePanel.value = null
+    return
+  }
+  const unsuitableItems = items.filter(i => !i.is_suitable || i.issues.length)
+  const latestAt = items.map(i => i.at).filter(Boolean).sort().at(-1) || resolveLlmTimestamp()
+  shotImageValidatePanel.value = {
+    at: latestAt,
+    total: items.length,
+    suitable: items.length - unsuitableItems.length,
+    unsuitable: unsuitableItems.length,
+    items,
+    unsuitableItems,
+  }
+  if (typeof document !== 'undefined') {
+    requestAnimationFrame(() => {
+      document.getElementById('shot-image-validate-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    })
+  }
+}
+
+/** 从分镜 reference_images 恢复已持久化的校验记录 */
+function hydrateShotImageValidateFromStoryboards(showPanel = false) {
+  const next = {}
+  const times = {}
+  for (const sb of sbs.value) {
+    if (!sb?.id) continue
+    const meta = parseNarrationImageMeta(sb)
+    if (!meta.image_validate_at && meta.image_validate_is_suitable == null && !meta.image_validate_summary) continue
+    next[sb.id] = {
+      is_suitable: meta.image_validate_is_suitable === true,
+      match_score: meta.image_validate_score ?? null,
+      summary: meta.image_validate_summary || '',
+      issues: Array.isArray(meta.image_validate_issues) ? meta.image_validate_issues : [],
+      suggestions: Array.isArray(meta.image_validate_suggestions) ? meta.image_validate_suggestions : [],
+      at: meta.image_validate_at || null,
+    }
+    if (meta.image_validate_at) {
+      times[sb.id] = meta.image_validate_at
+    }
+  }
+  shotScanResult.value = next
+  shotScanGeneratedAt.value = { ...shotScanGeneratedAt.value, ...times }
+  if (showPanel && Object.keys(next).length) {
+    rebuildShotImageValidatePanel()
+  } else if (!Object.keys(next).length) {
+    shotImageValidatePanel.value = null
+  } else if (shotImageValidatePanel.value) {
+    // 面板已打开时同步内容，不强制滚动
+    const items = Object.entries(next).map(([id, r]) => {
+      const sbId = Number(id)
+      const sb = sbs.value.find(item => item.id === sbId)
+      return {
+        storyboard_id: sbId,
+        shot_no: sb ? getNarrationShotDisplayNo(sb) : sbId,
+        is_suitable: !!r?.is_suitable,
+        match_score: r?.match_score ?? null,
+        summary: r?.summary || '',
+        issues: Array.isArray(r?.issues) ? r.issues : [],
+        suggestions: Array.isArray(r?.suggestions) ? r.suggestions : [],
+        at: r?.at || null,
+      }
+    }).sort((a, b) => Number(a.shot_no) - Number(b.shot_no))
+    const unsuitableItems = items.filter(i => !i.is_suitable || i.issues.length)
+    shotImageValidatePanel.value = {
+      at: items.map(i => i.at).filter(Boolean).sort().at(-1) || shotImageValidatePanel.value.at,
+      total: items.length,
+      suitable: items.length - unsuitableItems.length,
+      unsuitable: unsuitableItems.length,
+      items,
+      unsuitableItems,
+    }
+  }
+}
+
+function clearShotImageValidatePanel() {
+  shotImageValidatePanel.value = null
+}
+
+async function batchScanNarrationShotImages() {
+  const list = sbs.value.filter(sb => narrationShotNeedsOwnImage(sb) && hasNarrationShotImage(sb))
+  if (!list.length) {
+    toast.warning('暂无配图可校验')
+    return
+  }
+  if (!tryBeginBatch('shotImageValidate', `正在用 ${DEFAULT_LOCAL_VISION_MODEL} 校验配图是否合适…`)) return
+  let ok = 0
+  let bad = 0
+  let failed = 0
+  try {
+    if (usesLocalModelPipeline.value) {
+      await ensureLocalModelForTask('llm', { ollamaModel: DEFAULT_LOCAL_VISION_MODEL })
+    }
+    for (const sb of list) {
+      try {
+        const res = await scanNarrationShotImage(sb, { quiet: true, skipEnsure: true })
+        if (res?.is_suitable === true && !(res?.issues || []).length) ok++
+        else bad++
+      } catch {
+        failed++
+      }
+    }
+    rebuildShotImageValidatePanel()
+    const parts = [`合适 ${ok}`, `不合适 ${bad}`]
+    if (failed) parts.push(`失败 ${failed}`)
+    toast.info(`配图校验完成：${parts.join('，')}（详见上方结果面板）`, { duration: 8000 })
+  } finally {
+    endBatch('shotImageValidate')
+  }
+}
+
+function jumpToShotFromValidate(storyboardId) {
+  const id = Number(storyboardId)
+  const sb = sbs.value.find(item => item.id === id)
+  if (!sb) {
+    toast.warning('未找到对应镜头')
+    return
+  }
+
+  // 切到「生成配图」页签
+  panel.value = 'production'
+  prodTab.value = 'shots'
+
+  // 当前筛选下找不到该镜时，切回「全部」或「已有图」
+  if (!shotsFiltered.value.some(item => item.id === id)) {
+    shotsListFilter.value = hasNarrationShotImage(sb) ? 'done' : 'all'
+  }
+
+  // 等筛选重置页码的 watch 跑完后再定位分页
+  nextTick(() => {
+    jumpShotsListToShot(id)
+    selectedSb.value = sb
+    nextTick(() => {
+      const el = typeof document !== 'undefined'
+        ? document.getElementById(`shot-card-${id}`)
+        : null
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  })
 }
 
 function triggerNextShotImageUpload() {
@@ -6166,15 +8570,37 @@ async function clearAllNarrationImagePrompts() {
 }
 
 async function clearAllNarrationImages() {
-  const count = narrationOwnImageCount.value
-  if (!count) {
-    toast.info('暂无配图可清除')
+  const processingJobs = Object.values(narrationShotImageJobs.value)
+    .filter(j => j && (j.status === 'processing' || j.status === 'submitting'))
+  if (pendingNarrationShotIds.value.length || processingJobs.length) {
+    toast.warning('有镜头正在生图中，请等待完成后再清除配图')
     return
   }
-  if (!confirm(`将清除本集 ${count} 张配图（含 AI 生成与上传），删除文件并重置数据库；已合成的镜头需重新合成。是否继续？`)) return
+  const count = narrationOwnImageCount.value
+  if (!count) {
+    toast.info(narrationImageCharFilterActive.value
+      ? `「${narrationImageCharFilterLabel.value}」相关分镜暂无配图可清除`
+      : '暂无配图可清除')
+    return
+  }
+  const scopeHint = narrationImageCharFilterActive.value
+    ? `所选角色「${narrationImageCharFilterLabel.value}」相关的 `
+    : '本集 '
+  if (!confirm(`将清除${scopeHint}${count} 张配图（含 AI 生成与上传），删除文件并重置数据库；已合成的镜头需重新合成。是否继续？`)) return
   narrationAssetClearing.value = true
   try {
-    const res = await episodeAPI.clearNarrationImages(epId.value)
+    const storyboardIds = narrationImageCharFilterActive.value
+      ? sbs.value
+        .filter(sb => storyboardMatchesNarrationImageCharFilter(sb) && !!getNarrationShotOwnImage(sb))
+        .map(sb => sb.id)
+      : undefined
+    const res = await episodeAPI.clearNarrationImages(epId.value, {
+      ...(storyboardIds?.length
+        ? { storyboardIds }
+        : narrationImageCharFilterActive.value
+          ? { characterIds: [...narrationImageCharFilterIds.value] }
+          : {}),
+    })
     toast.success(`已清除 ${res?.cleared ?? count} 张配图`)
     await refresh()
   } catch (e) {
@@ -6563,16 +8989,202 @@ async function copyNarrationShotPrompt(sb) {
   if (copied) toast.success(`已复制镜头 ${label} 配图文案`)
 }
 
+async function copyNarrationFluxPromptEn(sb) {
+  const prompt = getNarrationFluxPromptEn(sb)
+  if (!prompt) {
+    toast.warning('暂无 Flux 英文')
+    return
+  }
+  const label = `#${getNarrationShotDisplayNo(sb)}`
+  const copied = await copyTextToClipboard(prompt)
+  if (copied) toast.success(`已复制镜头 ${label} Flux 英文`)
+}
+
+const narrationFluxTranslatePendingCount = computed(() =>
+  narrationShotsNeedingImage(sbs.value).filter(sb => needsFluxEnglishTranslate(sb)).length,
+)
+
+const narrationFluxChineseShotCount = computed(() =>
+  narrationShotsNeedingImage(sbs.value).filter(sb => {
+    const prompt = getNarrationImagePromptText(sb)
+    return prompt && /[\u4e00-\u9fff]/.test(prompt)
+  }).length,
+)
+
+const narrationFluxTranslateDoneCount = computed(() =>
+  Math.max(0, narrationFluxChineseShotCount.value - narrationFluxTranslatePendingCount.value),
+)
+
+const narrationFluxEnglishCount = computed(() =>
+  narrationShotsNeedingImage(sbs.value).filter(sb => getNarrationFluxPromptEn(sb)).length,
+)
+
+const showFluxTranslateRemaining = computed(() =>
+  showFluxEnglishPrompt.value
+  && narrationFluxTranslatePendingCount.value > 0
+  && narrationFluxEnglishCount.value > 0,
+)
+
+const fluxPromptTranslateProgressPercent = computed(() => {
+  const { done, total } = fluxPromptTranslateProgress.value
+  if (!total) return 0
+  return Math.min(100, Math.round((done / total) * 100))
+})
+
+const showFluxEnglishPrompt = computed(() => needsEnglishImagePromptModel())
+
+const canUseFluxEnglishPrompt = computed(() => needsEnglishImagePromptModel())
+
+const fluxEnglishPromptHint = computed(() => {
+  if (isKolorsEpisodeImageModel()) return '当前为 Kolors 中文直出，无需翻译英文'
+  if (isQwenEpisodeImageModel()) return '当前为 Qwen-Image-Edit 中文直出，无需翻译英文'
+  if (!needsEnglishImagePromptModel()) {
+    return '请先将顶栏「生图」切换为 InstantID / FLUX（需英文）或 Kolors（中文直出）'
+  }
+  if (isInstantIdEpisodeImageModel()) return 'InstantID 分镜需英文 prompt；请点「翻译英文」自译中文配图文案'
+  return 'FLUX 分镜需英文 prompt；配图文案只出中文，请点「翻译英文」自译'
+})
+
+async function translateNarrationShotFluxPrompt(sb) {
+  if (!canUseFluxEnglishPrompt.value) {
+    toast.warning(fluxEnglishPromptHint.value || '请先将顶栏生图模型切换为 FLUX')
+    return
+  }
+  const prompt = getNarrationImagePromptText(sb)
+  if (!prompt) {
+    toast.warning('暂无中文配图文案')
+    return
+  }
+  if (!/[一-鿿]/.test(prompt)) {
+    toast.info('配图文案已是英文，无需翻译')
+    return
+  }
+  if (fluxPromptTranslatingShotIds.value.includes(sb.id)) return
+  fluxPromptTranslatingShotIds.value.push(sb.id)
+  try {
+    const res = await storyboardAPI.translateFluxPrompt(sb.id)
+    applyShotFluxPromptMeta(sb, res?.reference_images, res?.flux_prompt_en, res?.flux_prompt_en_at)
+    toast.success(`镜头 #${getNarrationShotDisplayNo(sb)} 已翻译为英文`)
+  } catch (e) {
+    toast.error(e?.message || '翻译失败')
+  } finally {
+    fluxPromptTranslatingShotIds.value = fluxPromptTranslatingShotIds.value.filter(id => id !== sb.id)
+  }
+}
+
+async function translateAllNarrationFluxPrompts() {
+  if (!canUseFluxEnglishPrompt.value) {
+    toast.warning(fluxEnglishPromptHint.value || '请先将顶栏生图模型切换为 FLUX')
+    return
+  }
+  const pending = narrationShotsNeedingImage(sbs.value).filter(sb => needsFluxEnglishTranslate(sb))
+  if (!pending.length) {
+    toast.info('没有需要翻译的镜头（需中文配图文案且尚未翻译）')
+    return
+  }
+  fluxPromptTranslating.value = true
+  fluxPromptTranslateProgress.value = { done: 0, total: pending.length, status: 'running', currentNo: null }
+  let translated = 0
+  let failed = 0
+  try {
+    await episodeAPI.startFluxTranslateSession(epId.value)
+    for (const sb of pending) {
+      const shotNo = getNarrationShotDisplayNo(sb)
+      fluxPromptTranslateProgress.value = {
+        done: translated,
+        total: pending.length,
+        status: 'running',
+        currentNo: shotNo,
+      }
+      try {
+        const res = await storyboardAPI.translateFluxPrompt(sb.id, { hold_ollama: true })
+        applyShotFluxPromptMeta(sb, res?.reference_images, res?.flux_prompt_en, res?.flux_prompt_en_at)
+        translated++
+        fluxPromptTranslateProgress.value = {
+          done: translated,
+          total: pending.length,
+          status: 'running',
+          currentNo: shotNo,
+        }
+      } catch (e) {
+        failed++
+        toast.error(`镜头 #${shotNo} 翻译失败：${e?.message || '未知错误'}`)
+      }
+    }
+    if (translated) {
+      try {
+        const repair = await episodeAPI.repairFluxPrompts(epId.value)
+        if (repair?.repaired) await refreshStoryboardsOnly()
+      } catch {
+        /* 修复失败不阻断 */
+      }
+      toast.success(failed
+        ? `已翻译 ${translated} 镜，${failed} 镜失败（已完成镜头已保存）`
+        : `已翻译 ${translated} 个镜头为英文，可开始生成配图`)
+    } else if (failed) {
+      toast.error('全部镜头翻译失败')
+    }
+  } catch (e) {
+    toast.error(e?.message || '批量翻译失败')
+  } finally {
+    try {
+      await episodeAPI.endFluxTranslateSession(epId.value)
+    } catch {
+      /* 释放显存失败忽略 */
+    }
+    fluxPromptTranslating.value = false
+    fluxPromptTranslateProgress.value = { done: 0, total: 0, status: 'idle', currentNo: null }
+  }
+}
+
+const translateRemainingNarrationFluxPrompts = translateAllNarrationFluxPrompts
+
+async function clearAllNarrationFluxPrompts() {
+  const count = narrationFluxEnglishCount.value
+  if (!count) {
+    toast.info('暂无 Flux 英文可清除')
+    return
+  }
+  if (fluxPromptTranslating.value || fluxPromptTranslatingShotIds.value.length) {
+    toast.warning('正在翻译中，请等待完成后再清除')
+    return
+  }
+  if (!confirm(`将清除本集 ${count} 个镜头的 Flux 英文（保留中文配图文案），之后可重新一键翻译。是否继续？`)) return
+  fluxPromptClearing.value = true
+  try {
+    const res = await episodeAPI.clearFluxPrompts(epId.value)
+    for (const sb of narrationShotsNeedingImage(sbs.value)) {
+      clearShotFluxPromptMetaLocal(sb)
+    }
+    toast.success(`已清除 ${res?.cleared ?? count} 个镜头的 Flux 英文`)
+    await refresh()
+  } catch (e) {
+    toast.error(e?.message || '清除 Flux 英文失败')
+  } finally {
+    fluxPromptClearing.value = false
+  }
+}
+
 async function genCharImg(id) {
-  const useReference = isCharPortraitUseReference(id)
+  let useReference = isCharPortraitUseReference(id)
   const beforeChar = chars.value.find(c => c.id === id)
   const baseline = {
     startUrl: beforeChar?.image_url || beforeChar?.imageUrl || '',
     startUpdatedAt: beforeChar?.updated_at || beforeChar?.updatedAt || '',
   }
+  // 重生成时：若参考图就是自己当前定妆，改为纯文生图，否则容易「看起来没换」
+  if (useReference && baseline.startUrl) {
+    const ref = findPortraitReferenceCharacter(chars.value, beforeChar)
+    if (!ref || ref.id === id) useReference = false
+  }
   try {
+    await ensureLocalModelForTask('image')
     if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
     const result = await characterAPI.generateImage(id, epId.value, { useReference, ...portraitImageStyleOptions() })
+    // 生图提交后再次钉死 image 阶段，防止其它任务切走 Comfy
+    if (usesLocalModelPipeline.value) {
+      await ensureLocalModelForTask('image').catch(() => {})
+    }
     if (result?.appearance_auto_enriched && result?.appearance) {
       const c = chars.value.find(ch => ch.id === id)
       if (c) c.appearance = result.appearance
@@ -6586,17 +9198,26 @@ async function genCharImg(id) {
       ? '（画风锚定：项目已有定妆）'
       : '（无可用参考，纯文生图）'
     toast.success(`定妆生成中 · ${result?.model || episodeImageModel.value}${refHint}`)
-    await refresh()
     const genId = result?.image_generation_id
-    const done = await watchCharImageResult(id, genId, 36, 2500, baseline)
-    if (done) toast.success('定妆图已更新')
-    else if (genId) {
+    // Qwen 定妆常需 2～4 分钟；超时后仍会后台继续轮询并写回
+    const done = await watchCharImageResult(id, genId, 120, 3000, baseline)
+    if (done) {
+      if (genId) {
+        try {
+          const gen = await imageAPI.get(genId)
+          if (gen?.status === 'completed') applyCharPortraitFromGeneration(id, gen)
+        } catch {}
+      }
+      toast.success('定妆图已更新')
+    } else if (genId) {
       try {
         const gen = await imageAPI.get(genId)
         const err = gen?.error_msg || gen?.errorMsg
-        if (err) {
+        if (err && gen?.status === 'failed') {
           stampCharImageFailure(id, err)
           toast.error(err)
+        } else if (gen?.status === 'processing' || gen?.status === 'pending') {
+          toast.info('定妆仍在生成中，完成后会自动替换原图')
         }
       } catch {}
     }
@@ -6607,8 +9228,106 @@ async function genCharImg(id) {
   }
 }
 
+function applyDialoguePortraitExpressionsLocal(id: number, result: any) {
+  const c = chars.value.find(ch => ch.id === id)
+  if (!c) return
+  const pack = result?.dialogue_portrait
+    || result?.expressions
+    || result?.reference_images?.dialogue_portrait
+    || result?.referenceImages?.dialogue_portrait
+  const refsRaw = result?.reference_images ?? result?.referenceImages
+  if (refsRaw != null) {
+    c.reference_images = typeof refsRaw === 'string' ? refsRaw : JSON.stringify(refsRaw)
+    c.referenceImages = c.reference_images
+    return
+  }
+  if (pack && typeof pack === 'object') {
+    const prev = parseCharacterReferenceImages(c)
+    const next = { ...prev, dialogue_portrait: pack }
+    const json = JSON.stringify(next)
+    c.reference_images = json
+    c.referenceImages = json
+  }
+}
+
+async function genDialogueExpressions(id: number, options?: { force?: boolean }) {
+  const c = chars.value.find(ch => ch.id === id)
+  if (!(c?.image_url || c?.imageUrl)) {
+    toast.warning('请先生成定妆基图，再生成表情包')
+    return
+  }
+  try {
+    await ensureLocalModelForTask('image')
+    if (!isPendingDialogueExpression(id)) pendingDialogueExpressionIds.value.push(id)
+    const result = await characterAPI.generateDialogueExpressions(id, epId.value, {
+      force: options?.force,
+      ...portraitImageStyleOptions(),
+    })
+    applyDialoguePortraitExpressionsLocal(id, result)
+    if (result?.character) {
+      const idx = chars.value.findIndex(ch => ch.id === id)
+      if (idx >= 0) chars.value[idx] = result.character
+    }
+    toast.success(dialoguePortraitExpressionsReady(chars.value.find(ch => ch.id === id) || c)
+      ? '表情包已更新（idle / talk / react）'
+      : '表情包已提交（未齐时合成将回退定妆基图）')
+    await refresh()
+  } catch (e) {
+    toast.error(e?.message || '表情包生成失败（后端 API 可能尚未就绪）')
+  } finally {
+    pendingDialogueExpressionIds.value = pendingDialogueExpressionIds.value.filter(item => item !== id)
+  }
+}
+
+async function batchDialogueExpressions(options?: { force?: boolean }) {
+  const targets = visualChars.value.filter(c => c.image_url || c.imageUrl)
+  if (!targets.length) {
+    toast.warning('请先为角色生成定妆基图')
+    return
+  }
+  if (!tryBeginBatch('dialogueExpressions', '表情包批量生成中…')) return
+  try {
+    await ensureLocalModelForTask('image')
+    const ids = targets.map(c => c.id)
+    for (const id of ids) {
+      if (!isPendingDialogueExpression(id)) pendingDialogueExpressionIds.value.push(id)
+    }
+    try {
+      const result = await characterAPI.batchDialogueExpressions(ids, epId.value, {
+        force: options?.force,
+        ...portraitImageStyleOptions(),
+      })
+      const updated = result?.characters || result?.items || []
+      for (const row of updated) {
+        if (!row?.id) continue
+        applyDialoguePortraitExpressionsLocal(row.id, row)
+        const idx = chars.value.findIndex(ch => ch.id === row.id)
+        if (idx >= 0) chars.value[idx] = { ...chars.value[idx], ...row }
+      }
+      toast.success(`已请求生成 ${ids.length} 个角色的表情包`)
+    } catch {
+      // 批量接口可能尚未实现：逐个回退
+      let ok = 0
+      for (const id of ids) {
+        try {
+          await genDialogueExpressions(id, { force: options?.force })
+          ok++
+        } catch { /* toast already shown */ }
+      }
+      if (ok) toast.success(`已生成 ${ok}/${ids.length} 个角色表情包`)
+    }
+    await refresh()
+  } finally {
+    pendingDialogueExpressionIds.value = []
+    endBatch('dialogueExpressions')
+  }
+}
+
 async function recognizeCharPortrait(id) {
   try {
+    if (usesLocalModelPipeline.value) {
+      await ensureLocalModelForTask('llm')
+    }
     if (!isPendingCharRecognize(id)) pendingCharRecognizeIds.value.push(id)
     const result = await characterAPI.recognizePortrait(id, epId.value)
     charRecognizeGeneratedAt.value = {
@@ -6635,8 +9354,88 @@ async function recognizeCharPortrait(id) {
   }
 }
 
-async function generateCharAppearance(id) {
+async function validateCharPortraitStyle(id, options = {}) {
+  const quiet = !!options.quiet
   try {
+    if (usesLocalModelPipeline.value && !options.skipEnsure) {
+      await ensureLocalModelForTask('llm', { ollamaModel: DEFAULT_LOCAL_VISION_MODEL })
+    }
+    if (!isPendingCharStyleValidate(id)) pendingCharStyleValidateIds.value.push(id)
+    const result = await characterAPI.validatePortraitStyle(id, {
+      vision_model: DEFAULT_LOCAL_VISION_MODEL,
+    })
+    charStyleValidateResult.value = {
+      ...charStyleValidateResult.value,
+      [id]: {
+        is_standard: !!result?.is_standard,
+        score: result?.score ?? null,
+        summary: result?.summary || '',
+        issues: Array.isArray(result?.issues) ? result.issues : [],
+        suggestions: Array.isArray(result?.suggestions) ? result.suggestions : [],
+        at: pickLlmGeneratedAt(result) ?? resolveLlmTimestamp(),
+      },
+    }
+    if (!quiet) {
+      const score = result?.score ?? '—'
+      const summary = result?.summary || '校验完成'
+      const issues = (result?.issues || []).filter(Boolean)
+      if (result?.is_standard) {
+        toast.success(`${summary}（${score}分）`)
+      } else {
+        toast.warning(`${summary}（${score}分）\n${issues.join('；') || '画风不标准'}`)
+      }
+    }
+    return result
+  } catch (e) {
+    if (!isLlmCancelled(e)) {
+      if (!quiet) toast.error(e.message || '画风校验失败')
+      throw e
+    }
+  } finally {
+    pendingCharStyleValidateIds.value = pendingCharStyleValidateIds.value.filter(item => item !== id)
+  }
+}
+
+async function batchValidateCharPortraitStyles() {
+  const ids = visualChars.value
+    .filter(c => c.image_url || c.imageUrl)
+    .map(c => c.id)
+  if (!ids.length) {
+    toast.warning('暂无定妆图可校验')
+    return
+  }
+  if (!tryBeginBatch('charStyleValidate', `正在用 ${DEFAULT_LOCAL_VISION_MODEL} 校验定妆画风…`)) return
+  let nonStandard = 0
+  let ok = 0
+  let failed = 0
+  try {
+    if (usesLocalModelPipeline.value) {
+      await ensureLocalModelForTask('llm', { ollamaModel: DEFAULT_LOCAL_VISION_MODEL })
+    }
+    for (const id of ids) {
+      try {
+        const result = await validateCharPortraitStyle(id, { quiet: true, skipEnsure: true })
+        if (result?.is_standard) ok++
+        else nonStandard++
+      } catch {
+        failed++
+      }
+    }
+    const parts = [`标准 ${ok}`, `不标准 ${nonStandard}`]
+    if (failed) parts.push(`失败 ${failed}`)
+    toast.info(`画风校验完成：${parts.join('，')}`)
+  } finally {
+    endBatch('charStyleValidate')
+  }
+}
+
+async function generateCharAppearance(id) {
+  const toastId = `char-appearance-${id}`
+  try {
+    if (usesLocalModelPipeline.value) {
+      toast.info('正在切换 LLM 并生成外貌描述，约需 1–2 分钟…', { id: toastId, duration: 8000 })
+      await ensureLocalModelForTask('llm')
+    }
     if (!isPendingCharAppearance(id)) pendingCharAppearanceIds.value.push(id)
     const script = localRaw.value || rawContent.value || scriptContent.value || ''
     const result = await characterAPI.generateAppearance(id, {
@@ -6661,62 +9460,130 @@ async function generateCharAppearance(id) {
         if (idx >= 0) chars.value[idx] = result.character
       }
     }
-    toast.success('AI 外貌描述已生成（含 English tags）')
+    toast.success(isLocalComicMode.value ? 'AI 配图描述已生成（含 English tags）' : 'AI 外貌描述已生成（含 English tags）')
+    toast.dismiss(toastId)
   } catch (e) {
     if (!isLlmCancelled(e)) {
       charAppearanceGeneratedAt.value = { ...charAppearanceGeneratedAt.value, [id]: null }
       charAppearanceFailedAt.value = { ...charAppearanceFailedAt.value, [id]: resolveLlmTimestamp() }
       charAppearanceError.value = { ...charAppearanceError.value, [id]: llmErrorMessage(e) }
       toast.error(e.message)
+      toast.dismiss(toastId)
     }
   } finally {
     pendingCharAppearanceIds.value = pendingCharAppearanceIds.value.filter(item => item !== id)
   }
 }
 
-async function batchCharImages() {
-  const pending = sortCharactersForPortraitGeneration(
-    visualChars.value.filter(c => !(c.image_url || c.imageUrl)),
-  )
+async function batchCharAppearances() {
+  const missing = visualChars.value.filter(c => !(String(c.appearance || '').trim()))
+  const forceAll = missing.length === 0
+  const candidates = forceAll ? visualChars.value : missing
+  const pending = sortCharactersForPortraitGeneration(candidates)
   const ids = pending.map(c => c.id)
   if (!ids.length) {
-    toast.info('所有角色图片已生成')
+    toast.info('暂无角色可生成 AI 配图描述')
     return
   }
-  if (!tryBeginBatch('charImages', '角色图片批量生成中…')) return
-  pendingCharImageIds.value = [...new Set([...pendingCharImageIds.value, ...ids])]
+  if (forceAll) {
+    if (!confirm(`将重新生成 ${ids.length} 个角色的 AI 配图描述（覆盖现有文案）。是否继续？`)) return
+  }
+  if (!tryBeginBatch('charAppearances', forceAll ? '正在覆盖重写 AI 配图描述…' : '正在批量生成 AI 配图描述…')) return
   try {
+    if (usesLocalModelPipeline.value) await ensureLocalModelForTask('llm')
     for (const char of pending) {
+      await generateCharAppearance(char.id)
+    }
+    toast.success(forceAll ? 'AI 配图描述已全部重写' : 'AI 配图描述批量生成完成')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    endBatch('charAppearances')
+  }
+}
+
+async function batchCharImages(options?: { forceRegen?: boolean }) {
+  const forceRegen = !!options?.forceRegen
+  const candidates = forceRegen
+    ? visualChars.value.filter(c => !!(c.image_url || c.imageUrl))
+    : visualChars.value.filter(c => !(c.image_url || c.imageUrl))
+  const pending = sortCharactersForPortraitGeneration(candidates)
+  const ids = pending.map(c => c.id)
+  if (!ids.length) {
+    toast.info(forceRegen ? '暂无已有定妆可重新生成' : '所有角色图片已生成')
+    return
+  }
+  if (forceRegen) {
+    if (!confirm(`将重新生成 ${ids.length} 个角色定妆（覆盖原图）。是否继续？`)) return
+  }
+  const concurrency = resolveCharImageBatchConcurrency()
+  const batchHint = concurrency > 1
+    ? `角色定妆并发生成中（Agnes · ${concurrency} 路）…`
+    : (forceRegen ? '定妆重新生成中…' : '角色图片批量生成中…')
+  if (!tryBeginBatch('charImages', forceRegen ? `定妆重新生成中${concurrency > 1 ? `（${concurrency} 路并发）` : ''}…` : batchHint)) return
+  pendingCharImageIds.value = [...new Set([...pendingCharImageIds.value, ...ids])]
+  const baselines = new Map(pending.map(c => [c.id, {
+    startUrl: c.image_url || c.imageUrl || '',
+    startUpdatedAt: c.updated_at || c.updatedAt || '',
+  }]))
+  const pendingIdSet = new Set(ids)
+  try {
+    await ensureLocalModelForTask('image')
+    let completedCount = 0
+    let failedCount = 0
+
+    const results = await mapWithConcurrency(pending, concurrency, async (char) => {
       const useReference = isCharPortraitUseReference(char.id)
-      if (useReference) {
+      const effectiveUseRef = forceRegen ? false : useReference
+      if (effectiveUseRef) {
         const ref = findPortraitReferenceCharacter(chars.value, char)
-        if (ref && pending.some(c => c.id === ref.id && !(c.image_url || c.imageUrl))) {
-          await watchAsyncResult(() => {
-            const row = chars.value.find(c => c.id === ref.id)
-            return !!(row?.image_url || row?.imageUrl)
-          }, 36)
-          await refresh()
+        if (ref && pendingIdSet.has(ref.id) && !(ref.image_url || ref.imageUrl)) {
+          await watchCharImageResult(ref.id, null, 120, 3000, baselines.get(ref.id) || null)
+          await refresh({ skipDramaRefetch: true })
         } else if (!ref) {
           const anchor = findDramaStyleAnchorCharacter(chars.value, char)
-          if (anchor && pending.some(c => c.id === anchor.id && !(c.image_url || c.imageUrl))) {
-            await watchAsyncResult(() => {
-              const row = chars.value.find(c => c.id === anchor.id)
-              return !!(row?.image_url || row?.imageUrl)
-            }, 36)
-            await refresh()
+          if (anchor && pendingIdSet.has(anchor.id) && !(anchor.image_url || anchor.imageUrl)) {
+            await watchCharImageResult(anchor.id, null, 120, 3000, baselines.get(anchor.id) || null)
+            await refresh({ skipDramaRefetch: true })
           }
         }
       }
-      await characterAPI.generateImage(char.id, epId.value, { useReference, ...portraitImageStyleOptions() })
+      const result = await characterAPI.generateImage(char.id, epId.value, {
+        useReference: effectiveUseRef,
+        ...portraitImageStyleOptions(),
+      })
+      if (usesLocalModelPipeline.value && concurrency <= 1) {
+        await ensureLocalModelForTask('image').catch(() => {})
+      }
+      const genId = result?.image_generation_id
+      const done = await watchCharImageResult(char.id, genId, 120, 3000, baselines.get(char.id) || null)
+      if (!done) throw new Error('定妆生成超时或失败')
+      return true
+    })
+
+    for (let i = 0; i < results.length; i++) {
+      const row = results[i]
+      const char = pending[i]
+      if (row?.status === 'fulfilled') {
+        completedCount++
+      } else {
+        failedCount++
+        const err = row?.reason
+        stampCharImageFailure(char.id, err)
+        pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== char.id)
+      }
     }
-    await refresh()
-    await watchAsyncResult(() => ids.every(id => {
-      const char = chars.value.find(c => c.id === id)
-      const done = !!(char?.image_url || char?.imageUrl)
-      if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-      return done
-    }), 36)
-    toast.success('角色图片批量生成完成')
+
+    await refresh({ skipDramaRefetch: true })
+    if (failedCount && !completedCount) {
+      toast.error(`${failedCount} 个定妆生成失败`)
+    } else if (failedCount) {
+      toast.warning(`${completedCount} 张完成，${failedCount} 张失败`)
+    } else {
+      toast.success(forceRegen
+        ? `已重新生成 ${completedCount} 张定妆${concurrency > 1 ? `（${concurrency} 路并发）` : ''}`
+        : `角色图片批量生成完成${concurrency > 1 ? `（${concurrency} 路并发）` : ''}`)
+    }
   } catch (e) {
     pendingCharImageIds.value = pendingCharImageIds.value.filter(item => !ids.includes(item))
     toast.error(e.message)
@@ -6724,10 +9591,15 @@ async function batchCharImages() {
     endBatch('charImages')
   }
 }
+
+async function regenerateAllCharPortraitImages() {
+  return batchCharImages({ forceRegen: true })
+}
 async function genSceneImg(id) {
   try {
+    await ensureLocalModelForTask('image')
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
-    await sceneAPI.generateImage(id, epId.value)
+    await sceneAPI.generateImage(id, epId.value, portraitImageStyleOptions())
     toast.success('场景图片生成中')
     await refresh()
     watchAsyncResult(() => {
@@ -6750,7 +9622,7 @@ async function batchSceneImages() {
   if (!tryBeginBatch('sceneImages', '场景图片批量生成中…')) return
   pendingSceneImageIds.value = [...new Set([...pendingSceneImageIds.value, ...ids])]
   try {
-    const results = await Promise.allSettled(ids.map(id => sceneAPI.generateImage(id, epId.value)))
+    const results = await Promise.allSettled(ids.map(id => sceneAPI.generateImage(id, epId.value, portraitImageStyleOptions())))
     const failCount = results.filter(r => r.status === 'rejected').length
     if (failCount) toast.error(`${failCount} 个场景图片提交失败`)
     await refresh()
@@ -6775,12 +9647,21 @@ const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需
 function getDialogueSpeakerRaw(sb) {
   const dialogue = sb?.dialogue?.trim() || ''
   const match = dialogue.match(/^(.+?)[:：]/)
-  return match ? match[1].replace(/[（(].+?[)）]/g, '').trim() : ''
+  if (!match) return ''
+  const speaker = match[1].replace(/[（(].+?[)）]/g, '').trim()
+  if (speaker && !isPlausibleDialogueSpeaker(speaker)) return '旁白'
+  return speaker
 }
 
 function getDialogueText(sb) {
   const dialogue = sb?.dialogue?.trim() || ''
-  return dialogue ? dialogue.replace(/^.+?[:：]\s*/, '').trim() : ''
+  if (!dialogue) return ''
+  const match = dialogue.match(/^(.+?)[:：]/)
+  if (!match) return dialogue
+  const speaker = match[1].replace(/[（(].+?[)）]/g, '').trim()
+  // 误切叙述句：整句当旁白正文，不剥前缀
+  if (speaker && !isPlausibleDialogueSpeaker(speaker)) return dialogue
+  return dialogue.replace(/^.+?[:：]\s*/, '').trim()
 }
 
 function isTTSIgnorable(sb) {
@@ -6890,7 +9771,7 @@ async function genShotTTS(sb, force = false) {
     if (res?.tts_audio_url) {
       applyTtsResultToStoryboard(sb.id, res)
       const provider = res?.provider || (localTtsEnabled.value ? localTtsEngine.value : 'api')
-      const mode = provider === 'edge' ? '（本地 Edge）' : provider === 'voicebox' ? '（Voicebox）' : '（付费 API）'
+      const mode = provider === 'edge' ? '（本地 Edge）' : provider === 'indextts' ? '（IndexTTS2）' : provider === 'gptsovits' ? '（GPT-SoVITS）' : provider === 'voicebox' ? '（Voicebox）' : '（付费 API）'
       const speakerHint = isMotionComicMode.value
         ? ` · ${res?.speaker || getDialogueSpeaker(sb)}${res?.used_character_voice === false ? '（默认音色）' : ''}`
         : ''
@@ -6903,7 +9784,7 @@ async function genShotTTS(sb, force = false) {
       void watchTtsBatchResults([sb.id]).then(({ completed, remaining }) => {
         if (completed) {
           const provider = res?.provider || (localTtsEnabled.value ? localTtsEngine.value : 'api')
-          const mode = provider === 'edge' ? '（本地 Edge）' : provider === 'voicebox' ? '（Voicebox）' : '（付费 API）'
+          const mode = provider === 'edge' ? '（本地 Edge）' : provider === 'indextts' ? '（IndexTTS2）' : provider === 'gptsovits' ? '（GPT-SoVITS）' : provider === 'voicebox' ? '（Voicebox）' : '（付费 API）'
           toast.success(`${label} 配音已生成${mode}`)
         } else if (remaining) {
           toast.warning(`${label} 配音超时，请确认 Voicebox 已启动且模型已下载，或改用 Edge 后重试`)
@@ -7001,7 +9882,7 @@ async function runBatchShotTTS(batchMessage, force) {
             : ''
           toast.warning(`配音完成 ${completed + immediate} 段，仍有 ${remaining} 段未完成${failHint}`)
         } else if (completed + immediate > 0) {
-          toast.success(`剩余配音已全部生成${localTtsEnabled.value ? `（本地 ${localTtsEngine.value === 'voicebox' ? 'Voicebox' : 'Edge'}）` : ''}`)
+          toast.success(`剩余配音已全部生成${localTtsEnabled.value ? `（本地 ${localTtsEngineDisplayName()}）` : ''}`)
         } else if (failures.length) {
           toast.error(`${failures.length} 段配音失败：${failures.slice(0, 3).join('；')}${failures.length > 3 ? '…' : ''}`)
         }
@@ -7018,7 +9899,7 @@ async function runBatchShotTTS(batchMessage, force) {
       } else {
         toast.success(force
           ? `已重新生成 ${immediate} 条配音`
-          : `剩余配音已全部生成${localTtsEnabled.value ? `（本地 ${localTtsEngine.value === 'voicebox' ? 'Voicebox' : 'Edge'}）` : ''}`)
+          : `剩余配音已全部生成${localTtsEnabled.value ? `（本地 ${localTtsEngineDisplayName()}）` : ''}`)
       }
     }
   } catch (e) {
@@ -7036,9 +9917,10 @@ function getNarrationDisplayImage(s) { return resolveNarrationEffectiveImage(sbs
 function narrationShotImageSrc(sb) {
   const path = getNarrationDisplayImage(sb)
   if (!path) return ''
-  const v = sb?.updated_at || sb?.updatedAt || episode.value?.updated_at || episode.value?.updatedAt || ''
-  const q = v ? `?v=${encodeURIComponent(String(v))}` : ''
-  return `/${path.replace(/^\//, '')}${q}`
+  const stamp = sb?.updated_at || sb?.updatedAt || ''
+  const file = String(path).split('/').pop() || ''
+  const q = `?v=${encodeURIComponent(`${file}|${stamp}`)}`
+  return `/${String(path).replace(/^\//, '')}${q}`
 }
 function narrationShotInherited(s) {
   return hasNarrationShotImage(s) && parseNarrationImageMeta(s).narration_image_mode === 'copy'
@@ -7192,11 +10074,380 @@ async function setNarrationShotLayout(sb, layout) {
 }
 function isPendingNarrationShot(id) { return pendingNarrationShotIds.value.includes(id) }
 
+function getNarrationShotImageJob(shotId) {
+  return narrationShotImageJobs.value[shotId] || null
+}
+
+function patchNarrationShotImageJob(shotId, patch) {
+  const prev = narrationShotImageJobs.value[shotId] || {}
+  narrationShotImageJobs.value = {
+    ...narrationShotImageJobs.value,
+    [shotId]: { ...prev, ...patch },
+  }
+}
+
+function clearNarrationShotImageJob(shotId, delayMs = 0) {
+  if (delayMs > 0) {
+    setTimeout(() => clearNarrationShotImageJob(shotId, 0), delayMs)
+    return
+  }
+  if (!narrationShotImageJobs.value[shotId]) return
+  const next = { ...narrationShotImageJobs.value }
+  delete next[shotId]
+  narrationShotImageJobs.value = next
+}
+
+/** 成功完成：弹窗开着时保留 completed，关弹窗再清 */
+function clearNarrationShotImageJobAfterSuccess(shotId) {
+  if (narrationShotImageModalOpen.value) return
+  clearNarrationShotImageJob(shotId, 2500)
+}
+
+/** 配图已落库但轮询/待处理列表未清理时，同步前端生图状态 */
+function reconcileNarrationShotImageState() {
+  const pending = new Set(pendingNarrationShotIds.value)
+  let jobs = { ...narrationShotImageJobs.value }
+  let changedPending = false
+  let changedJobs = false
+
+  for (const sb of sbs.value) {
+    if (!narrationShotNeedsOwnImage(sb) || !hasNarrationShotImage(sb)) continue
+    if (pending.delete(sb.id)) changedPending = true
+    if (jobs[sb.id]) {
+      delete jobs[sb.id]
+      changedJobs = true
+    }
+  }
+
+  if (changedPending) {
+    pendingNarrationShotIds.value = [...pending]
+  }
+  if (changedJobs) {
+    narrationShotImageJobs.value = jobs
+  }
+}
+
+/** 从 generation 记录立即把 local_path 写回镜头，避免 refresh 竞态导致页面空白 */
+function applyNarrationShotImageFromGeneration(shotId, gen) {
+  const path = String(gen?.local_path || gen?.localPath || gen?.image_url || gen?.imageUrl || '').trim()
+  if (!path) return false
+  // 强制新 stamp，避免与库内旧 updated_at 相同导致浏览器缓存旧图
+  const stamp = String(
+    gen?.completed_at || gen?.completedAt || gen?.updated_at || gen?.updatedAt || '',
+  ) || new Date().toISOString()
+  const bust = `${stamp}|${path}`
+  const next = sbs.value.map((row) => {
+    if (row.id !== shotId) return row
+    return {
+      ...row,
+      composed_image: path,
+      composedImage: path,
+      updated_at: bust,
+      updatedAt: bust,
+    }
+  })
+  sbs.value = next
+  if (selectedSb.value?.id === shotId) {
+    selectedSb.value = {
+      ...selectedSb.value,
+      composed_image: path,
+      composedImage: path,
+      updated_at: bust,
+      updatedAt: bust,
+    }
+  }
+  return true
+}
+
+function jumpShotsListToShot(shotId) {
+  const list = shotsFiltered.value
+  const idx = list.findIndex(item => item.id === shotId)
+  if (idx < 0) return
+  const size = shotsListPageSize.value || 1
+  shotsListPage.value = Math.floor(idx / size) + 1
+}
+
+async function finalizeNarrationShotImageReady(shotId, gen = null) {
+  if (gen) applyNarrationShotImageFromGeneration(shotId, gen)
+  await refreshStoryboardsOnly()
+  // refresh 后若库里已有路径则保持；若仍空则用 generation.local_path 再挂一次
+  if (gen) applyNarrationShotImageFromGeneration(shotId, gen)
+  for (let retry = 0; retry < 4 && !hasNarrationShotImage(sbs.value.find(s => s.id === shotId)); retry++) {
+    await sleep(500)
+    await refreshStoryboardsOnly()
+    if (gen) applyNarrationShotImageFromGeneration(shotId, gen)
+  }
+  const sb = sbs.value.find(s => s.id === shotId)
+  if (hasNarrationShotImage(sb) || (gen && applyNarrationShotImageFromGeneration(shotId, gen))) {
+    patchNarrationShotImageJob(shotId, { status: 'completed', percent: 100, message: '生成完成' })
+    pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== shotId)
+    // 弹窗打开时保留 completed 状态供进度条展示；关闭弹窗时再清
+    if (!narrationShotImageModalOpen.value) clearNarrationShotImageJobAfterSuccess(shotId)
+    // 「生成中」过滤下镜头会消失：切到有图列表并翻到该镜
+    if (shotsListFilter.value === 'processing' || shotsListFilter.value === 'pending') {
+      shotsListFilter.value = 'done'
+    }
+    jumpShotsListToShot(shotId)
+    return true
+  }
+  return false
+}
+
+async function pollNarrationShotImageJob(shotId, generationId, options = {}) {
+  const attempts = options.attempts ?? 240
+  const delay = options.delay ?? 3000
+  const batchLabel = options.batchLabel
+
+  for (let i = 0; i < attempts; i++) {
+    await sleep(i === 0 ? 800 : delay)
+    const pseudoPercent = Math.min(92, 12 + Math.round((i / attempts) * 80))
+
+    if (generationId) {
+      try {
+        const gen = await imageAPI.get(generationId)
+        if (!gen?.id && !gen?.status) {
+          await refresh({ skipDramaRefetch: true })
+          const sbMissing = sbs.value.find(s => s.id === shotId)
+          // 无任务记录时：仅当不再 pending 且本镜有图才收尾（避免重生误判）
+          if (hasNarrationShotImage(sbMissing) && !isPendingNarrationShot(shotId)) {
+            patchNarrationShotImageJob(shotId, { status: 'completed', percent: 100, message: '生成完成' })
+            clearNarrationShotImageJobAfterSuccess(shotId)
+            return true
+          }
+          patchNarrationShotImageJob(shotId, {
+            status: 'failed',
+            percent: 100,
+            message: '任务已取消',
+            error: '配图任务记录不存在（可能生图时被「清除配图」打断），请重新生成',
+          })
+          pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== shotId)
+          clearNarrationShotImageJob(shotId, 15000)
+          return false
+        }
+        if (gen?.status === 'failed') {
+          const err = gen?.error_msg || gen?.errorMsg || '生成失败'
+          patchNarrationShotImageJob(shotId, {
+            status: 'failed',
+            percent: 100,
+            message: '生成失败',
+            error: err,
+          })
+          pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== shotId)
+          clearNarrationShotImageJob(shotId, 15000)
+          return false
+        }
+        if (gen?.status === 'processing' || gen?.status === 'pending') {
+          const startedMs = Date.parse(String(gen?.created_at || gen?.createdAt || gen?.updated_at || gen?.updatedAt || ''))
+          // 云端任务进程内轮询丢失后会永远 processing；超时后按失败收尾，避免弹窗卡死
+          if (Number.isFinite(startedMs) && Date.now() - startedMs > 12 * 60 * 1000) {
+            patchNarrationShotImageJob(shotId, {
+              status: 'failed',
+              percent: 100,
+              message: '生成超时',
+              error: '生图超时或服务中断，请重新生成该镜头',
+            })
+            pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== shotId)
+            clearNarrationShotImageJob(shotId, 15000)
+            return false
+          }
+        }
+        if (gen?.status === 'completed') {
+          if (await finalizeNarrationShotImageReady(shotId, gen)) return true
+          // completed 但分镜路径尚未可见：继续轮询，勿提前清 loading
+          patchNarrationShotImageJob(shotId, {
+            status: 'processing',
+            percent: Math.max(pseudoPercent, 90),
+            message: '配图已生成，同步到页面…',
+            generationId,
+          })
+          continue
+        }
+      } catch {}
+      // 仍有 generationId 且未 completed：禁止用库里旧配图误判「已完成」
+      await refreshStoryboardsOnly()
+      patchNarrationShotImageJob(shotId, {
+        status: 'processing',
+        percent: pseudoPercent,
+        message: batchLabel ? `ComfyUI 生图中（${batchLabel}）` : 'ComfyUI 生图中…',
+        generationId,
+      })
+      continue
+    }
+
+    await refreshStoryboardsOnly()
+    const sb = sbs.value.find(s => s.id === shotId)
+    if (hasNarrationShotImage(sb)) {
+      patchNarrationShotImageJob(shotId, { status: 'completed', percent: 100, message: '生成完成' })
+      pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== shotId)
+      clearNarrationShotImageJobAfterSuccess(shotId)
+      if (shotsListFilter.value === 'processing' || shotsListFilter.value === 'pending') {
+        shotsListFilter.value = 'done'
+      }
+      return true
+    }
+
+    patchNarrationShotImageJob(shotId, {
+      status: 'processing',
+      percent: pseudoPercent,
+      message: batchLabel ? `ComfyUI 生图中（${batchLabel}）` : 'ComfyUI 生图中…',
+      generationId,
+    })
+  }
+
+  // Flux+Redux 在 3080 上可能超过 5 分钟；有 generationId 时必须等本任务完成，不能拿旧图交差
+  await refresh({ skipDramaRefetch: true })
+  if (generationId) {
+    try {
+      const gen = await imageAPI.get(generationId)
+      if (gen?.status === 'completed' && await finalizeNarrationShotImageReady(shotId, gen)) return true
+      const stillProcessing = gen?.status === 'processing' || gen?.status === 'pending'
+      if (stillProcessing) {
+        patchNarrationShotImageJob(shotId, {
+          status: 'processing',
+          percent: 92,
+          message: 'ComfyUI 仍在生图，请稍候（刷新页面会继续等待）',
+          generationId,
+        })
+        return false
+      }
+    } catch {}
+  } else {
+    const sbFinal = sbs.value.find(s => s.id === shotId)
+    if (hasNarrationShotImage(sbFinal)) {
+      patchNarrationShotImageJob(shotId, { status: 'completed', percent: 100, message: '生成完成' })
+      pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== shotId)
+      clearNarrationShotImageJobAfterSuccess(shotId)
+      return true
+    }
+  }
+
+  let stillProcessing = false
+  if (generationId) {
+    try {
+      const gen = await imageAPI.get(generationId)
+      stillProcessing = gen?.status === 'processing' || gen?.status === 'pending'
+      if (gen?.status === 'completed' && await finalizeNarrationShotImageReady(shotId, gen)) return true
+    } catch {}
+  }
+  if (stillProcessing) {
+    patchNarrationShotImageJob(shotId, {
+      status: 'processing',
+      percent: 92,
+      message: 'ComfyUI 仍在生图，请稍候（刷新页面会继续等待）',
+      generationId,
+    })
+    return false
+  }
+
+  patchNarrationShotImageJob(shotId, {
+    status: 'failed',
+    percent: 100,
+    message: '生成超时',
+    error: '轮询超时，请稍后刷新查看',
+  })
+  pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== shotId)
+  clearNarrationShotImageJob(shotId, 15000)
+  return false
+}
+
+function scheduleNarrationShotImagePoll(shotId, generationId, options = {}) {
+  const key = `${shotId}:${generationId || 'unknown'}`
+  if (narrationShotImagePollers.has(key)) return
+  narrationShotImagePollers.add(key)
+  void pollNarrationShotImageJob(shotId, generationId, options).finally(() => {
+    narrationShotImagePollers.delete(key)
+  })
+}
+
+async function resumeCharImagePollIfNeeded() {
+  if (!dramaId) return
+  try {
+    const rows = await imageAPI.list({ drama_id: dramaId })
+    const list = Array.isArray(rows) ? rows : []
+    const processing = list.filter(row => {
+      const status = String(row?.status || '').toLowerCase()
+      if (status !== 'processing' && status !== 'pending') return false
+      const charId = Number(row?.character_id ?? row?.characterId)
+      return Number.isFinite(charId) && charId > 0
+    })
+    for (const row of processing) {
+      const charId = Number(row?.character_id ?? row?.characterId)
+      const generationId = Number(row?.id)
+      if (!Number.isFinite(charId) || !Number.isFinite(generationId)) continue
+      if (!chars.value.some(c => c.id === charId)) continue
+      if (!pendingCharImageIds.value.includes(charId)) {
+        pendingCharImageIds.value.push(charId)
+      }
+      scheduleCharImagePoll(charId, generationId)
+    }
+  } catch {}
+}
+
+async function resumeNarrationShotImagePollIfNeeded() {
+  if (!dramaId || !isNarrationMode.value) return
+  reconcileNarrationShotImageState()
+  try {
+    const rows = await imageAPI.list({ drama_id: dramaId })
+    const list = Array.isArray(rows) ? rows : []
+
+    // 已完成但前端还停在「生图中」/无图：立刻用 local_path 挂上（刷新/HMR 丢轮询时常见）
+    const recentCompleted = list.filter((row) => {
+      const status = String(row?.status || '').toLowerCase()
+      if (status !== 'completed') return false
+      const frame = String(row?.frame_type || row?.frameType || '').toLowerCase()
+      if (frame && frame !== 'illustration') return false
+      return !!(row?.local_path || row?.localPath || row?.image_url || row?.imageUrl)
+    })
+    for (const row of recentCompleted) {
+      const shotId = Number(row?.storyboard_id ?? row?.storyboardId)
+      if (!Number.isFinite(shotId)) continue
+      const sb = sbs.value.find(item => item.id === shotId)
+      if (!sb) continue
+      if (hasNarrationShotImage(sb) && !isPendingNarrationShot(shotId) && !getNarrationShotImageJob(shotId)) continue
+      await finalizeNarrationShotImageReady(shotId, row)
+    }
+
+    const processing = list.filter(row => {
+      const status = String(row?.status || '').toLowerCase()
+      if (status !== 'processing' && status !== 'pending') return false
+      const frame = String(row?.frame_type || row?.frameType || '').toLowerCase()
+      return frame === 'illustration' || !frame
+    })
+    for (const row of processing) {
+      const shotId = Number(row?.storyboard_id ?? row?.storyboardId)
+      const generationId = Number(row?.id)
+      if (!Number.isFinite(shotId) || !Number.isFinite(generationId)) continue
+      const sb = sbs.value.find(item => item.id === shotId)
+      if (!sb) continue
+      if (hasNarrationShotImage(sb)) {
+        pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== shotId)
+        clearNarrationShotImageJob(shotId)
+        continue
+      }
+      if (!pendingNarrationShotIds.value.includes(shotId)) {
+        pendingNarrationShotIds.value.push(shotId)
+      }
+      patchNarrationShotImageJob(shotId, {
+        status: 'processing',
+        percent: getNarrationShotImageJob(shotId)?.percent ?? 20,
+        message: 'ComfyUI 生图中…',
+        generationId,
+      })
+      openNarrationShotImageProgressModal()
+      scheduleNarrationShotImagePoll(shotId, generationId)
+    }
+  } catch {}
+}
+
 async function genNarrationShotImage(sb) {
   const style = getNarrationImageStyle()
   const basePrompt = getNarrationImagePromptText(sb, style)
   if (!basePrompt) {
     toast.warning('该镜头没有旁白文案，无法生成配图')
+    return
+  }
+  if (needsFluxEnglishTranslate(sb)) {
+    toast.warning('请先点击「翻译英文」，再生成配图')
     return
   }
   const otherPending = narrationShotsPendingImage(sbs.value).filter(item => item.id !== sb.id)
@@ -7209,30 +10460,42 @@ async function genNarrationShotImage(sb) {
     updateField(sb, 'image_prompt', basePrompt)
   }
   try {
+    await ensureLocalModelForTask('image')
     if (!isPendingNarrationShot(sb.id)) pendingNarrationShotIds.value.push(sb.id)
+    patchNarrationShotImageJob(sb.id, { status: 'submitting', percent: 8, message: '正在提交任务…' })
+    openNarrationShotImageProgressModal()
     const characterIds = await resolveShotCharacterIds(sb)
     const payload = buildNarrationImageGeneratePayload(sb, visualChars.value, style, {
       storyboard_id: sb.id,
       drama_id: dramaId,
       frame_type: 'illustration',
     }, episodeImageModel.value, characterIds, sbs.value)
-    await imageAPI.generate(buildImagePayload(payload))
-    toast.success('配图生成中')
-    await refresh()
-    await watchAsyncResult(() => {
-      const target = sbs.value.find(s => s.id === sb.id)
-      const done = hasNarrationShotImage(target)
-      if (done) pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(item => item !== sb.id)
-      return done
+    const generation = await imageAPI.generate(buildImagePayload(payload))
+    const generationId = generation?.id ?? null
+    patchNarrationShotImageJob(sb.id, {
+      status: 'processing',
+      percent: 15,
+      message: 'ComfyUI 生图中…',
+      generationId,
     })
+    toast.success('配图生成中')
+    scheduleNarrationShotImagePoll(sb.id, generationId)
   } catch (e) {
+    patchNarrationShotImageJob(sb.id, {
+      status: 'failed',
+      percent: 100,
+      message: '提交失败',
+      error: e.message,
+    })
     pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(item => item !== sb.id)
+    clearNarrationShotImageJob(sb.id, 15000)
     toast.error(e.message)
   }
 }
 
 async function watchNarrationImageBatchResult(jobs, options = {}) {
-  const attempts = options.attempts ?? 60
+  // Qwen GGUF 冷启动可能要数分钟；原先 60×4s≈4min 易超时却任务已在后台完成
+  const attempts = options.attempts ?? 180
   const delay = options.delay ?? 4000
 
   for (let i = 0; i < attempts; i++) {
@@ -7241,28 +10504,57 @@ async function watchNarrationImageBatchResult(jobs, options = {}) {
     for (const job of jobs) {
       if (job.status === 'completed' || job.status === 'failed') continue
       if (!job.generationId) continue
+      const doneCount = jobs.filter(j => j.status === 'completed' || j.status === 'failed').length
+      const batchLabel = `${doneCount}/${jobs.length}`
       try {
         const gen = await imageAPI.get(job.generationId)
         if (gen?.status === 'failed') {
           job.status = 'failed'
           job.error = gen?.error_msg || gen?.errorMsg || '生成失败'
           pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+          patchNarrationShotImageJob(job.shotId, {
+            status: 'failed',
+            percent: 100,
+            message: '生成失败',
+            error: job.error,
+          })
+          clearNarrationShotImageJob(job.shotId, 15000)
           continue
         }
         if (gen?.status === 'completed') {
-          job.status = 'completed'
-          pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+          if (await finalizeNarrationShotImageReady(job.shotId, gen)) {
+            job.status = 'completed'
+          } else {
+            patchNarrationShotImageJob(job.shotId, {
+              status: 'processing',
+              percent: 95,
+              message: '配图已生成，同步到页面…',
+              generationId: job.generationId,
+            })
+          }
+          continue
         }
+        patchNarrationShotImageJob(job.shotId, {
+          status: 'processing',
+          percent: Math.min(92, 15 + Math.round((doneCount / Math.max(jobs.length, 1)) * 70)),
+          message: `ComfyUI 生图中（${batchLabel}）`,
+          generationId: job.generationId,
+        })
       } catch {}
     }
 
-    await refresh()
+    await refreshStoryboardsOnly()
+    // 批量任务同样：有 generationId 时禁止用旧配图误判完成（由上方 gen.status===completed 分支收尾）
     for (const job of jobs) {
       if (job.status === 'completed' || job.status === 'failed') continue
+      if (job.generationId) continue
       const sb = sbs.value.find(s => s.id === job.shotId)
       if (hasNarrationShotImage(sb)) {
         job.status = 'completed'
         pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+        patchNarrationShotImageJob(job.shotId, { status: 'completed', percent: 100, message: '生成完成' })
+        clearNarrationShotImageJobAfterSuccess(job.shotId)
+        jumpShotsListToShot(job.shotId)
       }
     }
 
@@ -7273,36 +10565,84 @@ async function watchNarrationImageBatchResult(jobs, options = {}) {
         toast.error(`${failed.length} 张配图失败：${failed[0].error || '请检查图像 API 配置'}`)
       } else if (failed.length) {
         toast.warning(`${completed.length} 张完成，${failed.length} 张失败`)
+      } else if (completed.length) {
+        toast.success(`${completed.length} 张配图已完成`)
+        if (shotsListFilter.value === 'processing' || shotsListFilter.value === 'pending') {
+          shotsListFilter.value = 'done'
+        }
       }
       await sleep(failed.length ? 1200 : 0)
+      reconcileNarrationShotImageState()
       return true
     }
   }
 
   for (const job of jobs) {
     if (job.status === 'processing' || job.status === 'pending') {
+      const sb = sbs.value.find(s => s.id === job.shotId)
+      if (hasNarrationShotImage(sb)) {
+        job.status = 'completed'
+        pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+        clearNarrationShotImageJob(job.shotId)
+        continue
+      }
+      // 超时前再拉一次 generation，可能后台已完成
+      if (job.generationId) {
+        try {
+          const gen = await imageAPI.get(job.generationId)
+          if (gen?.status === 'completed' && await finalizeNarrationShotImageReady(job.shotId, gen)) {
+            job.status = 'completed'
+            continue
+          }
+        } catch {}
+      }
       job.status = 'failed'
       job.error = job.error || '生成超时'
       pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
     }
   }
-  toast.warning('配图生成超时，请稍后重试')
+  toast.warning('配图生成超时，请稍后重试或刷新页面')
+  reconcileNarrationShotImageState()
   return false
 }
 
 async function batchNarrationShotImages(options) {
   const allPending = narrationShotsPendingImage(sbs.value)
-  const pending = options?.shots?.length ? options.shots : allPending
+  const filteredPending = allPending.filter(sb => storyboardMatchesNarrationImageCharFilter(sb))
+  const pending = options?.shots?.length
+    ? options.shots
+    : (options?.forceRegen
+      ? narrationImagesRegenShotsFiltered.value
+      : filteredPending)
   if (!pending.length) {
-    toast.info('所有需配图镜头已生成')
+    toast.info(options?.forceRegen
+      ? (narrationImageCharFilterActive.value
+        ? `「${narrationImageCharFilterLabel.value}」暂无已有配图可重新生成`
+        : '暂无已有配图可重新生成')
+      : (narrationImageCharFilterActive.value
+        ? `「${narrationImageCharFilterLabel.value}」相关镜头均已生成配图`
+        : '所有需配图镜头已生成'))
+    return
+  }
+  if (options?.forceRegen) {
+    const scopeHint = narrationImageCharFilterActive.value
+      ? `所选角色「${narrationImageCharFilterLabel.value}」`
+      : '本集'
+    if (!confirm(`将重新生成${scopeHint} ${pending.length} 张已有配图（覆盖原图）。是否继续？`)) return
+  }
+  const needTranslate = pending.filter(sb => needsFluxEnglishTranslate(sb))
+  if (needTranslate.length) {
+    toast.warning(`有 ${needTranslate.length} 个镜头尚未有 Flux 英文，请点「翻译英文」后再生图`)
     return
   }
   const pendingLabel = formatNarrationShotDisplayList(pending)
-  const pendingHint = pending.length < allPending.length
-    ? `${pendingLabel}（${pending.length}/${allPending.length} 张）`
+  const pendingHint = pending.length < allPending.length || narrationImageCharFilterActive.value
+    ? `${pendingLabel}（${pending.length}${narrationImageCharFilterActive.value ? ' · ' + narrationImageCharFilterLabel.value : '/' + allPending.length} 张）`
     : formatNarrationPendingImageHint(sbs.value)
-  if (!tryBeginBatch('narrationImages', `配图生成中：${pendingHint}…`)) return
+  const concurrency = resolveStoryboardImageBatchConcurrency()
+  if (!tryBeginBatch('narrationImages', `${options?.forceRegen ? '重新生成配图' : '配图生成中'}：${pendingHint}${concurrency > 1 ? ` · ${concurrency} 路并发` : ''}…`)) return
   if (pending.length) shotsListFilter.value = 'processing'
+  openNarrationShotImageProgressModal()
   const jobs = pending.map(sb => ({
     shotId: sb.id,
     generationId: null,
@@ -7310,49 +10650,97 @@ async function batchNarrationShotImages(options) {
     error: '',
   }))
   try {
+    await ensureLocalModelForTask('image')
     const style = getNarrationImageStyle()
     pendingNarrationShotIds.value = [...new Set([...pendingNarrationShotIds.value, ...pending.map(sb => sb.id)])]
-    const results = await Promise.allSettled(pending.map(async sb => {
+
+    let completedCount = 0
+    let failedCount = 0
+    const imageModel = String(episodeImageModel.value || '').trim()
+    const agnesBatch = imageModel.toLowerCase().startsWith('agnes-image')
+
+    const results = await mapWithConcurrency(pending, concurrency, async (sb, index) => {
+      const job = jobs[index]
+      if (!job) throw new Error('内部任务缺失')
+      const batchLabel = `${index + 1}/${pending.length}`
+      patchNarrationShotImageJob(sb.id, { status: 'submitting', percent: 6, message: concurrency > 1 ? `并发提交（${batchLabel}）…` : `排队提交（${batchLabel}）…` })
       const characterIds = await resolveShotCharacterIds(sb)
       const payload = buildNarrationImageGeneratePayload(sb, visualChars.value, style, {
         storyboard_id: sb.id,
         drama_id: dramaId,
         frame_type: 'illustration',
       }, episodeImageModel.value, characterIds, sbs.value)
-      return imageAPI.generate(buildImagePayload(payload))
-    }))
-    results.forEach((result, index) => {
-      const job = jobs[index]
-      if (!job) return
-      if (result.status === 'fulfilled') {
-        job.generationId = result.value?.id ?? null
-        job.status = job.generationId ? 'processing' : 'failed'
-        if (!job.generationId) {
-          job.error = '提交失败：未返回任务 ID'
-          pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
-        }
-      } else {
-        job.status = 'failed'
-        job.error = result.reason?.message || '提交失败'
-        pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== job.shotId)
+      if (agnesBatch) payload.model = 'agnes-image-2.0-flash'
+      const generation = await imageAPI.generate(buildImagePayload(payload))
+      job.generationId = generation?.id ?? null
+      if (!job.generationId) {
+        throw new Error('提交失败：未返回任务 ID')
       }
+      job.status = 'processing'
+      patchNarrationShotImageJob(job.shotId, {
+        status: 'processing',
+        percent: 12,
+        message: concurrency > 1
+          ? `Agnes 并发生图中（${batchLabel}）`
+          : `生图中（${batchLabel}）`,
+        generationId: job.generationId,
+      })
+      const ok = await pollNarrationShotImageJob(sb.id, job.generationId, {
+        batchLabel,
+        attempts: 240,
+        delay: concurrency > 1 ? 3000 : 4000,
+      })
+      if (!ok) {
+        throw new Error(getNarrationShotImageJob(sb.id)?.error || '生成失败')
+      }
+      job.status = 'completed'
+      return true
     })
-    const submitFailCount = jobs.filter(j => j.status === 'failed').length
-    const submitOkCount = jobs.filter(j => j.status === 'processing').length
-    if (submitFailCount && !submitOkCount) {
-      toast.error(`${submitFailCount} 个镜头配图提交失败（${pendingLabel}）`)
-    } else if (submitFailCount) {
-      toast.warning(`已提交 ${submitOkCount} 张，${submitFailCount} 张提交失败`)
-    } else {
-      toast.success(`已提交配图生成：${pendingHint}`)
+
+    for (let i = 0; i < results.length; i++) {
+      const row = results[i]
+      const job = jobs[i]
+      const sb = pending[i]
+      if (row?.status === 'fulfilled') {
+        completedCount++
+      } else {
+        failedCount++
+        const errMsg = row?.reason?.message || String(row?.reason || '提交失败')
+        if (job) {
+          job.status = 'failed'
+          job.error = errMsg
+        }
+        if (sb) {
+          pendingNarrationShotIds.value = pendingNarrationShotIds.value.filter(id => id !== sb.id)
+          patchNarrationShotImageJob(sb.id, {
+            status: 'failed',
+            percent: 100,
+            message: '生成失败',
+            error: errMsg,
+          })
+          clearNarrationShotImageJob(sb.id, 15000)
+        }
+      }
     }
-    if (submitOkCount) {
-      await refresh()
-      await watchNarrationImageBatchResult(jobs, { attempts: 60, delay: 4000 })
+
+    if (failedCount && !completedCount) {
+      toast.error(`${failedCount} 个镜头配图失败（${pendingLabel}）`)
+    } else if (failedCount) {
+      toast.warning(`${completedCount} 张完成，${failedCount} 张失败`)
+    } else {
+      toast.success(options?.forceRegen
+        ? `已重新生成 ${completedCount} 张配图${concurrency > 1 ? `（${concurrency} 路并发）` : ''}`
+        : `配图已全部生成：${pendingHint}${concurrency > 1 ? `（${concurrency} 路并发）` : ''}`)
     }
   } finally {
+    reconcileNarrationShotImageState()
     endBatch('narrationImages')
   }
+}
+
+
+async function regenerateNarrationShotImagesForFilter() {
+  return batchNarrationShotImages({ forceRegen: true })
 }
 
 function getStoryboardCover(s) {
@@ -7377,9 +10765,7 @@ function getShotReferenceImages(sb) {
     if (!value || refs.includes(value) || refs.length >= 6) return
     refs.push(value)
   }
-  const sceneId = sb?.scene_id || sb?.sceneId
-  const scene = scenes.value.find(item => item.id === sceneId)
-  pushRef(scene?.image_url || scene?.imageUrl)
+  // 定妆参考优先（Flux Redux 身份锁定）
   for (const charId of getStoryboardCharacterIds(sb)) {
     const char = chars.value.find(item => item.id === charId)
     pushRef(char?.image_url || char?.imageUrl)
@@ -7391,6 +10777,9 @@ function getShotReferenceImages(sb) {
   const last = getLastFrame(sb)
   pushRef(first)
   pushRef(last)
+  const sceneId = sb?.scene_id || sb?.sceneId
+  const scene = scenes.value.find(item => item.id === sceneId)
+  pushRef(scene?.image_url || scene?.imageUrl)
   return refs.filter(Boolean).slice(0, 6)
 }
 
@@ -7429,6 +10818,7 @@ async function genShotFrame(sb, frameType) {
   const referenceImages = getShotReferenceImages(sb)
   const key = framePendingKey(sb.id, frameType)
   try {
+    await ensureLocalModelForTask('image')
     if (!pendingShotFrameKeys.value.includes(key)) pendingShotFrameKeys.value.push(key)
     const body = buildImagePayload({
       storyboard_id: sb.id,
@@ -7453,23 +10843,49 @@ async function genShotFrame(sb, frameType) {
 }
 
 async function genVid(sb) {
+  const cover = resolveVideoReferenceImage(sb)
+  if (!cover) {
+    toast.error('请先生成配图再生成视频')
+    return
+  }
+  const anchor = resolveNarrationImageAnchorShot(sbs.value, sb) || sb
+  const duration = estimateVideoDurationSec(sb)
+  const prompt = buildLocalVideoPrompt(sb)
+  const videoModel = String(localModelBarVideoModel.value || DEFAULT_LOCAL_VIDEO_MODEL)
+  const isWan = /wan/i.test(videoModel)
   const params = {
     storyboard_id: sb.id,
     drama_id: dramaId,
-    prompt: sb.video_prompt || sb.videoPrompt || '',
-    duration: Number(sb.duration || 5),
+    prompt,
+    duration,
+    model: videoModel,
   }
-  const first = getFirstFrame(sb)
-  const last = getLastFrame(sb)
+  const first = getFirstFrame(anchor) || getFirstFrame(sb) || cover
+  const last = getLastFrame(sb) || getLastFrame(anchor)
   const refs = getRefs(sb)
-  if (first && last) { Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last }) }
-  else if (refs.length) { Object.assign(params, { reference_mode: 'multiple', reference_image_urls: [first, ...refs].filter(Boolean) }) }
-  else if (first) { Object.assign(params, { reference_mode: 'single', image_url: first }) }
+  if (isWan && videoModel.includes('flf') && first && last) {
+    Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last })
+  } else if (isWan && first && last && !videoModel.includes('i2v')) {
+    Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last })
+  } else if (refs.length) {
+    Object.assign(params, { reference_mode: 'multiple', reference_image_urls: [first, ...refs].filter(Boolean), image_url: cover })
+  } else {
+    Object.assign(params, { reference_mode: 'single', image_url: cover, first_frame_url: first || cover })
+  }
   try {
+    if (isWan) {
+      await ensureLocalModelForTask('video', { comfyVideoModel: videoModel })
+    }
     delete failedVideoMessages.value[sb.id]
+    delete videoProgressMessages.value[sb.id]
     if (!isPendingVideo(sb.id)) pendingVideoIds.value.push(sb.id)
+    videoProgressMessages.value = {
+      ...videoProgressMessages.value,
+      [sb.id]: isWan ? '已提交，等待 ComfyUI…' : '正在用 Glide/轻量运镜生成…',
+    }
     const generation = await videoAPI.generate(params)
-    toast.success('视频生成中')
+    toast.success(isWan ? 'Wan 视频生成中（较慢）' : '运镜动态生成中')
+    console.info(`[VideoGen] 已提交 storyboard=${sb.id} gen=${generation?.id} model=${videoModel}`)
     await refresh()
     pollVideoGeneration(generation?.id, sb.id)
   } catch (e) {
@@ -7478,44 +10894,107 @@ async function genVid(sb) {
   }
 }
 async function pollVideoGeneration(generationId, storyboardId) {
+  // 本地 Wan 图生视频常需 10～40+ 分钟（冷启动更久）；后端 waitComfy 上限约 2h
+  // 原先 120×4s≈8min 会误报超时，任务其实仍在 Comfy 跑
+  const maxAttempts = 900
+  const delayMs = 5000
+  const startedAt = Date.now()
+  const formatElapsed = (ms) => {
+    const sec = Math.max(0, Math.round(ms / 1000))
+    const m = Math.floor(sec / 60)
+    const s = sec % 60
+    return m > 0 ? `${m}分${String(s).padStart(2, '0')}秒` : `${s}秒`
+  }
   if (!generationId) {
     watchAsyncResult(() => {
       const target = sbs.value.find(s => s.id === storyboardId)
       const done = !!(target?.video_url || target?.videoUrl)
-      if (done) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+      if (done) {
+        pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+        delete videoProgressMessages.value[storyboardId]
+      }
       return done
-    }, 60, 4000)
+    }, maxAttempts, delayMs)
     return
   }
-  for (let i = 0; i < 120; i++) {
-    await sleep(4000)
+  let lastStatus = ''
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleep(delayMs)
     try {
       const res = await videoAPI.get(generationId)
-      await refresh()
+      lastStatus = String(res?.status || '')
+      const progressText = String(res?.error_msg || res?.errorMsg || '').trim()
+      const elapsed = formatElapsed(Date.now() - startedAt)
+      if (lastStatus === 'processing' || lastStatus === 'pending') {
+        const label = progressText || `视频生成中 · 已等待 ${elapsed}`
+        videoProgressMessages.value = { ...videoProgressMessages.value, [storyboardId]: label }
+        if (i === 0 || i % 3 === 0) {
+          console.info(`[VideoGen] storyboard=${storyboardId} gen=${generationId} ${label}`)
+        }
+      }
+      // 只刷分镜，避免每 5s 全量 refresh 拖慢页面
+      await refreshStoryboardsOnly().catch(() => {})
       if (res?.status === 'completed') {
         pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
         delete failedVideoMessages.value[storyboardId]
+        delete videoProgressMessages.value[storyboardId]
+        console.info(`[VideoGen] storyboard=${storyboardId} 完成，耗时 ${elapsed}`)
         toast.success('视频生成完成')
         return
       }
       if (res?.status === 'failed') {
         pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+        delete videoProgressMessages.value[storyboardId]
         failedVideoMessages.value = {
           ...failedVideoMessages.value,
-          [storyboardId]: res?.error_msg || res?.errorMsg || '视频生成失败',
+          [storyboardId]: progressText || '视频生成失败',
         }
+        console.error(`[VideoGen] storyboard=${storyboardId} 失败:`, failedVideoMessages.value[storyboardId])
         toast.error(failedVideoMessages.value[storyboardId])
         return
       }
-    } catch {}
+    } catch (err) {
+      if (i % 6 === 0) console.warn(`[VideoGen] storyboard=${storyboardId} 轮询异常`, err)
+    }
   }
+  // 仍在排队/处理中：后端可能还在跑，勿当硬失败
   pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
+  delete videoProgressMessages.value[storyboardId]
+  if (lastStatus === 'pending' || lastStatus === 'processing' || !lastStatus) {
+    toast.warning('视频生成较慢，后台仍在继续，请稍后刷新页面查看结果')
+    return
+  }
   failedVideoMessages.value = {
     ...failedVideoMessages.value,
     [storyboardId]: '视频生成超时',
   }
   toast.error('视频生成超时')
 }
+
+async function deleteShotVideo(sb) {
+  if (!hasVid(sb)) {
+    toast.info('该单元还没有视频')
+    return
+  }
+  if (isPendingVideo(sb.id)) {
+    toast.info('正在生成中，请稍后再删')
+    return
+  }
+  const label = getComposeUnitShotRangeLabel(sb, sbs.value)
+  if (!confirm(`确定删除 ${label} 的本地视频？可稍后重新生成。`)) return
+  try {
+    await storyboardAPI.update(sb.id, { video_url: null })
+    sb.video_url = null
+    sb.videoUrl = null
+    delete failedVideoMessages.value[sb.id]
+    delete videoProgressMessages.value[sb.id]
+    toast.success(`已删除 ${label} 视频`)
+    await refreshStoryboardsOnly()
+  } catch (e) {
+    toast.error(e.message || '删除视频失败')
+  }
+}
+
 async function doCompose(sb) {
   try {
     delete failedComposeMessages.value[sb.id]
@@ -7534,21 +11013,36 @@ async function doCompose(sb) {
   }
 }
 async function batchVideos() {
-  const pendingIds = sbs.value.filter(s => !hasVid(s)).map(s => s.id)
-  if (!pendingIds.length) return
-  if (!tryBeginBatch('videos', '批量视频生成中…')) return
+  const targets = videoGenTargets.value.filter(s => hasImg(s) && !hasVid(s))
+  if (!targets.length) {
+    toast.info('没有可生成的镜头（需有配图且尚未生成视频）')
+    return
+  }
+  const videoModel = String(localModelBarVideoModel.value || DEFAULT_LOCAL_VIDEO_MODEL)
+  const isWan = /wan/i.test(videoModel)
+  if (!tryBeginBatch('videos', isWan
+    ? `批量 Wan 视频中（串行 ${targets.length}）…`
+    : `批量动图风中（${targets.length}）…`)) return
   try {
-    pendingIds.forEach(id => {
-      const sb = sbs.value.find(item => item.id === id)
-      if (sb) genVid(sb)
-    })
-    pendingVideoIds.value = [...new Set([...pendingVideoIds.value, ...pendingIds])]
-    await watchAsyncResult(() => pendingIds.every(id => {
-      const target = sbs.value.find(s => s.id === id)
-      const done = !!(target?.video_url || target?.videoUrl)
-      if (done) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== id)
-      return done
-    }), 80, 4000)
+    if (isWan) {
+      await ensureLocalModelForTask('video', { comfyVideoModel: videoModel })
+    }
+    for (const sb of targets) {
+      pendingVideoIds.value = [...new Set([...pendingVideoIds.value, sb.id])]
+      try {
+        await genVid(sb)
+        // 串行：Wan 防爆显存；轻量动态也串行以免 FFmpeg 抢满磁盘
+        await watchAsyncResult(() => {
+          const target = sbs.value.find(s => s.id === sb.id)
+          return !!(target?.video_url || target?.videoUrl) || !!failedVideoMessages.value[sb.id]
+        }, isWan ? 900 : 120, isWan ? 5000 : 1500)
+      } catch (e) {
+        failedVideoMessages.value = {
+          ...failedVideoMessages.value,
+          [sb.id]: e?.message || '视频生成失败',
+        }
+      }
+    }
   } finally {
     endBatch('videos')
   }
@@ -8125,7 +11619,7 @@ function inferVoiceGender(name, desc = []) {
   if (/(?:^|[\s:/_-])male(?:[-_]|$)/i.test(text)) return '男声'
   if (/(?:^|[\s:/_-])female(?:[-_]|$)/i.test(text)) return '女声'
   if (/(男|青年|大爷|学长|\bboy\b|\bman\b|\bmale\b)/i.test(text)) return '男声'
-  if (/(女|少女|御姐|奶奶|\bgirl\b|\bwoman\b|\bfemale\b)/i.test(text)) return '女声'
+  if (/(女|少女|御姐|奶奶|晓晨|晨宝|笑笑|翠兰|老板娘|\bgirl\b|\bwoman\b|\bfemale\b)/i.test(text)) return '女声'
   return '中性'
 }
 
@@ -8224,7 +11718,232 @@ async function loadVoiceboxVoices() {
   }
 }
 
+async function loadGptSovitsVoices() {
+  try {
+    const catalog = await voicesAPI.gptsovitsCatalog().catch(() => null)
+    const rows = catalog?.voices || await voicesAPI.list('gptsovits').catch(() => [])
+    const [gsvHealth, indexHealth] = await Promise.all([
+      voicesAPI.gptsovitsHealth().catch(() => null),
+      voicesAPI.indexttsHealth().catch(() => null),
+    ])
+    gptsovitsAvailable.value = !!gsvHealth?.ok
+    indexttsAvailable.value = !!indexHealth?.ok
+    if (!rows?.length) return []
+    return rows.map(v => {
+      const desc = Array.isArray(v.description) ? v.description[0] : ''
+      return {
+        id: v.voice_id,
+        label: v.voice_name || stripGsvId(v.voice_id),
+        gender: inferVoiceGender(v.voice_name || v.voice_id, desc ? [desc] : v.description),
+        traits: '音色克隆',
+        suitable: desc || v.prompt_text || '参考音频克隆',
+        isChinese: true,
+        source: 'gptsovits',
+      }
+    })
+  } catch (e) {
+    console.error('Failed to load GPT-SoVITS voices', e)
+    gptsovitsAvailable.value = false
+    return []
+  }
+}
+
+function stripGsvId(id) {
+  return String(id || '').replace(/^gsv:/i, '').trim()
+}
+
+function toGsvRef(id) {
+  const raw = stripGsvId(id)
+  return raw ? `gsv:${raw}` : ''
+}
+
+function resolveDefaultClonedVoiceId(profiles = edgeVoiceProfiles.value) {
+  const byId = profiles.find(p => p.id === DEFAULT_CLONED_VOICE_ID || stripGsvId(p.id) === '008')
+  if (byId) return byId.id
+  const byName = profiles.find(p => /云希/.test(String(p.label || '')))
+  return byName?.id || profiles[0]?.id || DEFAULT_CLONED_VOICE_ID
+}
+
+function ensureClonedVoiceForEngine() {
+  if (!usesGsvClonedVoices(localTtsEngine.value)) return
+  const isEdgeVoice = /^zh-/i.test(String(localEdgeVoiceId.value || ''))
+  const missing = !edgeVoiceProfiles.value.some(p => p.id === localEdgeVoiceId.value)
+  if (missing || isEdgeVoice) {
+    localEdgeVoiceId.value = resolveDefaultClonedVoiceId(edgeVoiceProfiles.value)
+  }
+}
+
+/** 仅一次性把「从未显式选过引擎」的旧默认迁到 IndexTTS2；已选 Edge 则保留 */
+function migrateLegacyEdgeDefaultTtsPrefs() {
+  if (typeof window === 'undefined' || !epId.value) return
+  const flagKey = `episode-${epId.value}-tts-migrated-edge-default-v2`
+  if (window.localStorage.getItem(flagKey)) return
+  const storedEngine = window.localStorage.getItem(`episode-${epId.value}-local-tts-engine`)
+  const storedVoice = window.localStorage.getItem(`episode-${epId.value}-local-voice`)
+  // null = 旧默认未写入；不再把用户主动选择的 edge 强行改掉
+  if (storedEngine === null) {
+    localTtsEngine.value = DEFAULT_LOCAL_TTS_ENGINE
+    if (!storedVoice || storedVoice === DEFAULT_LOCAL_EDGE_VOICE || /^zh-/i.test(String(storedVoice))) {
+      localEdgeVoiceId.value = DEFAULT_CLONED_VOICE_ID
+    }
+    persistLocalTtsPrefs()
+  }
+  window.localStorage.setItem(flagKey, '1')
+}
+
+function resetGsvForm() {
+  gsvEditingId.value = ''
+  gsvForm.voice_id = ''
+  gsvForm.voice_name = ''
+  gsvForm.ref_audio_path = ''
+  gsvForm.prompt_text = ''
+  gsvForm.prompt_lang = 'zh'
+  gsvForm.language = '中文'
+  gsvForm.gpt_weights = ''
+  gsvForm.sovits_weights = ''
+  gsvPreviewUrl.value = ''
+  if (gsvFileInputRef.value) gsvFileInputRef.value.value = ''
+}
+
+const canSaveGsvVoice = computed(() => {
+  return !!stripGsvId(gsvForm.voice_id)
+    && !!String(gsvForm.voice_name || '').trim()
+    && !!String(gsvForm.ref_audio_path || '').trim()
+    && !!String(gsvForm.prompt_text || '').trim()
+})
+
+const gsvVoiceInCatalog = computed(() => {
+  const id = stripGsvId(gsvForm.voice_id)
+  return !!id && gsvCatalogVoices.value.some(v => stripGsvId(v.voice_id) === id)
+})
+
+async function loadGsvVoiceCatalog() {
+  if (!usesLocalModelPipeline.value) return
+  gsvLoading.value = true
+  try {
+    const catalog = await voicesAPI.gptsovitsCatalog().catch(() => null)
+    gsvCatalogVoices.value = catalog?.voices || []
+    await loadLocalCastVoices()
+    const [gsvHealth, indexHealth] = await Promise.all([
+      voicesAPI.gptsovitsHealth().catch(() => null),
+      voicesAPI.indexttsHealth().catch(() => null),
+    ])
+    gptsovitsAvailable.value = !!gsvHealth?.ok
+    indexttsAvailable.value = !!indexHealth?.ok
+  } catch (e) {
+    console.error('Failed to load GPT-SoVITS catalog', e)
+  } finally {
+    gsvLoading.value = false
+  }
+}
+
+async function onGsvFilePick(event) {
+  const file = event.target?.files?.[0]
+  if (!file) return
+  gsvUploading.value = true
+  try {
+    const res = await voicesAPI.uploadGptsovitsRef(file)
+    gsvForm.ref_audio_path = res?.ref_audio_path || res?.refAudioPath || ''
+    if (!gsvForm.ref_audio_path) throw new Error('上传成功但未返回路径')
+    toast.success('参考音频已上传')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    gsvUploading.value = false
+    if (gsvFileInputRef.value) gsvFileInputRef.value.value = ''
+  }
+}
+
+function editGsvVoice(v) {
+  const id = stripGsvId(v.voice_id)
+  gsvEditingId.value = id
+  gsvPanelOpen.value = true
+  gsvForm.voice_id = id
+  gsvForm.voice_name = v.voice_name || id
+  gsvForm.ref_audio_path = v.ref_audio_path || ''
+  gsvForm.prompt_text = v.prompt_text || ''
+  gsvForm.prompt_lang = v.prompt_lang || 'zh'
+  gsvForm.language = v.language || '中文'
+  gsvForm.gpt_weights = v.gpt_weights || ''
+  gsvForm.sovits_weights = v.sovits_weights || ''
+  gsvPreviewUrl.value = ''
+}
+
+async function saveGsvVoice() {
+  if (!canSaveGsvVoice.value) {
+    toast.warning('请填写音色 ID、名称、参考音频与参考文本')
+    return
+  }
+  gsvSaving.value = true
+  try {
+    const payload = {
+      voice_id: stripGsvId(gsvForm.voice_id),
+      voice_name: String(gsvForm.voice_name).trim(),
+      ref_audio_path: String(gsvForm.ref_audio_path).trim(),
+      prompt_text: String(gsvForm.prompt_text).trim(),
+      prompt_lang: String(gsvForm.prompt_lang || 'zh').trim() || 'zh',
+      language: String(gsvForm.language || '中文').trim() || '中文',
+    }
+    if (gsvForm.gpt_weights?.trim()) payload.gpt_weights = gsvForm.gpt_weights.trim()
+    if (gsvForm.sovits_weights?.trim()) payload.sovits_weights = gsvForm.sovits_weights.trim()
+    await voicesAPI.saveGptsovitsVoice(payload)
+    toast.success(gsvEditingId.value ? '音色已更新' : '音色已添加（项目全局可用）')
+    resetGsvForm()
+    gsvPanelOpen.value = false
+    await loadGsvVoiceCatalog()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    gsvSaving.value = false
+  }
+}
+
+async function deleteGsvVoice(v) {
+  const id = stripGsvId(v.voice_id)
+  if (!id) return
+  if (!window.confirm(`确定删除全局音色「${v.voice_name || id}」？`)) return
+  gsvDeletingId.value = id
+  try {
+    await voicesAPI.deleteGptsovitsVoice(id)
+    toast.success('已删除')
+    if (gsvEditingId.value === id) resetGsvForm()
+    await loadGsvVoiceCatalog()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    gsvDeletingId.value = ''
+  }
+}
+
+async function previewGsvVoice() {
+  const voiceId = toGsvRef(gsvForm.voice_id)
+  if (!voiceId || !gptsovitsAvailable.value) return
+  gsvPreviewing.value = true
+  gsvPreviewUrl.value = ''
+  try {
+    const res = await voicesAPI.previewLocal({
+      local_tts_engine: 'gptsovits',
+      local_voice: voiceId,
+      text: String(gsvForm.prompt_text || '').trim() || '这是一段 GPT-SoVITS 试听。',
+    })
+    const path = res?.audio_url || res?.audioUrl
+    if (!path) throw new Error('试听生成失败')
+    gsvPreviewUrl.value = path.startsWith('/') ? path : `/${path.replace(/^\/+/, '')}`
+    toast.success('试听已生成')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    gsvPreviewing.value = false
+  }
+}
+
 async function refreshLocalVoices() {
+  if (usesGsvClonedVoices(localTtsEngine.value)) {
+    const profiles = await loadGptSovitsVoices()
+    edgeVoiceProfiles.value = profiles
+    ensureClonedVoiceForEngine()
+    return
+  }
   if (localTtsEngine.value === 'voicebox') {
     const profiles = await loadVoiceboxVoices()
     edgeVoiceProfiles.value = profiles
@@ -8283,9 +12002,13 @@ watch(narratorChar, (c) => {
 watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs(); restoreImageDetectBatchPrefs(); restoreNarrationImageStylePref(); restoreOpeningPickPrefs() }, { immediate: true })
 watch(openingPickCount, persistOpeningPickPrefs)
 watch([imageDetectBatchThreshold, imageDetectBatchSize, imagePromptBatchSize], () => { persistImageDetectBatchPrefs() })
-watch([epId, isNarrationLikeMode], ([id, narrationLike]) => {
-  if (id && narrationLike) void loadLocalCastVoices()
+watch([epId, isNarrationLikeMode, isLocalComicMode], ([id, narrationLike, localComic]) => {
+  if (id && (narrationLike || localComic)) void loadLocalCastVoices()
 }, { immediate: true })
+watch([scriptStep, isLocalComicMode], ([step, localComic]) => {
+  if (localComic && step === LOCAL_DRAMA_VOICE_STEP) void loadGsvVoiceCatalog()
+  else if (!localComic && step === 3) void loadGsvVoiceCatalog()
+})
 watch([prodTab, epId, () => isNarrationLikeMode.value], ([tab]) => {
   if (tab === 'bgm' && epId.value) loadBgmLibrary()
   if (tab === 'voice' && isNarrationLikeMode.value) {
@@ -8297,17 +12020,30 @@ watch([composeListFilter, () => sbs.value.length], () => { composeListPage.value
 watch(composePageCount, (count) => {
   if (composeListPage.value > count) composeListPage.value = count
 })
+watch([videosListFilter, () => videoGenTargets.value.length], () => { videosListPage.value = 1 })
+watch(videosPageCount, (count) => {
+  if (videosListPage.value > count) videosListPage.value = count
+})
 watch(prodTab, (tab, prev) => {
+  if (usesLocalModelPipeline.value) {
+    syncLocalModelStage(`prod:${tab}`)
+  }
   if (tab === 'shots' || prev === 'shots') {
     shotsListFilter.value = 'all'
     shotsListPage.value = 1
   }
+  if (tab === 'videos') videosListPage.value = 1
   if (tab === 'dubbing') dubbingListPage.value = 1
 })
 watch(dubbingPageCount, (count) => {
   if (dubbingListPage.value > count) dubbingListPage.value = count
 })
 watch([shotsListFilter, () => sbs.value.length], () => { shotsListPage.value = 1 })
+watch(
+  () => sbs.value.map(sb => `${sb.id}:${sb.reference_images || sb.referenceImages || ''}:${sb.updated_at || sb.updatedAt || ''}`).join('|'),
+  () => { hydrateShotImageValidateFromStoryboards(false) },
+  { immediate: true },
+)
 watch(shotsPageCount, (count) => {
   if (shotsListPage.value > count) shotsListPage.value = count
 })
@@ -8319,11 +12055,50 @@ watch([panel, epId], ([p, id]) => {
   if (p === 'export' && id) loadBgmLibrary({ resumePoll: false })
 })
 
+async function onLocalTtsEngineChange(engine) {
+  if (!engine || engine === localTtsEngine.value) return
+  localTtsEngine.value = engine
+  persistLocalTtsPrefs()
+  if (!usesLocalModelPipeline.value) return
+  if (prodTab.value === 'dubbing' || panel.value === 'script') {
+    try {
+      await ensureLocalModelForTask('audio', { ttsEngine: resolveActiveLocalTtsEngine() })
+      await refreshLocalModelStatus()
+    } catch {
+      // ensureLocalModelForTask 已 toast
+    }
+  }
+}
+
 async function initLocalVoices() {
+  const readStoredVoice = () => (
+    typeof window !== 'undefined' && epId.value
+      ? window.localStorage.getItem(`episode-${epId.value}-local-voice`)
+      : null
+  )
+
+  if (usesLocalModelPipeline.value) {
+    await refreshLocalModelStatus()
+    await loadGsvVoiceCatalog()
+  }
   await refreshLocalVoices()
+
+  if (isLocalComicMode.value) localTtsEnabled.value = true
+
+  if (isNarrationLikeMode.value || isLocalComicMode.value) {
+    migrateLegacyEdgeDefaultTtsPrefs()
+    // Edge 引擎保留用户选择；仅 GSV 克隆引擎时清掉残留的 Edge 音色 ID
+    if (usesGsvClonedVoices(localTtsEngine.value) && (!readStoredVoice() || /^zh-/i.test(String(localEdgeVoiceId.value || '')))) {
+      ensureClonedVoiceForEngine()
+    }
+    if (epId.value) persistLocalTtsPrefs()
+  }
+
+  // 仅 Voicebox 完全不可用时才换引擎；IndexTTS2 未就绪仍保持选中，由 UI 显示「未就绪」
   if (!voiceboxAvailable.value && localTtsEngine.value === 'voicebox' && !edgeVoiceProfiles.value.length) {
-    localTtsEngine.value = 'edge'
+    localTtsEngine.value = DEFAULT_LOCAL_TTS_ENGINE
     await refreshLocalVoices()
+    if (epId.value) persistLocalTtsPrefs()
   }
 }
 
@@ -8345,11 +12120,40 @@ onMounted(() => {
   if (epId.value) {
     sessionStorage.removeItem(`huobao:tts-batch:${epId.value}`)
   }
+  if (usesLocalModelPipeline.value) {
+    void refreshLocalModelStatus().then(() => {
+      const stage = resolveLocalModelStageFromNav(activeSubStepKey.value)
+      if (stage && stage !== 'idle' && stageNeedsLocalHardware(stage)) {
+        syncLocalModelStage(activeSubStepKey.value)
+      }
+    })
+    startLocalModelBarPolling()
+  }
+})
+
+onBeforeUnmount(() => {
+  stopLocalModelBarPolling()
+})
+
+watch(usesLocalModelPipeline, enabled => {
+  if (enabled) startLocalModelBarPolling()
+  else stopLocalModelBarPolling()
+})
+
+watch(localModelSwitching, () => {
+  if (usesLocalModelPipeline.value) startLocalModelBarPolling()
+})
+
+watch(currentLocalModelStage, stage => {
+  if (!stage || stage === 'idle') return
+  if (localModelBarStage.value === stage) return
+  localModelBarStage.value = stage
 })
 
   return {
     BaseSelect,
     COMPOSE_LIST_PAGE_SIZE,
+    VIDEO_LIST_PAGE_SIZE,
     DEFAULT_LOCAL_EDGE_VOICE,
     DEFAULT_OPENING_IMAGE_COUNT,
     DEFAULT_TTS_SPEED,
@@ -8392,10 +12196,14 @@ onMounted(() => {
     audioConfigs,
     audioUploadInputRef,
     audioUploadTarget,
+    batchCharAppearances,
     batchCharImages,
+    batchDialogueExpressions,
+    regenerateAllCharPortraitImages,
     batchCompose,
     batchGenSamples,
     batchNarrationShotImages,
+    regenerateNarrationShotImagesForFilter,
     batchRunning,
     batchSceneImages,
     batchShotTTS,
@@ -8435,6 +12243,7 @@ onMounted(() => {
     canTestMerge,
     cancelCompose,
     cancelMerge,
+    charAppearancesPendingCount,
     charImagesPendingCount,
     charImgCount,
     charPortraitUseReferenceById,
@@ -8448,6 +12257,14 @@ onMounted(() => {
     clearAllNarrationImageDetect,
     clearAllNarrationImagePrompts,
     clearAllNarrationImages,
+    narrationImageCharFilterIds,
+    toggleNarrationImageCharFilter,
+    clearNarrationImageCharFilter,
+    selectAllNarrationImageCharFilter,
+    narrationImageCharFilterActive,
+    narrationImageCharFilterLabel,
+    showNarrationImageCharFilter,
+    narrationImagesRegenCount,
     clearAllNarrationTts,
     clearAllStoryboards,
     clearCharPortraitImage,
@@ -8467,6 +12284,13 @@ onMounted(() => {
     composeFilteredShots,
     composeListFilter,
     composeListPage,
+    videosListPage,
+    videosListFilter,
+    videosFilteredTargets,
+    videosPageCount,
+    videosPageShots,
+    videosDoneCount,
+    videosProcessingCount,
     composePageCount,
     composePageShots,
     composePendingCount,
@@ -8481,7 +12305,26 @@ onMounted(() => {
     continueGridSplit,
     copyAllCharPortraitPrompts,
     copyNarrationShotPrompt,
+    copyNarrationFluxPromptEn,
     copyNarrationShotPromptsBatch,
+    translateNarrationShotFluxPrompt,
+    translateAllNarrationFluxPrompts,
+    translateRemainingNarrationFluxPrompts,
+    clearAllNarrationFluxPrompts,
+    getNarrationFluxPromptEn,
+    needsFluxEnglishTranslate,
+    showFluxEnglishPrompt,
+    canUseFluxEnglishPrompt,
+    fluxEnglishPromptHint,
+    fluxPromptTranslating,
+    fluxPromptTranslatingShotIds,
+    fluxPromptClearing,
+    fluxPromptTranslateProgress,
+    fluxPromptTranslateProgressPercent,
+    narrationFluxTranslatePendingCount,
+    narrationFluxTranslateDoneCount,
+    narrationFluxEnglishCount,
+    showFluxTranslateRemaining,
     copyTextToClipboard,
     createGridAssignments,
     cropNarrationImageWatermarks,
@@ -8498,6 +12341,7 @@ onMounted(() => {
     customTtsUsesLocal,
     customTtsVoiceId,
     deleteShot,
+    deleteShotVideo,
     doBreakdown,
     doCompose,
     doExtract,
@@ -8540,9 +12384,18 @@ onMounted(() => {
     episodeNumber,
     episodeTextModel,
     episodeTextModelSupportsThinking,
+    headerTextModelOptions,
+    headerImageModelOptions,
+    headerVideoModelOptions,
+    audioConfigSelectOptions,
+    studioHeaderModelHint,
+    onLocalModelBarVideoChange,
+    onEpisodeVideoConfigChange,
+    onEpisodeAudioConfigChange,
     episodeTextThinking,
     estimateNarrationDurationLocal,
     evaluateComposePollDone,
+    extractRunning,
     expandedSrtIndex,
     exportBgmApplying,
     exportBgmMusicId,
@@ -8577,7 +12430,18 @@ onMounted(() => {
     frameModeOptions,
     framePendingKey,
     genCharImg,
+    genDialogueExpressions,
+    getDialoguePortraitExpressions,
+    dialoguePortraitExpressionSrc,
+    dialoguePortraitExpressionsReady,
+    DIALOGUE_PORTRAIT_EXPRESSIONS,
+    DIALOGUE_PORTRAIT_EXPRESSION_LABELS,
+    DIALOGUE_PORTRAIT_MAX_CHARS,
+    dialoguePortraitCharOverLimit,
+    dialoguePortraitExpressionReadyCount,
+    isPendingDialogueExpression,
     genNarrationShotImage,
+    getNarrationShotImageJob,
     genSample,
     genSceneImg,
     genShotFrame,
@@ -8597,6 +12461,7 @@ onMounted(() => {
     getDialogueSpeaker,
     getDialogueSpeakerRaw,
     getDialogueText,
+    getVideoUnitMergedText,
     getEffectiveTTSUrl,
     getFirstFrame,
     getGridPromptShotIds,
@@ -8711,13 +12576,48 @@ onMounted(() => {
     insertShotAfter,
     isBatchRunning,
     isCharPortraitUseReference,
+    isComicCharPortraitMode,
+    isComicStoryboardMode,
     isNarrationMode,
     isMotionComicMode,
+    isNovelComicMode,
+    isLocalComicMode,
+    isDialoguePortraitMode,
+    usesDialogueSpeakers,
+    usesLocalModelPipeline,
+    isDramaLikeMode,
+    usesComicStoryboardRules,
+    usesComicVisuals,
+    localModelOnline,
+    localModelStage,
+    localModelStageText,
+    localModelStatus,
+    localModelStatusHint,
+    localModelSwitching,
+    localModelPrepareHint,
+    localModelBarStage,
+    localModelBarStageOptions: LOCAL_MODEL_BAR_STAGE_OPTIONS,
+    localModelBarVideoModel,
+    localModelBarModelOptions,
+    localModelBarModelValue,
+    localModelBarModelDisabled,
+    localModelBarStageBadge,
+    localModelBarStatusText,
+    localModelBarHint,
+    localModelBarNeedsHardware,
+    onLocalModelBarStageChange,
+    onLocalModelBarModelChange,
+    onLocalModelBarLoad,
+    currentLocalModelStage,
+    showCharsDualLocalModelControls,
+    runLocalModelStage,
+    unloadLocalModels,
     isNarrationTitleShot,
     isNarratorCharacter,
     isPendingCharAppearance,
     isPendingCharImage,
     isPendingCharRecognize,
+    isPendingCharStyleValidate,
     isPendingCompose,
     isPendingNarrationShot,
     isPendingTtsShot,
@@ -8728,6 +12628,7 @@ onMounted(() => {
     isTTSIgnorable,
     isTestComposeUnitReady,
     lastScriptChatDraft,
+    lastScriptChatDraftCharCount,
     loadBgmLibrary,
     loadConfigs,
     loadEdgeVoices,
@@ -8735,6 +12636,7 @@ onMounted(() => {
     loadNarrationSrtFiles,
     loadUploadedEpisodeAudio,
     loadLocalCastVoices,
+    loadGptSovitsVoices,
     loadVoiceboxVoices,
     loadVoices,
     localEdgeVoiceId,
@@ -8742,6 +12644,7 @@ onMounted(() => {
     localScript,
     localTtsEnabled,
     localTtsEngine,
+    onLocalTtsEngineChange,
     localTtsEngineLabel,
     localTtsEngineOptions,
     localTtsPreviewBump,
@@ -8794,6 +12697,7 @@ onMounted(() => {
     narrationAudioUploading,
     narrationBreakdownSummary,
     narrationBreaking,
+    storyboardBreaking,
     narrationCharCount,
     narrationCopyBatchIndex,
     narrationCopyBatchOptions,
@@ -8817,12 +12721,16 @@ onMounted(() => {
     charImageFailedAt,
     charImageError,
     resolveCharImageDisplayTime,
+    charPortraitImageSrc,
     charRecognizeGeneratedAt,
     charRecognizeFailedAt,
     charRecognizeError,
+    charStyleValidateResult,
     shotScanGeneratedAt,
     shotScanFailedAt,
     shotScanError,
+    shotScanResult,
+    shotImageValidatePanel,
     bgmDescGeneratedAt,
     bgmDescFailedAt,
     bgmDescError,
@@ -8834,6 +12742,23 @@ onMounted(() => {
     narrationImageBreakdownProgress,
     narrationImageBreakdownProgressMessage,
     narrationImageBreakdownProgressPercent,
+    narrationImageBreakdownModalOpen,
+    narrationImageBreakdownModalTitle,
+    narrationImageBreakdownModalProcessing,
+    narrationImageBreakdownModalDone,
+    narrationImageBreakdownModalFailed,
+    narrationImageBreakdownModalBatchLabel,
+    narrationImageBreakdownModalSummary,
+    closeNarrationImageBreakdownModal,
+    cancelNarrationImageBreakdown,
+    narrationShotImageModalOpen,
+    narrationShotImageModalTitle,
+    narrationShotImageModalProcessing,
+    narrationShotImageModalDone,
+    narrationShotImageModalFailed,
+    narrationShotImageModalPercent,
+    narrationShotImageModalSummary,
+    closeNarrationShotImageProgressModal,
     narrationImageBreaking,
     narrationImageDescUploading,
     narrationImageMetaJson,
@@ -8929,6 +12854,7 @@ onMounted(() => {
     pendingCharAppearanceIds,
     pendingCharImageIds,
     pendingCharRecognizeIds,
+    pendingCharStyleValidateIds,
     pendingComposeIds,
     pendingMergeKind,
     pendingNarrationShotIds,
@@ -8966,6 +12892,8 @@ onMounted(() => {
     rawLen,
     readTextFile,
     recognizeCharPortrait,
+    validateCharPortraitStyle,
+    batchValidateCharPortraitStyles,
     referPreviousEpisode,
     refresh,
     refreshBgmLibrary,
@@ -8995,6 +12923,7 @@ onMounted(() => {
     restoreOpeningPickPrefs,
     resumeComposePollIfNeeded,
     resumeNarrationImageBreakdownPollIfNeeded,
+    resumeNarrationShotImagePollIfNeeded,
     reuseNarrationShotImage,
     reuseNextNarrationShotImage,
     rn,
@@ -9015,6 +12944,11 @@ onMounted(() => {
     saveWatermarkText,
     sbs,
     scanNarrationShotImage,
+    batchScanNarrationShotImages,
+    clearShotImageValidatePanel,
+    jumpToShotFromValidate,
+    rebuildShotImageValidatePanel,
+    hydrateShotImageValidateFromStoryboards,
     sceneImagesPendingCount,
     sceneImgCount,
     scenes,
@@ -9025,12 +12959,23 @@ onMounted(() => {
     scriptChatInput,
     scriptChatMessages,
     scriptChatModel,
+    scriptChatAssistantLabel,
+    scriptChatGenModeHint,
+    scriptChatInputPlaceholder,
+    scriptChatManualHint,
+    scriptChatManualPlaceholder,
+    scriptChatMinChars,
+    scriptChatModelOptionsForPicker,
+    scriptChatModelSupportsThinking,
     scriptChatQuickHints,
     scriptChatScrollRef,
+    scriptChatStepTitle,
     scriptChatThinking,
+    showScriptChatPanel,
     scriptContent,
     scriptGenMode,
     scriptLen,
+    hasEpisodeScriptDraft,
     scriptStep,
     scriptSteps,
     scriptStoryboardListNo,
@@ -9074,6 +13019,7 @@ onMounted(() => {
     showBgmModelPicker,
     showBottomBubble,
     showImageModelPicker,
+    showImageStylePicker,
     showReferPreviousEpisodeToggle,
     showTextModelPicker,
     sidebarJumpSteps,
@@ -9109,6 +13055,10 @@ onMounted(() => {
     storyboardChatQuickHints,
     storyboardChatScrollRef,
     storyboardStep,
+    dramaRawStep,
+    dramaRewriteStep,
+    dramaExtractStep,
+    dramaVoiceStep,
     studioReady,
     stripNarrationDialoguePrefix,
     stripRawEmphasis,
@@ -9131,6 +13081,7 @@ onMounted(() => {
     testMergeUrl,
     testMergeVideoSrc,
     textModelOptions,
+    localLlmModelOptions,
     textModelSupportsThinking,
     textModelSupportsVision,
     tickBgmPoll,
@@ -9173,12 +13124,16 @@ onMounted(() => {
     updateField,
     updateGridAssignment,
     updateNarrationImagePrompt,
+    updateNarrationFluxPromptEn,
     updateNarrationImagePromptById,
     uploadImageFile,
     uploadedEpisodeAudio,
     videoConfigSelectOptions,
     videoConfigs,
     videoFailMessage,
+    videoProgressMessage,
+    videoGenTargets,
+    estimateVideoDurationSec,
     videosPendingCount,
     visibleBgmLibrary,
     visualCharNameCount,
@@ -9188,6 +13143,35 @@ onMounted(() => {
     voiceSampleCount,
     narratorVoiceSelectOptions,
     voiceSelectOptions,
+    scriptVoiceSelectOptions,
+    scriptVoiceProfiles,
+    gptsovitsAvailable,
+    indexttsAvailable,
+    localTtsVoicePlaceholder,
+    localTtsEngineReady,
+    localTtsSupportsEmotionInstruct,
+    localTtsUsesGsvVoices,
+    gsvCatalogVoices,
+    gsvLoading,
+    gsvSaving,
+    gsvUploading,
+    gsvPreviewing,
+    gsvDeletingId,
+    gsvEditingId,
+    gsvPreviewUrl,
+    gsvPanelOpen,
+    gsvFileInputRef,
+    gsvForm,
+    canSaveGsvVoice,
+    gsvVoiceInCatalog,
+    stripGsvId,
+    resetGsvForm,
+    loadGsvVoiceCatalog,
+    onGsvFilePick,
+    editGsvVoice,
+    saveGsvVoice,
+    deleteGsvVoice,
+    previewGsvVoice,
     voiceboxAvailable,
     voiceboxInstructOptions,
     voiceboxModelLoaded,

@@ -54,6 +54,7 @@ app.post('/suggest-description', async (c) => {
   try {
     const description = await generateBgmDescriptionWithLLM({
       model: body.model,
+      textModel: body.text_model || body.textModel,
       description: body.description,
       content,
       episodeId: body.episode_id ? Number(body.episode_id) : undefined,

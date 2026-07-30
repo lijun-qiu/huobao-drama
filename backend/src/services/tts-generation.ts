@@ -10,8 +10,12 @@ import { getAudioConfigById } from './ai.js'
 import { getTTSAdapter } from './adapters/registry.js'
 import { generateEdgeTTS } from './edge-tts-local.js'
 import { mapLocalVoiceToEdge, resolveLocalTtsVoiceInput } from './local-tts-resolve.js'
+import { generateGptSovitsTTS } from './gpt-sovits-tts.js'
+import { generateIndexTtsTTS } from './index-tts-tts.js'
 import { generateVoiceboxTTS, resolveVoiceboxProfileId, type VoiceboxModelSize } from './voicebox-tts.js'
+import type { LocalTtsEngine } from './local-tts-resolve.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
+import { ensureLocalModelStage } from './local-model-manager.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 import { applyTtsSpeedToAudioFile, resolveTtsSpeed } from '../utils/tts-speed.js'
 import { getAbsolutePath } from '../utils/storage.js'
@@ -28,7 +32,7 @@ interface TTSParams {
   emotion?: string
   configId?: number | null
   localTts?: boolean
-  localTtsEngine?: 'edge' | 'voicebox'
+  localTtsEngine?: LocalTtsEngine
   voiceboxInstruct?: string | null
   voiceboxModelSize?: VoiceboxModelSize | null
 }
@@ -59,10 +63,28 @@ export async function generateTTS(params: TTSParams): Promise<string> {
   const speed = resolveTtsSpeed(params.speed)
 
   if (params.localTts) {
-    if (params.localTtsEngine === 'voicebox') {
+    const engine: LocalTtsEngine = params.localTtsEngine === 'voicebox'
+      ? 'voicebox'
+      : params.localTtsEngine === 'gptsovits'
+        ? 'gptsovits'
+        : params.localTtsEngine === 'indextts'
+          ? 'indextts'
+          : 'edge'
+    await ensureLocalModelStage('audio', { ttsEngine: engine })
+    if (engine === 'voicebox') {
       const profileId = await resolveVoiceboxProfileId(params.voice)
       const path = await generateVoiceboxTTS(params.text, profileId, null, params.voiceboxInstruct, params.voiceboxModelSize)
       return applyTtsSpeedToAudioFile(path, speed)
+    }
+    if (engine === 'indextts') {
+      const path = await generateIndexTtsTTS(params.text, params.voice, {
+        emotionText: params.voiceboxInstruct,
+        speed,
+      })
+      return applyTtsSpeedToAudioFile(path, speed)
+    }
+    if (engine === 'gptsovits') {
+      return generateGptSovitsTTS(params.text, params.voice, speed)
     }
     return generateEdgeTTS(params.text, params.voice, speed)
   }
@@ -149,7 +171,7 @@ export async function generateVoiceSample(
   voiceProvider?: string | null,
   charMeta?: { role?: string | null; appearance?: string | null; description?: string | null },
   voiceboxModelSize?: VoiceboxModelSize | null,
-): Promise<{ path: string; engine: 'edge' | 'voicebox' | 'api' }> {
+): Promise<{ path: string; engine: 'edge' | 'voicebox' | 'gptsovits' | 'api' }> {
   const sampleText = `你好，我是${characterName}。很高兴认识你，这是我的声音试听。`
   const meta = {
     name: characterName,
@@ -176,6 +198,33 @@ export async function generateVoiceSample(
       localTtsEngine: 'edge',
     })
     return { path, engine: 'edge' }
+  }
+
+  if (resolved.engine === 'gptsovits') {
+    try {
+      const path = await generateTTS({
+        text: sampleText,
+        voice: resolved.voice,
+        localTts: true,
+        localTtsEngine: 'gptsovits',
+      })
+      return { path, engine: 'gptsovits' }
+    } catch (err: any) {
+      const edgeVoice = mapLocalVoiceToEdge(meta)
+      logTaskWarn('VoiceSample', 'gptsovits-fallback-edge', {
+        characterName,
+        voiceId,
+        error: err.message,
+        edgeVoice,
+      })
+      const path = await generateTTS({
+        text: sampleText,
+        voice: edgeVoice,
+        localTts: true,
+        localTtsEngine: 'edge',
+      })
+      return { path, engine: 'edge' }
+    }
   }
 
   try {

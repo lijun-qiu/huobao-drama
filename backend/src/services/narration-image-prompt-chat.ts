@@ -3,7 +3,7 @@
  */
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { resolveEpisodeTextThinking, resolveNarrationImageTextModel } from '../constants/text-models.js'
+import { resolveEpisodeTextThinking, resolveNarrationImageTextModel, isZhipuGlmTextModel } from '../constants/text-models.js'
 import { resolveNarrationImageStyle } from '../constants/art-styles.js'
 import {
   generateNarrationImagePromptsOnly,
@@ -23,7 +23,7 @@ import {
   type NarrationImageChatTurn,
 } from './narration-image-chat-context.js'
 import { createWorkflowChatStatusReporter } from './workflow-chat-status.js'
-import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { usesMotionComicVisuals, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 
 const NARRATION_PROMPT_CHAT_SYSTEM = [
   '你是火宝解说流水线的「配图文案」助手，帮助创作者生成与调整六维配图提示词。',
@@ -42,23 +42,23 @@ const NARRATION_PROMPT_CHAT_SYSTEM = [
 ].join('\n')
 
 const MOTION_COMIC_PROMPT_CHAT_SYSTEM = [
-  '你是火宝漫画解说流水线的「漫画配图文案」助手，帮助创作者生成与调整六维漫画配图 prompt。',
+  '你是火宝漫画解说流水线的「漫画配图文案」助手，帮助创作者生成与调整漫画配图 prompt。',
   '',
-  '【六维文案结构】',
-  '每条 prompt 含：画风规格、画面主体、年代场景、核心细节动作、光影色调、镜头视角、质感要求；国漫条漫粗线平涂，正常头身比。',
-  '主要配角须写定妆外貌；构图适合上下运镜浏览；禁止写实血腥。',
+  '【整段文案】',
+  '每条 prompt 写成一整段连贯中文（不用【】六维标签），但仍须覆盖：画风、画面主体、年代场景、核心动作、光影、镜头、质感；短剧解说高清国漫，冷色戏剧光，正常头身比。',
+  '主要配角须写定妆对照；构图适合上下运镜浏览；禁止写实血腥。',
   '',
   '【职责】',
-  '- 解读各段配图文案就绪情况，解释六维要素是否完整。',
+  '- 解读各段配图文案就绪情况，说明关键信息是否齐全。',
   '- 用户说「开始生成」「补全文案」「重新生成」等时，由系统后台执行；你解读进度与结果。',
-  '- 用户要求改某段文案，先给出修改建议或完整六维示例。',
+  '- 用户要求改某段文案，先给出修改建议或完整整段示例。',
   '- 不要输出 markdown 代码块包裹的 JSON；用自然语言 + #镜号 说明。',
   '',
   '回复简洁；用 #01 段号 指代配图锚点镜头。',
 ].join('\n')
 
 function resolvePromptChatSystem(episodeId: number): string {
-  return isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+  return usesMotionComicVisuals(resolveEpisodeProductionMode(episodeId))
     ? MOTION_COMIC_PROMPT_CHAT_SYSTEM
     : NARRATION_PROMPT_CHAT_SYSTEM
 }
@@ -83,7 +83,9 @@ function buildPromptChatMessages(params: NarrationImagePromptChatParams) {
   }
 
   const textModel = resolveNarrationImageTextModel(ep, params.textModel)
-  const textThinking = resolveEpisodeTextThinking(ep, params.textThinking)
+  const textThinking = isZhipuGlmTextModel(textModel)
+    ? false
+    : resolveEpisodeTextThinking(ep, params.textThinking)
   const context = buildPromptChatContextBlock(params.episodeId)
 
   const apiMessages: TextChatMessage[] = [
@@ -98,13 +100,20 @@ function formatPromptResultSummary(result: {
   paragraph_count?: number
   prompts_generated?: number
   prompts_updated?: number
+  prompts_missing?: number
   already_complete?: boolean
+  partial?: boolean
 }) {
   if (result.already_complete) {
     return `全部 ${result.paragraph_count ?? result.prompts_generated ?? 0} 条配图文案已就绪，无需重新生成。`
   }
   const total = result.paragraph_count ?? result.prompts_generated ?? 0
+  const missing = Number(result.prompts_missing || 0)
   const updated = result.prompts_updated
+  if (missing > 0 || result.partial) {
+    const done = typeof updated === 'number' ? updated : Math.max(0, total - missing)
+    return `本轮已生成 ${done} 段，仍有 ${missing || '若干'} 段失败已自动跳过。请点「补全缺失文案」继续，无需从头重跑。`
+  }
   if (typeof updated === 'number' && updated > 0) {
     return `文案生成完成：本次更新 ${updated} 段，当前共 ${total} 条配图文案已就绪。`
   }
@@ -126,7 +135,25 @@ export async function streamNarrationImagePromptChat(
 
     const reportStatus = createWorkflowChatStatusReporter(send)
     const onProgress: NarrationImageBreakdownProgressCallback = patch => {
-      reportStatus(patch.message)
+      const parts = [patch.message]
+      if (patch.batch && patch.batch_count) {
+        parts.push(`第 ${patch.batch}/${patch.batch_count} 批`)
+      }
+      if (typeof patch.percent === 'number') {
+        parts.push(`${patch.percent}%`)
+      }
+      reportStatus(parts.filter(Boolean).join(' · '))
+      // 每段中英文落库后通知前端刷新镜头列表
+      if (patch.prompts_saved != null || patch.prompts_saved_seq != null) {
+        send({
+          type: 'prompts_saved',
+          prompts_saved: patch.prompts_saved,
+          flux_en_saved: patch.flux_en_saved,
+          prompts_saved_seq: patch.prompts_saved_seq,
+          message: patch.message,
+          percent: patch.percent,
+        })
+      }
     }
 
     try {
@@ -137,7 +164,8 @@ export async function streamNarrationImagePromptChat(
       const opts = {
         batchSize: params.promptBatchSize,
         textModel,
-        textThinking,
+        // 批量写六维文案强制不思考；对话闲聊仍可用上方 textThinking
+        textThinking: false,
         onProgress,
       }
 
@@ -166,11 +194,20 @@ export async function streamNarrationImagePromptChat(
     turnCount: turns.length,
   })
 
-  const systemWithResult = promptSummary
-    ? apiMessages.map((m, i) => i === 0 && m.role === 'system'
-      ? { ...m, content: `${m.content}\n\n【刚完成的生成结果】\n${promptSummary}` }
-      : m)
-    : apiMessages
+  // 批量生成刚结束：直接回结果摘要，勿再开一轮「思考」聊天。
+  // 本集常开 text_thinking + deepseek，第二次请求 max_tokens=4096 会被思考链吃光 → 界面像「断了」，
+  // 即便文案已落库也会被前端 catch 成整次失败。
+  if (promptSummary && (params.action === 'run' || params.action === 'retry_missing')) {
+    send({ type: 'delta', content: promptSummary })
+    return {
+      reply: promptSummary,
+      model: textModel,
+      text_thinking: false,
+      prompt: { summary: promptSummary },
+    }
+  }
+
+  const systemWithResult = apiMessages
 
   let reply = await streamTextChatMessages(
     systemWithResult,
@@ -184,15 +221,16 @@ export async function streamNarrationImagePromptChat(
     {
       onThinkingDelta: (_delta, full) => send({ type: 'thinking', content: full }),
     },
+    'narration_image_prompt',
   )
 
-  reply = reply.trim() || promptSummary
+  reply = reply.trim()
   if (!reply) throw new Error('AI 未返回内容')
 
   return {
     reply,
     model: textModel,
     text_thinking: textThinking,
-    prompt: promptSummary ? { summary: promptSummary } : undefined,
+    prompt: undefined,
   }
 }

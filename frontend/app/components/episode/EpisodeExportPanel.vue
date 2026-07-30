@@ -53,7 +53,7 @@
                 <BaseSelect
                   :model-value="localEdgeVoiceId"
                   :options="edgeVoiceSelectOptions"
-                  :placeholder="localTtsEngine === 'voicebox' ? '选择 Voicebox 音色' : '选择本地音色'"
+                  :placeholder="localTtsVoicePlaceholder()"
                   searchable
                   style="min-width:220px"
                   @update:model-value="localEdgeVoiceId = $event"
@@ -67,10 +67,10 @@
                   @update:model-value="localVoiceboxModelSize = $event"
                 />
                 <BaseSelect
-                  v-if="localTtsEngine === 'voicebox'"
+                  v-if="localTtsSupportsEmotionInstruct"
                   :model-value="localVoiceboxInstructPreset"
                   :options="voiceboxInstructOptions"
-                  placeholder="风格/感情"
+                  :placeholder="localTtsEngine === 'indextts' ? '情感指令' : '风格/感情'"
                   style="min-width:140px"
                   @update:model-value="localVoiceboxInstructPreset = $event"
                 />
@@ -80,7 +80,7 @@
                   title="感情风格仅对 CustomVoice 预设音色生效（如 Eric、Serena）；克隆音色请改用预设或选「默认（自然）」"
                 >当前音色不支持感情</span>
                 <input
-                  v-if="localTtsEngine === 'voicebox' && localVoiceboxInstructPreset === VOICEBOX_INSTRUCT_CUSTOM"
+                  v-if="localTtsSupportsEmotionInstruct && localVoiceboxInstructPreset === VOICEBOX_INSTRUCT_CUSTOM"
                   v-model="localVoiceboxInstructCustom"
                   class="input"
                   type="text"
@@ -91,20 +91,26 @@
                 <button
                   class="btn btn-sm"
                   type="button"
-                  :disabled="localTtsPreviewing || !localEdgeVoiceId || (localTtsEngine === 'voicebox' && !voiceboxAvailable) || (localTtsEngine === 'voicebox' && !selectedVoiceboxVoiceReady())"
+                  :disabled="localTtsPreviewing || !localEdgeVoiceId || !localTtsEngineReady() || (localTtsEngine === 'voicebox' && !selectedVoiceboxVoiceReady())"
                   @click="previewLocalTtsVoice(openingSubtitleText)"
                 >
                   {{ localTtsPreviewing ? '试听生成中…' : '试听' }}
                 </button>
                 <button
                   class="btn btn-primary"
-                  :disabled="openingAudioGenerating || (localTtsEngine === 'voicebox' && !voiceboxAvailable)"
+                  :disabled="openingAudioGenerating || !localTtsEngineReady() || (localTtsEngine === 'voicebox' && !selectedVoiceboxVoiceReady())"
                   @click="generateOpeningAudio"
                 >
                   {{ openingAudioGenerating ? '生成中…' : (openingAudioUrl ? '重新生成配音' : `${localTtsEngineLabel} 生成配音`) }}
                 </button>
+                <span v-if="localTtsEngine === 'indextts' && indexttsAvailable" class="tag ok">IndexTTS2 已就绪</span>
+                <span v-else-if="localTtsEngine === 'indextts' && !indexttsAvailable" class="tag warn">IndexTTS2 未就绪</span>
+                <span v-if="localTtsEngine === 'gptsovits' && gptsovitsAvailable" class="tag ok">GPT-SoVITS 已连接</span>
+                <span v-else-if="localTtsEngine === 'gptsovits' && !gptsovitsAvailable" class="tag warn">GPT-SoVITS 未运行</span>
                 <span v-if="localTtsEngine === 'voicebox' && voiceboxAvailable" class="tag ok">Voicebox 已连接</span>
                 <span v-else-if="localTtsEngine === 'voicebox' && !voiceboxAvailable" class="tag warn">Voicebox 未运行</span>
+                <span v-if="localTtsEngine === 'edge' && localModelOnline.edgeTts" class="tag ok">Edge TTS 可用</span>
+                <span v-else-if="localTtsEngine === 'edge' && !localModelOnline.edgeTts" class="tag warn">Edge TTS 不可用</span>
                 <span
                   v-if="localTtsEngine === 'voicebox' && voiceboxAvailable && !voiceboxModelLoaded"
                   class="tag warn"

@@ -85,6 +85,8 @@ export interface ImageGenerationRecord {
   size?: string | null
   frameType?: string | null
   referenceImages?: string | null
+  /** 与 referenceImages 顺序对齐的定妆标签（Agnes 多图合成 identity map） */
+  portraitLabels?: string[] | null
   // ... 其他字段
 }
 

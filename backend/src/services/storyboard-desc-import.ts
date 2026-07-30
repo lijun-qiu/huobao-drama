@@ -7,7 +7,7 @@ import {
   parseNarrationImageMeta,
   sortStoryboardsByOrder,
 } from './narration-image.js'
-import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { isMotionComicMode, usesMotionComicStoryboardRules, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 import {
   getEpisodeVisualCharacters,
   linkStoryboardCharactersFromText,
@@ -236,7 +236,7 @@ export async function importNarrationImageDesc(episodeId: number, text: string) 
     .orderBy(asc(schema.storyboards.storyboardNumber))
     .all()
   if (!storyboards.length) {
-    const motionComic = isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+    const motionComic = usesMotionComicStoryboardRules(resolveEpisodeProductionMode(episodeId))
     throw new Error(motionComic ? '请先完成漫画分镜' : '请先完成旁白分镜')
   }
 

@@ -67,14 +67,14 @@ function dataUrlToBlob(dataUrl: string): Blob | null {
 function strengthenGptImagePrompt(prompt: string): string {
   const p = prompt || ''
   const isPortrait = /character reference portrait|character design sheet|定妆|turnaround view|三视图/i.test(p)
-  const isThreeViewPortrait = isPortrait && /modern Chinese webtoon comic|manhua illustration|16:9 widescreen character|现代国漫条漫|现代高质量 2D 动漫|动漫三视图|素体小人三视图|白色素体|极简素体|three views front side back|turnaround design sheet/i.test(p)
+  const isThreeViewPortrait = isPortrait && /modern Chinese webtoon comic|manhua illustration|16:9 widescreen character|现代国漫条漫|电影感日系|现代高质量 2D 动漫|现代高质量电影感|动漫三视图|素体小人三视图|白色素体|极简素体|three views front side back|turnaround design sheet|Makoto Shinkai/i.test(p)
   const isTitle = /opening background|title overlay|片头|reserved for dynamic title/i.test(p)
 
   if (isThreeViewPortrait) {
-    const isMotionComic = /现代国漫条漫|webtoon comic|粗黑线描|manhua illustration/i.test(p)
+    const isMotionComic = /电影感日系|Makoto Shinkai|现代高质量电影感|现代国漫条漫|webtoon comic|粗黑线描|manhua illustration/i.test(p)
     const isMinimal = /素体小人|白色素体|极简素体|stick figure/i.test(p)
     const styleLine = isMotionComic
-      ? '现代国漫条漫二维动漫定妆，粗黑线描、平涂赛璐璐、正常头身比、英俊帅气动漫脸型、纯白色背景'
+      ? '现代高质量电影感日系动漫定妆，细腻线稿、柔和赛璐璐、正常头身比、英俊帅气动漫脸型、纯白色背景'
       : isMinimal
         ? '极简素体小人定妆，白色简笔轮廓、正常卡通脸圆眼带高光、纯白色背景'
         : '现代高质量二维动漫定妆，清晰线稿、赛璐璐平涂、正常头身比、英俊帅气动漫脸型、纯白色背景'

@@ -1,5 +1,5 @@
 /**
- * FFmpeg 多镜头拼接 — 将所有合成后的镜头视频拼接为一集
+ * FFmpeg ????? ? ????????????????
  */
 import ffmpeg from 'fluent-ffmpeg'
 import { createHash } from 'crypto'
@@ -17,22 +17,22 @@ import { PAGE_FLIP_TRANSITION_SEC, PAGE_FLIP_XFADE_TRANSITION, computePageFlipMe
 import { mixPageFlipSfxIntoMergedVideo } from './ffmpeg-page-flip-sfx.js'
 import { BGM_VOICE_MIX_VOLUME } from './bgm-generation.js'
 import { isStoryboardTitleShot, resolveStoryboardVisualSource, sortStoryboardsByOrder } from './narration-image.js'
-import { isMotionComicMode, parseProductionMode } from '../constants/production-mode.js'
+import { usesMotionComicVisuals, parseProductionMode } from '../constants/production-mode.js'
 import { buildComposeUnitGroups, listComposeMergeUnitStoryboards } from './ffmpeg-compose.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 
-/** 换配图时转场：剪映风格云朵软擦除（自左向右） */
+/** ?????????????????????? */
 const IMAGE_CHANGE_TRANSITION = PAGE_FLIP_XFADE_TRANSITION
 const IMAGE_CHANGE_TRANSITION_SEC = PAGE_FLIP_TRANSITION_SEC
-/** 镜头边界音频淡入淡出（秒），消除硬切咔声；不用 acrossfade 避免旁白叠音 */
+/** ??????????????????????? acrossfade ?????? */
 const AUDIO_BOUNDARY_FADE_SEC = Math.max(0, Number(process.env.MERGE_AUDIO_BOUNDARY_FADE_SEC ?? 0.04))
 const MAX_XFADE_INPUTS = 48
-/** 成片拼接并行路数（按镜头/画面段分配，最后再总拼接） */
+/** ????????????/????????????? */
 const MERGE_LANE_CONCURRENCY = Math.max(1, Number(process.env.MERGE_LANE_CONCURRENCY || 3))
-/** 镜头数低于此值时不启用多路拼接 */
+/** ??????????????? */
 const MERGE_LANE_MIN_CLIPS = Math.max(4, Number(process.env.MERGE_LANE_MIN_CLIPS || 12))
 
 type ComposedStoryboard = {
@@ -70,9 +70,9 @@ export type MergeProgress = {
 export type MergeOptions = {
   bgmMusicId?: number
   bgmVolume?: number
-  /** 是否在成片前拼接开幕视频，默认 false */
+  /** ??????????????? false */
   includeOpeningVideo?: boolean
-  /** 测试导出：仅拼接前 N 个已合成镜头，不写回 episode.videoUrl */
+  /** ????????? N ?????????? episode.videoUrl */
   clipLimit?: number
 }
 
@@ -154,7 +154,7 @@ function parseTimemark(timemark: string): number {
 
 function supersedeStaleMerges(episodeId: number) {
   db.update(schema.videoMerges)
-    .set({ status: 'cancelled', errorMsg: '被新任务取代', completedAt: now() })
+    .set({ status: 'cancelled', errorMsg: '??????', completedAt: now() })
     .where(and(
       eq(schema.videoMerges.episodeId, episodeId),
       inArray(schema.videoMerges.status, ['processing', 'pending']),
@@ -198,7 +198,7 @@ function getVideoDuration(filePath: string): Promise<number> {
   })
 }
 
-/** 按镜头顺序拼接，保留各镜配音；边界短 fade 消除硬切咔声 */
+/** ?????????????????? fade ?????? */
 async function concatComposedVideos(
   absPaths: string[],
   outputPath: string,
@@ -232,7 +232,7 @@ function resolveAudioBoundaryFadeSec(durationSec: number): number {
   return Math.min(AUDIO_BOUNDARY_FADE_SEC, Math.max(0.008, durationSec / 4))
 }
 
-/** 每段首尾短 fade，concat 边界不再「咔」一声（不叠两段旁白） */
+/** ????? fade?concat ????????????????? */
 function appendAudioDeclickFilter(parts: string[], inputIndex: number, durationSec: number, outLabel: string): void {
   const dStr = fmtFilterSec(durationSec)
   const fade = resolveAudioBoundaryFadeSec(durationSec)
@@ -252,7 +252,7 @@ function appendAudioDeclickFilter(parts: string[], inputIndex: number, durationS
 }
 
 /**
- * 转场拼接旁白：整段保留、硬切不叠音；仅首段片头可极短 fade-in 防咔声。
+ * ?????????????????????????? fade-in ????
  */
 function appendAudioFullForMerge(
   parts: string[],
@@ -335,8 +335,8 @@ async function runFilterComplexMerge(
 }
 
 /**
- * 换配图段之间：云朵软擦除转场（smoothright，自左向右）；
- * 叠加型 td 秒：各段画面/旁白完整保留，转场期间旁白连续硬切播放（不截断、不叠音、不插静音）。
+ * ???????????????smoothright???????
+ * ??? td ??????/??????????????????????????????????
  */
 function buildXfadeFilterScript(segmentDurations: number[]): string {
   const td = IMAGE_CHANGE_TRANSITION_SEC
@@ -408,7 +408,7 @@ async function mergeSegmentsWithPageFlip(
   )
 }
 
-/** 硬切拼接（无云朵转场） */
+/** ??????????? */
 async function mergeSegmentsWithConcat(
   segments: MergeSegment[],
   outputPath: string,
@@ -426,7 +426,7 @@ function episodeUsesMotionComicMerge(episodeId: number): boolean {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return false
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
-  return isMotionComicMode(parseProductionMode(drama?.metadata))
+  return usesMotionComicVisuals(parseProductionMode(drama?.metadata))
 }
 
 async function mergeSegmentsSequential(
@@ -460,7 +460,7 @@ async function mergeSegmentsSequential(
   }
 }
 
-/** 同配图组：多镜顺序拼接；每镜已有独立成片时直接 concat */
+/** ??????????????????????? concat */
 async function buildMergeSegments(
   groups: VisualGroup[],
   storyboards: ComposedStoryboard[],
@@ -562,7 +562,7 @@ function splitContiguousBalanced<T>(items: T[], laneCount: number): T[][] {
   return lanes.length ? lanes : [items]
 }
 
-/** 按画面段顺序切分，尽量均衡每路镜头数 */
+/** ?????????????????? */
 function splitGroupsIntoContiguousLanes(groups: VisualGroup[], laneCount: number): VisualGroup[][] {
   if (laneCount <= 1 || groups.length <= 1) return [groups]
   const totalClips = groups.reduce((sum, group) => sum + group.clips.length, 0)
@@ -630,7 +630,7 @@ async function buildLaneOutputFromGroups(
   outputPath: string,
   run: ActiveMergeRun,
 ): Promise<{ duration: number; temps: string[] }> {
-  if (!groups.length) throw new Error('拼接分路为空')
+  if (!groups.length) throw new Error('??????')
 
   const { segments, temps } = await buildMergeSegments(groups, storyboards, run)
   if (run.cancelled) return { duration: 0, temps }
@@ -738,7 +738,7 @@ async function mergeEpisodeBodyWithLanes(
           mergeId: run.mergeId,
           phase: 'merging',
           percent: Math.min(65, pct),
-          message: `分路 ${finishedLanes}/${effectiveLaneCount} 已完成（复用缓存）…`,
+          message: `?? ${finishedLanes}/${effectiveLaneCount} ??????????`,
           updatedAt: Date.now(),
         })
         return
@@ -772,7 +772,7 @@ async function mergeEpisodeBodyWithLanes(
         mergeId: run.mergeId,
         phase: 'merging',
         percent: Math.min(65, pct),
-        message: `分路 ${finishedLanes}/${effectiveLaneCount} 已生成（${Math.min(MERGE_LANE_CONCURRENCY, effectiveLaneCount)} 路并发）…`,
+        message: `?? ${finishedLanes}/${effectiveLaneCount} ????${Math.min(MERGE_LANE_CONCURRENCY, effectiveLaneCount)} ?????`,
         updatedAt: Date.now(),
       })
     },
@@ -792,13 +792,13 @@ async function mergeEpisodeBodyWithLanes(
     mergeId: run.mergeId,
     phase: 'merging',
     percent: 68,
-    message: `正在总拼接 ${effectiveLaneCount} 路分片…`,
+    message: `????? ${effectiveLaneCount} ????`,
     updatedAt: Date.now(),
   })
 
   const finalSegments = laneOutputs.filter(Boolean)
   if (finalSegments.length !== effectiveLaneCount) {
-    throw new Error('部分拼接分路失败，请重试（已完成分路已缓存）')
+    throw new Error('??????????????????????')
   }
 
   if (usePageFlip) {
@@ -889,7 +889,7 @@ async function mergeOrderedSegmentsToOutput(
   fs.renameSync(tempOut, outputPath)
 }
 
-/** 无开幕/片头时，黑场云朵擦除进入正文第一镜（与换配图切镜一致） */
+/** ???/??????????????????????????? */
 const BODY_LEAD_DURATION_SEC = IMAGE_CHANGE_TRANSITION_SEC
 
 function runFfmpegSync(args: string[]) {
@@ -991,13 +991,13 @@ async function mixBgmIntoMergedVideo(
   fs.renameSync(tempOut, videoPath)
 }
 
-/** 镜头合成阶段已混入 BGM 时，成片级再混会叠两层 */
+/** ????????? BGM ??????????? */
 function storyboardsHaveEmbeddedBgm(storyboards: Array<{ bgmAudioUrl?: string | null }>): boolean {
   return storyboards.some(sb => !!String(sb.bgmAudioUrl || '').trim())
 }
 
 /**
- * 拼接一集的所有合成镜头视频
+ * ?????????????
  */
 export async function mergeEpisodeVideos(episodeId: number, dramaId: number, options: MergeOptions = {}): Promise<number> {
   const clipLimit = options.clipLimit && options.clipLimit > 0 ? Math.floor(options.clipLimit) : undefined
@@ -1011,7 +1011,7 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number, opt
   const absPaths = videos.map(v => toAbsPath(v))
   const missing = absPaths.filter(p => !fs.existsSync(p))
   if (missing.length > 0) {
-    throw new Error(`部分镜头视频文件缺失（${missing.length}/${videos.length}），请重新合成后再导出`)
+    throw new Error(`???????????${missing.length}/${videos.length}???????????`)
   }
 
   logTaskStart('MergeTask', clipLimit ? 'episode-merge-test' : 'episode-merge', {
@@ -1025,7 +1025,7 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number, opt
 
   supersedeStaleMerges(episodeId)
 
-  // 创建 merge 记录
+  // ?? merge ??
   const ts = now()
   const res = db.insert(schema.videoMerges).values({
     episodeId,
@@ -1045,7 +1045,7 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number, opt
   }).run()
   const mergeId = Number(res.lastInsertRowid)
 
-  // 异步执行（doMerge 内会重新读取 DB，避免用到启动瞬间的旧镜头快照）
+  // ?????doMerge ?????? DB????????????????
   doMerge(mergeId, episodeId, options).catch(err => {
     if (String(err?.message || '').includes('SIGKILL') || String(err?.message || '').includes('code 255')) return
     logTaskError('MergeTask', 'episode-merge', { mergeId, episodeId, error: err.message })
@@ -1060,7 +1060,7 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number, opt
   return mergeId
 }
 
-/** 取消正在进行的拼接（可立即打断 ffmpeg） */
+/** ??????????????? ffmpeg? */
 export function cancelEpisodeMerge(episodeId: number): boolean {
   const active = activeMerges.get(episodeId)
   if (!active) return false
@@ -1073,7 +1073,7 @@ export function cancelEpisodeMerge(episodeId: number): boolean {
   }
 
   db.update(schema.videoMerges)
-    .set({ status: 'cancelled', errorMsg: '已取消', completedAt: now() })
+    .set({ status: 'cancelled', errorMsg: '???', completedAt: now() })
     .where(eq(schema.videoMerges.id, active.mergeId))
     .run()
 
@@ -1091,19 +1091,19 @@ function loadEpisodeStoryboards(episodeId: number) {
   )
 }
 
-/** 主片拼接：按合成单元（与镜头合成一致，不含片头）取代表镜成片 */
+/** ?????????????????????????????? */
 function loadComposedStoryboards(episodeId: number, clipLimit?: number): ComposedStoryboard[] {
   const storyboards = loadEpisodeStoryboards(episodeId)
   const unitTotal = buildComposeUnitGroups(storyboards).length
   const composedUnits = listComposeMergeUnitStoryboards(storyboards) as ComposedStoryboard[]
   if (clipLimit && clipLimit > 0) {
     if (composedUnits.length === 0) {
-      throw new Error('没有已合成的正文单元，请先在「镜头合成」完成至少 1 个单元')
+      throw new Error('???????????????????????? 1 ???')
     }
     return composedUnits.slice(0, clipLimit)
   }
   if (composedUnits.length !== unitTotal) {
-    throw new Error(`尚有 ${unitTotal - composedUnits.length} 个合成单元未完成（${composedUnits.length}/${unitTotal}），请先在「镜头合成」完成全部单元后再导出`)
+    throw new Error(`?? ${unitTotal - composedUnits.length} ?????????${composedUnits.length}/${unitTotal}?????????????????????`)
   }
   if (composedUnits.length === 0) throw new Error('No videos to merge')
   return composedUnits
@@ -1116,7 +1116,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     mergeId,
     phase: 'preparing',
     percent: 2,
-    message: '正在准备拼接…',
+    message: '???????',
     updatedAt: Date.now(),
   })
 
@@ -1125,10 +1125,10 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
   const absPaths = storyboards.map(sb => toAbsPath(sb.composedVideoUrl!))
   const missing = absPaths.filter(p => !fs.existsSync(p))
   if (missing.length > 0) {
-    throw new Error(`部分镜头视频文件缺失（${missing.length}/${absPaths.length}），请重新合成后再导出`)
+    throw new Error(`???????????${missing.length}/${absPaths.length}???????????`)
   }
 
-  // 估算总时长，用于进度条
+  // ???????????
   let totalDurationSec = 0
   for (let i = 0; i < absPaths.length; i++) {
     totalDurationSec += await getVideoDuration(absPaths[i])
@@ -1138,7 +1138,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       mergeId,
       phase: 'preparing',
       percent: prepPct,
-      message: `正在校验镜头 (${i + 1}/${absPaths.length})…`,
+      message: `?????? (${i + 1}/${absPaths.length})?`,
       updatedAt: Date.now(),
     })
   }
@@ -1165,8 +1165,8 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       phase: 'merging',
       percent,
       message: usePageFlip
-        ? `正在云朵转场拼接 (${percent}%)…`
-        : `正在拼接 ${storyboards.length} 个合成单元 (${percent}%)…`,
+        ? `???????? (${percent}%)?`
+        : `???? ${storyboards.length} ????? (${percent}%)?`,
       updatedAt: Date.now(),
     })
   }
@@ -1181,7 +1181,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         mergeId,
         phase: 'merging',
         percent: 10,
-        message: `正在按 ${resolveMergeLaneCount(storyboards.length, groups.length, true)} 路并发生成拼接分片…`,
+        message: `??? ${resolveMergeLaneCount(storyboards.length, groups.length, true)} ??????????`,
         updatedAt: Date.now(),
       })
     } else {
@@ -1189,7 +1189,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         mergeId,
         phase: 'merging',
         percent: 10,
-        message: `正在按 ${resolveMergeLaneCount(storyboards.length, groups.length, false)} 路并发拼接 ${storyboards.length} 个镜头…`,
+        message: `??? ${resolveMergeLaneCount(storyboards.length, groups.length, false)} ????? ${storyboards.length} ????`,
         updatedAt: Date.now(),
       })
     }
@@ -1236,7 +1236,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       mergeId,
       phase: 'finalizing',
       percent: 86,
-      message: '正在为首镜添加云朵入场…',
+      message: '????????????',
       updatedAt: Date.now(),
     })
     try {
@@ -1246,7 +1246,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       totalDurationSec += BODY_LEAD_DURATION_SEC
       pageFlipTimes = prependPageFlipSegmentTimeline(BODY_LEAD_DURATION_SEC, pageFlipTimes)
     } catch (err: any) {
-      throw new Error(`首镜云朵入场失败: ${err.message}`)
+      throw new Error(`????????: ${err.message}`)
     } finally {
       cleanupTempFiles(tempFiles)
     }
@@ -1259,7 +1259,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         mergeId,
         phase: 'finalizing',
         percent: 88,
-        message: '正在拼接开幕视频…',
+        message: '?????????',
         updatedAt: Date.now(),
       })
       try {
@@ -1268,7 +1268,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         totalDurationSec += openingDur
         pageFlipTimes = prependPageFlipSegmentTimeline(openingDur, pageFlipTimes)
       } catch (err: any) {
-        throw new Error(`开幕视频拼接失败: ${err.message}`)
+        throw new Error(`????????: ${err.message}`)
       }
     }
   }
@@ -1280,7 +1280,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
       mergeId,
       phase: 'finalizing',
       percent: 90,
-      message: '正在混入转场音效…',
+      message: '?????????',
       updatedAt: Date.now(),
     })
     try {
@@ -1290,7 +1290,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
         cmd => attachMergeCommand(run, cmd),
       )
     } catch (err: any) {
-      throw new Error(`转场音效混音失败: ${err.message}`)
+      throw new Error(`????????: ${err.message}`)
     }
   }
 
@@ -1311,13 +1311,13 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
           mergeId,
           phase: 'finalizing',
           percent: 92,
-          message: '正在混入 BGM…',
+          message: '???? BGM?',
           updatedAt: Date.now(),
         })
         try {
           await mixBgmIntoMergedVideo(deliverPath, bgmAbs, options.bgmVolume ?? BGM_VOICE_MIX_VOLUME, run)
         } catch (err: any) {
-          throw new Error(`BGM 混音失败: ${err.message}`)
+          throw new Error(`BGM ????: ${err.message}`)
         }
       } else {
         logTaskError('MergeTask', 'bgm-missing', { mergeId, episodeId, bgmMusicId: options.bgmMusicId })
@@ -1331,11 +1331,11 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     mergeId,
     phase: 'finalizing',
     percent: 96,
-    message: '正在写入成片…',
+    message: '???????',
     updatedAt: Date.now(),
   })
 
-  // 获取时长
+  // ????
   const duration = Math.round(await getVideoDuration(deliverPath))
 
   const bareRelative = `static/merged/${bareFilename}`
@@ -1353,7 +1353,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     mergeCacheFingerprint,
   }
 
-  // 更新 merge 记录
+  // ?? merge ??
   db.update(schema.videoMerges)
     .set({
       status: 'completed',
@@ -1365,7 +1365,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     })
     .where(eq(schema.videoMerges.id, mergeId)).run()
 
-  // 测试导出不写回整集成片 URL
+  // ??????????? URL
   if (!clipLimit) {
     db.update(schema.episodes)
       .set({ videoUrl: mergedRelative, updatedAt: now() })
@@ -1376,7 +1376,7 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
     mergeId,
     phase: 'finalizing',
     percent: 100,
-    message: '拼接完成',
+    message: '????',
     updatedAt: Date.now(),
   })
   clearMergeProgress(episodeId)
@@ -1399,10 +1399,10 @@ async function doMerge(mergeId: number, episodeId: number, options: MergeOptions
 }
 
 /**
- * 将开幕视频合并进已完成的主片（翻页转场拼接在片头）
+ * ?????????????????????????
  */
 export async function mergeOpeningIntoEpisodeVideo(episodeId: number, dramaId: number): Promise<number> {
-  if (isMergeActive(episodeId)) throw new Error('有拼接任务正在进行，请稍候')
+  if (isMergeActive(episodeId)) throw new Error('?????????????')
 
   const [sourceMerge] = db.select().from(schema.videoMerges)
     .where(and(
@@ -1413,20 +1413,20 @@ export async function mergeOpeningIntoEpisodeVideo(episodeId: number, dramaId: n
     .limit(1)
     .all()
 
-  if (!sourceMerge?.mergedUrl) throw new Error('请先完成全集拼接')
+  if (!sourceMerge?.mergedUrl) throw new Error('????????')
 
   const sourceMeta = parseMergeScenes(sourceMerge.scenes)
-  if (sourceMeta.withOpening) throw new Error('当前成片已包含开幕视频，如需重新合并请先「重新拼接」主视频')
+  if (sourceMeta.withOpening) throw new Error('?????????????????????????????')
 
   const bodyRel = sourceMeta.bodyMergedUrl || sourceMerge.mergedUrl
   const bodyAbs = toAbsPath(bodyRel)
-  if (!fs.existsSync(bodyAbs)) throw new Error('主片文件缺失，请重新拼接')
+  if (!fs.existsSync(bodyAbs)) throw new Error('????????????')
 
   const openingAbs = resolveEpisodeOpeningVideoAbs(episodeId)
-  if (!openingAbs) throw new Error('请先生成开幕视频')
+  if (!openingAbs) throw new Error('????????')
 
   const titleAbs = sourceMeta.withTitle ? resolveEpisodeTitleVideoAbs(episodeId) : null
-  if (sourceMeta.withTitle && !titleAbs) throw new Error('片头视频文件缺失，请重新生成')
+  if (sourceMeta.withTitle && !titleAbs) throw new Error('??????????????')
 
   logTaskStart('MergeTask', 'opening-merge', { episodeId, dramaId, sourceMergeId: sourceMerge.id })
 
@@ -1488,7 +1488,7 @@ async function doOpeningMerge(
     mergeId,
     phase: 'finalizing',
     percent: 15,
-    message: '正在合并开幕视频…',
+    message: '?????????',
     updatedAt: Date.now(),
   })
 
@@ -1547,7 +1547,7 @@ async function doOpeningMerge(
       mergeId,
       phase: 'finalizing',
       percent: 100,
-      message: '开幕视频已合并完成',
+      message: '?????????',
       updatedAt: Date.now(),
     })
     clearMergeProgress(episodeId)
@@ -1566,10 +1566,10 @@ async function doOpeningMerge(
 }
 
 /**
- * 将片头视频合并进已完成的主片（翻页转场拼接在开幕之后、正文之前）
+ * ????????????????????????????????
  */
 export async function mergeTitleIntoEpisodeVideo(episodeId: number, dramaId: number): Promise<number> {
-  if (isMergeActive(episodeId)) throw new Error('有拼接任务正在进行，请稍候')
+  if (isMergeActive(episodeId)) throw new Error('?????????????')
 
   const [sourceMerge] = db.select().from(schema.videoMerges)
     .where(and(
@@ -1580,20 +1580,20 @@ export async function mergeTitleIntoEpisodeVideo(episodeId: number, dramaId: num
     .limit(1)
     .all()
 
-  if (!sourceMerge?.mergedUrl) throw new Error('请先完成全集拼接')
+  if (!sourceMerge?.mergedUrl) throw new Error('????????')
 
   const sourceMeta = parseMergeScenes(sourceMerge.scenes)
-  if (sourceMeta.withTitle) throw new Error('当前成片已包含片头视频，如需重新合并请先「重新拼接」主视频')
+  if (sourceMeta.withTitle) throw new Error('?????????????????????????????')
 
   const bodyRel = sourceMeta.bodyMergedUrl || sourceMerge.mergedUrl
   const bodyAbs = toAbsPath(bodyRel)
-  if (!fs.existsSync(bodyAbs)) throw new Error('主片文件缺失，请重新拼接')
+  if (!fs.existsSync(bodyAbs)) throw new Error('????????????')
 
   const titleAbs = resolveEpisodeTitleVideoAbs(episodeId)
-  if (!titleAbs) throw new Error('请先生成片头视频')
+  if (!titleAbs) throw new Error('????????')
 
   const openingAbs = sourceMeta.withOpening ? resolveEpisodeOpeningVideoAbs(episodeId) : null
-  if (sourceMeta.withOpening && !openingAbs) throw new Error('开幕视频文件缺失，请重新生成')
+  if (sourceMeta.withOpening && !openingAbs) throw new Error('??????????????')
 
   logTaskStart('MergeTask', 'title-merge', { episodeId, dramaId, sourceMergeId: sourceMerge.id })
 
@@ -1655,7 +1655,7 @@ async function doTitleMerge(
     mergeId,
     phase: 'finalizing',
     percent: 15,
-    message: '正在合并片头视频…',
+    message: '?????????',
     updatedAt: Date.now(),
   })
 
@@ -1714,7 +1714,7 @@ async function doTitleMerge(
       mergeId,
       phase: 'finalizing',
       percent: 100,
-      message: '片头视频已合并完成',
+      message: '?????????',
       updatedAt: Date.now(),
     })
     clearMergeProgress(episodeId)

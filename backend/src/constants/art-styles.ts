@@ -18,7 +18,12 @@ import {
   THREE_VIEW_PORTRAIT_SCENE_MINIMAL_CN,
   NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
 } from './portrait-reference.js'
-import { isMotionComicMode, resolveEpisodeProductionMode } from './production-mode.js'
+import {
+  NARRATION_FLUX_COMPACT_ART_STYLE_CN,
+  NARRATION_FLUX_COMPACT_LLM_RULE,
+  NARRATION_FLUX_COMPACT_TEXTURE_CN,
+} from './flux-prompt-compact.js'
+import { usesMotionComicVisuals, resolveEpisodeProductionMode } from './production-mode.js'
 
 export type ArtStyleContext = 'scene' | 'diptych' | 'title' | 'portrait' | 'agent'
 
@@ -53,14 +58,19 @@ export function resolveNarrationImageStyle(style?: string | null): string {
   return NARRATION_ANIME_STYLE
 }
 
-/** 定妆 + 配图统一画风：优先 image_style，漫画解说固定条漫，否则默认动漫 */
+/** 定妆 + 配图统一画风：优先 image_style；本地短剧/短剧模式使用完整 ART_STYLES（含电影质感等） */
 export function resolveEpisodeVisualStyle(
   episodeId: number,
   options?: { imageStyle?: string | null; dramaStyle?: string | null },
 ): string {
   const explicit = String(options?.imageStyle || '').trim()
+  const mode = resolveEpisodeProductionMode(episodeId)
+  if (usesMotionComicVisuals(mode)) return MOTION_COMIC_STYLE
+  if (mode === 'local_comic' || mode === 'drama') {
+    if (explicit) return normalizeArtStyle(explicit)
+    return normalizeArtStyle(options?.dramaStyle)
+  }
   if (explicit) return resolveNarrationImageStyle(explicit)
-  if (isMotionComicMode(resolveEpisodeProductionMode(episodeId))) return MOTION_COMIC_STYLE
   return resolveNarrationImageStyle(options?.dramaStyle)
 }
 
@@ -384,31 +394,39 @@ export const NARRATION_MINIMAL_STAGE_FACE_RULE =
 export const NARRATION_ERA_CLOTHING_LLM_RULE =
   '【年代与着装】年代氛围写「八十年代市井」「九十年代城镇」等概括词，禁止具体年份数字（1980、1990、19XX）及 vintage/retro/复古滤镜；【画面主体】须写主人公与可见配角的年代化简化服装；【年代场景】写地点环境与陈设道具'
 
+/** LLM：手机/电脑等带屏设备须正面或略侧可见屏幕内容，禁止只露背面 */
+export const NARRATION_SCREEN_DEVICE_ORIENTATION_LLM_RULE =
+  '【屏幕朝向·硬性】手机/电脑/笔记本/平板/显示器等带屏设备：须写屏幕朝向镜头或略侧（三分之四角）可见屏幕内容/UI；手持手机写「侧持可见亮屏界面」或「屏幕朝向镜头可见聊天/通话UI」；桌上设备写「屏幕正面或略侧朝向镜头显示内容」；禁止只画手机背面/摄像头模组朝向镜头、禁止显示器机箱背面占主视角、禁止空白黑屏当唯一内容'
+
+/** LLM：同帧陈设/电子产品须统一年代，禁止跨代混搭 */
+export const NARRATION_ERA_PROP_CONSISTENCY_LLM_RULE =
+  '【物件年代统一·硬性】【年代场景】内电子设备、通讯工具、家具陈设须与本镜时代氛围同一年代套装：现代/当代→液晶或超薄笔记本+现代触屏手机+低矮现代键鼠；九十年代→米色CRT厚显示器+厚键帽键盘+BP机或直板功能机（禁止全面屏智能机）；八十年代→更早期家电与无智能机；须点明「陈设与电子产品统一{时代}造型」。同一帧禁止CRT厚显示器与超薄巧克力键盘/全面屏手机混搭，也禁止现代液晶与大哥大/CRT无故混搭'
+
 /** 解说配图万能模板：画风规格维固定正文（原无前缀前缀块，不含【】） */
 export const NARRATION_UNIVERSAL_STYLE_SPEC_BODY =
   `16:9 横屏，2D 扁平插画，全员${NARRATION_CROWD_BODY}简笔身形纯色平涂无复杂光影（${NARRATION_CROWD_FACE}），黑色轮廓线，${NARRATION_BODY_CONSISTENCY_CORE}`
 
 /** 解说配图动漫风格：画风规格维固定正文 */
 export const NARRATION_ANIME_STYLE_SPEC_BODY =
-  '16:9 横屏，现代高质量 2D 动漫插画，清晰线稿，赛璐璐平涂结合柔和渐变，正常青年头身比（非Q版非三头身），大而富有表现力的动漫眼睛带瞳孔高光，日常叙事 slice-of-life 质感，低饱和写实配色'
+  '16:9 横屏，现代高质量电影感日系动漫插画（新海诚/京都动画级），干净细腻线稿，柔和水彩质感赛璐璐与明暗塑造体积感，正常青年头身比（非Q版非三头身），大而传神的双眸含层次高光与瞳孔反光，温暖黄金时刻窗光与发丝轮廓逆光，背景高度写实细节加浅景深虚化'
 
 /** 动漫风格禁止偏离项 */
 export const NARRATION_ANIME_STYLE_FORBIDDEN =
-  '禁止Q版三头身、像素风、3D渲染、真人照片、厚涂肌理、条漫、半写实数字绘画'
+  '禁止Q版三头身、像素风、3D渲染、真人照片、粗劣平涂、低精度草图、条漫'
 
 /** 动漫风格固定后缀 */
 export const NARRATION_ANIME_SCENE_SUFFIX =
-  '电影感叙事构图，干净整洁的画面，无文字无水印'
+  '电影感叙事构图，精致干净的画面'
 
 /** LLM 写【质感要求】时的短补充项（动漫） */
-export const NARRATION_ANIME_TEXTURE_LLM_HINT =
-  '清晰线稿，赛璐璐平涂与柔和渐变，表情夸张生动，环境陈设有细节，无文字无水印'
+export const NARRATION_ANIME_TEXTURE_LLM_HINT = NARRATION_FLUX_COMPACT_TEXTURE_CN
 
-/** 动漫/动态漫：统一人物审美（不写胖瘦体型词，只保持正常头身比动漫风） */
+/** 动漫/动态漫：统一人物审美（不写胖瘦体型词，只保持标准比例动漫风） */
 export const NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE = [
-  '【人物审美·硬性】全片统一正常头身比动漫/漫画人物（以【画风规格】为准），禁止写「微胖」「肥胖」「瘦削」「腰腹略鼓」「肩背厚实」等胖瘦体型词；',
-  '禁止写「躯干X份高×Y份宽」「三头身」「圆头直径」等素体份数计量；',
-  '【画面主体】只写发型、表情、服装、姿态与道具，不要额外描写肩腰肚胖瘦；情绪只改表情（汗珠/脸红/眼神）。',
+  '【人物审美·硬性】全片统一标准成年比例动漫/漫画人物（以【画风规格】为准），禁止写「微胖」「肥胖」「瘦削」「腰腹略鼓」「肩背厚实」等胖瘦体型词，禁止幼态/萝莉化面容与身材描写；',
+  '【定妆固定·硬性】有定妆时脸型与发型参照定妆图固定不变，【画面主体】禁止重写脸型/发型/发色/眉形/身形；本镜服装+#hex 只写在位于…以…姿态之后的（身穿…）中，可按剧情换装；',
+  '禁止写「躯干X份高×Y份宽」「三头身」「圆头直径」等素体份数计量（素体画风除外）；',
+  '【表情细化·硬性】身份括号内只写本镜可变表情（眉眼开合、瞳孔缩放、嘴型、汗珠/脸红/泪光/咬牙/颤线等），按 narration_lines 情绪写细，勿只写「表情紧张/神情放松」一词带过；禁止追加幼态面容词。',
 ].join(' ')
 
 /** @deprecated 动漫/动态漫不再按档位写体型，仅保留类型供素体模式使用 */
@@ -422,17 +440,6 @@ export const NARRATION_ANIME_BODY_DESCRIPTORS: Record<AnimeBodyBuild, string> = 
   chubby: '微胖体型，腰腹略鼓，肩背略厚，四肢偏圆润但不臃肿',
   obese: '明显肥胖身材，腰腹突出圆润，肩背宽厚，整体体量较大',
 }
-
-/** 动漫配图：写 prompt 用分析流程 */
-export const NARRATION_ANIME_LLM_ANALYSIS_STEPS_PROMPT = [
-  '1) 通读 full_narration（及 previous_episode_narration 若有），把握全文主线、人物关系、地点变迁、核心物件与情绪节奏',
-  '2) 读 prior_narration 与 characters，提取已出现地点、陈设载体、具体物件名、服装款式、人生阶段；同一配图段内主人公服装款式+#hex 主色须锁定一致',
-  '3) 读 narration_lines 确定本配图段叙事锚点；先锁定单帧（位置+姿态+动作+表情），再按动漫模板六维填空',
-  '4) 按 NARRATION_ANIME_SCENE_BODY_TEMPLATE 写出丰富 prompt，结合 full_narration 与 prior_narration；禁止只贴段内字面',
-] as const
-
-/** @deprecated 使用 NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE */
-export const NARRATION_ANIME_BODY_CONSISTENCY_LLM_RULE = NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE
 
 /** @deprecated 动漫/动态漫不再按体重弧线改体型 */
 export const NARRATION_ANIME_BODY_WEIGHT_ARC_LLM_RULE = ''
@@ -523,6 +530,11 @@ export function formatNarrationStyleSpecBracket(body?: string | null, style?: st
   return `【${NARRATION_STYLE_SPEC_DIM_LABEL}：${content}】`
 }
 
+/** LLM 配图文案用【画风规格】短锚（动漫/Flux 压缩，不含导演名/头身比/浅景深/无文字套话） */
+export function formatNarrationAnimeStyleSpecBracketForLLM(): string {
+  return `【${NARRATION_STYLE_SPEC_DIM_LABEL}：${NARRATION_FLUX_COMPACT_ART_STYLE_CN}】`
+}
+
 /** @deprecated 使用 NARRATION_UNIVERSAL_STYLE_SPEC_BODY */
 export const NARRATION_UNIVERSAL_SCENE_PREFIX = NARRATION_UNIVERSAL_STYLE_SPEC_BODY
 
@@ -562,17 +574,52 @@ export const NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE =
 export const NARRATION_STYLE_SPEC_LLM_RULE =
   `【画风规格·固定】须原样写入：${NARRATION_UNIVERSAL_STYLE_SPEC_BODY}；禁止改写、禁止在此维写具体人物姿态或场景（姿态/位置只在【画面主体】）`
 
-/** LLM：【镜头视角】须以完整主人公为朝向，禁止肢体局部特写当主 framing */
+/** 万能模板：叙事可见性优先选景别（先锁位姿/动作/物件，再选能装下它们的景别；无剧本特例） */
+export const NARRATION_CAMERA_FRAMING_LLM_RULE = [
+  '【景别选择·叙事可见性优先】写【镜头视角】前须先锁定本镜：位置+姿态+动作手位+关键物件是否入画，再选能同时装下它们的最小景别；禁止「情绪→默认近景大头」：',
+  '· 【站立优先全身·硬性】【画面主体】为站立/站姿/行走/进门/离去/脚步/照镜站立时，【镜头视角】必须写中远景（禁止中近景），并写「主人公从头顶到脚完整入镜，双脚鞋子可见，头顶与脚底留白」；头高约8–14%，站立全身约占40–50%；禁止中近景/上半身/齐腰裁切/头高≥22%/「须可见肩线」（即使抬手、握物、照镜，也须看得见双脚）',
+  '· 有明确肢体动作或道具互动且非站立行走（坐姿/蹲姿抬手、握物、触物等）→ 默认中近景（可见头+肩+手），头高约22–30%；须写「镜头朝向主人公上半身与{动作点/物件}」',
+  '· 双人在场对话、递物、对峙、并肩、对视 → 中景或过肩，头高约14–20%，须写清人物相对位置；若双方站立仍须可见到膝盖以下或写全身入镜',
+  '· 新场所首次出现、时间/地点跳转、强调环境规模 → 全景或远景，须写分层前景/中景/后景，头高约5–10%',
+  '· 仅当旁白纯神情、无肢体动作、无道具互动、且非站立全身需求 → 才允许近景；仍须可见肩线或手部一点，头高上限≤35%；禁止写「面部特写/只拍脸」',
+  '· 【镜头占比·优先头高】【镜头视角】须写「主人公头高约占画面高度X%」（跨站姿/坐姿对齐；解说配图环境偏多；禁止全片同一头高）：站立全身/中远景约8–16%；中近景（仅坐姿等）约22–30%；近景（仅纯神情）约26–35%；双人中景/过肩约14–20%；全景/远景约5–10%',
+  '· 【全身占比·姿态分档】站立行走/进门须追加全身约占28–40%；坐姿可见躯干+头约22–34%；侧卧/躺卧约18–30%',
+  '· 【分层场景】【年代场景】有前/中/后景时，【镜头视角】须同步写景别+头高+朝向，使关键物件入镜',
+  '· 【硬禁】站立写成中近景/上半身导致腿脚出画；「近景+头高≥35%」且本镜有坐姿/站姿/肢体动作/道具互动；「镜头朝向面部」却不写上半身或手部入镜；与【画面主体】姿态矛盾的裁切',
+  '机位句式：景别 + 俯仰 + 朝向（站立朝向全身主人公与{物件/动作点}；坐姿可朝向上半身与{物件/动作点}）+ 景深 + 头高约占X%；站立须补「从头顶到脚完整入镜」；同一作品中近景不宜超过半数，须穿插全身与环境建立镜',
+].join('')
+
+/** 配图七维：禁止幼态/萝莉化面容与身材描述（成年人按年龄写成年比例） */
+export const NARRATION_NO_YOUTHFUL_FACE_LLM_RULE =
+  '【禁幼态·硬性】【画面主体】【质感要求】及全文七维禁止写幼态、萝莉、稚气、娃娃脸、娇小少女感、圆脸幼态、软萌幼顔、童颜、幼女气质、1girl 气质等；按角色年龄写成年动漫面容与标准比例，成年人禁止未成年/幼齿化描写；表情可夸张（汗珠/脸红/颤抖线）但勿写成幼态卖萌'
+
+/** 万能模板：动作与场景细化（构图五要素同帧可见；无剧本特例） */
+export const NARRATION_ACTION_SCENE_DETAIL_LLM_RULE = [
+  '【动作细化·硬性】【核心细节动作】须同时含：①具体肢体（哪只手/脚在做什么）②视线落点③与道具/配角/环境的接触；禁止用「氛围感/专注感/光晕/情绪张力」替代可画动作；禁止整维只有神情描写而无肢体姿态',
+  '【场景细化·硬性】【年代场景】须写：时代+具体地点+前/中/后景分层+至少2–3个可辨认物件（含颜色/材质/状态）；物件优先取自 narration_lines；禁止只写场所类别词',
+  '【场景禁特写词】【年代场景】【镜头视角】【光影色调】禁止写「面部特写/脸部特写/只映出脸/只拍脸/大特写局部」；有反射面时写「映出人物上半身/姿态/动作」，勿写「映出面部特写」',
+  '【镜面反射·硬性】凡出现镜子/镜面/镜中/照镜子/橱窗玻璃反光等：①场景只设一面落地镜/穿衣镜，禁止壁挂小圆镜或多面镜；②镜中是光学左右镜像（同一瞬间同一服装姿态），不是可互动的第二个人；③主人公始终只有两只手，双手自然下垂或放在身前，禁止伸手摸镜、触碰镜中脸、与镜中人互动（此类动作极易多生第三只手）；④【核心细节动作】写「站在单面镜子前注视映像，双手不接触镜面，镜中左右镜像与本人一致」',
+  '【手持解剖·硬性】手持手机/杯/袋/文件等：①【核心细节动作】须写清「恰好两只手两条手臂」与左右分工（如「右手持手机于胸前，左手自然垂于身侧」或「双手捧杯」）；②禁止一手撑墙/扶门+另一手持物贴墙/举物（极易生出第三只手）；靠墙时写「肩背轻靠墙，手不撑墙」；③禁止同时写抬手、撑墙、握物三种手部动作；④手指五指正常、无多余手指；物件只由已写明的那一只或两只手握住',
+  '【主体一致】【画面主体】有配角/路人时禁止写「无配角」；主人公姿态与【核心细节动作】【镜头视角】须同一瞬间；表情写在主体（细化眉眼嘴），动作写在核心维，构图须同帧可见',
+].join('')
+
+/** @deprecated 使用 NARRATION_CAMERA_FRAMING_LLM_RULE */
+export const NARRATION_ANIME_CAMERA_FRAMING_LLM_RULE = NARRATION_CAMERA_FRAMING_LLM_RULE
+
+/** @deprecated 使用 NARRATION_ACTION_SCENE_DETAIL_LLM_RULE */
+export const NARRATION_ANIME_ACTION_SCENE_DETAIL_LLM_RULE = NARRATION_ACTION_SCENE_DETAIL_LLM_RULE
+
+/** LLM：禁止用局部特写（含面部大头）压掉姿态/动作/物件 */
 export const NARRATION_PARTIAL_CLOSEUP_LLM_RULE =
-  '【禁止肢体局部特写】素体小人须保持统一比例：【画面主体】写全身/大半身姿态时，【镜头视角】禁止「近景特写/大特写/镜头朝向裤脚/鞋/手/猫爪/接触点」等以肢体局部为主 framing；【光影色调】禁止「聚焦于裤脚/鞋/猫爪」而不写主人公整体；脚边/猫爪/勾裤脚等互动须写「同一主人公从头顶到裤脚完整入镜」「猫爪勾住该同一主人公裤脚」，禁止第二个人的腿/鞋/巨型裤腿；推荐机位：中景或中近景略俯/略仰，镜头朝向主人公整体，脚边互动在其身体下方同一画面'
+  '【禁止特写压构图】①肢体局部：当【画面主体】为全身/大半身或低位/脚边互动时，【镜头视角】禁止「近景特写/大特写/朝向裤脚/鞋/手/爪/接触点」为主 framing；②面部大头：本镜有坐姿/站姿/抬手/道具互动时，禁止「近景+头高>35%」「突出面部表情」「面部特写」等把构图收成只剩一张脸；低位互动须写「同一主人公从头顶到脚完整入镜」；机位须与【景别选择】一致且保证姿态+动作+关键物件同帧可见'
 
 /** 解说配图万能模板：七维正文（【画风规格】+ 场景六维） */
 export const NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE =
-  `【画风规格：照抄固定文风规格】，【画面主体：无配角时写「一位主人公位于{位置}以{姿态}（人生阶段+身穿#hex款式简笔轮廓+正常卡通脸表情），无配角」；有配角时写「一位主人公位于{位置}以{姿态}（…），一位或几位配角位于{配角位置}（穿#64748b低饱和便装，两个小圆点眼）」；姿态须与{姿态}一致，禁止写「画面中心前景站立」与躺卧/侧卧/休息矛盾；脚边/猫爪互动须写「同一主人公的裤脚/脚边」，禁止第二个人的腿或鞋】，【年代场景：时代氛围+具体地点；有载体时写「载体+陈列物件名」】，【核心细节动作：无配角时只写猫/道具/环境互动（勿写主人公）；有配角时写配角动作（勿写主人公，主人公只在【画面主体】出现一次）；猫勾裤脚等只写猫的动作，不写「主人公裤脚」】，【光影色调：光线明暗、时段、冷暖与剧情情绪；禁止只写「聚焦于裤脚/猫爪」而不照主人公整体】，【镜头视角：中景或中近景，镜头朝向该姿态下的主人公整体；禁止近景特写对准裤脚/鞋/手/猫爪/接触点】，【质感要求：柔和平涂，简化服装轮廓，正常卡通脸表情，无文字无水印】`
+  `【画风规格：照抄固定文风规格】，【画面主体：无配角时写「一位主人公位于{位置}以{姿态}（性别+人生阶段+身穿#hex款式简笔轮廓+正常卡通脸表情），无配角」；有配角时写「一位主人公位于{位置}以{姿态}（…），一位或几位配角位于{配角位置}（穿#64748b低饱和便装，两个小圆点眼）」；有他人互动时禁止写无配角；姿态须一致，禁止与躺卧/侧卧/休息矛盾】，【年代场景：时代+具体地点+前/中/后景分层+至少2–3个具体物件（含材质/颜色/状态）；禁止写面部特写】，【核心细节动作：本镜可见的具体肢体、视线、与道具/配角/环境互动，勿写抽象氛围词】，【光影色调：时段+冷暖+主光源，贴合剧情情绪；禁聚焦面部局部】，【镜头视角：按【景别选择·叙事可见性优先】写景别+俯仰+朝向（人+物件/动作点）+景深+头高%；站立默认中景全身从头顶到脚，坐姿可中近景】，【质感要求：柔和平涂，简化服装轮廓，正常卡通脸表情，无文字无水印】`
 
 /** LLM：【年代场景】陈设（权威表述，纯 AI 输出，无后处理补全） */
 export const NARRATION_FIXTURES_LLM_RULE =
-  '【年代场景·陈设·硬性】陈设唯一写入【年代场景】：有摊位/货架/柜台/桌面/展台/流水线/工位/铺面/墙面等载体时，必须写「{时代氛围}{具体场所}，{载体}上陈列/摆放至少2个具体物件名（含材质或颜色，如绿色传送带、金属零件盒、成堆纸箱、啤酒罐与烟盒、木质算盘）」；同一场所可写多个载体；须从 prior_narration、full_narration 或 narration_lines 提取或合理推断；同场所可从 prior 延续仍相关物件，场景/经营形态切换时重设；须与【核心细节动作】展示行为一致；禁止只写「堆叠的纸箱」「各类工具」「货物/商品/货物堆/各类商品/工具」等泛称；无载体则写场所环境细节（墙面标语、门窗、灯管、地面材质等）至少1项'
+  '【年代场景·陈设·硬性】陈设唯一写入【年代场景】：有桌面/柜台/货架/展台/工位/墙面/地面等载体时，须写「{时代氛围}{具体场所}，{载体}上陈列/摆放至少2个具体物件（含材质或颜色）」；物件从 prior_narration、full_narration 或 narration_lines 提取或合理推断；同场所可延续仍相关物件，场景切换时重设；须与【核心细节动作】一致；禁止只写「货物/商品/工具」等泛称；无载体则写门窗、灯具、墙面、地面材质等至少1项环境细节'
 
 /** @deprecated 使用 NARRATION_FIXTURES_LLM_RULE */
 export const NARRATION_FIXTURES_FORMAT_LLM_RULE = NARRATION_FIXTURES_LLM_RULE
@@ -606,11 +653,15 @@ export const NARRATION_ATMOSPHERE_LLM_RULE =
 /** 解说配图万能模板：LLM 唯一结构规范（七维分工与一致性均在此，禁止另加补丁规则） */
 export const NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE = [
   `【万能模板】完整 prompt = ${formatNarrationStyleSpecBracket()} + 场景六维 + ${NARRATION_UNIVERSAL_SCENE_SUFFIX}；${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
+  NARRATION_FLUX_COMPACT_LLM_RULE,
   NARRATION_STYLE_SPEC_LLM_RULE,
+  NARRATION_CAMERA_FRAMING_LLM_RULE,
+  NARRATION_ACTION_SCENE_DETAIL_LLM_RULE,
   `【七维正文·严格按序填空】${NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE}`,
   NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
   '【单帧一致】写七维前先锁定唯一可画瞬间（主人公位置+姿态+动作）；【画面主体】须同时写清位置与姿态，【核心细节动作】【镜头视角】须同一瞬间同一位置同一姿态，禁止动作维再写与主体不同的姿态；与【年代场景】【光影色调】同空间同氛围；配角须与主人公逗号分句分开写位置，禁止挤在同一括号内。',
   '【无配角单帧】旁白无其他人物时【画面主体】须写「无配角」；禁止同时出现站立展示与躺卧/侧卧/休息两种姿态（文生图易画两个同款主人公）；【画风规格】只写通用三头身比例，勿写「标准站姿」「中心前景站立」等与{姿态}冲突的词',
+  NARRATION_NO_YOUTHFUL_FACE_LLM_RULE,
   NARRATION_PARTIAL_CLOSEUP_LLM_RULE,
   NARRATION_MINIMAL_CLOTHING_LLM_RULE,
   NARRATION_MINIMAL_EXPRESSION_LLM_RULE,
@@ -620,36 +671,58 @@ export const NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE = [
   NARRATION_FIXTURES_LLM_RULE,
   NARRATION_ATMOSPHERE_LLM_RULE,
   NARRATION_ERA_CLOTHING_LLM_RULE,
+  NARRATION_SCREEN_DEVICE_ORIENTATION_LLM_RULE,
+  NARRATION_ERA_PROP_CONSISTENCY_LLM_RULE,
   `【质感要求】仅写「${NARRATION_MINIMAL_TEXTURE_LLM_HINT}」，禁止复述【画风规格】画风`,
 ].join(' ')
 
 /** 解说配图动漫风格：LLM 七维结构规范（场景六维复用，仅替换画风/人物/质感规则） */
 export const NARRATION_ANIME_STYLE_SPEC_LLM_RULE =
-  `【画风规格·固定】须原样写入：${NARRATION_ANIME_STYLE_SPEC_BODY}；禁止改写、禁止在此维写具体人物姿态或场景`
+  `【画风规格·固定】须写一行短锚：「${NARRATION_FLUX_COMPACT_ART_STYLE_CN}」；禁止写新海诚/京阿尼/正常头身比/浅景深/无文字无水印，禁止照抄长段画风规格，禁止在此维写人物姿态或具体场景`
 
-/** 动漫风格七维正文模板 */
+/** 动漫风格七维正文模板（景别/动作/场景细则见万能模板规则，此处仅保留动漫主体/质感差异） */
 export const NARRATION_ANIME_SCENE_BODY_TEMPLATE =
-  '【画风规格：照抄固定文风规格】，【画面主体：无配角时写「对照定妆「name·阶段」（若无定妆则写一位X期主人公）（性别+发型+夸张表情，正常头身比）位于{位置}以{姿态}，身穿#hex款式，无配角」；有配角时写「一位主人公…，一位或几位配角位于{配角位置}（低饱和便装，简化动漫脸型）」；禁止写素体小人/圆点眼/三头身/份数计量/胖瘦体型词】，【年代场景：时代氛围+具体地点+载体上陈列至少2个具体物件名（含材质或颜色）】，【核心细节动作：无配角时只写猫/道具/环境互动（手持物写在此维）；有配角时写配角动作（勿重复写主人公姿态）】，【光影色调：光线明暗、时段、冷暖与剧情情绪】，【镜头视角：中景或中近景，电影感叙事构图，朝向主人公整体】，【质感要求：清晰线稿，赛璐璐平涂与柔和渐变，表情夸张生动，无文字无水印】'
+  `【画风规格：${NARRATION_FLUX_COMPACT_ART_STYLE_CN}】，【画面主体：无配角时写「对照定妆「name·阶段」（只写本镜细化表情，禁止写脸型/发型/发色/服装）位于{位置}以{姿态}（身穿#hex本镜服装款式），无配角」；有配角时写「对照定妆主人公…，一位或几位配角位于{配角位置}（低饱和便装+#hex，简笔表情）」；有他人互动时禁止写无配角；禁止素体小人/圆点眼/三头身；禁止在主体写面部特写】，【年代场景：时代+具体地点+前/中/后景+至少2–3个具体物件（含材质/颜色/状态）；禁止写面部特写】，【核心细节动作：须含肢体+视线+与道具/环境接触（含屏幕UI）；禁止只写盯脸/氛围词】，【光影色调：具体时段+冷暖+主光源，贴合剧情；禁「聚焦面部局部」替代构图】，【镜头视角：按【景别选择·叙事可见性优先】写景别+俯仰+朝向（人+物件/动作点）+景深+头高%；站立写中景全身从头顶到脚，坐姿可中近景】，【质感要求：${NARRATION_FLUX_COMPACT_TEXTURE_CN}】`
 
 /** 动漫风格 LLM 唯一结构规范 */
 export const NARRATION_ANIME_SIX_DIM_LLM_RULE = [
-  `【动漫模板】完整 prompt = ${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)} + 场景六维 + ${NARRATION_ANIME_SCENE_SUFFIX}；${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
+  `【动漫模板】完整 prompt = ${formatNarrationAnimeStyleSpecBracketForLLM()} + 场景六维 + ${NARRATION_ANIME_SCENE_SUFFIX}；${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
+  NARRATION_FLUX_COMPACT_LLM_RULE,
   NARRATION_ANIME_STYLE_SPEC_LLM_RULE,
+  NARRATION_CAMERA_FRAMING_LLM_RULE,
+  NARRATION_ACTION_SCENE_DETAIL_LLM_RULE,
   `【七维正文·严格按序填空】${NARRATION_ANIME_SCENE_BODY_TEMPLATE}`,
   NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
-  '【单帧一致】写七维前先锁定唯一可画瞬间（主人公位置+姿态+动作）；【画面主体】须写清位置、姿态与动漫表情；【核心细节动作】【镜头视角】须同一瞬间同一姿态；配角须与主人公分句写位置。',
-  '【人物规格】主人公与配角均为正常头身比动漫人物，大眼睛带瞳孔高光，表情可夸张（紧张时可画汗珠、脸红、颤抖线）；禁止素体小人、圆点眼、三头身、Q版比例。',
+  '【单帧一致】写七维前先锁定唯一可画瞬间（位置+姿态+动作+关键物件）；【画面主体】【核心细节动作】【年代场景】【镜头视角】须同一瞬间同帧可见；配角须分句写位置。',
+  '【人物规格】主人公与配角均为标准成年比例动漫人物；有定妆不写脸型发型（定妆图锁定），表情须细化可夸张；禁止素体小人、圆点眼、三头身、Q版比例。',
+  NARRATION_NO_YOUTHFUL_FACE_LLM_RULE,
+  NARRATION_PARTIAL_CLOSEUP_LLM_RULE,
   NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE,
   NARRATION_MINIMAL_CLOTHING_LLM_RULE,
   NARRATION_FIXTURES_LLM_RULE,
   NARRATION_ATMOSPHERE_LLM_RULE,
   NARRATION_ERA_CLOTHING_LLM_RULE,
+  NARRATION_SCREEN_DEVICE_ORIENTATION_LLM_RULE,
+  NARRATION_ERA_PROP_CONSISTENCY_LLM_RULE,
   `【质感要求】仅写「${NARRATION_ANIME_TEXTURE_LLM_HINT}」，禁止复述【画风规格】画风；${NARRATION_ANIME_STYLE_FORBIDDEN}`,
 ].join(' ')
 
-/** 动漫风格六维填表示例 */
+/** 动漫风格六维填表示例：情绪动作中近景（须见姿态+手部+陈设，勿写成大头特写） */
 export const NARRATION_ANIME_SCENE_BODY_EXAMPLE =
-  `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【画面主体：对照定妆「男主·青年」（黑色略凌乱短发，大眼睛带高光，脸颊泛红、额头汗珠，表情紧张）位于客厅沙发前以坐姿僵直（身穿#64748b休闲T恤与#334155长裤），无配角】，【年代场景：现代都市客厅，蓝色布艺沙发、木质茶几上摆啤酒罐与烟盒与遥控器等小物】，【核心细节动作：头部周围画白色颤抖线强调紧张】，【光影色调：室内自然光偏冷，低饱和蓝灰色调】，【镜头视角：中近景平视，镜头朝向主人公面部与上半身】，【质感要求：${NARRATION_ANIME_TEXTURE_LLM_HINT}】`
+  `${formatNarrationAnimeStyleSpecBracketForLLM()}，【画面主体：对照定妆「男主·青年」（眉头紧锁、瞳孔微缩，嘴角抿紧，两颊泛红，额头细汗）位于客厅沙发前以坐姿僵直（身穿#64748b休闲T恤与#334155长裤），无配角】，【年代场景：现代都市客厅，前景蓝色布艺沙发扶手，中景木质茶几上摆啤酒罐与烟盒与遥控，后景落地窗与窗帘】，【核心细节动作：双手紧握膝盖，视线低垂落在茶几边缘，肩背绷直】，【光影色调：室内自然光偏冷，低饱和蓝灰色调】，【镜头视角：中近景平视，镜头朝向主人公上半身与紧握膝盖的双手，主人公头高约占画面高度26%，须可见坐姿肩线与双手】，【质感要求：${NARRATION_ANIME_TEXTURE_LLM_HINT}】`
+
+/** 动漫反例（勿模仿）：结构冲突，非某剧本 */
+export const NARRATION_ANIME_SCENE_BODY_BAD_EXAMPLE_FACE_CLOSEUP = [
+  '✗ 【镜头视角】站立姿态却写中近景/上半身/头高26%（须中景全身，从头顶到脚完整入镜）',
+  '✗ 【年代场景/镜头视角】写「面部特写」或「近景+头高≥35%」却同时有坐姿/抬手/道具——易生成只有脸，丢掉姿态与动作',
+].join('；')
+
+/** 动漫风格六维示例：全身/环境建立（行走/进门类镜头参考，勿照抄具体题材） */
+export const NARRATION_ANIME_SCENE_BODY_EXAMPLE_FULL_BODY =
+  `${formatNarrationAnimeStyleSpecBracketForLLM()}，【画面主体：对照定妆「男主·青年」（眉目舒展，嘴角微扬，眼神轻松望向前方）位于室内走廊以站立姿态（身穿#64748b休闲外套与#334155长裤），无配角】，【年代场景：现代室内走廊，前景门把手与鞋垫，中景白墙与挂钟，后景尽头窗光】，【核心细节动作：一手扶门框，刚推门进入，视线望向室内，脚步刚踏入】，【光影色调：侧窗自然光，柔和中性色调】，【镜头视角：中远景平视，镜头朝向进门站立的主人公与门把手，主人公头高约占画面高度12%，站立全身约占画面高度32%，从头顶到脚完整入镜，前景门把手、中景挂钟与白墙、后景尽头窗光占画面主要面积】，【质感要求：${NARRATION_ANIME_TEXTURE_LLM_HINT}】`
+
+/** @deprecated 使用 NARRATION_ANIME_SCENE_BODY_EXAMPLE_FULL_BODY */
+export const NARRATION_ANIME_SCENE_BODY_EXAMPLE_WIDE = NARRATION_ANIME_SCENE_BODY_EXAMPLE_FULL_BODY
 
 /** @deprecated 已并入 NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE */
 export const NARRATION_FRAME_TRIAD_CONSISTENCY_LLM_RULE = NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE
@@ -690,8 +763,11 @@ export const NARRATION_IMAGE_DETECT_BATCH_THRESHOLD_DEFAULT = 80
 /** 配图换镜检测：分批时每批覆盖的镜头数上限 */
 export const NARRATION_IMAGE_DETECT_BATCH_SIZE_DEFAULT = 30
 
-/** 配图文案生成：每批段落数默认值 */
-export const NARRATION_IMAGE_PROMPT_BATCH_SIZE_DEFAULT = 6
+/** 配图文案生成：每批段落数默认值（结构化 JSON，偏大可少打几次 LLM） */
+export const NARRATION_IMAGE_PROMPT_BATCH_SIZE_DEFAULT = 5
+
+/** 配图文案生成：云端批并发（OpenRouter 免费约 20 RPM，4 路并发通常够用） */
+export const NARRATION_IMAGE_PROMPT_BATCH_CONCURRENCY_DEFAULT = 4
 
 /** 配图文案生成：每批段落数下限 */
 export const NARRATION_IMAGE_PROMPT_BATCH_SIZE_MIN = 1
@@ -710,9 +786,18 @@ export const NARRATION_LLM_ANALYSIS_STEPS_DETECT = [
 export const NARRATION_LLM_ANALYSIS_STEPS_PROMPT = [
   '1) 通读 full_narration（及 previous_episode_narration 若有），把握全文主线、人物关系、地点变迁、核心物件与情绪节奏；若有 weight_arc 须识别肥胖→减肥→逆袭的体重变化时间线',
   '2) 读 prior_narration、characters 与 suggested_body_weight_tier，提取已出现地点、陈设载体、具体物件名、服装款式、人生阶段与体重档位；同一配图段内主人公服装款式+#hex 主色与躯干宽高须锁定一致',
-  '3) 读 narration_lines 确定本配图段叙事锚点；先锁定单帧（位置+姿态+动作+体重档位），再按万能模板六维填空',
-  '4) 按 NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE 写出丰富 prompt，结合 full_narration 与 prior_narration；禁止只贴段内字面',
+  '3) 读 narration_lines 确定本配图段叙事锚点；先锁定单帧（位置+姿态+动作+人数/空间关系），再按【景别选择】选本镜景别，最后按万能模板六维填空',
+  '4) 按 NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE 写出丰富 prompt，结合 full_narration 与 prior_narration；禁止全片统一同一景别，禁止只贴段内字面',
 ] as const
+
+/** 动漫配图：写 prompt 用分析流程（复用万能模板分析 + 动漫定妆补充） */
+export const NARRATION_ANIME_LLM_ANALYSIS_STEPS_PROMPT = [
+  ...NARRATION_LLM_ANALYSIS_STEPS_PROMPT,
+  '5) 动漫画风：【画面主体】须对照定妆标签；脸型发型不写（定妆固定），只细化表情；禁止素体份数计量'
+] as const
+
+/** @deprecated 使用 NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE */
+export const NARRATION_ANIME_BODY_CONSISTENCY_LLM_RULE = NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE
 
 /** @deprecated 使用 NARRATION_LLM_ANALYSIS_STEPS_PROMPT */
 export const NARRATION_LLM_ANALYSIS_STEPS = NARRATION_LLM_ANALYSIS_STEPS_PROMPT
@@ -726,23 +811,23 @@ export const NARRATION_PARAGRAPH_KEY_MOMENT_LLM_RULE = NARRATION_PARAGRAPH_FULL_
 
 /** LLM 写配图 prompt：如何通读全文 */
 export const NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE =
-  '写每条配图 prompt 前须先通读 full_narration（及 previous_episode_narration 若有），按时间线把握人物关系、地点变迁、职业/经营形态、反复出现的物件与情绪曲线；再读 prior_narration 与 narration_lines 确定本段锚点；画面设计以全文为依据丰富细节，而非仅翻译当前段落'
+  '写每条配图 prompt 前先读 full_narration_summary（整集压缩时间线）把握主线与地点物件，再以本段 narration_lines 为锚点；若有 scene_enrichment / prior_timeline_snip 用来补陈设与连贯，禁止抛开本段锚点另写无关剧情'
 
 /** LLM 配图：以全文剧情丰富画面，不单贴当前段落 */
 export const NARRATION_FULL_PLOT_ENRICHMENT_LLM_RULE =
-  '【全文丰富】narration_lines 只定本配图段的叙事锚点与情绪，但每条 prompt 须结合 full_narration、prior_narration、characters、detect_scene_description（若有）与全文时间线，主动丰富【年代场景】的环境细节、【年代场景·陈设】的具体物件、【核心细节动作】的可视化动作与互动、【光影色调】的剧情氛围；禁止只复述 narration_lines 首句或段内字面、禁止空泛场所（如只写「室内」「商店」而不写陈设载体与物件）、禁止省略 prior/全文已建立的关键道具与生活/经营细节；须推断出完整可画的单帧瞬间，让观众不看字幕也能懂剧情'
+  '【全文丰富】narration_lines 定本段锚点；结合 full_narration_summary 与 scene_enrichment（place/carriers/props/actions）写七维：【年代场景】落盘清单物件，【核心细节动作】落盘 actions；禁止只复述段内首句、禁止空泛场所、禁止无视道具清单'
 
 /** LLM 写配图 prompt：物件/品类全文连贯（通用） */
 export const NARRATION_PLOT_CONTINUITY_LLM_RULE =
-  '【物件连贯】陈设/物件/服装须能在 full_narration、prior_narration 或 narration_lines 中找到依据或合理推断；同一场所可从 prior 与全文前文延续仍相关物件并补充具体名称；场景/时代/经营形态切换时重设，禁止无关物件混搭；有具体名称必须写具体名称，禁止泛称'
+  '【物件连贯】陈设/物件优先采用 scene_enrichment.props 与 prior_props；其余须能在 full_narration_summary、prior_timeline_snip 或 narration_lines 找到依据；同一场所可延续仍相关物件；场景切换时重设；禁止泛称「货物/东西」'
 
-/** LLM 配图：同一配图段内主人公服装款式与主色锁定，换段可换装 */
+/** LLM 配图：同一配图段内服装锁定；跨段按旁白/场所换装，禁止全片抄同一套定妆服 */
 export const NARRATION_PARAGRAPH_OUTFIT_CONTINUITY_LLM_RULE =
-  '【段落内服装锁定】同一配图段（同一 start_index / paragraph_index；含 layout=diptych 的【左格】【右格】）内，主人公仅一套简化服装，款式与 #hex 主色须完全一致，禁止同段内左格 #ff6b9d花衬衫、右格 #2563ebT恤 或同 prompt 内两套不同 #hex；换配图段（不同 start_index）时，若旁白未明确换装/更衣/洗澡/换季/改行/时段大跳转，须延续上一段主人公服装款式与 #hex；旁白明确换装或场景大切换后，新段可更换服装，但新段内须再次锁定直至下一段；本批 paragraphs 逐段独立检查，不得段内乱换 #hex'
+  '【服装·段内锁定·跨段随戏】①同一配图段（同一 start_index；含 diptych 左右格）内主人公仅一套（身穿#hex…），款式与 #hex 完全一致，禁止段内左右格两套不同衣服；②换配图段时须按本段旁白+场所写服装，勿默认照抄上一段或 portrait_default_outfit：办公室/通勤→衬衫西装或职场便装，居家/厨房→家居服或便装，外出街道→外套，就寝见【就寝换装】；③仅当本段与上一段场所连续且旁白无换装暗示时，才可延续上一段（身穿…）；④禁止全片每镜同一套米色毛衣/同一 #hex；#hex 紧挨款式词'
 
-/** LLM 配图：就寝场景仅换款式词，不换 #hex 主色 */
+/** LLM 配图：就寝场景可换款式，主色可与日装同系，勿全片锁死一套定妆服 */
 export const NARRATION_SLEEP_OUTFIT_CONTINUITY_LLM_RULE =
-  '【就寝换装·保主色】入睡、半夜醒来、盖被休息、床上侧卧/躺卧等就寝场景：须延续上一配图段主人公已锁定的 #hex 主色（上装 hex 与下装 hex 均不变），仅将款式词改为同色系家居服/睡衣/睡裤（如 #6b7280短袖衬衫→#6b7280睡衣、#1f2937长裤→#1f2937睡裤）；禁止就寝场景另起全新 #hex（如 #1e40af）除非 prior 段已是该 hex 或旁白明确洗澡更衣换洗衣物'
+  '【就寝换装】入睡、半夜醒来、盖被、床上侧卧/躺卧：须写睡衣/家居服（身穿#hex睡衣与#hex睡裤等），可与近日装同色系；禁止继续写日装毛衣/西装上班服；禁止无换装暗示却全片抄同一套定妆服'
 
 /** @deprecated 使用 NARRATION_FIXTURES_LLM_RULE */
 export const NARRATION_FIXTURES_CONTINUITY_LLM_RULE = NARRATION_FIXTURES_LLM_RULE
@@ -756,7 +841,7 @@ export const NARRATION_LLM_PROMPT_GOOD_BAD_EXAMPLES = [
   '正反例（须从旁白提取真实内容，勿照抄）：',
   `✓ 【画面主体：青年期${NARRATION_PROTAGONIST_BODY}主人公身穿#ff6b9d花衬衫与#333333喇叭裤简笔轮廓…】，【年代场景：…】，【核心细节动作：…】，【光影色调：…】`,
   `✓ 【画面主体：两位中年期${NARRATION_PROTAGONIST_BODY}主人公（圆头无头发、躯干1.15份宽，正常卡通脸）并肩位于前景…】（夫妻/父子等同框双主角须同阶段同规格）`,
-  `✓ 【画面主体：一位青年期${NARRATION_PROTAGONIST_BODY}主人公位于楼道站立低头看脚边…，【核心细节动作：一只狸花猫伸爪勾住裤脚】，【镜头视角：中近景略俯拍，同一主人公从头顶到裤脚完整入镜，猫爪在该主人公裤脚上】`,
+  `✓ 【画面主体：一位青年期${NARRATION_PROTAGONIST_BODY}主人公位于楼道站立低头看脚边…，【核心细节动作：一只狸花猫伸爪勾住裤脚】，【镜头视角：中远景略俯拍，同一主人公从头顶到脚完整入镜，双脚可见，猫爪在该主人公裤脚上】`,
   `✓ 【画面主体：一位青年期${NARRATION_PROTAGONIST_BODY}主人公位于教室后排课桌处以趴桌姿态伏低（穿#3b82f6短袖…），一位配角位于后方讲台（穿#4b5563低饱和西装）】…【核心细节动作：配角在讲台手持点名册指向下方（勿写主人公）】…【镜头视角：中景平视，镜头朝向趴桌姿态的主人公】`,
   `✓ 【画面主体：一位少年期${NARRATION_PROTAGONIST_BODY}主人公位于餐桌前以坐姿（躯干0.85份高×1.10份宽，少年肥胖圆滚肚子，正常卡通脸开心，身穿#fbbf24短袖…）…】（肥胖主题须写具象躯干宽高，禁止只写三头身）`,
   '✗ 【镜头视角】近景特写，镜头朝向裤脚与猫爪接触点（与全身主人公冲突，易生成巨型裤腿/第二个人的腿）',
@@ -765,7 +850,8 @@ export const NARRATION_LLM_PROMPT_GOOD_BAD_EXAMPLES = [
   '✗ 【画面主体：仅写素体小人无服装】（须写与年代匹配的简化服装）',
   '✗ 【画面主体】写中心前景站立 + 【核心细节动作】写后排趴桌（三镜矛盾，会生成两个同款主人公）',
   '✗ 【画面主体】侧卧/躺卧休息 + 前缀或主体含「标准站姿」「中心前景站立」（姿态冲突，文生图易画站立+躺卧两个同款主人公）',
-  '✗ 就寝场景把 #6b7280+#1f2937 日装换成全新 #1e40af 睡衣（须保主色仅改款式词，见【就寝换装·保主色】）',
+  '✗ 就寝场景仍写日装毛衣/西装（须写睡衣/家居服，见【就寝换装】）',
+  '✗ 办公室、厨房、街道每镜都抄同一套定妆米色毛衣（须按场所换装）',
   '✗ 【画面主体】主人公与配角挤在同一括号用「与一位配角」连接（须分开写各自位置）',
   '✗ 【画面主体：身穿亮黄色T恤与蓝色短裤】（禁止中文色词，须写 #ffd700、#2563eb 等 #hex）',
   '✗ 【画面主体：身穿#2563eb 短裤】（#hex 与款式词之间禁止空格）',
@@ -914,16 +1000,20 @@ export function buildNarrationParagraphImagePromptLLMSystem(
   ].filter(Boolean)
 
   if (structured) {
-    const styleSpec = formatNarrationStyleSpecBracket(undefined, style)
+    const styleSpec = anime
+      ? formatNarrationAnimeStyleSpecBracketForLLM()
+      : formatNarrationStyleSpecBracket(undefined, style)
     const suffix = minimal ? NARRATION_UNIVERSAL_SCENE_SUFFIX : NARRATION_ANIME_SCENE_SUFFIX
-    const example = minimal ? NARRATION_UNIVERSAL_SCENE_BODY_EXAMPLE : NARRATION_ANIME_SCENE_BODY_EXAMPLE
+    const example = minimal
+      ? NARRATION_UNIVERSAL_SCENE_BODY_EXAMPLE
+      : `中近景动作参考 ${NARRATION_ANIME_SCENE_BODY_EXAMPLE}；全身/进门参考 ${NARRATION_ANIME_SCENE_BODY_EXAMPLE_FULL_BODY}；${NARRATION_ANIME_SCENE_BODY_BAD_EXAMPLE_FACE_CLOSEUP}`
     const hardRules = [
       '硬性规则：',
       `1) 结构：${styleSpec} + 场景六维 + ${suffix}`,
-      `2) 填空示例：${example}，${suffix}`,
+      `2) 填空示例（景别须按本镜剧情选择，禁止全片统一同一景别）：${example}，${suffix}`,
       '3) layout=single：单张完整场景，禁止 grid/collage/multi-panel/split/storyboard',
       options?.hasDiptych ? `4) ${NARRATION_DIPPTYCH_SIX_PART_LLM_RULE}` : '',
-      options?.hasCharacters ? 'characters 提供 portrait_label、has_portrait 与外貌；有定妆时【画面主体】须对照定妆标签，详见【定妆对照】规则' : '',
+      options?.hasCharacters ? 'characters 提供 portrait_label、gender、has_portrait；有定妆时【画面主体】只写对照定妆标签+细化表情（禁止写脸型/发型），详见【定妆对照】规则' : '',
       '每条 prompt 须以 narration_lines 为锚点、结合 full_narration 与 prior_narration 丰富场景/陈设/动作；不要输出负面提示词',
     ].filter(Boolean)
     return [...shared, ...hardRules, '只输出 JSON，不要解释。'].join('\n')
@@ -1059,7 +1149,7 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
       NARRATION_ERA_CLOTHING_LLM_RULE,
       violenceRule,
       '硬性规则：',
-      `1) 结构：${formatNarrationStyleSpecBracket(undefined, style)} + 【片头背景场景】+【主题氛围】+ ${NARRATION_ANIME_SCENE_SUFFIX}`,
+      `1) 结构：${formatNarrationAnimeStyleSpecBracketForLLM()} + 【片头背景场景】+【主题氛围】+ ${NARRATION_ANIME_SCENE_SUFFIX}`,
       `2) ${NARRATION_TITLE_IMAGE_LLM_RULE}`,
       `3) ${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
       '只输出 JSON，不要解释。',
@@ -1259,7 +1349,7 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
 }
 
 export function normalizeArtStyle(style?: string | null): string {
-  const key = String(style || '').trim().toLowerCase()
+  const key = String(style || '').trim().toLowerCase().replace(/_/g, '-')
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
   if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
   if (STYLE_PROMPTS[key]) return key
@@ -1284,6 +1374,20 @@ export function isNarrationMinimalStyle(style?: string | null): boolean {
 
 export function isNarrationAnimeStyle(style?: string | null): boolean {
   return normalizeArtStyle(style) === NARRATION_ANIME_STYLE
+}
+
+export function isShortDramaStyle(style?: string | null): boolean {
+  return normalizeArtStyle(style) === DEFAULT_ART_STYLE
+}
+
+/** 定妆提取/入库须走 appearance 规范化（16:9 + 正面全身锚点） */
+export function usesPortraitAppearanceSanitize(style?: string | null): boolean {
+  return (
+    isNarrationAnimeStyle(style) ||
+    isNarrationMinimalStyle(style) ||
+    isMotionComicStyle(style) ||
+    isShortDramaStyle(style)
+  )
 }
 
 
@@ -2985,6 +3089,48 @@ export function applyNarrationPlotContinuity(
   return String(plot || '').trim()
 }
 
+/** 【画面主体】是否已含性别描述 */
+export function subjectBracketHasGender(text: string): boolean {
+  return /男性|女性|男子|女子|男生|女生|男主|女主|\b1boy\b|\b1girl\b|\bmale\b|\bfemale\b/i.test(String(text || ''))
+}
+
+function injectGenderIntoSubjectInner(inner: string, genderLabel: '男性' | '女性'): string {
+  const trimmed = String(inner || '').trim()
+  if (!trimmed || subjectBracketHasGender(trimmed)) return trimmed
+  const portraitMatch = trimmed.match(/^(对照定妆「[^」]+」)(（)(.*)$/)
+  if (portraitMatch) {
+    return `${portraitMatch[1]}${portraitMatch[2]}${genderLabel}，${portraitMatch[3]}`
+  }
+  const portraitNoParenMatch = trimmed.match(/^(对照定妆「[^」]+」)(.+)$/)
+  if (portraitNoParenMatch) {
+    return `${portraitNoParenMatch[1]}（${genderLabel}，${portraitNoParenMatch[2].trim()}`
+  }
+  if (!/两位|丈夫|妻子|父亲|母亲|儿子|女儿|配偶|兄妹|夫妻/.test(trimmed)) {
+    const protagonistMatch = trimmed.match(/^(.*?)(一位[^，。]*?)(主人公)(.*)$/)
+    if (protagonistMatch) {
+      return `${protagonistMatch[1]}${protagonistMatch[2]}${genderLabel}${protagonistMatch[3]}${protagonistMatch[4]}`
+    }
+  }
+  return `${genderLabel}，${trimmed}`
+}
+
+/** 向【画面主体】仅追加性别词，不改其它维度 */
+export function injectGenderIntoImagePromptSubject(
+  prompt: string,
+  genderLabel: '男性' | '女性',
+): string {
+  const trimmed = String(prompt || '').trim()
+  if (!trimmed || !genderLabel) return trimmed
+  return trimmed.replace(
+    /(【画面主体[：:]\s*)([^】]*)(】)/g,
+    (_, open, inner, close) => {
+      const body = String(inner || '').trim()
+      if (!body || subjectBracketHasGender(body)) return `${open}${inner}${close}`
+      return `${open}${injectGenderIntoSubjectInner(body, genderLabel)}${close}`
+    },
+  )
+}
+
 /** 向已有 prompt 的指定【】框内追加内容（用于角色名等补充描述） */
 export function appendToNarrationBracket(prompt: string, label: string, addition: string): string {
   const trimmed = String(prompt || '').trim()
@@ -3201,6 +3347,10 @@ const APPEARANCE_STYLE_REPLACEMENTS: Array<[RegExp, string]> = [
   [/webtoon画风/gi, ''],
   [/时代弄潮儿/gi, ''],
   [/走在时代前沿/g, ''],
+  [/红瞳|赤瞳|血红双眼|双眼血红/g, '深褐虹膜'],
+  [/整眼(?:通红|鲜红|发红)|虹膜(?:通红|鲜红|全红)/g, '深褐虹膜带高光'],
+  [/\b(solid\s+)?(glowing\s+)?(crimson|blood[- ]?red|demon(?:ic)?)\s+eyes?\b/gi, 'natural dark-brown iris'],
+  [/\bred\s+eyes?\b/gi, 'natural dark-brown eyes'],
 ]
 
 const CONFLICTING_STYLE_PATTERNS = [
@@ -3477,21 +3627,21 @@ export function buildMinimalPortraitPostureHint(variantLabel?: string | null): s
   const stage = normalizeNarrationBodyStage(label)
   const spec = formatNarrationBodyStageSpec(stage)
   if (stage === '小孩') {
-    return `${body}主人公，${face}，开心微笑，简化童装轮廓，${spec}，三视图标准站立双手自然下垂`
+    return `${body}主人公，${face}，开心微笑，简化童装轮廓，${spec}，正面全身标准站立双手自然下垂`
   }
   if (stage === '少年') {
-    return `${body}主人公，${face}，青涩微笑，简化校服或休闲装轮廓，${spec}，三视图标准站立双手自然下垂`
+    return `${body}主人公，${face}，青涩微笑，简化校服或休闲装轮廓，${spec}，正面全身标准站立双手自然下垂`
   }
   if (stage === '青年') {
-    return `${body}主人公，${face}，自信微笑，简化年代服装轮廓，${spec}，三视图标准站立双手自然下垂`
+    return `${body}主人公，${face}，自信微笑，简化年代服装轮廓，${spec}，正面全身标准站立双手自然下垂`
   }
   if (stage === '中年') {
-    return `${body}主人公，${face}，沉稳表情，简化中年便装轮廓，${spec}，三视图标准站立双手自然下垂`
+    return `${body}主人公，${face}，沉稳表情，简化中年便装轮廓，${spec}，正面全身标准站立双手自然下垂`
   }
   if (stage === '老年') {
-    return `${body}主人公，${face}，慈祥微笑，简化老年便装轮廓，${spec}，三视图标准站立双手自然下垂`
+    return `${body}主人公，${face}，慈祥微笑，简化老年便装轮廓，${spec}，正面全身标准站立双手自然下垂`
   }
-  return `${body}主人公，${face}，中性表情，简化服装轮廓，${spec}，三视图标准站立双手自然下垂`
+  return `${body}主人公，${face}，中性表情，简化服装轮廓，${spec}，正面全身标准站立双手自然下垂`
 }
 
 function extractBodyWeightAppearanceFragments(raw: string): string[] {
@@ -3827,14 +3977,19 @@ function getMinimalStyleForbiddenPattern(): RegExp {
   return minimalStyleForbiddenPattern
 }
 
-/** 提取指定六维标签的正文（支持重复标签，如两宫格） */
+/** 提取指定六维标签的正文（支持重复标签，如两宫格；兼容半角 []） */
 export function extractNarrationPromptBracketContents(text: string, labels: string | string[]): string[] {
   const labelList = Array.isArray(labels) ? labels : [labels]
   const contents: string[] = []
   for (const label of labelList) {
-    const re = new RegExp(`【${label}[：:]\\s*([^】]+)】`, 'g')
-    for (const match of String(text || '').matchAll(re)) {
-      if (match[1]) contents.push(match[1].trim())
+    const patterns = [
+      new RegExp(`【${label}[：:]\\s*([^】]+)】`, 'g'),
+      new RegExp(`\\[${label}[：:]\\s*([^\\]]+)\\]`, 'g'),
+    ]
+    for (const re of patterns) {
+      for (const match of String(text || '').matchAll(re)) {
+        if (match[1]) contents.push(match[1].trim())
+      }
     }
   }
   return contents
@@ -3912,6 +4067,269 @@ export function hasNarrationPartialCloseupIssue(text: string): boolean {
   const lighting = extractNarrationPromptBracketContents(text, '光影色调')[0] ?? ''
   const camera = extractNarrationPromptBracketContents(text, '镜头视角')[0] ?? ''
   return isNarrationPartialCloseupConflict(subject, action, lighting, camera)
+}
+
+/** 近景/面部特写/头高过高，与坐姿・肢体动作・道具冲突（易生成只剩一张脸） */
+export function hasNarrationFaceCloseupVsActionIssue(text: string): boolean {
+  const subject = extractNarrationPromptBracketContents(text, '画面主体')[0] ?? ''
+  const action = extractNarrationPromptBracketContents(text, '核心细节动作')[0] ?? ''
+  const scene = extractNarrationPromptBracketContents(text, '年代场景')[0] ?? ''
+  const lighting = extractNarrationPromptBracketContents(text, '光影色调')[0] ?? ''
+  const camera = extractNarrationPromptBracketContents(text, '镜头视角')[0] ?? ''
+  return isNarrationFaceCloseupVsActionConflict(subject, action, scene, lighting, camera)
+}
+
+const NARRATION_FACE_CLOSEUP_BAN_RE =
+  /面部特写|脸部特写|只映出脸|只拍脸|大特写局部|突出面部(?:表情)?(?:与镜中细节)?/g
+
+function narrationHasPoseLimbOrProp(subject: string, action: string, scene: string): boolean {
+  const blob = `${subject} ${action} ${scene}`
+  return /坐姿|站立|站姿|僵直|抬|触|握|端|伸手|双手|右手|左手|扶|按|倚靠|摸|递|推|拉/.test(blob)
+    || /镜|杯|台|桌|门|袋|架|沙发|椅|床|墙|窗|屏|机|灯|柜/.test(blob)
+}
+
+export function isNarrationFaceCloseupVsActionConflict(
+  subject: string,
+  action: string,
+  scene: string,
+  lighting: string,
+  camera: string,
+): boolean {
+  const cue = `${camera} ${scene} ${lighting}`
+  if (/面部特写|脸部特写|只映出脸|只拍脸|突出面部/.test(cue)) return true
+
+  const headMatch = camera.match(/头高约占画面高度\s*(\d{1,2})\s*%/)
+    || camera.match(/头高[^。；;]{0,24}?(\d{1,2})\s*%/)
+  const headPct = headMatch ? Number(headMatch[1]) : NaN
+  const nearShot = /近景/.test(camera) && !/中近景/.test(camera)
+  const highHead = Number.isFinite(headPct) && headPct >= 35
+  if ((nearShot || highHead) && narrationHasPoseLimbOrProp(subject, action, scene)) return true
+  if (/聚焦面部/.test(camera) && narrationHasPoseLimbOrProp(subject, action, scene)) return true
+  return false
+}
+
+function replaceNarrationBracketBody(text: string, label: string, nextBody: string): string {
+  const body = String(nextBody || '').trim()
+  let out = text.replace(
+    new RegExp(`(【${label}[：:]\\s*)([^】]*)(】)`, 'g'),
+    (_, open, _old, close) => `${open}${body}${close}`,
+  )
+  out = out.replace(
+    new RegExp(`(\\[${label}[：:]\\s*)([^\\]]*)(\\])`, 'g'),
+    (_, open, _old, close) => `${open}${body}${close}`,
+  )
+  return out
+}
+
+function repairNarrationFaceCloseupScene(scene: string): string {
+  return String(scene || '')
+    .replace(/映出面部特写/g, '映出人物上半身与抬手')
+    .replace(/面部特写/g, '上半身')
+    .replace(/脸部特写/g, '上半身')
+    .replace(/只映出脸/g, '映出上半身')
+    .replace(/只拍脸/g, '拍到上半身')
+}
+
+function repairNarrationFaceCloseupLighting(lighting: string): string {
+  return String(lighting || '')
+    .replace(/聚焦于?面[部脸][^，,；;]*/g, '面部受光均匀')
+    .replace(NARRATION_FACE_CLOSEUP_BAN_RE, '')
+}
+
+function repairNarrationFaceCloseupCamera(camera: string, subject: string, action: string): string {
+  let c = String(camera || '').trim()
+  const standing = isNarrationStandingPose(subject, action, c)
+  if (!c) {
+    c = standing
+      ? '中景全身平视，镜头朝向站立全身的主人公与动作点，主人公头高约占画面高度12%，站立全身约占画面高度35%，从头顶到脚完整入镜'
+      : '中近景平视，镜头朝向主人公上半身与动作点，主人公头高约占画面高度26%'
+  }
+
+  c = c.replace(NARRATION_FACE_CLOSEUP_BAN_RE, '')
+  c = c.replace(/突出面部[^，,；;]{0,24}/g, standing ? '须可见从头顶到脚完整入镜' : '须可见坐姿肩线与手部')
+  c = c.replace(/聚焦面部与上半身/g, standing ? '须可见站立全身' : '须可见上半身与手部')
+  c = c.replace(/聚焦面部(?:与手部动作)?/g, standing ? '须可见站立全身与手部动作' : '须可见上半身与手部动作')
+  c = c.replace(/聚焦于?面[部脸][^，,；;]{0,16}/g, standing ? '须可见站立全身' : '须可见上半身与手部')
+  c = c.replace(/须可见上半身与手部动作与上半身/g, '须可见上半身与手部')
+  c = c.replace(/须可见上半身与手部动作，须可见坐姿肩线与手部/g, '须可见坐姿肩线与手部')
+
+  if (standing) {
+    return repairNarrationStandingFullBodyCamera(c, subject, action)
+  }
+
+  if (/近景/.test(c) && !/中近景/.test(c)) {
+    c = c.replace(/近景/g, '中近景')
+  }
+
+  c = c.replace(/头高约占画面高度\s*(\d{1,2})\s*%/g, (_m, n) => {
+    const pct = Number(n)
+    return pct >= 35 ? '头高约占画面高度26%' : `头高约占画面高度${pct}%`
+  })
+  if (!/头高约占画面高度/.test(c)) {
+    const loose = c.match(/头高[^。；;%]{0,24}?(\d{1,2})\s*%/)
+    if (loose) {
+      const pct = Number(loose[1])
+      c = c.replace(loose[0], pct >= 35 ? '头高约占画面高度26%' : `头高约占画面高度${pct}%`)
+    }
+  }
+
+  if (/朝向[^，,；;]*面部/.test(c) && !/上半身/.test(c)) {
+    c = c.replace(/朝向[^，,；;]*/, '朝向主人公上半身与动作点及镜面陈设')
+  } else if (!/朝向/.test(c)) {
+    c = `${c.replace(/[，,；;]+$/, '')}，镜头朝向主人公上半身与动作点`
+  }
+
+  if (!/须可见/.test(c) && narrationHasPoseLimbOrProp(subject, action, '')) {
+    c = `${c.replace(/[，,；;]+$/, '')}，须可见坐姿肩线与手部`
+  }
+
+  return tidyAppearancePunctuation(c)
+}
+
+/** 站立/行走姿态：禁止裁成中近景上半身 */
+export function isNarrationStandingPose(subject?: string | null, action?: string | null, camera?: string | null): boolean {
+  const merged = `${subject || ''} ${action || ''} ${camera || ''}`
+  if (/坐姿|坐在|坐下|蹲|跪|侧卧|躺|趴|卧床|趴桌/.test(merged)) return false
+  return /站立|站着|站在|站姿|行走|走进|走出|进门|离去|脚步|踏入/.test(merged)
+}
+
+export function repairNarrationStandingFullBodyCamera(
+  camera: string,
+  subject: string,
+  action: string,
+): string {
+  if (!isNarrationStandingPose(subject, action, camera)) return String(camera || '').trim()
+  let c = String(camera || '').trim()
+  if (!c) {
+    c = '中远景平视，镜头朝向站立全身的主人公与动作点，主人公头高约占画面高度12%，站立全身约占画面高度45%，从头顶到脚完整入镜，头顶与脚底留白'
+  }
+  c = c.replace(/中近景/g, '中远景')
+  c = c.replace(/近景(?!特写)/g, '中远景')
+  c = c.replace(/中景全身特写/g, '中远景')
+  c = c.replace(/中景全身/g, '中远景')
+  c = c.replace(/朝向主人公上半身/g, '朝向站立全身的主人公')
+  c = c.replace(/朝向([^，,；;]*?)上半身/g, '朝向站立全身的主人公与$1')
+  c = c.replace(/须可见站立姿态肩线与手部[^，,；;]*/g, '须可见从头顶到脚完整入镜，双脚与鞋子清晰')
+  c = c.replace(/须可见[^，,；;]{0,16}肩线与手部[^，,；;]*/g, '须可见从头顶到脚完整入镜，双脚与鞋子清晰')
+  c = c.replace(/须可见坐姿肩线与手部[^，,；;]*/g, '须可见从头顶到脚完整入镜')
+  c = c.replace(/头高约占画面高度\s*\d{1,2}\s*%/g, '头高约占画面高度12%')
+  c = c.replace(/站立全身约占画面高度\s*(?:2\d|3\d|4[0-4])\s*%/g, '站立全身约占画面高度45%')
+  if (!/站立全身约占/.test(c)) {
+    c = `${c.replace(/[，,；;]+$/, '')}，站立全身约占画面高度45%`
+  }
+  if (!/从头顶到脚|完整入镜|全身入镜|双脚/.test(c)) {
+    c = `${c.replace(/[，,；;]+$/, '')}，主人公从头顶到脚完整入镜，双脚与鞋子可见，头顶与脚底留白`
+  } else if (!/头顶与脚底留白|脚底留白/.test(c)) {
+    c = `${c.replace(/[，,；;]+$/, '')}，头顶与脚底留白`
+  }
+  if (!/头高约占/.test(c)) {
+    c = `${c.replace(/[，,；;]+$/, '')}，主人公头高约占画面高度12%`
+  }
+  if (!/中远景|中景|全景/.test(c)) {
+    c = `中远景平视，${c}`
+  }
+  return tidyAppearancePunctuation(c)
+}
+
+/** 规则改写：站立镜强制全身入镜，避免腿被截断 */
+export function applyNarrationStandingFullBodyFixes(fields: {
+  subject: string
+  action: string
+  camera: string
+}): { subject: string; action: string; camera: string; changed: boolean } {
+  const before = String(fields.camera || '')
+  const camera = repairNarrationStandingFullBodyCamera(before, fields.subject, fields.action)
+  return {
+    subject: fields.subject,
+    action: fields.action,
+    camera,
+    changed: camera !== before,
+  }
+}
+
+/** 规则改写：有姿态/动作/道具时，去掉面部特写大头构图 */
+export function applyNarrationFaceCloseupVsActionFixes(fields: {
+  subject: string
+  action: string
+  scene: string
+  lighting: string
+  camera: string
+}): {
+  subject: string
+  action: string
+  scene: string
+  lighting: string
+  camera: string
+  conflict: boolean
+} {
+  const conflict = isNarrationFaceCloseupVsActionConflict(
+    fields.subject,
+    fields.action,
+    fields.scene,
+    fields.lighting,
+    fields.camera,
+  )
+  const banCue = /面部特写|脸部特写|只映出脸|只拍脸|突出面部/.test(
+    `${fields.scene} ${fields.lighting} ${fields.camera}`,
+  )
+  if (!conflict && !banCue) return { ...fields, conflict: false }
+
+  return {
+    subject: fields.subject,
+    action: fields.action,
+    scene: repairNarrationFaceCloseupScene(fields.scene),
+    lighting: repairNarrationFaceCloseupLighting(fields.lighting),
+    camera: repairNarrationFaceCloseupCamera(fields.camera, fields.subject, fields.action),
+    conflict: true,
+  }
+}
+
+/** 对完整七维文案做面部大头冲突修复（全角/半角 bracket 均可） */
+export function repairNarrationFaceCloseupVsActionPrompt(prompt?: string | null): string {
+  const text = String(prompt || '').trim()
+  if (!text) return ''
+  if (!/画面主体/.test(text) || !/镜头视角/.test(text)) return text
+
+  const subject = extractNarrationPromptBracketContents(text, '画面主体')[0] ?? ''
+  const action = extractNarrationPromptBracketContents(text, '核心细节动作')[0] ?? ''
+  const scene = extractNarrationPromptBracketContents(text, '年代场景')[0] ?? ''
+  const lighting = extractNarrationPromptBracketContents(text, '光影色调')[0] ?? ''
+  const camera = extractNarrationPromptBracketContents(text, '镜头视角')[0] ?? ''
+  if (!subject && !camera) return text
+
+  const fixed = applyNarrationFaceCloseupVsActionFixes({
+    subject,
+    action,
+    scene,
+    lighting,
+    camera,
+  })
+  if (!fixed.conflict) return text
+
+  let out = text
+  if (scene) out = replaceNarrationBracketBody(out, '年代场景', fixed.scene)
+  if (lighting) out = replaceNarrationBracketBody(out, '光影色调', fixed.lighting)
+  if (camera || fixed.camera) out = replaceNarrationBracketBody(out, '镜头视角', fixed.camera)
+  return out
+}
+
+/** 规则改写：整段 prompt 站立镜强制全身（动漫 resolveLLM 路径也要走） */
+export function repairNarrationStandingFullBodyPrompt(prompt?: string | null): string {
+  const text = String(prompt || '').trim()
+  if (!text) return ''
+  if (!/画面主体/.test(text) || !/镜头视角/.test(text)) return text
+
+  const subject = extractNarrationPromptBracketContents(text, '画面主体')[0] ?? ''
+  const action = extractNarrationPromptBracketContents(text, '核心细节动作')[0] ?? ''
+  const camera = extractNarrationPromptBracketContents(text, '镜头视角')[0] ?? ''
+  if (!subject && !camera) return text
+  if (!isNarrationStandingPose(subject, action, camera)) return text
+
+  const fixed = applyNarrationStandingFullBodyFixes({ subject, action, camera })
+  if (!fixed.changed && /从头顶到脚|中景全身|中远景/.test(camera) && !/中近景|上半身|头高约占画面高度\s*(2[2-9]|3[0-9])\s*%/.test(camera)) {
+    return text
+  }
+  return replaceNarrationBracketBody(text, '镜头视角', fixed.camera)
 }
 
 /** 【画面主体】出现多位主人公（不含【多主人公例外】） */
@@ -4044,7 +4462,27 @@ export function normalizeMinimalPromptByTemplate(prompt?: string | null): string
   camera = partialFixed.camera
   const plotFixed = partialFixed.action
 
-  return assembleNarrationUniversalScenePrompt(scene, plotFixed, {
+  const faceFixed = applyNarrationFaceCloseupVsActionFixes({
+    subject,
+    action: plotFixed,
+    scene,
+    lighting: atmosphere,
+    camera,
+  })
+  subject = faceFixed.subject
+  atmosphere = faceFixed.lighting
+  camera = faceFixed.camera
+  const sceneFixed = faceFixed.scene
+  const plotOut = faceFixed.action
+
+  const standingFixed = applyNarrationStandingFullBodyFixes({
+    subject,
+    action: plotOut,
+    camera,
+  })
+  camera = standingFixed.camera
+
+  return assembleNarrationUniversalScenePrompt(sceneFixed, plotOut, {
     styleSpec,
     subject,
     atmosphere,
@@ -4058,26 +4496,40 @@ export function shouldPreserveRawNarrationPrompt(raw?: string | null): boolean {
   return NARRATION_USE_RAW_LLM_PROMPTS && !!String(raw || '').trim()
 }
 
-/** 将 LLM/旧库中的动漫配图 prompt 对齐七维模板 */
+/** 将 LLM/旧库中的动漫/漫画解说配图 prompt 对齐模板；漫画解说整段文案不做【】强制重组 */
 export function coerceAnimeLLMImagePrompt(
   prompt?: string | null,
   style?: string | null,
   options?: { lockedProtagonistBody?: string | null },
 ): string {
-  let text = ensureNarrationStyleSpecDim(String(prompt || '').trim(), style)
+  const motionComic = isMotionComicStyle(style)
+  let text = String(prompt || '').trim()
   if (!text) return ''
+  // 漫画解说：整段连贯文案原样保留（仅做轻量冲突修复），不注入【画风规格】等标签
+  if (motionComic && !/【(?:画风规格|画面主体|年代场景)[：:]/.test(text)) {
+    text = normalizeAnimeProtagonistBodyInPrompt(text, options?.lockedProtagonistBody)
+    text = repairNarrationFaceCloseupVsActionPrompt(text)
+    text = repairNarrationStandingFullBodyPrompt(text)
+    return applyMinimalNoClothingGuard(text)
+  }
+  text = ensureNarrationStyleSpecDim(text, style)
   text = text.replace(/【([^：:【]+)[：:]([^】]*)】/g, (_, label, body) => {
     const trimmedLabel = String(label).trim()
     if (trimmedLabel === '质感要求') {
-      const normalized = normalizeAnimeTextureBracket(String(body).trim())
+      const rawBody = String(body).trim()
+      const normalized = motionComic
+        ? normalizeBracketContent(rawBody)
+        : normalizeAnimeTextureBracket(rawBody)
       return `【${trimmedLabel}：${normalized}】`
     }
     return `【${trimmedLabel}：${normalizeBracketContent(String(body).trim())}】`
   })
   if (!/【画风规格[：:]/.test(text) && /【(?:画面主体|年代场景)/.test(text)) {
-    text = `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，${text}`
+    text = `${formatNarrationStyleSpecBracket(undefined, style)}，${text}`
   }
   text = normalizeAnimeProtagonistBodyInPrompt(text, options?.lockedProtagonistBody)
+  text = repairNarrationFaceCloseupVsActionPrompt(text)
+  text = repairNarrationStandingFullBodyPrompt(text)
   return applyMinimalNoClothingGuard(text)
 }
 

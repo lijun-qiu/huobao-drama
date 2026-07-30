@@ -51,6 +51,22 @@ export interface NarrationImageMeta {
   expression_action?: string
   /** 漫画动态漫：一体化分镜 — 场景背景 */
   scene_background?: string
+  /** Flux 生图英文 prompt（一键翻译写入，中文仍保留在 image_prompt） */
+  flux_prompt_en?: string
+  flux_prompt_en_at?: string
+  /** 翻译器版本；低于当前版本需重译 */
+  flux_prompt_en_version?: number
+  /** 配图 VLM 校验结果（MiniCPM-V 等） */
+  image_validate_at?: string
+  image_validate_model?: string
+  image_validate_is_suitable?: boolean
+  image_validate_score?: number
+  image_validate_summary?: string
+  image_validate_issues?: string[]
+  image_validate_suggestions?: string[]
+  image_validate_matches_narration?: boolean
+  image_validate_matches_prompt?: boolean
+  image_validate_style_ok?: boolean
 }
 
 /**
@@ -117,6 +133,47 @@ export function parseNarrationImageMeta(referenceImages?: string | null): Narrat
         : undefined,
       subtitle_narration: typeof parsed?.subtitle_narration === 'string' && parsed.subtitle_narration.trim()
         ? parsed.subtitle_narration.trim()
+        : undefined,
+      flux_prompt_en: typeof parsed?.flux_prompt_en === 'string' && parsed.flux_prompt_en.trim()
+        ? parsed.flux_prompt_en.trim()
+        : undefined,
+      flux_prompt_en_at: typeof parsed?.flux_prompt_en_at === 'string' && parsed.flux_prompt_en_at.trim()
+        ? parsed.flux_prompt_en_at.trim()
+        : undefined,
+      flux_prompt_en_version: typeof parsed?.flux_prompt_en_version === 'number'
+        ? parsed.flux_prompt_en_version
+        : undefined,
+      image_validate_at: typeof parsed?.image_validate_at === 'string' && parsed.image_validate_at.trim()
+        ? parsed.image_validate_at.trim()
+        : undefined,
+      image_validate_model: typeof parsed?.image_validate_model === 'string' && parsed.image_validate_model.trim()
+        ? parsed.image_validate_model.trim()
+        : undefined,
+      image_validate_is_suitable: typeof parsed?.image_validate_is_suitable === 'boolean'
+        ? parsed.image_validate_is_suitable
+        : parsed?.image_validate_is_suitable === 'true' || parsed?.image_validate_is_suitable === 'false'
+          ? parsed.image_validate_is_suitable === 'true'
+          : undefined,
+      image_validate_score: typeof parsed?.image_validate_score === 'number' && Number.isFinite(parsed.image_validate_score)
+        ? parsed.image_validate_score
+        : undefined,
+      image_validate_summary: typeof parsed?.image_validate_summary === 'string' && parsed.image_validate_summary.trim()
+        ? parsed.image_validate_summary.trim()
+        : undefined,
+      image_validate_issues: Array.isArray(parsed?.image_validate_issues)
+        ? parsed.image_validate_issues.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
+      image_validate_suggestions: Array.isArray(parsed?.image_validate_suggestions)
+        ? parsed.image_validate_suggestions.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
+      image_validate_matches_narration: typeof parsed?.image_validate_matches_narration === 'boolean'
+        ? parsed.image_validate_matches_narration
+        : undefined,
+      image_validate_matches_prompt: typeof parsed?.image_validate_matches_prompt === 'boolean'
+        ? parsed.image_validate_matches_prompt
+        : undefined,
+      image_validate_style_ok: typeof parsed?.image_validate_style_ok === 'boolean'
+        ? parsed.image_validate_style_ok
         : undefined,
     }
   } catch {}

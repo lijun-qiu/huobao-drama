@@ -6,11 +6,16 @@ import { toSnakeCase } from '../utils/transform.js'
 import { generateVoiceSample } from '../services/tts-generation.js'
 import { generateImage } from '../services/image-generation.js'
 import { generateCharacterAppearance, resolveCharacterPortraitGeneration, resolvePortraitImageModel, resolvePortraitImageSize, variantNeedsYouthPortraitReference, variantPortraitSortOrder, getVariantAgeGroup, finalizeCharacterAppearance } from '../services/narration-characters.js'
+import { sanitizePortraitAppearanceForGeneration } from '../constants/portrait-reference.js'
 import { buildCharacterAppearanceContext } from '../services/ai-description-context.js'
 import { recognizePortraitImage } from '../services/kling-image-recognize.js'
+import { validateCharacterPortraitStyle } from '../services/portrait-style-validate.js'
+import { resolveEpisodeTextModel, resolveEpisodeTextThinking, DEFAULT_LOCAL_VISION_MODEL } from '../constants/text-models.js'
+import { LOCAL_COMIC_ENV } from '../constants/local-comic.js'
 import { resolveEpisodeImageModel, imageModelSupportsReferenceImages } from '../constants/image-models.js'
-import { resolveEpisodeTextModel, resolveEpisodeTextThinking } from '../constants/text-models.js'
+import { resolveEpisodeProductionMode, isLocalComicMode, usesLocalModelPipeline, parseProductionMode, isDialoguePortraitMode } from '../constants/production-mode.js'
 import { normalizeArtStyle, sanitizeCharacterAppearance, isNarrationMinimalStyle, resolveEpisodeVisualStyle, resolveNarrationImageStyle } from '../constants/art-styles.js'
+import { isMotionComicStyle } from '../constants/motion-comic.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 import { logTaskError, logTaskStart, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 
@@ -27,8 +32,10 @@ function resolvePortraitStyleFromRequest(
   source?: { imageStyle?: unknown; image_style?: unknown; style?: unknown },
 ): string {
   const imageStyle = source?.imageStyle ?? source?.image_style ?? source?.style
-  if (imageStyle) return resolveNarrationImageStyle(String(imageStyle))
-  return resolveEpisodeVisualStyle(episodeId, { dramaStyle: drama?.style })
+  return resolveEpisodeVisualStyle(episodeId, {
+    imageStyle: imageStyle ? String(imageStyle) : undefined,
+    dramaStyle: drama?.style,
+  })
 }
 
 function resolvePortraitReferenceImages(
@@ -56,14 +63,21 @@ async function submitCharacterPortrait(
   ep: typeof schema.episodes.$inferSelect,
   style: string,
   useReference = true,
+  textModel?: string | null,
 ) {
-  const model = resolvePortraitImageModel(resolveEpisodeImageModel(ep), char.variantLabel)
+  const model = resolvePortraitImageModel(resolveEpisodeImageModel(ep, undefined, resolveEpisodeProductionMode(ep.id)), char.variantLabel)
   let appearance = char.appearance || ''
-  const cleanedAppearance = await finalizeCharacterAppearance(appearance || char.description || '', {
-    name: char.name,
-    role: char.role,
-    minimal: isNarrationMinimalStyle(style),
-  })
+  const cleanedAppearance = sanitizePortraitAppearanceForGeneration(
+    await finalizeCharacterAppearance(appearance || char.description || '', {
+      name: char.name,
+      role: char.role,
+      minimal: isNarrationMinimalStyle(style),
+      motionComic: isMotionComicStyle(style),
+      textModel,
+      // 生图阶段禁止拉 LLM：否则会 unload Comfy 并导致 execution_interrupted
+      allowLlmEnrichment: false,
+    }),
+  )
   if (cleanedAppearance && cleanedAppearance !== appearance) {
     appearance = cleanedAppearance
     db.update(schema.characters).set({ appearance, updatedAt: now() }).where(eq(schema.characters.id, char.id)).run()
@@ -103,6 +117,7 @@ async function submitCharacterPortrait(
     dramaId: char.dramaId,
     prompt: resolved.prompt,
     model,
+    style,
     size: resolvePortraitImageSize(style),
     configId: ep.imageConfigId ?? undefined,
     referenceImages,
@@ -214,11 +229,17 @@ app.post('/:id/generate-voice-sample', async (c) => {
 
   try {
     logTaskStart('VoiceSample', 'generate', { characterId: id, characterName: char.name, episodeId: ep.id, voice: char.voiceStyle })
+    const mode = resolveEpisodeProductionMode(ep.id)
+    const voiceProvider = usesLocalModelPipeline(mode)
+      ? (/^(zh|en|ja|ko)-/i.test(String(char.voiceStyle || '')) || String(char.voiceProvider || '').toLowerCase() === 'edge'
+        ? 'edge'
+        : (String(char.voiceProvider || '').toLowerCase() === 'indextts' ? 'indextts' : 'gptsovits'))
+      : char.voiceProvider
     const result = await generateVoiceSample(
       char.name,
       char.voiceStyle,
       ep.audioConfigId ?? undefined,
-      char.voiceProvider,
+      voiceProvider,
       { role: char.role, appearance: char.appearance, description: char.description },
       resolveVoiceboxModelSize(body?.voicebox_model_size ?? body?.voiceboxModelSize),
     )
@@ -257,7 +278,7 @@ app.post('/:id/generate-appearance', async (c) => {
       script = script || String(ep.scriptContent || ep.content || '').trim()
       drama = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()[0]
       style = resolvePortraitStyleFromRequest(ep.id, drama, body)
-      textModel = resolveEpisodeTextModel(ep, body.text_model)
+      textModel = resolveEpisodeTextModel(ep, body.text_model, resolveEpisodeProductionMode(ep.id))
       textThinking = resolveEpisodeTextThinking(ep, body.text_thinking)
     }
   }
@@ -269,6 +290,8 @@ app.post('/:id/generate-appearance', async (c) => {
   const contentCtx = buildCharacterAppearanceContext({
     characterId: id,
     characterName: char.name,
+    characterVariantLabel: char.variantLabel,
+    characterRole: char.role,
     episodeId,
     dramaId: char.dramaId,
     script,
@@ -286,6 +309,9 @@ app.post('/:id/generate-appearance', async (c) => {
       contentContext: contentCtx,
       textModel,
       textThinking,
+      productionMode: ep
+        ? resolveEpisodeProductionMode(ep.id)
+        : parseProductionMode(drama?.metadata),
     })
     db.update(schema.characters)
       .set({ appearance, updatedAt: now() })
@@ -296,6 +322,28 @@ app.post('/:id/generate-appearance', async (c) => {
     return success(c, { appearance, character: toSnakeCase(row), generated_at: now() })
   } catch (err: any) {
     logTaskError('CharacterAppearance', 'generate', { characterId: id, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /characters/:id/validate-portrait-style — 本地 MiniCPM-V 校验定妆画风是否不标准
+app.post('/:id/validate-portrait-style', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>
+  try {
+    logTaskStart('CharacterPortraitValidate', 'style', { characterId: id })
+    const result = await validateCharacterPortraitStyle(id, {
+      visionModel: String(body.vision_model || body.visionModel || LOCAL_COMIC_ENV.ollamaVisionModel || DEFAULT_LOCAL_VISION_MODEL),
+      imageUrl: body.image_url != null ? String(body.image_url) : (body.imageUrl != null ? String(body.imageUrl) : null),
+    })
+    logTaskSuccess('CharacterPortraitValidate', 'style', {
+      characterId: id,
+      isStandard: result.is_standard,
+      score: result.score,
+    })
+    return success(c, { ...result, generated_at: now() })
+  } catch (err: any) {
+    logTaskError('CharacterPortraitValidate', 'style', { characterId: id, error: err.message })
     return badRequest(c, err.message)
   }
 })
@@ -312,11 +360,13 @@ app.post('/:id/recognize-portrait', async (c) => {
 
   let episodeConfigId: number | undefined
   let portraitStyle: string | undefined
+  let textModel: string | null = null
   if (body.episode_id) {
     const episodeId = Number(body.episode_id)
     const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
     episodeConfigId = ep?.imageConfigId ?? undefined
     if (ep) {
+      textModel = resolveEpisodeTextModel(ep, body.text_model ?? body.textModel, resolveEpisodeProductionMode(ep.id))
       const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
       portraitStyle = resolvePortraitStyleFromRequest(episodeId, drama, body)
     }
@@ -330,7 +380,13 @@ app.post('/:id/recognize-portrait', async (c) => {
     const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, char.dramaId)).all()
     const merged = await finalizeCharacterAppearance(
       [char.appearance?.trim(), description.trim()].filter(Boolean).join('; '),
-      { name: char.name, role: char.role, minimal: isNarrationMinimalStyle(portraitStyle || drama?.style) },
+      {
+        name: char.name,
+        role: char.role,
+        minimal: isNarrationMinimalStyle(portraitStyle || drama?.style),
+        motionComic: isMotionComicStyle(portraitStyle || drama?.style),
+        textModel,
+      },
     )
     db.update(schema.characters)
       .set({ appearance: merged, updatedAt: now() })
@@ -362,12 +418,16 @@ app.get('/:id/portrait-prompt', async (c) => {
     imageStyle: c.req.query('image_style') ?? c.req.query('imageStyle'),
   })
   const useReference = c.req.query('use_reference') !== 'false'
+  const textModel = resolveEpisodeTextModel(ep, undefined, resolveEpisodeProductionMode(ep.id))
 
   let appearance = char.appearance || ''
   const cleanedAppearance = await finalizeCharacterAppearance(appearance || char.description || '', {
     name: char.name,
     role: char.role,
     minimal: isNarrationMinimalStyle(style),
+    motionComic: isMotionComicStyle(style),
+    textModel,
+    allowLlmEnrichment: false,
   })
   if (cleanedAppearance) appearance = cleanedAppearance
 
@@ -407,7 +467,8 @@ app.post('/:id/generate-image', async (c) => {
 
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, char.dramaId)).all()
   const style = resolvePortraitStyleFromRequest(Number(body.episode_id), drama, body)
-  const model = resolvePortraitImageModel(resolveEpisodeImageModel(ep), char.variantLabel)
+  const model = resolvePortraitImageModel(resolveEpisodeImageModel(ep, undefined, resolveEpisodeProductionMode(ep.id)), char.variantLabel)
+  const textModel = resolveEpisodeTextModel(ep, body.text_model ?? body.textModel, resolveEpisodeProductionMode(ep.id))
 
   let appearance = char.appearance || ''
   let appearanceAutoEnriched = false
@@ -415,6 +476,9 @@ app.post('/:id/generate-image', async (c) => {
     name: char.name,
     role: char.role,
     minimal: isNarrationMinimalStyle(style),
+    motionComic: isMotionComicStyle(style),
+    textModel,
+    allowLlmEnrichment: false,
   })
   if (cleanedAppearance && cleanedAppearance !== appearance) {
     appearance = cleanedAppearance
@@ -445,6 +509,7 @@ app.post('/:id/generate-image', async (c) => {
       dramaId: char.dramaId,
       prompt: resolved.prompt,
       model,
+      style,
       size: resolvePortraitImageSize(style),
       configId: ep.imageConfigId ?? undefined,
       referenceImages,
@@ -471,6 +536,64 @@ app.post('/:id/generate-image', async (c) => {
   }
 })
 
+// POST /characters/batch-dialogue-expressions — 批量表情包（须在 /:id 路由之前）
+app.post('/batch-dialogue-expressions', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const ids: number[] = body.character_ids || body.characterIds || []
+  if (!ids.length) return badRequest(c, 'character_ids is required')
+  const episodeId = Number(body.episode_id || body.episodeId || 0)
+  if (episodeId && !isDialoguePortraitMode(resolveEpisodeProductionMode(episodeId))) {
+    return badRequest(c, '仅对话立绘模式可生成表情包')
+  }
+  try {
+    const { batchGenerateDialoguePortraitExpressions } = await import('../services/dialogue-portrait-assets.js')
+    const result = await batchGenerateDialoguePortraitExpressions(ids, {
+      force: body.force === true,
+      episodeId: episodeId || undefined,
+      imageStyle: body.image_style ?? body.imageStyle,
+      tryAiEdit: body.try_ai_edit !== false && body.tryAiEdit !== false,
+    })
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /characters/:id/dialogue-expressions — 对话立绘表情包 idle/talk/react
+app.post('/:id/dialogue-expressions', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  if (!char || char.deletedAt) return badRequest(c, 'Character not found')
+
+  const episodeId = Number(body.episode_id || body.episodeId || 0)
+  if (episodeId) {
+    const mode = resolveEpisodeProductionMode(episodeId)
+    if (!isDialoguePortraitMode(mode)) {
+      return badRequest(c, '仅对话立绘模式可生成表情包')
+    }
+  }
+
+  try {
+    const { generateDialoguePortraitExpressions } = await import('../services/dialogue-portrait-assets.js')
+    logTaskStart('CharacterImage', 'dialogue-expressions', { characterId: id, episodeId: episodeId || undefined })
+    const result = await generateDialoguePortraitExpressions(id, {
+      force: body.force === true,
+      episodeId: episodeId || undefined,
+      imageStyle: body.image_style ?? body.imageStyle,
+      tryAiEdit: body.try_ai_edit !== false && body.tryAiEdit !== false,
+    })
+    logTaskSuccess('CharacterImage', 'dialogue-expressions', {
+      characterId: id,
+      fallback: result.fallback,
+    })
+    return success(c, result)
+  } catch (err: any) {
+    logTaskError('CharacterImage', 'dialogue-expressions', { characterId: id, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
 // POST /characters/batch-generate-images
 app.post('/batch-generate-images', async (c) => {
   const body = await c.req.json()
@@ -480,6 +603,7 @@ app.post('/batch-generate-images', async (c) => {
   if (!ep) return badRequest(c, 'Episode not found')
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
   const style = resolvePortraitStyleFromRequest(ep.id, drama, body)
+  const textModel = resolveEpisodeTextModel(ep, body.text_model ?? body.textModel, resolveEpisodeProductionMode(ep.id))
 
   const chars = ids
     .map(cid => db.select().from(schema.characters).where(eq(schema.characters.id, cid)).all()[0])
@@ -538,7 +662,7 @@ app.post('/batch-generate-images', async (c) => {
         }
       }
 
-      const genId = await submitCharacterPortrait(char, ep, style, useReference)
+      const genId = await submitCharacterPortrait(char, ep, style, useReference, textModel)
       results.push(genId)
 
       if (useReference && laterNames.has(char.name.trim())) {

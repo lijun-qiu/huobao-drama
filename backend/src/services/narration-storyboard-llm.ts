@@ -2,7 +2,7 @@ import { buildNarrationStoryboardLLMSystem } from '../constants/art-styles.js'
 import { resolveNarrationStoryboardTextModel } from '../constants/text-models.js'
 import { logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 import { stripEmphasisMarkers } from '../utils/subtitle-emphasis.js'
-import { getTextConfig } from './ai.js'
+import { assertTextConfigHasCredentials, getTextConfig } from './ai.js'
 import {
   splitNarrationSentencesWithMeta,
   splitTitleSentencesWithMeta,
@@ -211,9 +211,7 @@ export async function buildStoryboardSentenceItemsWithLLM(
     options?.textModel,
   )
   const config = getTextConfig(textModel)
-  if (!config.apiKey) {
-    throw new Error('未配置文本模型 API Key')
-  }
+  assertTextConfigHasCredentials(config)
 
   const ruleTitleItems = title ? splitTitleSentencesWithMeta(title) : []
   const ruleBodyItems = body.trim() ? splitNarrationSentencesWithMeta(body) : []

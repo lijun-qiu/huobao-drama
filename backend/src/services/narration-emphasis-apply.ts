@@ -16,10 +16,10 @@ import {
   normalizeEmphasisAcrossSentences,
   hasEmphasisMarkers,
 } from '../utils/subtitle-emphasis.js'
-import { getTextConfig } from './ai.js'
+import { assertTextConfigHasCredentials, getTextConfig } from './ai.js'
 import { patchNarrationImageMeta, parseNarrationImageMeta } from './narration-image.js'
 import type { NarrationParagraph } from './narration-paragraph.js'
-import { callTextChat } from './text-chat.js'
+import { callTextChat, type OllamaNumCtxProfile } from './text-chat.js'
 
 const SUBTITLE_EMPHASIS_LLM_BATCH_SIZE = 20
 const SUBTITLE_EMPHASIS_LLM_RETRIES = 2
@@ -212,6 +212,7 @@ export type NarrationEmphasisLLMOptions = {
   textThinking?: boolean
   fullNarration?: string[]
   titleHook?: string | null
+  ollamaNumCtxProfile?: OllamaNumCtxProfile
 }
 
 function buildEmphasisLLMUserPayload(params: {
@@ -252,7 +253,7 @@ async function markSentencesWithEmphasisLLM(
   if (!originals.length) return []
 
   const config = getTextConfig(options?.textModel)
-  if (!config.apiKey) throw new Error('未配置文本模型 API Key')
+  assertTextConfigHasCredentials(config)
 
   const system = buildNarrationScriptEmphasisLLMSystem()
   // 结构化 JSON 标注，禁用思考模式以显著加速（125 句约 5 批）
@@ -303,6 +304,8 @@ async function markSentencesWithEmphasisLLM(
           textThinking,
           SCRIPT_EMPHASIS_LLM_TIMEOUT_MS,
           true,
+          undefined,
+          options?.ollamaNumCtxProfile,
         )
         marked = parseMarkedSentencesResponse(text, batch.length)
         if (marked) break
@@ -397,7 +400,7 @@ export async function fillParagraphSubtitleLinesWithLLM(
   if (!paragraphs.length || !narrationEmphasisUsesLlm()) return result
 
   const config = getTextConfig(options?.textModel)
-  if (!config.apiKey) throw new Error('未配置文本模型 API Key')
+  assertTextConfigHasCredentials(config)
 
   const system = buildNarrationSubtitleEmphasisLLMSystem()
   const textThinking = options?.textThinking ?? false
@@ -444,6 +447,8 @@ export async function fillParagraphSubtitleLinesWithLLM(
           textThinking,
           SUBTITLE_EMPHASIS_LLM_TIMEOUT_MS,
           true,
+          undefined,
+          options?.ollamaNumCtxProfile ?? 'narration_image_prompt',
         )
         lastRaw = text
         rows = parseSubtitleEmphasisRows(text, batch)

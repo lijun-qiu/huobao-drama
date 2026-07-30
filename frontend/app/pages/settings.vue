@@ -53,6 +53,12 @@
             <button class="btn btn-primary" @click="presetDialog = true">
               <Sparkles :size="14" /> 火宝一键配置
             </button>
+            <button class="btn" type="button" @click="applyLocalPreset">
+              <Sparkles :size="14" /> 本地短剧配置
+            </button>
+            <p class="setup-desc" style="margin:8px 0 0;font-size:12px;color:var(--text-3)">
+              本地短剧与 master 短剧制作流程相同；文本/生图/视频默认走智谱免费（GLM-4.7-Flash / CogView-3-Flash / CogVideoX-Flash），配音仍可用 Edge/GPT-SoVITS；可选回退 ComfyUI Qwen/Wan。
+            </p>
           </div>
           <div class="preset-grid">
             <article v-for="preset in huobaoPresetCards" :key="preset.serviceType" class="preset-card">
@@ -422,7 +428,7 @@ const cfgTestResult = ref(null)
 const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0 })
 const huobaoForm = reactive({ apiKey: '' })
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }, { type: 'music', label: '音乐' }]
-const providers = ['ali', 'chatfire', 'gemini', 'kling', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine']
+const providers = ['ali', 'agnes', 'chatfire', 'gemini', 'kling', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine', 'zhipu', 'ollama', 'comfyui']
 const providerSelectOptions = computed(() => providers.map(p => ({ label: p, value: p })))
 const serviceMeta = {
   text: { label: '文本', desc: '剧本改写、角色场景提取、分镜拆解等 Agent 文本能力' },
@@ -433,13 +439,17 @@ const serviceMeta = {
 }
 const providerPresets = {
   text: {
-    chatfire: { label: '4022 文本（推荐）', baseUrl: 'https://api.4022543.xyz', models: ['deepseek-v4-pro', 'qwen3.5-plus', 'gpt-4o'] },
-    openrouter: { label: 'OpenRouter 推荐', baseUrl: 'https://openrouter.ai/api', models: ['google/gemini-3-flash-preview'] },
-    openai: { label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'] },
+    chatfire: { label: '4022 文本（DeepSeek）', baseUrl: 'https://api.4022543.xyz', models: ['deepseek-v4-flash', 'deepseek-v4-pro', 'qwen3.5-plus', 'gpt-4o'] },
+    zhipu: { label: '智谱免费 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4.7-flash', 'glm-4-flash-250414'] },
+    openrouter: { label: 'OpenRouter（Nemotron / DeepSeek）', baseUrl: 'https://openrouter.ai/api', models: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'openrouter/deepseek-v4-flash', 'openrouter/deepseek-v4-pro'] },
+    openai: { label: 'DeepSeek 官网 / OpenAI', baseUrl: 'https://api.deepseek.com', models: ['deepseek-v4-flash', 'deepseek-v4-pro', 'gpt-4.1-mini'] },
+    ollama: { label: 'Ollama 本地 LLM（可选）', baseUrl: 'http://127.0.0.1:11434/v1', models: ['qwen3.5:9b', 'qwen3.5:27b'] },
   },
   image: {
+    zhipu: { label: '智谱免费 CogView（推荐）', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['cogview-3-flash'] },
+    agnes: { label: 'Agnes Image 定妆（推荐）', baseUrl: 'https://apihub.agnes-ai.com/v1', models: ['agnes-image-2.0-flash', 'agnes-image-2.0'] },
     kling: {
-      label: '4022 可灵 Kling（推荐）',
+      label: '4022 可灵 Kling',
       baseUrl: 'https://api.4022543.xyz',
       models: ['kling-v1', 'kling-v1-5', 'kling-v2', 'kling-v2-new', 'kling-v2-1', 'kling-v3'],
     },
@@ -468,13 +478,16 @@ const providerPresets = {
       baseUrl: 'https://ark.cn-beijing.volces.com',
       models: ['doubao-seedream-5-0-260128', 'doubao-seedream-4-0-250828', 'doubao-seedream-4-5-251128'],
     },
+    comfyui: { label: 'ComfyUI 本地生图', baseUrl: 'http://127.0.0.1:8188', models: ['qwen_image_edit_q3', 'qwen_image_edit_q4', 'kolors'] },
   },
   video: {
-    vidu: { label: '4022 Vidu（推荐）', baseUrl: 'https://api.4022543.xyz', models: ['viduq3-turbo', 'viduq3-pro', 'viduq2-turbo'] },
+    zhipu: { label: '智谱免费 CogVideoX（推荐）', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['cogvideox-flash'] },
+    vidu: { label: '4022 Vidu', baseUrl: 'https://api.4022543.xyz', models: ['viduq3-turbo', 'viduq3-pro', 'viduq2-turbo'] },
     minimax: { label: '4022 海螺视频', baseUrl: 'https://api.4022543.xyz/minimax', models: ['MiniMax-Hailuo-2.3', 'MiniMax-Hailuo-02'] },
     volcengine: { label: '火山直连', baseUrl: 'https://ark.cn-beijing.volces.com', models: ['doubao-seedream-5-0-260128'] },
     vidu_direct: { label: 'Vidu 直连', baseUrl: 'https://api.vidu.com', models: ['viduq3-turbo'] },
     ali: { label: '阿里推荐', baseUrl: 'https://dashscope.aliyuncs.com', models: ['wan2.6-i2v'] },
+    comfyui: { label: 'ComfyUI Wan 本地视频', baseUrl: 'http://127.0.0.1:8188', models: ['wan_i2v', 'wan_flf2v'] },
   },
   audio: {
     minimax: {
@@ -487,12 +500,12 @@ const providerPresets = {
     chatfire: {
       label: '4022 音乐 BGM',
       baseUrl: 'https://api.4022543.xyz',
-      models: ['suno_music_open', 'chirp-v3-5', 'pixverse-sound-effect'],
+      models: ['ace_step_local', 'suno_music_open', 'chirp-v3-5', 'pixverse-sound-effect'],
     },
   },
 }
 const huobaoPresetCards = [
-  { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'deepseek-v4-pro', priority: 100 },
+  { serviceType: 'text', label: '文本', provider: 'openrouter', baseUrl: 'https://openrouter.ai/api', model: 'nvidia/nemotron-3-ultra-550b-a55b:free', priority: 110 },
   { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'vidu', baseUrl: 'https://api.4022543.xyz', model: 'viduq3-turbo', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.4022543.xyz/minimax', model: 'speech-2.8-hd', priority: 97 },
@@ -508,6 +521,12 @@ const endpointPrefixes = {
   ali: '/api/v1',
   kling: '/kling/v1',
   vidu: '/ent/v2',
+  zhipu: '',
+  bigmodel: '',
+  agnes: '',
+  ollama: '',
+  comfyui: '',
+  edge: '',
 }
 
 const endpointHint = computed(() => {
@@ -599,6 +618,16 @@ async function saveCfg() {
     cfgDialog.value = false; toast.success('已保存'); loadCfgs()
   } catch (e) { toast.error(e.message) }
 }
+async function applyLocalPreset() {
+  try {
+    await aiConfigAPI.localPreset()
+    await loadCfgs()
+    toast.success('本地短剧配置已写入（智谱 GLM + CogView + CogVideoX + Edge TTS）')
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
 async function applyHuobaoPreset() {
   if (!huobaoForm.apiKey) {
     toast.warning('请填写 Huobao API Key')

@@ -8,8 +8,16 @@ export type NarrationImageBreakdownProgress = {
   batch?: number
   batch_count?: number
   paragraph_count?: number
+  /** 本任务已落库的配图文案条数（中文） */
+  prompts_saved?: number
+  /** 本任务已落库的英文条数 */
+  flux_en_saved?: number
+  /** 递增序号，前端用来判断是否该刷新镜头列表 */
+  prompts_saved_seq?: number
   image_detect_source?: 'llm' | 'balanced' | 'conservative'
   generated_at?: string
+  /** 本次配图文案任务同步写出的 Flux 英文条数 */
+  flux_prompt_en_translated?: number
   updated_at: number
   error?: string
 }
@@ -55,7 +63,8 @@ export function assertNarrationImageBreakdownNotCancelled(episodeId: number) {
 
 export function requestNarrationImageBreakdownCancel(episodeId: number): boolean {
   const progress = progressMap.get(episodeId)
-  if (!progress || progress.status !== 'processing') return false
+  const running = runningJobs.has(episodeId) || progress?.status === 'processing'
+  if (!running) return false
   cancelFlags.set(episodeId, true)
   updateNarrationImageBreakdownProgress(episodeId, {
     status: 'cancelled',
@@ -94,8 +103,12 @@ export function updateNarrationImageBreakdownProgress(
     batch: patch.batch ?? prev?.batch,
     batch_count: patch.batch_count ?? prev?.batch_count,
     paragraph_count: patch.paragraph_count ?? prev?.paragraph_count,
+    prompts_saved: patch.prompts_saved ?? prev?.prompts_saved,
+    flux_en_saved: patch.flux_en_saved ?? prev?.flux_en_saved,
+    prompts_saved_seq: patch.prompts_saved_seq ?? prev?.prompts_saved_seq,
     image_detect_source: patch.image_detect_source ?? prev?.image_detect_source,
     generated_at: patch.generated_at ?? prev?.generated_at,
+    flux_prompt_en_translated: patch.flux_prompt_en_translated ?? prev?.flux_prompt_en_translated,
     updated_at: Date.now(),
     error: patch.error !== undefined ? patch.error : prev?.error,
   }

@@ -1,18 +1,17 @@
 /**
- * 配图检测 / 配图文案 — 聊天上下文（镜头列表 + 当前检测/文案状态）
+ * ???? / ???? ? ?????????? + ????/?????
  */
 import { asc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { usesMotionComicVisuals, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { resolveStoryboardNarrationText } from '../constants/motion-comic.js'
 import { parseNarrationImageMeta } from './narration-image.js'
 
 function storyboardNarrationSentence(sb: {
   description?: string | null
   dialogue?: string | null
 }): string {
-  const desc = String(sb.description || '').trim()
-  if (desc) return desc
-  return String(sb.dialogue || '').trim().replace(/^(旁白|剧中)[：:]\s*/, '')
+  return resolveStoryboardNarrationText(sb)
 }
 
 export type NarrationImageChatTurn = {
@@ -32,15 +31,15 @@ export function sanitizeImageChatTurns(messages: NarrationImageChatTurn[]): Narr
 
 export function loadNarrationImageChatStoryboards(episodeId: number) {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
-  if (!ep) throw new Error('集不存在')
+  if (!ep) throw new Error('????')
 
   const orderedStoryboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
     .orderBy(asc(schema.storyboards.storyboardNumber))
     .all()
   if (!orderedStoryboards.length) {
-    const motionComic = isMotionComicMode(resolveEpisodeProductionMode(episodeId))
-    throw new Error(motionComic ? '请先完成漫画分镜' : '请先完成旁白分镜')
+    const motionComic = usesMotionComicVisuals(resolveEpisodeProductionMode(episodeId))
+    throw new Error(motionComic ? '????????' : '????????')
   }
 
   return { ep, orderedStoryboards }
@@ -49,10 +48,10 @@ export function loadNarrationImageChatStoryboards(episodeId: number) {
 export function buildDetectChatContextBlock(episodeId: number): string {
   const { ep, orderedStoryboards } = loadNarrationImageChatStoryboards(episodeId)
   const lines: string[] = [
-    ep.title ? `本集：${ep.title}` : '',
-    `共 ${orderedStoryboards.length} 镜`,
+    ep.title ? `???${ep.title}` : '',
+    `? ${orderedStoryboards.length} ?`,
     '',
-    '【镜头列表】',
+    '??????',
   ].filter(Boolean)
 
   orderedStoryboards.forEach((sb, index) => {
@@ -60,21 +59,21 @@ export function buildDetectChatContextBlock(episodeId: number): string {
     const meta = parseNarrationImageMeta(sb.referenceImages)
     const text = storyboardNarrationSentence(sb).slice(0, 120)
     const flags: string[] = []
-    if (meta.narration_shot_type === 'title') flags.push('片头')
+    if (meta.narration_shot_type === 'title') flags.push('??')
     if (meta.narration_image_mode === 'new') {
-      flags.push(`需配图#${meta.paragraph_index ?? '?'}`)
-      if (meta.paragraph_layout === 'diptych') flags.push('两宫格')
+      flags.push(`???#${meta.paragraph_index ?? '?'}`)
+      if (meta.paragraph_layout === 'diptych') flags.push('???')
     } else if (meta.narration_image_mode === 'inherit') {
-      flags.push('沿用配图')
+      flags.push('????')
     }
-    const flagStr = flags.length ? ` [${flags.join(' · ')}]` : ''
+    const flagStr = flags.length ? ` [${flags.join(' � ')}]` : ''
     lines.push(`#${String(num).padStart(2, '0')} ${text}${flagStr}`)
   })
 
   const anchorCount = orderedStoryboards.filter(
     sb => parseNarrationImageMeta(sb.referenceImages).narration_image_mode === 'new',
   ).length
-  lines.push('', `【当前状态】已标记需配图 ${anchorCount} 张`)
+  lines.push('', `???????????? ${anchorCount} ?`)
   return lines.join('\n')
 }
 
@@ -86,33 +85,33 @@ export function buildPromptChatContextBlock(episodeId: number): string {
 
   if (!anchors.length) {
     return [
-      ep.title ? `本集：${ep.title}` : '',
-      '【当前状态】尚未检测配图，请先执行换镜检测。',
+      ep.title ? `???${ep.title}` : '',
+      '??????????????????????',
     ].filter(Boolean).join('\n')
   }
 
   const lines: string[] = [
-    ep.title ? `本集：${ep.title}` : '',
-    `需配图 ${anchors.length} 张`,
+    ep.title ? `???${ep.title}` : '',
+    `??? ${anchors.length} ?`,
     '',
-    '【配图段落与文案】',
+    '?????????',
   ].filter(Boolean)
 
   anchors.forEach(({ sb, meta }) => {
     const num = sb.storyboardNumber ?? 0
     const scene = String(meta.scene_content || '').slice(0, 80)
     const prompt = String(sb.imagePrompt || meta.image_prompt_llm_raw || '').trim()
-    const promptPreview = prompt ? prompt.slice(0, 160) + (prompt.length > 160 ? '…' : '') : '（未生成）'
+    const promptPreview = prompt ? prompt.slice(0, 160) + (prompt.length > 160 ? '?' : '') : '?????'
     lines.push(
-      `#${String(num).padStart(2, '0')} 段${meta.paragraph_index ?? '?'}${meta.paragraph_layout === 'diptych' ? '·两宫格' : ''}`,
-      `  场景：${scene || '—'}`,
-      `  文案：${promptPreview}`,
+      `#${String(num).padStart(2, '0')} ?${meta.paragraph_index ?? '?'}${meta.paragraph_layout === 'diptych' ? '�???' : ''}`,
+      `  ???${scene || '?'}`,
+      `  ???${promptPreview}`,
     )
   })
 
   const readyCount = anchors.filter(({ sb, meta }) =>
     String(sb.imagePrompt || meta.image_prompt_llm_raw || '').trim(),
   ).length
-  lines.push('', `【当前状态】配图文案 ${readyCount}/${anchors.length} 条已就绪`)
+  lines.push('', `?????????? ${readyCount}/${anchors.length} ????`)
   return lines.join('\n')
 }

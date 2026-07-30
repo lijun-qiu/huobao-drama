@@ -1,10 +1,11 @@
 import { DEFAULT_EDGE_VOICE, EDGE_VOICE_OPTIONS, resolveEdgeVoice } from './edge-tts-local.js'
-import { inferCharacterGender } from './local-voice-assign.js'
+import { GSV_VOICE_PREFIX, resolveGptSovitsVoiceDisplayName } from './gpt-sovits-tts.js'
+import { inferCharacterGender, inferVoiceGenderFromLabel } from './local-voice-assign.js'
 
 const VOICEBOX_PROFILE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const PRESET_REF_PREFIX = 'preset:'
 
-export type LocalTtsEngine = 'edge' | 'voicebox'
+export type LocalTtsEngine = 'edge' | 'voicebox' | 'gptsovits' | 'indextts'
 
 export function isEdgeVoiceId(voiceId?: string | null): boolean {
   return /^(zh|en|ja|ko)-/i.test(String(voiceId || '').trim())
@@ -17,6 +18,15 @@ export function isVoiceboxVoiceId(voiceId?: string | null): boolean {
   return VOICEBOX_PROFILE_UUID_RE.test(raw)
 }
 
+export function isGptSovitsVoiceId(voiceId?: string | null): boolean {
+  return String(voiceId || '').trim().startsWith(GSV_VOICE_PREFIX)
+}
+
+/** GPT-SoVITS 与 IndexTTS2 共用 gsv: 参考音 */
+export function isClonedRefVoiceId(voiceId?: string | null): boolean {
+  return isGptSovitsVoiceId(voiceId)
+}
+
 export function resolveLocalTtsEngine(
   voiceStyle?: string | null,
   voiceProvider?: string | null,
@@ -25,8 +35,14 @@ export function resolveLocalTtsEngine(
   const provider = String(voiceProvider || '').trim().toLowerCase()
   if (provider === 'edge') return 'edge'
   if (provider === 'voicebox') return 'voicebox'
+  if (provider === 'gptsovits') return 'gptsovits'
+  if (provider === 'indextts') return 'indextts'
   const raw = String(voiceStyle || '').trim()
   if (isEdgeVoiceId(raw)) return 'edge'
+  if (isClonedRefVoiceId(raw)) {
+    if (fallbackEngine === 'indextts') return 'indextts'
+    return 'gptsovits'
+  }
   if (isVoiceboxVoiceId(raw)) return 'voicebox'
   return fallbackEngine
 }
@@ -41,8 +57,15 @@ export function resolveLocalTtsVoiceInput(
   if (engine === 'edge') {
     return { engine, voice: resolveEdgeVoice(raw || fallback?.voice) }
   }
+  if (engine === 'gptsovits' || engine === 'indextts') {
+    if (raw) return { engine, voice: raw }
+    if (fallback?.voice && (isClonedRefVoiceId(fallback.voice) || fallback.engine === engine)) {
+      return { engine, voice: fallback.voice }
+    }
+    throw new Error(engine === 'indextts' ? '未选择 IndexTTS2 克隆音色' : '未选择 GPT-SoVITS 音色')
+  }
   if (raw) return { engine, voice: raw }
-  if (fallback?.voice) return { engine: 'voicebox', voice: fallback.voice }
+  if (fallback?.voice) return { engine: fallback.engine || 'voicebox', voice: fallback.voice }
   throw new Error('未选择 Voicebox 音色')
 }
 
@@ -73,7 +96,19 @@ export function mapLocalVoiceToEdge(
   if (isEdgeVoiceId(raw)) return resolveEdgeVoice(raw)
   const fallback = String(fallbackVoice || '').trim()
   if (isEdgeVoiceId(fallback)) return resolveEdgeVoice(fallback)
-  const gender = inferCharacterGender(charMeta || { name: charMeta?.name || '旁白' })
+  if (isGptSovitsVoiceId(raw)) {
+    const label = resolveGptSovitsVoiceDisplayName(raw)
+    if (label) {
+      const voiceGender = inferVoiceGenderFromLabel(label)
+      if (voiceGender === 'female') {
+        return EDGE_VOICE_OPTIONS.find(v => v.voice_id === 'zh-CN-XiaoxiaoNeural')?.voice_id || DEFAULT_EDGE_VOICE
+      }
+      if (voiceGender === 'male') {
+        return EDGE_VOICE_OPTIONS.find(v => v.voice_id === 'zh-CN-YunxiNeural')?.voice_id || DEFAULT_EDGE_VOICE
+      }
+    }
+  }
+  const gender = inferCharacterGender(charMeta ?? { name: '旁白' })
   if (gender === 'female') {
     return EDGE_VOICE_OPTIONS.find(v => v.voice_id === 'zh-CN-XiaoxiaoNeural')?.voice_id || DEFAULT_EDGE_VOICE
   }
@@ -94,6 +129,8 @@ export function resolveStoryboardLocalTtsInput(
     preferSpeakerVoice?: boolean
     forceEngine?: LocalTtsEngine
     allowVoicebox?: boolean
+    allowGptsovits?: boolean
+    allowIndextts?: boolean
   },
 ): { engine: LocalTtsEngine; voiceInput: string; speakerName: string; usedCharacterVoice: boolean } {
   const charMeta = findCharacterVoiceMeta(speaker, chars, { isTitleShot: options.isTitleShot })
@@ -102,15 +139,24 @@ export function resolveStoryboardLocalTtsInput(
     : (String(options.fallbackVoice || '').trim() || undefined)
   const characterVoice = String(charMeta?.voiceStyle || '').trim()
   const speakerName = charMeta?.name || (options.isTitleShot || speaker === '剧中' ? '旁白' : speaker)
-  const forceEdge = options.forceEngine === 'edge' || options.allowVoicebox === false
+  const preferredEngine = options.forceEngine || options.fallbackEngine
+
+  const shouldForceEdge = (engine: LocalTtsEngine) => {
+    if (options.forceEngine === 'edge') return true
+    if (options.forceEngine && engine === options.forceEngine) return false
+    if (engine === 'voicebox' && options.allowVoicebox === false) return true
+    if (engine === 'gptsovits' && options.allowGptsovits === false) return true
+    if (engine === 'indextts' && options.allowIndextts === false) return true
+    return false
+  }
 
   if (characterVoice && characterVoice !== 'alloy') {
     const resolved = resolveLocalTtsVoiceInput(
       characterVoice,
       charMeta?.voiceProvider,
-      fallbackVoice ? { engine: options.fallbackEngine, voice: fallbackVoice } : undefined,
+      { engine: preferredEngine, voice: fallbackVoice || characterVoice || DEFAULT_EDGE_VOICE },
     )
-    if (forceEdge && resolved.engine === 'voicebox') {
+    if (shouldForceEdge(resolved.engine)) {
       return {
         engine: 'edge',
         voiceInput: mapLocalVoiceToEdge(charMeta, fallbackVoice),
@@ -129,9 +175,9 @@ export function resolveStoryboardLocalTtsInput(
   const resolved = resolveLocalTtsVoiceInput(
     fallbackVoice || undefined,
     undefined,
-    { engine: options.fallbackEngine, voice: fallbackVoice || DEFAULT_EDGE_VOICE },
+    { engine: preferredEngine, voice: fallbackVoice || DEFAULT_EDGE_VOICE },
   )
-  if (forceEdge && resolved.engine === 'voicebox') {
+  if (shouldForceEdge(resolved.engine)) {
     return {
       engine: 'edge',
       voiceInput: mapLocalVoiceToEdge(null, fallbackVoice),

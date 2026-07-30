@@ -1,14 +1,14 @@
 <template>
 <div class="content-panel">
-<!-- Step 0: AI Script Chat (narration) / Raw Content (drama) -->
-        <div v-if="isNarrationMode && scriptStep === 0" class="step-editor script-chat-step">
+<!-- Step 0: AI Script Chat (narration / local comic) / Raw Content (drama) -->
+        <div v-if="showScriptChatPanel" class="step-editor script-chat-step">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
                 <span class="step-num">01</span>
-                <span class="step-name">剧本生成</span>
+                <span class="step-name">{{ scriptChatStepTitle }}</span>
               </div>
-              <span class="dim" style="font-size:12px;margin-left:8px">{{ scriptGenMode === 'chat' ? (isMotionComicMode ? 'AI 对话 · 漫画解说写稿' : 'AI 对话 · 体验人生解说稿') : (isMotionComicMode ? '直接输入 · 粘贴或编写解说稿' : '直接输入 · 粘贴或编写解说稿') }}</span>
+              <span class="dim" style="font-size:12px;margin-left:8px">{{ scriptChatGenModeHint }}</span>
             </div>
             <div class="toolbar-right">
               <div class="prod-tabs script-gen-tabs">
@@ -30,6 +30,27 @@
                 >
                   直接输入
                 </button>
+              </div>
+              <div
+                v-if="scriptGenMode === 'chat' && scriptChatModelSupportsThinking"
+                class="text-thinking-toggle script-chat-thinking-toggle"
+              >
+                <span class="dim" style="font-size:12px;margin-right:6px">思考</span>
+                <div class="prod-tabs text-thinking-tabs">
+                  <button type="button" class="prod-tab" :class="{ active: episodeTextThinking }" :disabled="scriptChatGenerating" @click="setEpisodeTextThinking(true)">开</button>
+                  <button type="button" class="prod-tab" :class="{ active: !episodeTextThinking }" :disabled="scriptChatGenerating" @click="setEpisodeTextThinking(false)">关</button>
+                </div>
+              </div>
+              <div v-if="scriptGenMode === 'chat' && usesLocalModelPipeline" class="script-chat-model-field">
+                <BaseSelect
+                  class="script-chat-model-select"
+                  :model-value="scriptChatModel"
+                  :options="scriptChatModelOptionsForPicker"
+                  placeholder="剧本模型"
+                  searchable
+                  :disabled="scriptChatGenerating"
+                  @update:model-value="v => scriptChatModel = v"
+                />
               </div>
               <button
                 v-if="scriptGenMode === 'chat'"
@@ -61,32 +82,18 @@
             <textarea
               v-model="localRaw"
               class="fill-textarea script-manual-textarea"
-              :placeholder="isMotionComicMode ? '粘贴或编写快切解说稿…\n首行：本期故事：…\n一句一行，段间空行换场景' : '粘贴或编写完整解说稿…\n首行建议：今天体验的人生剧本是，…\n也可从 Word / 备忘录直接粘贴'"
+              :placeholder="scriptChatManualPlaceholder"
             />
             <div class="narration-hint" style="margin-top:10px">
-              {{ isMotionComicMode ? '漫画解说须用快切解说稿（每行说话人：台词）；保存后进「旁白分镜」。在 AI 对话里说「补说话人」可改已保存文案。' : '自备稿可直接在此编辑；保存后进入「文案输入」或「旁白分镜」继续。字幕 ** 强调在分镜时由 Qwen 自动标注。' }}
+              {{ scriptChatManualHint }}
             </div>
           </div>
 
           <div v-else class="script-chat-panel script-chat-panel-full">
             <div class="script-chat-body">
-              <div class="script-chat-toolbar">
-                <span class="dim" style="font-size:12px">模型</span>
-                <BaseSelect
-                  :model-value="scriptChatModel"
-                  :options="textModelOptions"
-                  placeholder="选择模型"
-                  searchable
-                  style="width:280px"
-                  @update:model-value="v => scriptChatModel = v"
-                />
-                <div v-if="textModelSupportsThinking(scriptChatModel)" class="text-thinking-toggle">
-                  <span class="dim" style="font-size:12px">思考</span>
-                  <div class="prod-tabs text-thinking-tabs">
-                    <button type="button" class="prod-tab" :class="{ active: scriptChatThinking }" @click="scriptChatThinking = true">开</button>
-                    <button type="button" class="prod-tab" :class="{ active: !scriptChatThinking }" @click="scriptChatThinking = false">关</button>
-                  </div>
-                </div>
+              <div v-if="isLocalComicMode && scriptChatGenerating && localModelPrepareHint" class="script-chat-model-prepare">
+                <Loader2 :size="14" class="animate-spin" />
+                <span>{{ localModelPrepareHint }}</span>
               </div>
               <div ref="scriptChatScrollRef" class="script-chat-messages">
                 <div
@@ -94,13 +101,14 @@
                   :key="idx"
                   :class="['script-chat-msg', msg.role === 'user' ? 'is-user' : 'is-assistant']"
                 >
-                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : (isMotionComicMode ? '解说大师' : 'AI') }}</span>
+                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : scriptChatAssistantLabel }}</span>
                   <div class="script-chat-msg-text">
-                    <template v-if="msg.role === 'assistant' && scriptChatGenerating && idx === scriptChatMessages.length - 1 && !msg.content && !msg.thinking">
+                    <template v-if="msg.role === 'assistant' && scriptChatGenerating && idx === scriptChatMessages.length - 1 && !msg.content && !msg.thinking && !msg.statusText">
                       <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
-                      <span class="dim">{{ scriptChatThinking ? '等待思考…' : '正在生成…' }}</span>
+                      <span class="dim">{{ episodeTextThinking ? '等待思考…' : '正在生成…' }}</span>
                     </template>
                     <template v-else>
+                      <div v-if="msg.statusText" class="script-chat-status">{{ msg.statusText }}</div>
                       <div v-if="msg.thinking" class="script-chat-thinking">
                         <div class="script-chat-thinking-label">思考过程</div>
                         <div class="script-chat-thinking-body">{{ msg.thinking }}</div>
@@ -119,6 +127,10 @@
                 </div>
               </div>
               <div v-if="lastScriptChatDraft" class="script-chat-draft-actions">
+                <span v-if="lastScriptChatDraftCharCount" class="dim" style="font-size:11px;margin-right:8px">
+                  可填入约 {{ lastScriptChatDraftCharCount }} 字
+                  <template v-if="lastScriptChatDraftCharCount < scriptChatMinChars">（不足 {{ scriptChatMinChars }} 字）</template>
+                </span>
                 <button
                   type="button"
                   class="btn btn-sm"
@@ -147,7 +159,7 @@
                   v-model="scriptChatInput"
                   class="script-chat-input"
                   rows="3"
-                  :placeholder="isMotionComicMode ? '写完整稿，或多轮改稿：补说话人、去片尾…（直接输入里的文案会自动带入）' : '描述本期人生，例如：十八岁职高辍学，八十年代进城摆夜市摊…'"
+                  :placeholder="scriptChatInputPlaceholder"
                   :disabled="scriptChatGenerating"
                   @keydown.enter.exact.prevent="sendScriptChat"
                 />
@@ -164,15 +176,18 @@
           </div>
         </div>
 
-        <div v-else-if="!isNarrationMode && scriptStep === 0" class="step-editor">
+        <div v-else-if="scriptStep === dramaRawStep" class="step-editor">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
-                <span class="step-num">01</span>
+                <span class="step-num">{{ isLocalComicMode ? '02' : '01' }}</span>
                 <span class="step-name">原始内容</span>
               </div>
             </div>
             <div class="toolbar-right">
+              <button v-if="isLocalComicMode" type="button" class="btn btn-sm" @click="goSubStep('script:chat')">
+                返回 AI 对话
+              </button>
               <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
               <button class="btn btn-sm" @click="saveRaw(); toast.success('已保存')">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
@@ -184,7 +199,7 @@
           <textarea
             class="fill-textarea"
             v-model="localRaw"
-            placeholder="粘贴小说原文、故事大纲或分镜描述..."
+            :placeholder="isLocalComicMode ? '粘贴小说原文、故事大纲，或在「剧本生成」写稿后点「填入文案并编辑」…' : '粘贴小说原文、故事大纲或分镜描述...'"
           />
         </div>
 
@@ -220,11 +235,17 @@
           <textarea
             class="fill-textarea"
             v-model="localRaw"
-            :placeholder="isMotionComicMode ? '粘贴漫画解说稿，或在「剧本生成」写稿后点「填入文案并编辑」…' : '粘贴解说文案，或在「剧本生成」写稿后点「填入文案并编辑」…'"
+            :placeholder="isDialoguePortraitMode ? '粘贴对话脚本（角色名：台词），或在「剧本生成」写稿后点「填入文案并编辑」…' : (isNovelComicMode ? '粘贴本章旁白朗读稿，或从剧集页确认大纲后自动填入…' : (isMotionComicMode ? '粘贴漫画解说稿，或在「剧本生成」写稿后点「填入文案并编辑」…' : '粘贴解说文案，或在「剧本生成」写稿后点「填入文案并编辑」…'))"
           />
           <div class="narration-hint" style="margin-top:12px">
-            <template v-if="isMotionComicMode">
-              <strong>漫画解说稿格式：</strong>首行「本期故事：…」；一句一行（8～18字），段间空行换场景；对话嵌入叙述；分镜后 1～2 镜一图、换人说话须换图，同图整段一种运镜。
+            <template v-if="isDialoguePortraitMode">
+              <strong>对话立绘格式：</strong>视觉小说式——每行「角色名：台词」；可写（点头）等短动作；本集 1～2 人；段间空行或「【场景名】」换景。合成时背景锁定，立绘切表情并微动。
+            </template>
+            <template v-else-if="isNovelComicMode">
+              <strong>小说漫画讲解：</strong>本章旁白朗读正文（叙述为主，可少量讲解）。请先在剧集页完成「粘贴小说 → 大纲 → 确认建集」。分镜后漫画配图 + 运镜合成。
+            </template>
+            <template v-else-if="isMotionComicMode">
+              <strong>漫画解说稿格式：</strong>首行「本期故事：…」；每行「说话人：台词」；一句一行（8～18字），段间空行换场景；目标约旁白 30% / 对白 70%（对白单独成行，禁止空桥接旁白）；分镜后约 2～4 镜一图、按场景/动作换图（换人不强制换图），同图整段一种运镜。
             </template>
             <template v-else>
               <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。
@@ -232,12 +253,12 @@
           </div>
         </div>
 
-        <!-- Step 1: Rewrite (drama only) -->
-        <div v-else-if="!isNarrationMode && scriptStep === 1" class="step-editor">
+        <!-- Step: Rewrite (drama / local drama) -->
+        <div v-else-if="!isNarrationMode && scriptStep === dramaRewriteStep" class="step-editor">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
-                <span class="step-num">02</span>
+                <span class="step-num">{{ isLocalComicMode ? '03' : '02' }}</span>
                 <span class="step-name">AI 改写</span>
               </div>
             </div>
@@ -281,37 +302,43 @@
           <textarea v-else class="fill-textarea" v-model="localScript" placeholder="格式化剧本内容..." />
         </div>
 
-        <!-- Step 2: Extract -->
-        <div v-else-if="!isNarrationMode && scriptStep === 2" class="step-editor">
+        <!-- Step: Extract -->
+        <div v-else-if="!isNarrationMode && scriptStep === dramaExtractStep" class="step-editor">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
-                <span class="step-num">03</span>
+                <span class="step-num">{{ isLocalComicMode ? '04' : '03' }}</span>
                 <span class="step-name">提取角色与场景</span>
               </div>
             </div>
             <div class="toolbar-right">
               <span v-if="chars.length" class="char-count">{{ chars.length }} 角色 · {{ scenes.length }} 场景</span>
-              <button v-if="chars.length" class="btn btn-sm" @click="doExtract" :disabled="rn">
-                <Loader2 v-if="rn && rt === 'extractor'" :size="11" class="animate-spin" />
+              <button v-if="chars.length" class="btn btn-sm" @click="doExtract" :disabled="extractRunning">
+                <Loader2 v-if="extractRunning" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                 重新提取
               </button>
             </div>
           </div>
 
-          <div v-if="!chars.length && !rn" class="step-empty">
+          <div v-if="!chars.length && !extractRunning" class="step-empty">
             <div class="empty-visual">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             </div>
             <div class="empty-title">从剧本提取角色与场景</div>
             <div class="empty-desc">AI 自动分析剧本，提取角色信息和场景列表，与项目已有数据智能去重合并</div>
-            <button class="btn btn-primary" @click="doExtract">
+            <p v-if="isLocalComicMode" class="dim" style="font-size:12px;margin-top:8px">
+              本地短剧结构化提取默认使用 Qwen 3.5 9B（开思考）。
+            </p>
+            <p v-if="!hasEpisodeScriptDraft" class="dim" style="font-size:12px;margin-top:8px">
+              当前集数据库中尚无剧本。请返回上一步填写原始内容或完成 AI 改写后再提取。
+            </p>
+            <button class="btn btn-primary" :disabled="!hasEpisodeScriptDraft || extractRunning" @click="doExtract">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
               开始提取
             </button>
           </div>
-          <div v-else-if="rn && rt === 'extractor'" class="step-loading">
+          <div v-else-if="extractRunning" class="step-loading">
             <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
             <div class="loading-text">正在提取角色和场景...</div>
           </div>
@@ -377,19 +404,19 @@
           </div>
         </div>
 
-        <!-- Step 3: Voice Assignment -->
-        <div v-else-if="!isNarrationMode && scriptStep === 3" class="step-editor">
+        <!-- Step: Voice Assignment -->
+        <div v-else-if="!isNarrationMode && scriptStep === dramaVoiceStep" class="step-editor">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
-                <span class="step-num">04</span>
+                <span class="step-num">{{ isLocalComicMode ? '05' : '04' }}</span>
                 <span class="step-name">分配音色</span>
               </div>
             </div>
             <div class="toolbar-right">
               <span v-if="charsVoiced" class="char-count">{{ charsVoiced }}/{{ chars.length }} 已分配</span>
               <span v-if="voiceSampleCount" class="char-count">{{ voiceSampleCount }}/{{ charsVoiced }} 试听文件</span>
-              <button v-if="charsVoiced" class="btn btn-sm" @click="doVoice" :disabled="rn">
+              <button v-if="charsVoiced && !isLocalComicMode" class="btn btn-sm" @click="doVoice" :disabled="rn">
                 <Loader2 v-if="rn && rt === 'voice_assigner'" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
                 重新分配
@@ -401,7 +428,14 @@
             </div>
           </div>
 
-          <div v-if="!charsVoiced && !rn" class="step-empty">
+          <div v-if="!chars.length && !rn" class="step-empty">
+            <div class="empty-visual">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+            </div>
+            <div class="empty-title">请先完成角色提取</div>
+            <div class="empty-desc">提取角色后，再为每个角色分配 GPT-SoVITS 克隆或微软 Edge TTS 音色</div>
+          </div>
+          <div v-else-if="!charsVoiced && !rn && !isLocalComicMode" class="step-empty">
             <div class="empty-visual">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
             </div>
@@ -417,7 +451,88 @@
             <div class="loading-text">正在分配音色...</div>
           </div>
           <div v-else class="voice-stage">
-            <aside class="card voice-stage-panel">
+            <aside class="card voice-stage-panel" :class="{ 'voice-stage-panel-gsv': isLocalComicMode }">
+              <template v-if="isLocalComicMode">
+                <div class="voice-stage-kicker">GPT-SoVITS</div>
+                <div class="voice-stage-title">全局克隆音色</div>
+                <div class="voice-stage-desc">在任意一集上传登记的音色，项目内全部剧集可用。参考音频 5～15 秒，参考文本须与音频一致。</div>
+                <div class="gsv-mini-status">
+                  <span :class="['tag', gptsovitsAvailable ? 'tag-success' : 'tag-error']">{{ gptsovitsAvailable ? '服务在线' : '服务离线（音色库仍可用）' }}</span>
+                  <span class="dim">{{ gsvCatalogVoices.length }} 条</span>
+                  <button type="button" class="btn btn-sm" :disabled="gsvLoading" @click="loadGsvVoiceCatalog">
+                    <Loader2 v-if="gsvLoading" :size="11" class="animate-spin" />
+                    刷新
+                  </button>
+                </div>
+                <button type="button" class="btn btn-sm btn-primary gsv-add-toggle" @click="gsvPanelOpen = !gsvPanelOpen">
+                  {{ gsvPanelOpen ? '收起表单' : (gsvEditingId ? '编辑音色' : '添加克隆音色') }}
+                </button>
+                <div v-if="gsvPanelOpen" class="gsv-mini-form">
+                  <label class="gsv-field">
+                    <span class="gsv-field-label">音色 ID</span>
+                    <input v-model="gsvForm.voice_id" class="input input-sm" placeholder="如 narrator-male" :disabled="!!gsvEditingId" />
+                  </label>
+                  <label class="gsv-field">
+                    <span class="gsv-field-label">显示名称</span>
+                    <input v-model="gsvForm.voice_name" class="input input-sm" placeholder="如 男声旁白" />
+                  </label>
+                  <label class="gsv-field">
+                    <span class="gsv-field-label">参考音频</span>
+                    <div class="gsv-upload-row">
+                      <input ref="gsvFileInputRef" type="file" accept=".wav,.mp3,.flac,.ogg,.m4a,audio/*" class="gsv-file-input" @change="onGsvFilePick" />
+                      <button type="button" class="btn btn-sm" :disabled="gsvUploading" @click="gsvFileInputRef?.click()">
+                        <Loader2 v-if="gsvUploading" :size="11" class="animate-spin" />
+                        上传
+                      </button>
+                      <span v-if="gsvForm.ref_audio_path" class="mono gsv-ref-path">{{ gsvForm.ref_audio_path }}</span>
+                    </div>
+                  </label>
+                  <label class="gsv-field">
+                    <span class="gsv-field-label">参考文本</span>
+                    <textarea v-model="gsvForm.prompt_text" class="textarea textarea-sm" rows="2" placeholder="与参考音频逐字一致" />
+                  </label>
+                  <div class="gsv-form-actions">
+                    <button type="button" class="btn btn-sm btn-primary" :disabled="gsvSaving || !canSaveGsvVoice" @click="saveGsvVoice">
+                      <Loader2 v-if="gsvSaving" :size="11" class="animate-spin" />
+                      {{ gsvEditingId ? '保存' : '添加' }}
+                    </button>
+                    <button v-if="gsvEditingId" type="button" class="btn btn-sm btn-ghost" @click="resetGsvForm(); gsvPanelOpen = false">取消</button>
+                    <button
+                      v-if="gsvForm.voice_id && gsvForm.ref_audio_path && gsvVoiceInCatalog"
+                      type="button"
+                      class="btn btn-sm"
+                      :disabled="gsvPreviewing || !gptsovitsAvailable"
+                      @click="previewGsvVoice"
+                    >
+                      <Loader2 v-if="gsvPreviewing" :size="11" class="animate-spin" />
+                      试听
+                    </button>
+                  </div>
+                  <audio v-if="gsvPreviewUrl" :key="gsvPreviewUrl" :src="gsvPreviewUrl" controls class="gsv-preview-audio" preload="none" />
+                </div>
+                <div class="voice-library-meta">
+                  <span>已登记音色</span>
+                  <span>{{ gsvCatalogVoices.length }} 条</span>
+                </div>
+                <div class="voice-library">
+                  <div v-if="!gsvCatalogVoices.length" class="gsv-empty-hint">暂无音色，请先添加克隆音色</div>
+                  <div v-for="v in gsvCatalogVoices" :key="v.voice_id" class="voice-library-item gsv-voice-item">
+                    <div class="voice-library-head">
+                      <span class="voice-library-name">{{ v.voice_name || v.voice_id }}</span>
+                      <div class="gsv-item-actions">
+                        <button type="button" class="btn btn-ghost btn-xs" @click="editGsvVoice(v)">编辑</button>
+                        <button type="button" class="btn btn-ghost btn-xs" :disabled="gsvDeletingId === stripGsvId(v.voice_id)" @click="deleteGsvVoice(v)">
+                          <Loader2 v-if="gsvDeletingId === stripGsvId(v.voice_id)" :size="10" class="animate-spin" />
+                          <span v-else>删</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="mono gsv-voice-id">{{ v.voice_id }}</div>
+                    <div v-if="v.prompt_text" class="voice-library-fit">{{ v.prompt_text }}</div>
+                  </div>
+                </div>
+              </template>
+              <template v-else>
               <div class="voice-stage-kicker">Voice Casting</div>
               <div class="voice-stage-title">角色声音分配台</div>
               <div class="voice-stage-desc">先为每个角色选择合适音色，再生成试听。音色标签会帮助你快速区分旁白、主角、反派和配角的表达方向。</div>
@@ -433,10 +548,10 @@
               </div>
               <div class="voice-library-meta">
                 <span>音色库</span>
-                <span>{{ voiceProfiles.length }} 条</span>
+                <span>{{ scriptVoiceProfiles.length }} 条</span>
               </div>
               <div class="voice-library">
-                <div v-for="voice in voiceProfiles" :key="voice.id" class="voice-library-item">
+                <div v-for="voice in scriptVoiceProfiles" :key="voice.id" class="voice-library-item">
                   <div class="voice-library-head">
                     <span class="voice-library-name">{{ voice.label }}</span>
                     <span class="tag">{{ voice.gender }}</span>
@@ -445,6 +560,7 @@
                   <div class="voice-library-fit">{{ voice.suitable }}</div>
                 </div>
               </div>
+              </template>
             </aside>
 
             <div class="voice-grid">
@@ -470,7 +586,7 @@
                   <span class="voice-block-label">选择音色</span>
                   <BaseSelect
                     :model-value="c.voice_style || c.voiceStyle || ''"
-                    :options="voiceSelectOptions"
+                    :options="scriptVoiceSelectOptions"
                     placeholder="选择音色"
                     searchable
                     style="width:100%"
@@ -504,14 +620,14 @@
         </div>
 
         <!-- Storyboard -->
-        <div v-else-if="scriptStep === storyboardStep" class="step-editor" :class="{ 'script-chat-step': isNarrationMode && !sbs.length, 'narration-storyboard-step': isNarrationMode }">
+        <div v-else-if="scriptStep === storyboardStep" class="step-editor" :class="{ 'script-chat-step': isComicStoryboardMode && !sbs.length, 'narration-storyboard-step': isComicStoryboardMode }">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
-                <span class="step-num">{{ isNarrationMode ? '03' : '05' }}</span>
-                <span class="step-name">{{ isNarrationMode ? stepLabels[storyboardStep] : '分镜列表' }}</span>
+                <span class="step-num">{{ isNarrationMode ? '03' : (isLocalComicMode ? '06' : '05') }}</span>
+                <span class="step-name">{{ isComicStoryboardMode ? stepLabels[storyboardStep] : '分镜列表' }}</span>
               </div>
-              <span v-if="isNarrationMode" class="dim" style="font-size:12px;margin-left:8px">{{ isMotionComicMode ? 'AI 对话 · 旁白拆镜' : 'AI 对话 · 整稿拆镜' }}</span>
+              <span v-if="isComicStoryboardMode" class="dim" style="font-size:12px;margin-left:8px">{{ usesComicStoryboardRules ? 'AI 对话 · 旁白拆镜' : 'AI 对话 · 整稿拆镜' }}</span>
             </div>
             <div class="toolbar-right">
               <span v-if="sbs.length" class="char-count">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
@@ -519,7 +635,7 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 添加
               </button>
-              <template v-if="!sbs.length && !isNarrationMode">
+              <template v-if="!sbs.length && !isComicStoryboardMode">
                 <span class="locked-config">视频模型 · {{ lockedVideoConfigLabel }}</span>
               </template>
               <button
@@ -534,12 +650,12 @@
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
                 {{ storyboardClearing ? '清除中…' : `清除分镜 (${sbs.length})` }}
               </button>
-              <template v-if="isNarrationMode">
+              <template v-if="isComicStoryboardMode">
                 <button
                   type="button"
                   class="btn btn-sm btn-primary"
                   :disabled="narrationBreaking || storyboardChatGenerating || narrationStoryboardDescUploading || storyboardClearing"
-                  :title="isMotionComicMode ? '按当前解说稿整稿拆镜（会覆盖本集全部镜头）' : '按当前文案整稿拆镜（会覆盖本集全部镜头）'"
+                  :title="usesComicStoryboardRules ? '按当前剧本整稿拆镜（会覆盖本集全部镜头）' : '按当前文案整稿拆镜（会覆盖本集全部镜头）'"
                   @click="doNarrationBreakdown()"
                 >
                   <Loader2 v-if="narrationBreaking" :size="11" class="animate-spin" />
@@ -557,7 +673,7 @@
                   上传分镜描述
                 </button>
               </template>
-              <button v-if="!isNarrationMode" class="btn btn-sm" :disabled="rn || narrationBreaking || storyboardClearing" @click="doBreakdown()">
+              <button v-if="!isComicStoryboardMode" class="btn btn-sm" :disabled="rn || narrationBreaking || storyboardBreaking || storyboardClearing" @click="doBreakdown()">
                 <Loader2 v-if="rn && rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 {{ sbs.length ? '重新分镜' : 'AI 拆解分镜' }}
@@ -565,31 +681,15 @@
             </div>
           </div>
 
-          <div v-if="isNarrationMode && !sbs.length && !storyboardChatGenerating && !narrationBreaking" class="narration-storyboard-cta">
+          <div v-if="isComicStoryboardMode && !sbs.length && !storyboardChatGenerating && !narrationBreaking" class="narration-storyboard-cta">
             <p class="dim" style="margin:0;font-size:13px">
-              {{ isMotionComicMode ? '解说稿已写好？点右上角「执行拆镜」，或下方对话区同按钮。' : '文案已写好？点右上角「执行拆镜」，或下方对话区同按钮。' }}
+              {{ usesComicStoryboardRules ? '剧本已写好？点右上角「执行拆镜」，或下方对话区同按钮。' : '文案已写好？点右上角「执行拆镜」，或下方对话区同按钮。' }}
             </p>
           </div>
 
-          <div v-if="isNarrationMode" class="script-chat-panel script-chat-panel-full storyboard-chat-panel">
+          <div v-if="isComicStoryboardMode" class="script-chat-panel script-chat-panel-full storyboard-chat-panel">
             <div class="script-chat-body">
               <div class="script-chat-toolbar">
-                <span class="dim" style="font-size:12px">文本模型</span>
-                <BaseSelect
-                  :model-value="episodeTextModel"
-                  :options="textModelOptions"
-                  placeholder="选择模型"
-                  searchable
-                  style="width:280px"
-                  @update:model-value="onEpisodeTextModelChange"
-                />
-                <div v-if="episodeTextModelSupportsThinking" class="text-thinking-toggle">
-                  <span class="dim" style="font-size:12px">思考</span>
-                  <div class="prod-tabs text-thinking-tabs">
-                    <button type="button" class="prod-tab" :class="{ active: episodeTextThinking }" @click="setEpisodeTextThinking(true)">开</button>
-                    <button type="button" class="prod-tab" :class="{ active: !episodeTextThinking }" @click="setEpisodeTextThinking(false)">关</button>
-                  </div>
-                </div>
                 <button
                   v-if="sbs.length"
                   type="button"
@@ -611,13 +711,17 @@
                   {{ sbs.length ? '重新分镜' : '执行拆镜' }}
                 </button>
               </div>
+              <div v-if="isLocalComicMode && storyboardChatGenerating && localModelPrepareHint" class="script-chat-model-prepare">
+                <Loader2 :size="14" class="animate-spin" />
+                <span>{{ localModelPrepareHint }}</span>
+              </div>
               <div ref="storyboardChatScrollRef" class="script-chat-messages">
                 <div
                   v-for="(msg, idx) in storyboardChatMessages"
                   :key="'sb-' + idx"
                   :class="['script-chat-msg', msg.role === 'user' ? 'is-user' : 'is-assistant']"
                 >
-                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : (isMotionComicMode ? '分镜助手' : 'AI') }}</span>
+                  <span class="script-chat-msg-role">{{ msg.role === 'user' ? '你' : (usesComicStoryboardRules ? '分镜助手' : 'AI') }}</span>
                   <div class="script-chat-msg-text">
                     <template v-if="msg.role === 'assistant' && storyboardChatGenerating && idx === storyboardChatMessages.length - 1 && !msg.content && !msg.thinking && !msg.statusText">
                       <Loader2 :size="14" class="animate-spin" style="vertical-align:-2px;margin-right:6px" />
@@ -675,18 +779,18 @@
             </div>
           </div>
 
-          <div v-if="isNarrationMode && narrationStoryboardBreakdownPanel" class="narration-breakdown-panel">
+          <div v-if="isComicStoryboardMode && narrationStoryboardBreakdownPanel" class="narration-breakdown-panel">
             <div class="narration-breakdown-head">
               <div>
-                <strong>旁白分镜结果</strong>
+                <strong>{{ isDialoguePortraitMode ? '对话分镜结果' : '旁白分镜结果' }}</strong>
                 <span v-if="narrationStoryboardBreakdownPanel.failedAt" class="llm-failed-at" style="font-size:11px;margin-left:8px">失败于 {{ formatBreakdownTime(narrationStoryboardBreakdownPanel.failedAt) }}<template v-if="narrationStoryboardBreakdownPanel.errorMessage">：{{ narrationStoryboardBreakdownPanel.errorMessage }}</template></span>
                 <span v-else-if="narrationStoryboardBreakdownPanel.generatedAt" class="dim" style="font-size:11px;margin-left:8px">生成于 {{ formatBreakdownTime(narrationStoryboardBreakdownPanel.generatedAt) }}</span>
               </div>
-              <span class="tag dim">旁白 TTS 分镜</span>
+              <span class="tag dim">{{ isDialoguePortraitMode ? '对话 TTS 分镜' : '旁白 TTS 分镜' }}</span>
             </div>
             <div class="narration-breakdown-stats">
               <span class="tag mono">{{ narrationStoryboardBreakdownPanel.count }} 镜</span>
-              <span v-if="!isMotionComicMode" class="tag mono">{{ narrationStoryboardBreakdownPanel.sentenceCount }} 句旁白</span>
+              <span v-if="!usesComicStoryboardRules" class="tag mono">{{ narrationStoryboardBreakdownPanel.sentenceCount }} 句旁白</span>
               <span v-else class="tag mono dim">正文 {{ narrationStoryboardBreakdownPanel.sentenceCount }} 镜</span>
               <span class="tag mono">约 {{ narrationStoryboardBreakdownPanel.totalDur }}s</span>
               <span v-if="narrationStoryboardBreakdownPanel.titleCount" class="tag">
@@ -725,7 +829,7 @@
                 >
                   <div class="shot-item-header">
                     <div class="shot-num">#{{ String(scriptStoryboardListNo(sb)).padStart(2,'0') }}</div>
-                    <span v-if="isNarrationMode && isNarrationTitleShot(sb)" class="tag tag-title" style="font-size:10px">片头</span>
+                    <span v-if="isComicStoryboardMode && isNarrationTitleShot(sb)" class="tag tag-title" style="font-size:10px">片头</span>
                     <span class="tag" style="font-size:10px">{{ sb.shot_type || sb.shotType || '—' }}</span>
                     <span v-if="getStoryboardCharacterIds(sb).length" class="tag" style="font-size:10px">{{ getStoryboardCharacterIds(sb).length }} 角色</span>
                     <div class="shot-status">
@@ -742,7 +846,7 @@
                     <span v-if="sb.location" class="shot-location">{{ sb.location }}</span>
                     <span v-if="getStoryboardCharacterNames(sb).length" class="shot-location">{{ getStoryboardCharacterNames(sb).join(' / ') }}</span>
                     <span v-if="sb.dialogue" class="shot-dialogue">{{ sb.dialogue }}</span>
-                    <button v-if="isNarrationMode" class="btn btn-ghost btn-sm shot-edit-btn" @click.stop="openShotEditor(sb)">编辑</button>
+                    <button v-if="isComicStoryboardMode" class="btn btn-ghost btn-sm shot-edit-btn" @click.stop="openShotEditor(sb)">编辑</button>
                   </div>
                 </div>
               </div>
@@ -759,10 +863,10 @@
                   <button class="btn btn-ghost btn-icon ml-auto" style="color:var(--error)" @click="deleteShot(selectedSb)">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
                   </button>
-                  <button v-if="isNarrationMode" class="btn btn-sm" @click="openShotEditor(selectedSb)">编辑镜头</button>
+                  <button v-if="isComicStoryboardMode" class="btn btn-sm" @click="openShotEditor(selectedSb)">编辑镜头</button>
               </div>
               <div class="detail-body">
-                <div v-if="isNarrationMode" class="detail-section narration-shot-edit">
+                <div v-if="isComicStoryboardMode" class="detail-section narration-shot-edit">
                   <div class="detail-section-head">
                     <span class="detail-section-title">编辑镜头</span>
                     <span v-if="isNarrationTitleShot(selectedSb)" class="tag tag-title">片头 · 剧中红字</span>
@@ -791,12 +895,12 @@
                     <button class="btn btn-sm" :disabled="narrationEditBusy" @click="insertShotAfter(selectedSb)">后插镜头</button>
                   </div>
                   <p class="dim" style="font-size:11px;margin:0">
-                    {{ isMotionComicMode
+                    {{ usesComicStoryboardRules
                       ? '例：片头 hook — 台词写「标题：废柴少年被宗门驱逐，三年后王者归来」→ 点「按标点拆成多镜」。'
                       : '例：把片头一句拆四镜 — 台词写「今天体验的人生剧本是，18岁职高辍学打工，省吃俭用五年，结果越来越穷」→ 点「按标点拆成多镜」。' }}
                   </p>
                 </div>
-                <template v-if="!isNarrationMode">
+                <template v-if="!isComicStoryboardMode">
                 <div class="detail-hero">
                   <div class="detail-hero-copy">
                     <div class="detail-hero-label">镜头概览</div>
@@ -899,7 +1003,14 @@
                           :class="['role-pill', { active: isStoryboardCharacterSelected(selectedSb, char.id) }]"
                           @click="toggleStoryboardCharacter(selectedSb, char.id)"
                         >
-                          {{ char.name }}
+                          <img
+                            v-if="charPortraitImageSrc(char)"
+                            :src="charPortraitImageSrc(char)"
+                            class="role-pill-avatar"
+                            alt=""
+                          />
+                          <span v-else class="role-pill-avatar is-fallback">{{ char.name?.[0] || '?' }}</span>
+                          <span class="role-pill-label">{{ formatCharacterDisplayName(char) }}</span>
                         </button>
                         <span v-if="!chars.length" class="dim" style="font-size:12px">当前集还没有角色</span>
                       </div>
@@ -999,12 +1110,12 @@
             </div>
           </div>
 
-          <div v-else-if="!isNarrationMode && ((rn && rt === 'storyboard_breaker') || narrationBreaking)" class="step-loading">
+          <div v-else-if="!isComicStoryboardMode && ((rn && rt === 'storyboard_breaker') || narrationBreaking || storyboardBreaking)" class="step-loading">
             <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
             <div class="loading-text">正在拆解分镜并生成提示词...</div>
           </div>
 
-          <div v-else-if="!isNarrationMode" class="step-empty">
+          <div v-else-if="!isComicStoryboardMode" class="step-empty">
             <div class="empty-visual">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">
                 <rect x="2" y="2" width="20" height="20" rx="2.5"/><line x1="7" y1="8" x2="7" y2="16"/><line x1="10" y1="8" x2="10" y2="16"/><line x1="13" y1="8" x2="13" y2="16"/>
@@ -1012,9 +1123,13 @@
             </div>
             <div class="empty-title">将剧本拆解为分镜序列</div>
             <div class="empty-desc">AI 自动分析剧本，生成镜头列表和视频提示词</div>
+            <div v-if="isLocalComicMode && (!hasEpisodeScriptDraft || !chars.length)" class="locked-config-banner" style="margin-top:8px">
+              <template v-if="!hasEpisodeScriptDraft">请先在「原始内容」或「AI 改写」填写并保存剧本</template>
+              <template v-else-if="!chars.length">请先在「提取」步骤提取角色与场景</template>
+            </div>
             <div class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
-            <button class="btn btn-primary" :disabled="narrationBreaking" @click="doBreakdown()">
-              <Loader2 v-if="rn && rt === 'storyboard_breaker'" :size="13" class="animate-spin" />
+            <button class="btn btn-primary" :disabled="narrationBreaking || rn || storyboardBreaking" @click="doBreakdown()">
+              <Loader2 v-if="(rn && rt === 'storyboard_breaker') || storyboardBreaking" :size="13" class="animate-spin" />
               <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
               AI 拆解分镜
             </button>

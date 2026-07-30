@@ -9,18 +9,23 @@ loadEnvLocal(resolve(__dirname, '../../.env.local'))
 
 const apiKey = process.env.AI_API_KEY?.trim()
 const baseUrl = (process.env.AI_BASE_URL || 'https://api.4022543.xyz').replace(/\/+$/, '')
+const isOpenRouter = /openrouter\.ai/i.test(baseUrl) || /^sk-or-/i.test(apiKey || '')
 
 if (!apiKey) {
   console.error('Missing AI_API_KEY in .env.local')
   process.exit(1)
 }
 
-const PRESET_SERVICES = [
-  { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl, model: 'deepseek-v4-pro,qwen3.5-plus,gpt-4o', priority: 100 },
-  { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl, model: 'gpt-image-2', priority: 99 },
-  { serviceType: 'video', label: '视频', provider: 'vidu', baseUrl, model: 'viduq3-turbo', priority: 98 },
-  { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: `${baseUrl}/minimax`, model: 'speech-2.8-hd', priority: 97 },
-] as const
+const PRESET_SERVICES = isOpenRouter
+  ? [
+      { serviceType: 'text', label: '文本', provider: 'openrouter', baseUrl: 'https://openrouter.ai/api', model: 'deepseek-v4-flash:free,deepseek-v4-flash,deepseek-v4-pro', priority: 110 },
+    ] as const
+  : [
+      { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl, model: 'deepseek-v4-flash:free,deepseek-v4-flash,deepseek-v4-pro,qwen3.5-plus,gpt-4o', priority: 100 },
+      { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl, model: 'gpt-image-2', priority: 99 },
+      { serviceType: 'video', label: '视频', provider: 'vidu', baseUrl, model: 'viduq3-turbo', priority: 98 },
+      { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: `${baseUrl}/minimax`, model: 'speech-2.8-hd', priority: 97 },
+    ] as const
 
 const AGENT_DEFAULTS = [
   { agentType: 'script_rewriter', name: '剧本改写' },
@@ -30,7 +35,7 @@ const AGENT_DEFAULTS = [
   { agentType: 'grid_prompt_generator', name: '图片提示词生成' },
 ] as const
 
-const AGENT_MODEL = 'deepseek-v4-pro'
+const AGENT_MODEL = 'deepseek-v4-flash:free'
 const ts = new Date().toISOString()
 
 function presetModels(model: string): string[] {

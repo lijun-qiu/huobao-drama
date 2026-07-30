@@ -66,6 +66,26 @@ function resolveEdgeTtsBin() {
   return (process.env.EDGE_TTS_BIN || 'edge-tts').trim() || 'edge-tts'
 }
 
+/** 检查 edge-tts CLI 是否可用（pip install edge-tts） */
+export async function checkEdgeTtsAvailable(): Promise<boolean> {
+  const bin = resolveEdgeTtsBin()
+  return new Promise((resolve) => {
+    const child = spawn(bin, ['--version'], { shell: process.platform === 'win32' })
+    const timer = setTimeout(() => {
+      child.kill()
+      resolve(false)
+    }, 8_000)
+    child.on('error', () => {
+      clearTimeout(timer)
+      resolve(false)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      resolve(code === 0)
+    })
+  })
+}
+
 /** 通过临时文件调用 edge-tts CLI，避免 Windows shell 把含空格的 --text 拆成多参数 */
 function runEdgeTtsCli(text: string, voice: string, outputPath: string, speed = DEFAULT_TTS_SPEED): Promise<void> {
   const bin = resolveEdgeTtsBin()

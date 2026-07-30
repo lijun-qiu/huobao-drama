@@ -1,12 +1,3 @@
-import { loadEnvLocal } from './utils/load-env-local.js'
-import {
-  BACKEND_CORS_ORIGINS,
-  BACKEND_TEST_PORT,
-  resolveBackendPort,
-} from './constants/ports.js'
-
-loadEnvLocal()
-
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { Hono } from 'hono'
@@ -27,14 +18,22 @@ import agentConfigs from './routes/agentConfigs.js'
 import agent from './routes/agent.js'
 import compose from './routes/compose.js'
 import merge from './routes/merge.js'
-import music from './routes/music.js'
 import grid from './routes/grid.js'
 import skills from './routes/skills.js'
 import webhooks from './routes/webhooks.js'
 import aiVoices from './routes/aiVoices.js'
+import music from './routes/music.js'
+import localModels from './routes/localModels.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
-import { resumePendingBgmTasks } from './services/bgm-generation.js'
+import { resumeStuckComfyImageGenerations, failOrphanCloudImageGenerations } from './services/image-generation.js'
 import { syncEnvAiConfig } from './services/sync-env-ai-config.js'
+
+// 启动时把 .env.local 的 OpenRouter / DeepSeek Key 同步进 DB（免费 Flash 优先）
+try {
+  syncEnvAiConfig()
+} catch (err) {
+  console.warn('[AIConfig] syncEnvAiConfig failed:', err)
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -43,7 +42,7 @@ const app = new Hono()
 
 // Middleware
 app.use('*', cors({
-  origin: [...BACKEND_CORS_ORIGINS],
+  origin: ['http://localhost:3013', 'http://localhost:5679'],
   credentials: true,
 }))
 app.use('*', requestLogger)
@@ -68,10 +67,11 @@ api.route('/agent-configs', agentConfigs)
 api.route('/agent', agent)
 api.route('/compose', compose)
 api.route('/merge', merge)
-api.route('/music', music)
 api.route('/grid', grid)
 api.route('/skills', skills)
 api.route('/ai-voices', aiVoices)
+api.route('/music', music)
+api.route('/local-models', localModels)
 
 app.route('/api/v1', api)
 
@@ -86,9 +86,13 @@ const distPath = path.join(projectRoot, 'frontend', 'dist')
 app.use('*', serveStatic({ root: distPath }))
 app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
 
-const port = resolveBackendPort()
-const portLabel = port === BACKEND_TEST_PORT ? ' [test]' : ''
-console.log(`🚀 Huobao Drama TS server${portLabel} on http://localhost:${port}`)
-syncEnvAiConfig()
-resumePendingBgmTasks()
+const port = Number(process.env.PORT || 5679)
+console.log(`🚀 Huobao Drama TS server on http://localhost:${port}`)
 serve({ fetch: app.fetch, port })
+
+setTimeout(() => {
+  const orphanCloud = failOrphanCloudImageGenerations()
+  if (orphanCloud) console.log(`[ImageTask] failed ${orphanCloud} orphan cloud generation(s) after restart`)
+  const n = resumeStuckComfyImageGenerations()
+  if (n) console.log(`[ImageTask] resumed ${n} stuck ComfyUI generation(s)`)
+}, 2_000)

@@ -1,14 +1,14 @@
 <template>
   <div class="base-select" ref="rootEl">
     <!-- Trigger -->
-    <button type="button" class="base-select-trigger" :class="{ open: isOpen }" @click="toggle">
+    <button type="button" class="base-select-trigger" :class="{ open: isOpen, disabled }" :disabled="disabled" @click="toggle">
       <span :class="selectedLabel ? '' : 'placeholder'" class="base-select-label">{{ selectedLabel || placeholder }}</span>
       <ChevronDown :size="13" class="base-select-arrow" />
     </button>
 
     <!-- Dropdown -->
     <Teleport to="body">
-      <div v-if="isOpen" class="base-select-dropdown" :style="dropdownStyle" ref="dropdownEl">
+      <div v-if="isOpen" class="base-select-dropdown" :style="dropdownStyle" ref="dropdownEl" @mousedown.stop>
         <!-- Search -->
         <div v-if="searchable" class="base-select-search">
           <Search :size="12" />
@@ -57,6 +57,7 @@ const props = defineProps({
   options: { type: Array, default: () => [] }, // [{ label, value, group? }, ...] or [{ label, group, options: [] }]
   placeholder: { type: String, default: '请选择...' },
   searchable: { type: Boolean, default: true },
+  disabled: { type: Boolean, default: false },
 })
 const emit = defineEmits(['update:modelValue'])
 
@@ -76,15 +77,18 @@ const normalizedGroups = computed(() => {
   if (props.options[0]?.options) {
     return props.options.map(g => ({
       label: g.label || '',
-      options: g.options.map(o => ({ label: o.label ?? o, value: o.value ?? o })),
-    }))
+      options: g.options
+        .filter(o => !o.disabled && o.value !== '' && o.value != null)
+        .map(o => ({ label: o.label ?? o, value: o.value ?? o })),
+    })).filter(g => g.options.length > 0)
   }
   // Flat list with optional group property
   const map = new Map()
   for (const o of props.options) {
+    if (o.disabled || o.value === '' || o.value == null) continue
     const label = o.group || ''
     if (!map.has(label)) map.set(label, [])
-    map.get(label).push({ label: o.label ?? o, value: o.value ?? o })
+    map.get(label).push({ label: o.label ?? o, value: o.value ?? o, disabled: !!o.disabled })
   }
   return Array.from(map.entries()).map(([label, options]) => ({ label, options }))
 })
@@ -106,7 +110,7 @@ const flatOptions = computed(() => filteredGroups.value.flatMap(g => g.options))
 
 function getGlobalIdx(gi, oi) {
   let idx = 0
-  for (let i = 0; i < gi; i++) idx += normalizedGroups.value[i].options.length
+  for (let i = 0; i < gi; i++) idx += filteredGroups.value[i].options.length
   return idx + oi
 }
 
@@ -128,6 +132,7 @@ const selectedLabel = computed(() => {
 })
 
 function toggle() {
+  if (props.disabled) return
   isOpen.value ? close() : open()
 }
 
@@ -138,6 +143,11 @@ async function open() {
   searchQuery.value = ''
   searchInputEl.value?.focus()
   positionDropdown()
+  await nextTick()
+  if (highlightedIdx.value >= 0 && optionsEl.value) {
+    const btns = optionsEl.value.querySelectorAll('.base-select-option')
+    btns[highlightedIdx.value]?.scrollIntoView({ block: 'nearest' })
+  }
 }
 
 function close() {
@@ -146,6 +156,7 @@ function close() {
 }
 
 function pick(opt) {
+  if (!opt || opt.disabled || opt.value === '' || opt.value == null) return
   emit('update:modelValue', opt.value)
   close()
 }
@@ -153,16 +164,27 @@ function pick(opt) {
 function positionDropdown() {
   const rect = rootEl.value?.getBoundingClientRect()
   if (!rect) return
-  const top = rect.bottom + 4
-  const left = rect.left
-  // Keep within viewport
-  const maxHeight = window.innerHeight - top - 16
-  dropdownStyle.value = {
-    position: 'fixed',
-    top: `${top}px`,
-    left: `${left}px`,
-    width: `${rect.width}px`,
-    maxHeight: `${Math.min(maxHeight, 400)}px`,
+  const spaceBelow = window.innerHeight - rect.bottom - 16
+  const spaceAbove = rect.top - 16
+  const preferredMax = 320
+  const openUp = spaceBelow < 200 && spaceAbove > spaceBelow
+  const maxHeight = Math.min(preferredMax, openUp ? spaceAbove : spaceBelow)
+  if (openUp) {
+    dropdownStyle.value = {
+      position: 'fixed',
+      left: `${rect.left}px`,
+      width: `${rect.width}px`,
+      bottom: `${window.innerHeight - rect.top + 4}px`,
+      maxHeight: `${Math.max(maxHeight, 120)}px`,
+    }
+  } else {
+    dropdownStyle.value = {
+      position: 'fixed',
+      top: `${rect.bottom + 4}px`,
+      left: `${rect.left}px`,
+      width: `${rect.width}px`,
+      maxHeight: `${Math.max(maxHeight, 120)}px`,
+    }
   }
 }
 
@@ -230,6 +252,12 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 3px var(--accent-glow);
   background: var(--bg-0);
 }
+.base-select-trigger.disabled,
+.base-select-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 .base-select-trigger .placeholder {
   color: var(--text-3);
   font-weight: 300;
@@ -255,6 +283,8 @@ onBeforeUnmount(() => {
 
 /* Dropdown */
 .base-select-dropdown {
+  display: flex;
+  flex-direction: column;
   background: var(--bg-0);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -286,9 +316,11 @@ onBeforeUnmount(() => {
 }
 
 .base-select-options {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  max-height: 260px;
-  padding: 4px;
+  padding: 4px 4px 10px;
+  overscroll-behavior: contain;
 }
 
 .base-select-group-label {

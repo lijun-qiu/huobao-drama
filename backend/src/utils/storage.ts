@@ -76,6 +76,38 @@ export function getAbsolutePath(relativePath: string): string {
   return path.join(STORAGE_ROOT, relativePath)
 }
 
+/** Lanczos 放大到目标分辨率（ComfyUI ESRGAN 不可用时的兜底） */
+export async function upscaleImageToTargetSize(
+  relativePath: string,
+  width: number,
+  height: number,
+  options?: { fit?: 'cover' | 'contain' },
+): Promise<string> {
+  const abs = getAbsolutePath(relativePath)
+  if (!fs.existsSync(abs)) throw new Error(`Image not found: ${relativePath}`)
+
+  const meta = await sharp(abs).metadata()
+  if ((meta.width ?? 0) >= width && (meta.height ?? 0) >= height) {
+    return relativePath
+  }
+
+  const ext = path.extname(abs) || '.png'
+  const tmp = abs.replace(new RegExp(`${ext.replace('.', '\\.')}$`), `.up${ext}`)
+  const fit = options?.fit ?? 'cover'
+  // cover 会中心裁切（易切腿）；分镜站立全身请用 contain
+  await sharp(abs)
+    .resize(width, height, {
+      fit,
+      position: 'centre',
+      background: { r: 0, g: 0, b: 0, alpha: 1 },
+      kernel: sharp.kernel.lanczos3,
+    })
+    .sharpen({ sigma: 0.5, m1: 0.5, m2: 0.25 })
+    .toFile(tmp)
+  fs.renameSync(tmp, abs)
+  return relativePath
+}
+
 /**
  * 保存 Base64 编码的图片数据到本地存储
  * 用于 Gemini 等只返回 base64 数据的厂商
@@ -109,25 +141,40 @@ export async function readImageAsCompressedDataUrl(
     maxWidth?: number
     maxHeight?: number
     quality?: number
+    /** 透明底 flatten 颜色；Agnes 定妆参考宜用深色，避免白棚 */
+    flattenBackground?: string
+    /** 将近白像素替换为深藏青（Agnes 多图合成防设定拼贴） */
+    replaceNearWhiteBg?: boolean
   } = {},
 ): Promise<string> {
   const filePath = getAbsolutePath(relativePath)
   const maxWidth = options.maxWidth ?? 768
   const maxHeight = options.maxHeight ?? 768
   const quality = options.quality ?? 68
+  const flattenBg = options.flattenBackground || '#ffffff'
 
-  const resized = sharp(filePath).rotate().resize({
+  const pipeline = sharp(filePath).rotate().resize({
     width: maxWidth,
     height: maxHeight,
     fit: 'inside',
     withoutEnlargement: true,
   })
-  const metadata = await resized.metadata()
+
+  if (options.replaceNearWhiteBg) {
+    const { convertPortraitRefWhiteBgToAgnesDark } = await import('./portrait-ref-preprocess.js')
+    const buf = await pipeline.ensureAlpha().png().toBuffer()
+    const converted = await convertPortraitRefWhiteBgToAgnesDark(buf)
+    const out = await sharp(converted)
+      .jpeg({ quality, mozjpeg: true })
+      .toBuffer()
+    return `data:image/jpeg;base64,${out.toString('base64')}`
+  }
+
+  const metadata = await pipeline.metadata()
   const output = metadata.hasAlpha
-    ? await resized.flatten({ background: '#ffffff' }).jpeg({ quality, mozjpeg: true }).toBuffer()
-    : await resized.jpeg({ quality, mozjpeg: true }).toBuffer()
-  const mimeType = 'image/jpeg'
-  return `data:${mimeType};base64,${output.toString('base64')}`
+    ? await pipeline.flatten({ background: flattenBg }).jpeg({ quality, mozjpeg: true }).toBuffer()
+    : await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer()
+  return `data:image/jpeg;base64,${output.toString('base64')}`
 }
 
 export function parseDataUrl(dataUrl: string): { mimeType: string; data: string } | null {

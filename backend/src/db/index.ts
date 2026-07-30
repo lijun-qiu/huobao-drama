@@ -401,6 +401,7 @@ ensureColumn('episodes', 'title_video_url', 'TEXT')
 ensureColumn('episodes', 'title_video_error', 'TEXT')
 
 // 历史默认迁移为 GPT Image（4022 OpenAI 兼容，文生图 + edits 参考图定妆）
+// 跳过 ComfyUI / 智谱 CogView / 本地生图配置
 try {
   sqlite.exec(`
     UPDATE episodes
@@ -419,48 +420,109 @@ try {
         model = '["gpt-image-2","qwen-image-edit-2509","qwen-image-2.0-2026-03-03","qwen-image-max"]',
         updated_at = datetime('now')
     WHERE service_type = 'image'
+      AND LOWER(COALESCE(provider, '')) NOT IN ('comfyui', 'local', 'zhipu', 'bigmodel', 'zai', 'agnes')
       AND (
         provider IN ('kling', 'gemini')
         OR model LIKE '%kling%'
         OR model LIKE '%seedream%'
         OR model LIKE '%gemini%flash-image%'
-        OR model LIKE '%qwen-image%'
-        OR model NOT LIKE '%gpt-image%'
+        OR (
+          model LIKE '%qwen-image%'
+          AND model NOT LIKE '%qwen_image_edit%'
+        )
+        OR (
+          model NOT LIKE '%gpt-image%'
+          AND model NOT LIKE '%qwen_image%'
+          AND model NOT LIKE '%kolors%'
+          AND model NOT LIKE '%sdxl_%'
+          AND model NOT LIKE '%flux%'
+          AND model NOT LIKE '%wan_%'
+          AND model NOT LIKE '%cogview%'
+          AND model NOT LIKE '%agnes-image%'
+        )
       )
   `)
 } catch {
   // ignore migration errors on fresh DB
 }
 
-// 文本模型默认 deepseek-v4-pro
+// 管线默认生图：旧 CogView 默认 → Agnes 定妆（支持参考图）
 try {
   sqlite.exec(`
     UPDATE episodes
-    SET text_model = 'deepseek-v4-pro'
+    SET image_model = 'agnes-image-2.0-flash'
+    WHERE image_model = 'cogview-3-flash'
+      AND drama_id IN (
+        SELECT id FROM dramas
+        WHERE metadata LIKE '%"production_mode":"narration"%'
+           OR metadata LIKE '%"production_mode":"motion_comic"%'
+           OR metadata LIKE '%"production_mode":"novel_comic"%'
+           OR metadata LIKE '%"production_mode":"local_comic"%'
+           OR metadata LIKE '%"production_mode":"dialogue_portrait"%'
+      )
+  `)
+} catch {
+  // ignore
+}
+
+// 文本模型：默认 Nemotron Ultra 免费；旧 free Flash 别名迁移
+try {
+  sqlite.exec(`
+    UPDATE episodes
+    SET text_model = 'nvidia/nemotron-3-ultra-550b-a55b:free'
     WHERE text_model IS NULL
        OR TRIM(text_model) = ''
-       OR text_model IN ('gemini-3-pro-preview', 'gemini-3-flash-preview', 'google/gemini-3-flash-preview', 'gpt-4.1-mini')
+       OR text_model IN (
+         'gemini-3-pro-preview', 'gemini-3-flash-preview', 'google/gemini-3-flash-preview', 'gpt-4.1-mini',
+         'deepseek-v4-flash:free', 'openrouter/deepseek-v4-flash:free',
+         'nvidia/nemotron-3-ultra:free', 'nvidia/nemotron-3-ultra-550b:free',
+         'glm-4.7-flash', 'glm-4-flash-250414'
+       )
+  `)
+  // 历史默认曾把付费 Flash/Pro 短名当 OpenRouter 用，迁移到显式 openrouter/ 前缀
+  sqlite.exec(`
+    UPDATE episodes
+    SET text_model = 'openrouter/deepseek-v4-flash'
+    WHERE text_model = 'deepseek-v4-flash'
+  `)
+  sqlite.exec(`
+    UPDATE episodes
+    SET text_model = 'openrouter/deepseek-v4-pro'
+    WHERE text_model = 'deepseek-v4-pro'
   `)
   sqlite.exec(`
     UPDATE ai_service_configs
-    SET model = '["deepseek-v4-pro","qwen3.5-plus","gpt-4o"]',
+    SET model = '["nvidia/nemotron-3-ultra-550b-a55b:free","openrouter/deepseek-v4-flash","openrouter/deepseek-v4-pro"]',
         updated_at = datetime('now')
     WHERE service_type = 'text'
+      AND LOWER(COALESCE(provider, '')) = 'openrouter'
+  `)
+  sqlite.exec(`
+    UPDATE ai_service_configs
+    SET model = '["deepseek-v4-flash","deepseek-v4-pro"]',
+        name = CASE WHEN name IS NULL OR TRIM(name) = '' THEN 'DeepSeek 官网文本' ELSE name END,
+        updated_at = datetime('now')
+    WHERE service_type = 'text'
+      AND LOWER(COALESCE(provider, '')) IN ('openai', 'deepseek')
       AND (
-        model IS NULL
-        OR TRIM(model) = ''
-        OR model LIKE '%gemini-3-pro-preview%'
-        OR model LIKE '%gemini-3-flash%'
-        OR model NOT LIKE '%deepseek-v4-pro%'
+        base_url LIKE '%deepseek.com%'
+        OR name LIKE '%DeepSeek%'
+        OR name LIKE '%官网%'
       )
   `)
   sqlite.exec(`
     UPDATE agent_configs
-    SET model = 'deepseek-v4-pro',
+    SET model = 'nvidia/nemotron-3-ultra-550b-a55b:free',
         updated_at = datetime('now')
     WHERE model IS NULL
        OR TRIM(model) = ''
-       OR model IN ('gemini-3-pro-preview', 'gemini-3-flash-preview', 'google/gemini-3-flash-preview', 'gpt-4.1-mini')
+       OR model IN (
+         'gemini-3-pro-preview', 'gemini-3-flash-preview', 'google/gemini-3-flash-preview', 'gpt-4.1-mini',
+         'deepseek-v4-flash:free', 'openrouter/deepseek-v4-flash:free',
+         'nvidia/nemotron-3-ultra:free', 'nvidia/nemotron-3-ultra-550b:free',
+         'deepseek-v4-flash', 'deepseek-v4-pro',
+         'glm-4.7-flash', 'glm-4-flash-250414'
+       )
   `)
 } catch {
   // ignore

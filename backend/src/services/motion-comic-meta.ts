@@ -67,7 +67,7 @@ export type MotionComicAnchorMotionMeta = {
   shotType: string
 }
 
-/** 为配图段（1～2 句）推断运镜，整段共用一种 camera_kind */
+/** 为配图段（约 2～4 句）推断运镜，整段共用一种 camera_kind */
 export function buildMotionComicSegmentMotionMeta(
   sentences: string[],
   paragraphIndex: number,

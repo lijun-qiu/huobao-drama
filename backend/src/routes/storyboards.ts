@@ -8,11 +8,15 @@ import { findReusableTtsByText, narrationShotNeedsOwnTts, parseDialogueForTTS, r
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta } from '../services/narration-image.js'
 import { buildComposeUnitMergedTtsText, findComposeUnitMembers, propagateComposeUnitTts } from '../services/ffmpeg-compose.js'
 import { formatCharacterDisplayName, resolveStoryboardCharacterIdsForShot } from '../services/narration-characters.js'
+import { DEFAULT_CLONED_TTS_VOICE, DEFAULT_LOCAL_TTS_ENGINE } from '../constants/local-comic.js'
 import { DEFAULT_EDGE_VOICE, resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { findCharacterVoiceMeta, isEdgeVoiceId, mapLocalVoiceToEdge, resolveStoryboardLocalTtsInput, type LocalTtsEngine } from '../services/local-tts-resolve.js'
+import { checkGptSovitsHealth } from '../services/gpt-sovits-tts.js'
+import { checkIndexTtsHealth } from '../services/index-tts-tts.js'
 import { checkVoiceboxHealth, listVoiceboxProfiles, resolveVoiceboxProfileId, isChineseCapableKokoroPreset, isChineseCapableVoiceboxVoice, parseVoiceboxPresetRef, textPrefersChineseTtsLanguage } from '../services/voicebox-tts.js'
 import { applyUploadedTtsToStoryboard } from '../services/narration-audio-split.js'
 import {
+  purgeStoryboardShotVideo,
   purgeStoryboardTtsBeforeRegenerate,
   replaceStoryboardAssetOnUpdate,
 } from '../services/storyboard-asset-replace.js'
@@ -21,6 +25,7 @@ import { resolveTtsSpeed } from '../utils/tts-speed.js'
 import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 import { scanNarrationStoryboardImage } from '../services/narration-image-scan.js'
+import { translateStoryboardFluxPrompt, mergeStoryboardFluxPromptMeta, clearStoryboardFluxPromptMeta } from '../services/flux-storyboard-translate.js'
 
 const app = new Hono()
 
@@ -31,13 +36,15 @@ async function generateStoryboardTtsAudio(
   try {
     return await generateTTS(params)
   } catch (err: any) {
-    if (!params.localTts || params.localTtsEngine !== 'voicebox') throw err
+    if (!params.localTts || (params.localTtsEngine !== 'voicebox' && params.localTtsEngine !== 'gptsovits' && params.localTtsEngine !== 'indextts')) throw err
     const fallbackVoice = resolveEdgeVoice(
       options?.edgeFallbackVoice && isEdgeVoiceId(options.edgeFallbackVoice)
         ? options.edgeFallbackVoice
         : DEFAULT_EDGE_VOICE,
     )
-    logTaskWarn('StoryboardAPI', 'voicebox-fallback-edge', {
+    logTaskWarn('StoryboardAPI', 'local-tts-fallback-edge', {
+      engine: params.localTtsEngine,
+      requestedVoice: params.voice,
       error: err.message,
       fallbackVoice,
     })
@@ -164,13 +171,19 @@ app.put('/:id', async (c) => {
     bgm_prompt: 'bgmPrompt', sound_effect: 'soundEffect',
     composed_image: 'composedImage', reference_images: 'referenceImages',
     tts_audio_url: 'ttsAudioUrl',
+    video_url: 'videoUrl',
     bgm_audio_url: 'bgmAudioUrl', bgm_generation_id: 'bgmGenerationId',
   }
 
   const updates: Record<string, any> = { updatedAt: now() }
   for (const [snakeKey, camelKey] of Object.entries(fieldMap)) {
     if (snakeKey in body) {
-      if (camelKey === 'composedImage' || camelKey === 'ttsAudioUrl') {
+      if (camelKey === 'videoUrl' && (body[snakeKey] == null || body[snakeKey] === '')) {
+        purgeStoryboardShotVideo(id, storyboard)
+        // purge already cleared DB videoUrl; skip setting again unless we keep other fields
+        continue
+      }
+      if (camelKey === 'composedImage' || camelKey === 'ttsAudioUrl' || camelKey === 'videoUrl') {
         replaceStoryboardAssetOnUpdate(storyboard, camelKey, body[snakeKey])
       }
       updates[camelKey] = body[snakeKey]
@@ -192,16 +205,22 @@ app.put('/:id', async (c) => {
     updates.imagePrompt = normalizeStoryboardImagePrompt(body.image_prompt)
     const nextPrompt = updates.imagePrompt
     const prevPrompt = String(storyboard.imagePrompt || '').trim()
-    if (nextPrompt !== prevPrompt && nextPrompt) {
+    if (nextPrompt !== prevPrompt) {
       const meta = parseNarrationImageMeta(storyboard.referenceImages)
-      if (meta.narration_image_mode === 'new') {
-        const { narration_image_mode, ...restMeta } = meta
-        updates.referenceImages = buildNarrationImageMeta(narration_image_mode, {
-          ...restMeta,
-          image_prompt_source: 'manual',
-        })
+      const { flux_prompt_en: _fp, flux_prompt_en_at: _fpa, ...restMeta } = meta
+      const extra: Record<string, unknown> = { ...restMeta }
+      if (nextPrompt && meta.narration_image_mode === 'new') {
+        extra.image_prompt_source = 'manual'
       }
+      updates.referenceImages = buildNarrationImageMeta(meta.narration_image_mode, extra)
     }
+  }
+
+  if ('flux_prompt_en' in body) {
+    const en = String(body.flux_prompt_en ?? '').trim()
+    updates.referenceImages = en
+      ? mergeStoryboardFluxPromptMeta(storyboard.referenceImages, en)
+      : (clearStoryboardFluxPromptMeta(storyboard.referenceImages) ?? storyboard.referenceImages)
   }
 
   validateStoryboardBindings(
@@ -250,11 +269,18 @@ app.post('/:id/generate-tts', async (c) => {
   if (!sb) return badRequest(c, '镜头不存在')
   // 解说镜默认本地 TTS；仅显式传 local_tts: false 时才走付费 API
   const localTts = body?.local_tts === false ? false : (body?.local_tts === true || isNarrationStoryboard(sb))
-  const localTtsEngine = body?.local_tts_engine === 'voicebox' ? 'voicebox' : 'edge'
+  const localTtsEngineRaw = String(body?.local_tts_engine || body?.localTtsEngine || DEFAULT_LOCAL_TTS_ENGINE).trim().toLowerCase()
+  const localTtsEngine: LocalTtsEngine =
+    localTtsEngineRaw === 'gptsovits' ? 'gptsovits'
+      : localTtsEngineRaw === 'voicebox' ? 'voicebox'
+        : localTtsEngineRaw === 'indextts' ? 'indextts'
+          : localTtsEngineRaw === 'edge' ? 'edge'
+            : DEFAULT_LOCAL_TTS_ENGINE
   const ttsSpeed = resolveTtsSpeed(body?.tts_speed ?? body?.ttsSpeed)
-  const voiceboxInstruct = localTtsEngine === 'voicebox'
+  const emotionInstruct = (localTtsEngine === 'voicebox' || localTtsEngine === 'indextts')
     ? resolveVoiceboxInstruct(body?.voicebox_instruct ?? body?.voiceboxInstruct ?? body?.tts_instruct ?? body?.ttsInstruct)
     : undefined
+  const voiceboxInstruct = localTtsEngine === 'voicebox' ? emotionInstruct : undefined
   const voiceboxModelSize = localTtsEngine === 'voicebox'
     ? resolveVoiceboxModelSize(body?.voicebox_model_size ?? body?.voiceboxModelSize)
     : undefined
@@ -359,13 +385,35 @@ app.post('/:id/generate-tts', async (c) => {
 
   try {
     purgeStoryboardTtsBeforeRegenerate(id, sb)
-    const requestedEngine: LocalTtsEngine = localTtsEngine === 'voicebox' ? 'voicebox' : 'edge'
+    const requestedEngine: LocalTtsEngine = localTtsEngine
     let voiceboxHealthy = requestedEngine === 'voicebox'
+    let gptsovitsHealthy = requestedEngine === 'gptsovits'
+    let indexttsHealthy = requestedEngine === 'indextts'
     if (voiceboxHealthy) {
       const health = await checkVoiceboxHealth()
       voiceboxHealthy = !!health.ok
       if (!voiceboxHealthy) {
         logTaskWarn('StoryboardAPI', 'voicebox-unavailable', {
+          storyboardId: id,
+          error: health.error,
+        })
+      }
+    }
+    if (gptsovitsHealthy) {
+      const health = await checkGptSovitsHealth()
+      gptsovitsHealthy = !!health.ok
+      if (!gptsovitsHealthy) {
+        logTaskWarn('StoryboardAPI', 'gptsovits-unavailable', {
+          storyboardId: id,
+          error: health.error,
+        })
+      }
+    }
+    if (indexttsHealthy) {
+      const health = await checkIndexTtsHealth()
+      indexttsHealthy = !!health.ok
+      if (!indexttsHealthy) {
+        logTaskWarn('StoryboardAPI', 'indextts-unavailable', {
           storyboardId: id,
           error: health.error,
         })
@@ -387,19 +435,18 @@ app.post('/:id/generate-tts', async (c) => {
         preferSpeakerVoice,
         forceEngine: requestedEngine,
         allowVoicebox: voiceboxHealthy,
+        allowGptsovits: gptsovitsHealthy,
+        allowIndextts: indexttsHealthy,
       })
       ttsEngine = localInput.engine
       ttsSpeakerName = localInput.speakerName
       usedCharacterVoice = localInput.usedCharacterVoice
+      const charMeta = findCharacterVoiceMeta(speaker, chars, { isTitleShot: !!isTitleShot })
+      edgeFallbackVoice = mapLocalVoiceToEdge(charMeta, fallbackVoice)
       if (localInput.engine === 'edge' || isEdgeVoiceId(localInput.voiceInput)) {
         edgeFallbackVoice = localInput.voiceInput
       } else if (fallbackVoice && isEdgeVoiceId(fallbackVoice)) {
         edgeFallbackVoice = fallbackVoice
-      } else if (ttsEngine === 'edge') {
-        edgeFallbackVoice = mapLocalVoiceToEdge(
-          findCharacterVoiceMeta(speaker, chars, { isTitleShot: !!isTitleShot }),
-          fallbackVoice,
-        )
       }
       ttsVoice = ttsEngine === 'voicebox'
         ? await (async () => {
@@ -428,7 +475,9 @@ app.post('/:id/generate-tts', async (c) => {
           }
           return resolveVoiceboxProfileId(voiceInput)
         })()
-        : localInput.voiceInput
+        : ttsEngine === 'gptsovits' || ttsEngine === 'indextts'
+          ? localInput.voiceInput
+          : localInput.voiceInput
     }
 
     const unitMemberIds = unitTts ? findComposeUnitMembers(id, episodeStoryboards).map(m => m.id) : undefined
@@ -442,8 +491,8 @@ app.post('/:id/generate-tts', async (c) => {
         configId: localTts ? null : (ep?.audioConfigId || null),
         localTts,
         localTtsEngine: localTts ? (ttsEngine as LocalTtsEngine) : undefined,
-        voiceboxInstruct: localTts && ttsEngine === 'voicebox'
-          ? voiceboxInstruct
+        voiceboxInstruct: localTts && (ttsEngine === 'voicebox' || ttsEngine === 'indextts')
+          ? emotionInstruct
           : undefined,
         voiceboxModelSize: localTts && ttsEngine === 'voicebox'
           ? voiceboxModelSize
@@ -537,13 +586,28 @@ app.post('/:id/upload-tts', async (c) => {
   }
 })
 
-// POST /storyboards/:id/scan-narration-image — VLM 扫描配图与旁白/文案一致性
+// POST /storyboards/:id/translate-flux-prompt — 规则/有道将中文配图文案译为 Flux 英文（写入 meta，不覆盖中文）
+app.post('/:id/translate-flux-prompt', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const holdOllama = !!(body.hold_ollama ?? body.holdOllama)
+  try {
+    const result = await translateStoryboardFluxPrompt(id, { holdOllama })
+    return success(c, result)
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'translate-flux-prompt', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /storyboards/:id/scan-narration-image — MiniCPM-V 等校验配图是否合适
 app.post('/:id/scan-narration-image', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json().catch(() => ({}))
   try {
     const result = await scanNarrationStoryboardImage(id, {
       textModel: body.text_model || body.textModel,
+      visionModel: body.vision_model || body.visionModel,
       textThinking: body.text_thinking ?? body.textThinking,
     })
     return success(c, { ...result, generated_at: now() })

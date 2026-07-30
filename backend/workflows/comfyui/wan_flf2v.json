@@ -1,0 +1,140 @@
+{
+  "_comment": "Length/fps overridden at runtime. Balanced: 768x432 @16fps, 49 frames, 20 steps. TTS muxed after save.",
+  "37": {
+    "class_type": "UNETLoader",
+    "_meta": {"title": "Wan FLF2V 14B FP8"},
+    "inputs": {
+      "unet_name": "wan2.1_flf2v_720p_14B_fp8_e4m3fn.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "38": {
+    "class_type": "CLIPLoader",
+    "_meta": {"title": "Wan CLIP (UMT5)"},
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan"
+    }
+  },
+  "39": {
+    "class_type": "VAELoader",
+    "_meta": {"title": "Wan VAE"},
+    "inputs": {"vae_name": "wan_2.1_vae.safetensors"}
+  },
+  "41": {
+    "class_type": "CLIPVisionLoader",
+    "_meta": {"title": "CLIP Vision H"},
+    "inputs": {"clip_name": "clip_vision_h.safetensors"}
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "_meta": {"title": "Start Frame"},
+    "inputs": {"image": "start.png"}
+  },
+  "11": {
+    "class_type": "LoadImage",
+    "_meta": {"title": "End Frame"},
+    "inputs": {"image": "end.png"}
+  },
+  "12": {
+    "class_type": "CLIPVisionEncode",
+    "_meta": {"title": "Encode Start"},
+    "inputs": {
+      "clip_vision": ["41", 0],
+      "image": ["10", 0],
+      "crop": "center"
+    }
+  },
+  "13": {
+    "class_type": "CLIPVisionEncode",
+    "_meta": {"title": "Encode End"},
+    "inputs": {
+      "clip_vision": ["41", 0],
+      "image": ["11", 0],
+      "crop": "center"
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Prompt"},
+    "inputs": {
+      "text": "角色从起始姿态自然过渡到结束姿态，动作连贯流畅，镜头稳定，国漫风格，高清细节",
+      "clip": ["38", 0]
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Negative Prompt"},
+    "inputs": {
+      "text": "static, blurry, distorted, low quality, watermark, jitter, flickering, deformed",
+      "clip": ["38", 0]
+    }
+  },
+  "40": {
+    "class_type": "WanFirstLastFrameToVideo",
+    "_meta": {"title": "FLF2V ~49 frames @16fps"},
+    "inputs": {
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "vae": ["39", 0],
+      "width": 768,
+      "height": 432,
+      "length": 49,
+      "batch_size": 1,
+      "clip_vision_start_image": ["12", 0],
+      "clip_vision_end_image": ["13", 0],
+      "start_image": ["10", 0],
+      "end_image": ["11", 0]
+    }
+  },
+  "42": {
+    "class_type": "ModelSamplingSD3",
+    "_meta": {"title": "Wan Sampling Shift"},
+    "inputs": {
+      "model": ["37", 0],
+      "shift": 8.0
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "_meta": {"title": "KSampler"},
+    "inputs": {
+      "seed": 42,
+      "steps": 20,
+      "cfg": 5.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["42", 0],
+      "positive": ["40", 0],
+      "negative": ["40", 1],
+      "latent_image": ["40", 2]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "_meta": {"title": "VAE Decode"},
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["39", 0]
+    }
+  },
+  "50": {
+    "class_type": "CreateVideo",
+    "_meta": {"title": "Create Video"},
+    "inputs": {
+      "images": ["8", 0],
+      "fps": 16.0
+    }
+  },
+  "51": {
+    "class_type": "SaveVideo",
+    "_meta": {"title": "Save Video"},
+    "inputs": {
+      "video": ["50", 0],
+      "filename_prefix": "video/wan_flf2v",
+      "format": "auto",
+      "codec": "auto"
+    }
+  }
+}

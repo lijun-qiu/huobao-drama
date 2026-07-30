@@ -8,37 +8,424 @@ import {
   NARRATION_USE_RAW_LLM_PROMPTS,
 } from '~/composables/useArtStyles'
 
-export type ProductionMode = 'drama' | 'narration' | 'motion_comic'
+export type ProductionMode = 'drama' | 'narration' | 'motion_comic' | 'novel_comic' | 'local_comic' | 'dialogue_portrait'
 
-export function isNarrationLikeMode(mode: ProductionMode): boolean {
-  return mode === 'narration' || mode === 'motion_comic'
+export const DIALOGUE_PORTRAIT_EXPRESSIONS = ['idle', 'talk', 'react'] as const
+export type DialoguePortraitExpression = (typeof DIALOGUE_PORTRAIT_EXPRESSIONS)[number]
+export const DIALOGUE_PORTRAIT_EXPRESSION_LABELS: Record<DialoguePortraitExpression, string> = {
+  idle: '待机',
+  talk: '说话',
+  react: '反应',
 }
+/** 本集绑定角色上限（1=居中，2=左右） */
+export const DIALOGUE_PORTRAIT_MAX_CHARS = 2
+
+export function isNarrationLikeMode(mode?: ProductionMode | string | null): boolean {
+  return mode === 'narration' || mode === 'motion_comic' || mode === 'novel_comic' || mode === 'dialogue_portrait'
+}
+
+export function isDialoguePortraitMode(mode?: ProductionMode | string | null): boolean {
+  return mode === 'dialogue_portrait'
+}
+
+export function isNovelComicMode(mode?: ProductionMode | string | null): boolean {
+  return mode === 'novel_comic'
+}
+
+export function isDramaLikeMode(mode?: ProductionMode | string | null): boolean {
+  return mode === 'drama' || mode === 'local_comic'
+}
+
+export function isLocalComicMode(mode?: ProductionMode | string | null): boolean {
+  return mode === 'local_comic'
+}
+/** 解说 / 漫画解说 / 小说漫画讲解 / 对话立绘 / 本地短剧：管线模型选项（默认可为智谱等云端） */
+export function usesLocalModelPipeline(mode?: ProductionMode | string | null): boolean {
+  return mode === 'narration'
+    || mode === 'motion_comic'
+    || mode === 'novel_comic'
+    || mode === 'local_comic'
+    || mode === 'dialogue_portrait'
+}
+
+export function usesMotionComicStoryboardRules(mode?: ProductionMode | string | null): boolean {
+  return mode === 'motion_comic'
+}
+
+/** 配图/运镜与漫画解说一致 */
+export function usesMotionComicVisuals(mode?: ProductionMode | string | null): boolean {
+  return mode === 'motion_comic' || mode === 'novel_comic'
+}
+
+/** 多角色「说话人：台词」分镜 / 配音（漫画解说、对话立绘） */
+export function usesDialogueSpeakers(mode?: ProductionMode | string | null): boolean {
+  return mode === 'motion_comic' || mode === 'dialogue_portrait'
+}
+
+export function parseCharacterReferenceImages(char: any): Record<string, any> {
+  const raw = char?.reference_images ?? char?.referenceImages
+  if (!raw) return {}
+  if (typeof raw === 'object') return raw as Record<string, any>
+  try { return JSON.parse(String(raw)) || {} } catch { return {} }
+}
+
+/** 角色表情包：`referenceImages.dialogue_portrait.{idle,talk,react}` */
+export function getDialoguePortraitExpressions(char: any): Partial<Record<DialoguePortraitExpression, string>> {
+  const pack = parseCharacterReferenceImages(char)?.dialogue_portrait
+  if (!pack || typeof pack !== 'object') return {}
+  const out: Partial<Record<DialoguePortraitExpression, string>> = {}
+  for (const key of DIALOGUE_PORTRAIT_EXPRESSIONS) {
+    const url = String((pack as Record<string, unknown>)[key] || '').trim()
+    if (url) out[key] = url
+  }
+  return out
+}
+
+export function dialoguePortraitExpressionSrc(url?: string | null): string {
+  const u = String(url || '').trim()
+  if (!u) return ''
+  return u.startsWith('/') ? u : `/${u}`
+}
+
+export function dialoguePortraitExpressionsReady(char: any): boolean {
+  const pack = getDialoguePortraitExpressions(char)
+  return DIALOGUE_PORTRAIT_EXPRESSIONS.every(k => !!pack[k])
+}
+/** 本地短剧（local_comic）：基于 master 短剧制作流程 + 本地模型 */
+export function isLocalDramaMode(mode?: ProductionMode | string | null): boolean {
+  return mode === 'local_comic'
+}
+
+export const LOCAL_DRAMA_SCRIPT_CHAT_STEP = 0
+
+export const LOCAL_DRAMA_RAW_STEP = 1
+
+export const LOCAL_DRAMA_REWRITE_STEP = 2
+
+export const LOCAL_DRAMA_EXTRACT_STEP = 3
+
+export const LOCAL_DRAMA_VOICE_STEP = 4
+
+export const LOCAL_DRAMA_STORYBOARD_STEP = 5
+
+export function dramaRawStepForMode(mode?: ProductionMode | string | null) {
+  return isLocalDramaMode(mode) ? LOCAL_DRAMA_RAW_STEP : 0
+}
+
+export function dramaRewriteStepForMode(mode?: ProductionMode | string | null) {
+  return isLocalDramaMode(mode) ? LOCAL_DRAMA_REWRITE_STEP : 1
+}
+
+export function dramaExtractStepForMode(mode?: ProductionMode | string | null) {
+  return isLocalDramaMode(mode) ? LOCAL_DRAMA_EXTRACT_STEP : 2
+}
+
+export function dramaVoiceStepForMode(mode?: ProductionMode | string | null) {
+  return isLocalDramaMode(mode) ? LOCAL_DRAMA_VOICE_STEP : 3
+}
+
+export function dramaStoryboardStepForMode(mode?: ProductionMode | string | null) {
+  return isLocalDramaMode(mode) ? LOCAL_DRAMA_STORYBOARD_STEP : dramaStoryboardStep()
+}
+
+export const DEFAULT_LOCAL_TEXT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+/** 本地短剧：剧本生成对话默认模型 */
+export const DEFAULT_LOCAL_SCRIPT_TEXT_MODEL = DEFAULT_LOCAL_TEXT_MODEL
+
+export const DEFAULT_LOCAL_AGENT_MODEL = DEFAULT_LOCAL_TEXT_MODEL
+
+export const LOCAL_TEXT_MODEL_OPTIONS = [
+  { value: 'glm-4.7-flash', label: '智谱 · GLM-4.7-Flash（免费）' },
+  { value: 'glm-4-flash-250414', label: '智谱 · GLM-4-Flash-250414（免费）' },
+] as const
+
+export const CLOUD_TEXT_MODELS = new Set([
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'openrouter/deepseek-v4-flash:free',
+  'openrouter/deepseek-v4-flash',
+  'openrouter/deepseek-v4-pro',
+  'deepseek-v4-flash',
+  'deepseek-v4-pro',
+  'deepseek-v4-flash:free',
+  'qwen3.5-plus',
+  'gpt-4o',
+  'gemini-3-pro-preview',
+  'gemini-3-flash-preview',
+  'google/gemini-3-flash-preview',
+  'gpt-4.1-mini',
+])
+
+export function normalizeTextModelId(model?: string | null): string {
+  const m = String(model || '').trim()
+  if (!m) return m
+  if (
+    m === 'deepseek-v4-flash:free'
+    || m === 'openrouter/deepseek-v4-flash:free'
+    || m === 'nvidia/nemotron-3-ultra:free'
+    || m === 'nvidia/nemotron-3-ultra-550b:free'
+  ) {
+    return 'nvidia/nemotron-3-ultra-550b-a55b:free'
+  }
+  return m
+}
+
+export function textModelLabel(model?: string | null): string {
+  const m = normalizeTextModelId(model)
+  if (!m) return '未选'
+  const hit = TEXT_MODEL_OPTIONS.find(item => item.value === m)
+    || LOCAL_TEXT_MODEL_OPTIONS.find(item => item.value === m)
+  return hit?.label || m
+}
+
+const LEGACY_OLLAMA_TEXT_MODEL_TAGS = new Set([
+  'qwen3.5:9b',
+  'qwen3.5:9b-96k',
+  'qwen3.5:9b-128k',
+  'qwen3.5:27b',
+  'qwen3.5:20b-64k',
+  'qwen2.5:14b',
+  'deepseek-r1:14b',
+  'deepseek-r1:14b-24k',
+  'deepseek-r1:14b-64k',
+])
+
+export const DEFAULT_LOCAL_IMAGE_MODEL = 'agnes-image-2.0-flash'
+
+export const DEFAULT_LOCAL_VIDEO_MODEL = 'cogvideox-flash'
+
+export const FLUX_PROMPT_EN_VERSION = 20
+
+const FLUX_EN_SECTION_LABELS = [
+  'Camera and composition',
+  'Environment and era',
+  'Action and interaction',
+  'Subjects in frame',
+  'Lighting and color',
+  'Art style spec',
+  'Render quality',
+] as const
+
+const FLUX_EN_BLEED_LABELS = [
+  'Lighting and color',
+  'Art style spec',
+  'Render quality',
+  'Action and interaction',
+  'Environment and era',
+  'Camera and composition',
+] as const
+
+function closeUnclosedParens(s: string): string {
+  let open = 0
+  for (const ch of s) {
+    if (ch === '(') open++
+    else if (ch === ')') open = Math.max(0, open - 1)
+  }
+  if (open > 0) return `${s.replace(/[,.\s]+$/, '')}${')'.repeat(open)}`
+  return s
+}
+
+function stripTrailingIncompleteParenGroup(body: string): string {
+  let open = 0
+  let lastOpen = -1
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === '(') {
+      open++
+      lastOpen = i
+    } else if (body[i] === ')') {
+      open = Math.max(0, open - 1)
+    }
+  }
+  if (open > 0 && lastOpen >= 0) return body.slice(0, lastOpen).replace(/[,.\s]+$/, '').trim()
+  return body
+}
+
+function parseFluxEnglishSections(raw: string): Record<string, string> {
+  const text = String(raw || '').trim()
+  const sections: Record<string, string> = {}
+  const re = /(Art style spec|Subjects in frame|Environment and era|Action and interaction|Lighting and color|Camera and composition|Render quality):\s*/gi
+  const indices: Array<{ label: string; start: number; contentStart: number }> = []
+  for (const m of text.matchAll(re)) {
+    if (m.index == null) continue
+    indices.push({ label: m[1], start: m.index, contentStart: m.index + m[0].length })
+  }
+  for (let i = 0; i < indices.length; i++) {
+    const end = i + 1 < indices.length ? indices[i + 1].start : text.length
+    sections[indices[i].label] = text.slice(indices[i].contentStart, end).replace(/[.\s]+$/, '').trim()
+  }
+  return sections
+}
+
+function stripBleedFromSectionBody(body: string): string {
+  let cutAt = -1
+  for (const label of FLUX_EN_BLEED_LABELS) {
+    const escaped = label.replace(/ /g, '\\s+')
+    const patterns = [
+      new RegExp(`\\.\\s*${escaped}:\\s*`, 'i'),
+      new RegExp(`\\(#\\d*\\.?\\s*${escaped}:\\s*`, 'i'),
+      new RegExp(`\\(#?[0-9a-f]{3,8}\\.?\\s*${escaped}:\\s*`, 'i'),
+      new RegExp(`\\s${escaped}:\\s*`, 'i'),
+    ]
+    for (const re of patterns) {
+      const m = re.exec(body)
+      if (m?.index != null && m.index > 12 && (cutAt < 0 || m.index < cutAt)) cutAt = m.index
+    }
+  }
+  let trimmed = cutAt >= 0 ? body.slice(0, cutAt).trim() : body
+  trimmed = trimmed.replace(/\s*\(#\d*\.?\s*$/, '').trim()
+  trimmed = trimmed.replace(/\s*\(#?[0-9a-f]{3,8}\.?\s*$/i, '').trim()
+  return trimmed
+}
+
+/** 修复七维英文串段/未闭合括号，与后端 repairFluxEnglishPromptStructure 对齐 */
+
+/** 修复七维英文串段/未闭合括号，与后端 repairFluxEnglishPromptStructure 对齐 */
+export function repairFluxEnglishForPendingCheck(raw: string): string {
+  let s = String(raw || '').trim()
+  if (!s) return s
+  s = s
+    .replace(/Contrasting makeup\s*["「]?/gi, 'matching reference portrait for "')
+    .replace(/Contrast makeup\s*["「]?/gi, 'matching reference portrait for "')
+    .replace(/Xinhai Cheng/gi, 'Makoto Shinkai')
+    .replace(/Jing\s*'ani/gi, 'Kyoto Animation')
+    .trim()
+
+  const sections = parseFluxEnglishSections(s)
+  if (Object.keys(sections).length < 2) return closeUnclosedParens(s)
+
+  for (const label of FLUX_EN_SECTION_LABELS) {
+    const body = sections[label]
+    if (!body) continue
+    let fixed = stripBleedFromSectionBody(body)
+    if (label === 'Subjects in frame') {
+      fixed = stripTrailingIncompleteParenGroup(fixed)
+      fixed = closeUnclosedParens(fixed)
+    }
+    sections[label] = fixed.trim()
+  }
+
+  return FLUX_EN_SECTION_LABELS
+    .filter(label => sections[label])
+    .map(label => `${label}: ${sections[label]}`)
+    .join('. ')
+}
+
+export function hasUnclosedFluxSubjectsParen(en: string): boolean {
+  const sections = parseFluxEnglishSections(en)
+  const subjects = sections['Subjects in frame']
+  if (!subjects) return false
+  let open = 0
+  for (const ch of subjects) {
+    if (ch === '(') open++
+    else if (ch === ')') open = Math.max(0, open - 1)
+  }
+  return open > 0
+}
+/** 与后端 assessFluxEnglishPromptAccuracy 对齐：待重译/不可用英文判定 */
+export function isFluxEnglishPromptInaccurate(en: string, chinese?: string | null): boolean {
+  const stored = repairFluxEnglishForPendingCheck(String(en || '').trim())
+  if (!stored) return true
+  const withoutLabelCjk = stored
+    .replace(/portrait\s+label\s*'[^']*'/gi, '')
+    .replace(/portrait\s+label\s*"[^"]*"/gi, '')
+    .replace(/matching\s+(?:reference\s+)?portrait(?:\s+for)?\s*'[^']*'/gi, '')
+    .replace(/matching\s+(?:reference\s+)?portrait(?:\s+for)?\s*"[^"]*"/gi, '')
+  if (/[\u4e00-\u9fff]/.test(withoutLabelCjk)) return true
+  if (/thinking process|analyze the request|deconstruct the input|must be included|\*\*/i.test(stored)) return true
+  if (/contrast pose|contrasting makeup|control makeup|shinkaisei|delicate line manuscript|non-q version|supporting role|head-to-head ratio|celluloid and gradient|film感动/i.test(stored)) return true
+  if (/portrait\s+label\s*'[^']+'[^.]{0,40}\b(?:Xiaoya|Xiao\s*Ya|XiaoYa)\b/i.test(stored)) return true
+  if (/portrait\s+label\s*'[^']+'[^.]{0,80}\bCharacter\s*["']/i.test(stored)) return true
+  if (/\b(and|with|or|mult|mechan|transpar|keyboar|highligh|display)\s*\.?\s*$/i.test(stored)) return true
+  if (/\b(straig|mid-grou|shoulders\+ha|shoulders\+h)\b/i.test(stored)) return true
+  if (hasUnclosedFluxSubjectsParen(stored)) return true
+  for (const label of FLUX_EN_SECTION_LABELS) {
+    if (!stored.includes(`${label}:`)) return true
+  }
+  const zh = String(chinese || '')
+  if (zh) {
+    if (stored.length < 60) return true
+    const cnCam = (zh.match(/[【［[]镜头视角[：:]([^】］]+)/) || [])[1] || ''
+    const cnSub = (zh.match(/[【［[]画面主体[：:]([^】］]+)/) || [])[1] || ''
+    const cnAct = (zh.match(/[【［[]核心细节动作[：:]([^】］]+)/) || [])[1] || ''
+    const cam = (parseFluxEnglishSections(stored)['Camera and composition'] || '')
+    const subj = (parseFluxEnglishSections(stored)['Subjects in frame'] || '')
+    if (/头高约占画面高度\s*\d+\s*%/.test(cnCam) && !/head\s*~\s*\d+%/.test(cam)) return true
+    const dualPose = /坐姿或站姿|站姿或坐姿/.test(cnCam)
+    const poseCtx = dualPose ? `${cnSub} ${cnAct}` : `${cnCam} ${cnSub}`
+    if (!dualPose) {
+      if (/站立|站姿/.test(poseCtx) && /sitting/i.test(cam)) return true
+      if (/坐姿|端坐/.test(poseCtx) && /standing shoulders/i.test(cam) && !/sitting/i.test(cam)) return true
+    } else {
+      if (/站立|以站姿|站姿/.test(poseCtx) && !/以坐姿|端坐/.test(poseCtx) && /sitting/i.test(cam)) return true
+      if (/以坐姿|端坐|坐着/.test(poseCtx) && /standing shoulders/i.test(cam) && !/sitting/i.test(cam)) return true
+    }
+    const label = (cnSub.match(/对照定妆「([^」]+)」/) || [])[1]
+    if (label && !subj.includes(label) && !/portrait\s+label/i.test(subj)) return true
+    const hex = (cnSub.match(/#[0-9a-fA-F]{6}/) || [])[0]
+    if (hex && !new RegExp(hex, 'i').test(stored)) return true
+    if (/无配角/.test(cnSub) && !/no other characters|no supporting/i.test(subj)) return true
+  } else if (stored.length < 40) {
+    return true
+  }
+  return false
+}
+
+export const LOCAL_IMAGE_MODEL_OPTIONS = [
+  { value: 'agnes-image-2.0-flash', label: 'Agnes · Image 2.0（定妆/参考图，默认）' },
+  { value: 'cogview-3-flash', label: '智谱 · CogView-3-Flash（免费文生图，无定妆参考）' },
+  { value: 'qwen_image_edit_q3', label: 'ComfyUI Qwen-Edit · Q3_K_M（中文+定妆）' },
+  { value: 'qwen_image_edit_q4', label: 'ComfyUI Qwen-Edit · Q4_K_M（中文+定妆）' },
+  { value: 'kolors', label: 'ComfyUI Kolors · 中文直出（不定妆图）' },
+] as const
+
+export const LOCAL_VIDEO_MODEL_OPTIONS = [
+  { value: 'cogvideox-flash', label: '智谱 · CogVideoX-Flash（免费视频，推荐）' },
+  { value: 'wan_i2v_fusionx', label: 'Wan FusionX 快速 · 6 步图生视频' },
+  { value: 'wan_i2v', label: 'Wan I2V 本地 · AI 图生视频（14B 高质量）' },
+  { value: 'wan_flf2v', label: 'Wan FLF2V 本地 · 首尾帧' },
+  { value: 'glide', label: 'Glide 运镜 · 亚像素推拉（不占 Wan 显存）' },
+  { value: 'kenburns', label: '动图风 · FFmpeg 轻推镜（无 GPU）' },
+] as const
 
 export const DEFAULT_IMAGE_MODEL = 'gpt-image-2'
 
-export const DEFAULT_TEXT_MODEL = 'deepseek-v4-pro'
+export const DEFAULT_TEXT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+
 export const DEFAULT_TEXT_THINKING = true
 /** 剧本生成对话默认模型 */
-export const DEFAULT_NARRATION_SCRIPT_CHAT_MODEL = 'qwen3.5-plus'
+export const DEFAULT_NARRATION_SCRIPT_CHAT_MODEL = DEFAULT_TEXT_MODEL
 /** 解说模式：配图等文本 LLM 默认模型 */
 export const DEFAULT_NARRATION_TEXT_MODEL = DEFAULT_NARRATION_SCRIPT_CHAT_MODEL
 
 export const TEXT_MODEL_OPTIONS = [
-  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 默认（推理+Agent）' },
-  { value: 'qwen3.5-plus', label: 'Qwen 3.5 Plus · 思考+VLM（4022）' },
+  { value: 'nvidia/nemotron-3-ultra-550b-a55b:free', label: 'Nemotron 3 Ultra · OpenRouter 免费' },
+  { value: 'openrouter/deepseek-v4-flash', label: 'DeepSeek V4 Flash · OpenRouter 付费' },
+  { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash · 官网' },
+  { value: 'openrouter/deepseek-v4-pro', label: 'DeepSeek V4 Pro · OpenRouter 付费' },
+  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 官网' },
+  { value: 'qwen3.5-plus', label: 'Qwen 3.5 Plus · 4022' },
   { value: 'gpt-4o', label: 'GPT-4o · OpenAI 兼容' },
+  ...LOCAL_TEXT_MODEL_OPTIONS,
 ] as const
 
 export function resolveEpisodeTextModel(ep?: { text_model?: string | null; textModel?: string | null } | null) {
-  const picked = String(ep?.text_model || ep?.textModel || '').trim()
+  const picked = normalizeTextModelId(ep?.text_model || ep?.textModel)
   return picked || DEFAULT_TEXT_MODEL
 }
 
 export function resolveNarrationEpisodeTextModel(
   ep?: { text_model?: string | null; textModel?: string | null } | null,
 ) {
-  const stored = String(ep?.text_model || ep?.textModel || '').trim()
-  if (stored && stored !== DEFAULT_TEXT_MODEL) return stored
+  const stored = normalizeTextModelId(ep?.text_model || ep?.textModel)
+  const legacy = new Set([
+    'gemini-3-pro-preview',
+    'gemini-3-flash-preview',
+    'google/gemini-3-flash-preview',
+    'gpt-4.1-mini',
+    'deepseek-v4-flash:free',
+    'glm-4.7-flash',
+    'glm-4-flash-250414',
+  ])
+  if (stored && stored !== DEFAULT_TEXT_MODEL && !legacy.has(stored)) return stored
   return DEFAULT_NARRATION_TEXT_MODEL
 }
 
@@ -58,7 +445,29 @@ export function textModelSupportsThinking(model?: string | null): boolean {
 
 export function textModelSupportsVision(model?: string | null): boolean {
   const m = String(model || '').trim().toLowerCase()
+  if (
+    m.includes('minicpm')
+    || m.includes('qwen2.5vl')
+    || m.includes('qwen2.5-vl')
+    || m.includes('llava')
+  ) return true
+  if (/^qwen[\w.-]*:\d/i.test(m)) return false
   return m.includes('qwen3.5') || m.includes('qwen-3.5') || m.includes('gpt-4o')
+}
+
+export const DEFAULT_LOCAL_VISION_MODEL = 'qwen2.5vl:7b'
+
+export function resolveScriptChatTextThinking(
+  ep?: { text_thinking?: boolean | number | null; textThinking?: boolean | number | null } | null,
+  bodyValue?: boolean | number | string | null,
+): boolean {
+  if (bodyValue !== undefined && bodyValue !== null && bodyValue !== '') {
+    if (bodyValue === false || bodyValue === 0 || bodyValue === '0') return false
+    if (bodyValue === true || bodyValue === 1 || bodyValue === '1') return true
+  }
+  const stored = ep?.text_thinking ?? ep?.textThinking
+  if (stored === false || stored === 0) return false
+  return true
 }
 
 export function resolveEpisodeTextThinking(
@@ -92,10 +501,11 @@ export const IMAGE_MODEL_OPTIONS = [
   { value: 'gemini-3.1-flash-image', label: 'Gemini 3.1 Flash Image · ¥0.17/张' },
 ] as const
 
-export const DEFAULT_BGM_MODEL = 'suno_music_open'
+export const DEFAULT_BGM_MODEL = 'ace_step_local'
 
 export const BGM_MODEL_OPTIONS = [
-  { value: 'suno_music_open', label: 'Suno · 纯器乐（默认）' },
+  { value: 'ace_step_local', label: 'ACE-Step 本地 · 纯器乐 BGM（推荐）' },
+  { value: 'suno_music_open', label: 'Suno · 纯器乐（云端）' },
   { value: 'pixverse-sound-effect', label: 'PixVerse · 音效/环境音（需镜头视频）' },
   { value: 'chirp-v3-5', label: 'Suno chirp-v3-5' },
 ] as const
@@ -107,6 +517,16 @@ export function bgmModelLabel(model?: string | null): string {
 
 export function imageModelUnitPrice(model?: string | null): number {
   const m = String(model || DEFAULT_IMAGE_MODEL).toLowerCase()
+  if (
+    m.startsWith('sdxl_') ||
+    m.startsWith('wan_') ||
+    m.startsWith('flux') ||
+    m === 'kolors' ||
+    m.startsWith('qwen_image') ||
+    m === 'kenburns'
+    || m === 'glide'
+    || m === 'glide-ffmpeg'
+  ) return 0
   if (m.startsWith('gpt-image')) return 0.21
   if (m === 'kling-v1') return 0.0425
   if (m === 'kling-v1-5') return 0.17
@@ -132,12 +552,151 @@ export function imageModelPriceLabel(model?: string | null): string {
   return `¥${price}/张`
 }
 
+export function resolveLocalEpisodeTextModel(
+  ep?: { text_model?: string | null; textModel?: string | null } | null,
+) {
+  const stored = normalizeTextModelId(ep?.text_model || ep?.textModel)
+  if (stored && CLOUD_TEXT_MODELS.has(stored)) return stored
+  if (stored && isLocalOllamaTextModel(stored)) return DEFAULT_LOCAL_TEXT_MODEL
+  if (stored && LOCAL_TEXT_MODEL_OPTIONS.some(item => item.value === stored)) return stored
+  if (stored && !CLOUD_TEXT_MODELS.has(stored)) return stored
+  return DEFAULT_LOCAL_TEXT_MODEL
+}
+
+export function resolveLocalScriptChatTextModel(
+  ep?: { text_model?: string | null; textModel?: string | null } | null,
+) {
+  const stored = normalizeTextModelId(ep?.text_model || ep?.textModel)
+  if (stored && CLOUD_TEXT_MODELS.has(stored)) return stored
+  if (stored && isLocalOllamaTextModel(stored)) return DEFAULT_LOCAL_SCRIPT_TEXT_MODEL
+  if (stored && LOCAL_TEXT_MODEL_OPTIONS.some(item => item.value === stored)) return stored
+  if (stored && stored.startsWith('glm-')) return stored
+  return DEFAULT_LOCAL_SCRIPT_TEXT_MODEL
+}
+
+export function isLocalOllamaTextModel(model?: string | null): boolean {
+  const m = normalizeTextModelId(model)
+  if (!m || CLOUD_TEXT_MODELS.has(m)) return false
+  if (m.startsWith('glm-') || m.startsWith('openrouter/')) return false
+  if (LEGACY_OLLAMA_TEXT_MODEL_TAGS.has(m)) return true
+  if (LOCAL_TEXT_MODEL_OPTIONS.some(item => item.value === m)) return false
+  return /^[\w.-]+:[\w.-]+$/i.test(m)
+}
+
+/** 智谱 GLM 等云端文本：无需 Ollama 预加载 */
+export function isCloudTextModel(model?: string | null): boolean {
+  const m = String(model || '').trim().toLowerCase()
+  if (!m) return false
+  if (m.startsWith('glm-')) return true
+  if (CLOUD_TEXT_MODELS.has(m)) return true
+  return !isLocalOllamaTextModel(m)
+}
+
+/** 智谱 CogVideoX 等云端视频 */
+export function isCloudVideoModel(model?: string | null): boolean {
+  const m = String(model || '').trim().toLowerCase()
+  if (!m) return false
+  return m.startsWith('cogvideox') || m.startsWith('cogvideo')
+}
+
+/** 需要 ComfyUI Wan 本地显存的视频模型 */
+export function needsLocalVideoHardware(model?: string | null): boolean {
+  return String(model || '').trim().toLowerCase().startsWith('wan_')
+}
+
+/** 需要 ComfyUI 本地显存的生图模型 */
+export function needsLocalImageHardware(model?: string | null): boolean {
+  const m = String(model || '').trim()
+  if (!m) return false
+  return !isCloudImageModel(m)
+}
+/** 当前界面选中的管线文本模型（云端 DeepSeek / 智谱保留；旧 Ollama tag 回落默认） */
+export function resolveActiveLocalLlmModel(episodeModel?: string | null): string {
+  const picked = normalizeTextModelId(episodeModel)
+  if (!picked) return DEFAULT_LOCAL_TEXT_MODEL
+  if (CLOUD_TEXT_MODELS.has(picked)) return picked
+  if (LOCAL_TEXT_MODEL_OPTIONS.some(item => item.value === picked)) return picked
+  if (isLocalOllamaTextModel(picked)) return DEFAULT_LOCAL_TEXT_MODEL
+  return picked
+}
+/** 支持工具调用的管线模型（智谱 GLM / 旧 Ollama Qwen） */
+export function isLocalAgentToolModel(model?: string | null): boolean {
+  const m = String(model || '').trim().toLowerCase()
+  if (m.startsWith('glm-')) return true
+  return m.includes('qwen2.5') || m.includes('qwen3.5')
+}
+
+/** 鏈湴婕墽缁撴瀯鍖栨彁鍙栵紙瑙掕壊/场景 JSON锛変紭鍏?Qwen锛汥eepSeek R1 鎬濊€冭緭鍑烘槗瀵艰嚧 JSON 解析失败 */
+
+/** 鏈湴婕墽缁撴瀯鍖栨彁鍙栵紙瑙掕壊/场景 JSON锛変紭鍏?Qwen锛汥eepSeek R1 鎬濊€冭緭鍑烘槗瀵艰嚧 JSON 解析失败 */
+export function resolveLocalExtractModel(episodeModel?: string | null): string {
+  const picked = resolveActiveLocalLlmModel(episodeModel)
+  if (isLocalAgentToolModel(picked)) return picked
+  return DEFAULT_LOCAL_AGENT_MODEL
+}
+
+export function resolveLocalEpisodeImageModel(
+  ep?: { image_model?: string | null; imageModel?: string | null } | null,
+) {
+  let stored = String(ep?.image_model || ep?.imageModel || '').trim()
+  if (stored === 'qwen_image_edit') stored = 'qwen_image_edit_q3'
+  if (stored && LOCAL_IMAGE_MODEL_OPTIONS.some(item => item.value === stored)) return stored
+  if (stored && stored.startsWith('cogview')) return stored
+  if (stored && stored.startsWith('agnes-image')) {
+    return stored === 'agnes-image-2.0' ? 'agnes-image-2.0-flash' : stored
+  }
+  if (stored && (stored.startsWith('sdxl_') || stored.startsWith('wan_') || stored.startsWith('flux') || stored === 'kolors' || stored.startsWith('qwen_image'))) return stored
+  if (stored && !isCloudImageModel(stored)) return stored
+  return DEFAULT_LOCAL_IMAGE_MODEL
+}
+
+export function isCloudImageModel(model?: string | null): boolean {
+  const m = String(model || '').trim().toLowerCase()
+  if (!m) return false
+  if (m.startsWith('cogview') || m.startsWith('agnes-image')) return true
+  if (m.startsWith('sdxl_') || m.startsWith('wan_') || m.startsWith('flux') || m === 'kolors' || m.startsWith('qwen_image')) return false
+  return true
+}
+
+export function textModelOptionsForMode(mode?: ProductionMode | string | null) {
+  return usesLocalModelPipeline(mode) ? LOCAL_TEXT_MODEL_OPTIONS : TEXT_MODEL_OPTIONS
+}
+
+export function imageModelOptionsForMode(mode?: ProductionMode | string | null) {
+  return usesLocalModelPipeline(mode) ? LOCAL_IMAGE_MODEL_OPTIONS : IMAGE_MODEL_OPTIONS
+}
+
+export function defaultTextModelForMode(mode?: ProductionMode | string | null) {
+  return usesLocalModelPipeline(mode) ? DEFAULT_LOCAL_TEXT_MODEL : DEFAULT_TEXT_MODEL
+}
+
+export function defaultImageModelForMode(mode?: ProductionMode | string | null) {
+  return usesLocalModelPipeline(mode) ? DEFAULT_LOCAL_IMAGE_MODEL : DEFAULT_IMAGE_MODEL
+}
+
+export function resolveEpisodeTextModelForMode(
+  mode?: ProductionMode | string | null,
+  ep?: { text_model?: string | null; textModel?: string | null } | null,
+) {
+  if (usesLocalModelPipeline(mode)) return resolveLocalEpisodeTextModel(ep)
+  return resolveEpisodeTextModel(ep)
+}
+
+export function resolveEpisodeImageModelForMode(
+  mode?: ProductionMode | string | null,
+  ep?: { image_model?: string | null; imageModel?: string | null } | null,
+) {
+  if (usesLocalModelPipeline(mode)) return resolveLocalEpisodeImageModel(ep)
+  return resolveEpisodeImageModel(ep)
+}
+
 export function resolveEpisodeImageModel(episode?: any) {
   return episode?.image_model || episode?.imageModel || DEFAULT_IMAGE_MODEL
 }
 
 export function imageModelSupportsReferenceImages(model?: string | null): boolean {
   const m = String(model || DEFAULT_IMAGE_MODEL).toLowerCase()
+  if (m.startsWith('agnes-image')) return true
   if (m.startsWith('gpt-image')) return true
   if (m === 'kling-v2-1') return false
   if (m === 'kling-v2-new') return true
@@ -149,6 +708,7 @@ export function imageModelSupportsReferenceImages(model?: string | null): boolea
 
 export function imageModelMaxReferenceImages(model?: string | null): number {
   const m = String(model || DEFAULT_IMAGE_MODEL).toLowerCase()
+  if (m.startsWith('agnes-image')) return 4
   if (m.startsWith('gpt-image')) return 4
   if (m.startsWith('kling-')) return 1
   if (m.startsWith('qwen-image')) return 3
@@ -163,6 +723,9 @@ export function parseProductionMode(drama: any): ProductionMode {
   }
   if (meta?.production_mode === 'narration') return 'narration'
   if (meta?.production_mode === 'motion_comic') return 'motion_comic'
+  if (meta?.production_mode === 'novel_comic') return 'novel_comic'
+  if (meta?.production_mode === 'local_comic') return 'local_comic'
+  if (meta?.production_mode === 'dialogue_portrait') return 'dialogue_portrait'
   return 'drama'
 }
 
@@ -202,6 +765,7 @@ export function extractNarrationSentence(sb: any): string {
 }
 
 export type NarrationImageMode = 'new' | 'inherit' | 'copy'
+
 export type NarrationShotType = 'title' | 'normal'
 
 export interface NarrationImageMeta {
@@ -221,6 +785,14 @@ export interface NarrationImageMeta {
   image_prompt_source?: 'llm_raw' | 'optimized' | 'upload' | 'manual'
   image_prompt_llm_raw?: string
   subtitle_narration?: string
+  /** 配图 VLM 校验（持久化在 reference_images） */
+  image_validate_at?: string
+  image_validate_model?: string
+  image_validate_is_suitable?: boolean
+  image_validate_score?: number
+  image_validate_summary?: string
+  image_validate_issues?: string[]
+  image_validate_suggestions?: string[]
 }
 
 export function isNarrationStoryboard(sb: any) {
@@ -270,6 +842,27 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
       subtitle_narration: typeof raw.subtitle_narration === 'string' && raw.subtitle_narration.trim()
         ? raw.subtitle_narration.trim()
         : undefined,
+      image_validate_at: typeof raw.image_validate_at === 'string' && raw.image_validate_at.trim()
+        ? raw.image_validate_at.trim()
+        : undefined,
+      image_validate_model: typeof raw.image_validate_model === 'string' && raw.image_validate_model.trim()
+        ? raw.image_validate_model.trim()
+        : undefined,
+      image_validate_is_suitable: typeof raw.image_validate_is_suitable === 'boolean'
+        ? raw.image_validate_is_suitable
+        : undefined,
+      image_validate_score: typeof raw.image_validate_score === 'number' && Number.isFinite(raw.image_validate_score)
+        ? raw.image_validate_score
+        : undefined,
+      image_validate_summary: typeof raw.image_validate_summary === 'string' && raw.image_validate_summary.trim()
+        ? raw.image_validate_summary.trim()
+        : undefined,
+      image_validate_issues: Array.isArray(raw.image_validate_issues)
+        ? raw.image_validate_issues.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
+      image_validate_suggestions: Array.isArray(raw.image_validate_suggestions)
+        ? raw.image_validate_suggestions.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
     }
   }
   try {
@@ -307,10 +900,33 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
       subtitle_narration: typeof parsed?.subtitle_narration === 'string' && parsed.subtitle_narration.trim()
         ? parsed.subtitle_narration.trim()
         : undefined,
+      image_validate_at: typeof parsed?.image_validate_at === 'string' && parsed.image_validate_at.trim()
+        ? parsed.image_validate_at.trim()
+        : undefined,
+      image_validate_model: typeof parsed?.image_validate_model === 'string' && parsed.image_validate_model.trim()
+        ? parsed.image_validate_model.trim()
+        : undefined,
+      image_validate_is_suitable: typeof parsed?.image_validate_is_suitable === 'boolean'
+        ? parsed.image_validate_is_suitable
+        : undefined,
+      image_validate_score: typeof parsed?.image_validate_score === 'number' && Number.isFinite(parsed.image_validate_score)
+        ? parsed.image_validate_score
+        : undefined,
+      image_validate_summary: typeof parsed?.image_validate_summary === 'string' && parsed.image_validate_summary.trim()
+        ? parsed.image_validate_summary.trim()
+        : undefined,
+      image_validate_issues: Array.isArray(parsed?.image_validate_issues)
+        ? parsed.image_validate_issues.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
+      image_validate_suggestions: Array.isArray(parsed?.image_validate_suggestions)
+        ? parsed.image_validate_suggestions.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
     }
   } catch {}
   return { narration_image_mode: 'inherit' }
 }
+
+/** 是否已写入配图换镜检测结果（① 检测配图） */
 
 /** 是否已写入配图换镜检测结果（① 检测配图） */
 export function storyboardHasImageDetectMarks(meta: NarrationImageMeta): boolean {
@@ -333,6 +949,8 @@ export function isNarrationTitleShot(sb: any) {
 }
 
 /** 稳定排序：先镜号，同号时片头镜优先，再按 id */
+
+/** 稳定排序：先镜号，同号时片头镜优先，再按 id */
 export function compareStoryboardOrder(a: any, b: any) {
   const na = a.storyboard_number || a.storyboardNumber || 0
   const nb = b.storyboard_number || b.storyboardNumber || 0
@@ -346,6 +964,8 @@ export function compareStoryboardOrder(a: any, b: any) {
 export function sortStoryboards(list: any[]) {
   return [...list].sort(compareStoryboardOrder)
 }
+
+/** 合成/合并分组用：与后端 resolveStoryboardVisualSource 的 key 对齐 */
 
 /** 合成/合并分组用：与后端 resolveStoryboardVisualSource 的 key 对齐 */
 export function getStoryboardComposeVisualKey(sb: any, storyboards: any[], ordered = sortStoryboards(storyboards)) {
@@ -377,6 +997,8 @@ export function buildComposeVisualGroups(storyboards: any[]) {
 }
 
 /** 配图锚点镜：本镜为 new，或向前找到最近的 new 锚点（与 inherit 链对齐） */
+
+/** 配图锚点镜：本镜为 new，或向前找到最近的 new 锚点（与 inherit 链对齐） */
 export function resolveNarrationImageAnchorShot(storyboards: any[], sb: any, ordered = sortStoryboards(storyboards)) {
   const idx = ordered.findIndex(item => item.id === sb.id)
   if (idx < 0) return sb
@@ -388,7 +1010,28 @@ export function resolveNarrationImageAnchorShot(storyboards: any[], sb: any, ord
 }
 
 /** 合成单元（检测配图 paragraph 或分镜同图继承，与后端 buildComposeUnitGroups 对齐） */
+
+/** 合成单元（检测配图 paragraph 或分镜同图继承，与后端 buildComposeUnitGroups 对齐） */
+/** 分镜是否带对话立绘 meta（与后端 resolveComposeUnitKey 的 dp: 分支对齐） */
+export function hasDialoguePortraitStoryboardMeta(sb: any): boolean {
+  const raw = sb?.reference_images ?? sb?.referenceImages
+  if (!raw) return false
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+    if (!parsed || typeof parsed !== 'object') return false
+    const nested = (parsed as any).dialogue_portrait
+    if (nested && typeof nested === 'object') return true
+    return !!(parsed as any).speaker || !!(parsed as any).expression || !!(parsed as any).layout
+  } catch {
+    return false
+  }
+}
+
 export function resolveComposeUnitKey(sb: any, storyboards: any[], ordered = sortStoryboards(storyboards)) {
+  // 对话立绘：每镜独立合成（表情/说话人不同），禁止同背景归组
+  if (hasDialoguePortraitStoryboardMeta(sb)) {
+    return `dp:${sb.id}`
+  }
   const anchor = resolveNarrationImageAnchorShot(storyboards, sb, ordered)
   const meta = parseNarrationImageMeta(anchor)
   if (typeof meta.paragraph_index === 'number') {
@@ -426,6 +1069,8 @@ export function buildComposeUnitGroups(storyboards: any[]) {
 }
 
 /** @deprecated 别名 */
+
+/** @deprecated 别名 */
 export const buildParagraphComposeGroups = buildComposeUnitGroups
 
 export function getParagraphComposeMembers(
@@ -445,6 +1090,8 @@ export function resolveParagraphComposeMembers(
 }
 
 /** 合成烧录字幕（与后端 resolveStoryboardSubtitleNarration 对齐） */
+
+/** 合成烧录字幕（与后端 resolveStoryboardSubtitleNarration 对齐） */
 export function resolveStoryboardSubtitleNarration(sb: any): string {
   const meta = parseNarrationImageMeta(sb)
   const stored = String(meta.subtitle_narration || '').trim()
@@ -455,6 +1102,8 @@ export function resolveStoryboardSubtitleNarration(sb: any): string {
 export function stripSubtitleEmphasis(text: string): string {
   return String(text || '').replace(/\*\*/g, '').trim()
 }
+
+/** 多镜合并配音：句间加逗号，给 TTS 自然停顿提示 */
 
 /** 多镜合并配音：句间加逗号，给 TTS 自然停顿提示 */
 export function joinNarrationTtsParts(parts: string[]): string {
@@ -483,6 +1132,8 @@ export type ComposeUnitSubtitleLine = {
   endSec: number
   durationSec: number
 }
+
+/** 合成单元内各句字幕与时间轴（与 group compose 顺序一致） */
 
 /** 合成单元内各句字幕与时间轴（与 group compose 顺序一致） */
 export function buildComposeUnitSubtitleLines(members: any[]): ComposeUnitSubtitleLine[] {
@@ -562,6 +1213,36 @@ export function getComposeUnitMergedTtsText(sb: any, storyboards: any[]): string
   return joinNarrationTtsParts(parts)
 }
 
+/** 清洗视频提示词中的旁白标记/强调符 */
+export function cleanVideoPromptText(raw: string): string {
+  return String(raw || '')
+    .replace(/\*\*/g, '')
+    .replace(/旁白\s*[:：]\s*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * 由「配图场景描述 + 段落旁白」生成 Wan 提示词。
+ * 配图锚定画面，段落锚定动作/情绪。
+ */
+export function buildVideoPromptFromParagraphAndImage(imageScene: string, paragraph: string): string {
+  const scene = cleanVideoPromptText(imageScene).slice(0, 110)
+  const para = cleanVideoPromptText(paragraph).slice(0, 90)
+  if (scene && para) {
+    return `${scene}。旁白情境：${para}。画面与配图一致，角色轻微自然动作，镜头稳定，动漫风格`
+  }
+  if (para) {
+    return `旁白情境：${para}。画面与配图一致，角色轻微自然动作，镜头稳定，动漫风格`
+  }
+  if (scene) {
+    return `${scene}。画面轻微自然运动，镜头稳定，动漫风格`
+  }
+  return '画面与配图一致，角色轻微自然动作，镜头稳定，动漫风格'
+}
+
+/** 配音列表：片头 + 正文每句一镜（按句配音，合成时再拼段落） */
+
 /** 配音列表：片头 + 正文每句一镜（按句配音，合成时再拼段落） */
 export function listNarrationTtsUnits(storyboards: any[]) {
   const ordered = sortStoryboards(storyboards)
@@ -578,6 +1259,8 @@ export type NarrationTtsUnitViewItem = {
   statusLabel: string
   lineCount: number
 }
+
+/** 配音页卡片视图：一次 buildComposeUnitGroups，避免模板内重复 O(n²) 计算 */
 
 /** 配音页卡片视图：一次 buildComposeUnitGroups，避免模板内重复 O(n²) 计算 */
 export function buildNarrationTtsUnitViews(storyboards: any[]): NarrationTtsUnitViewItem[] {
@@ -653,6 +1336,8 @@ export function narrationTtsUnitReady(storyboards: any[], sb: any) {
 }
 
 /** 镜头合成/导出：每个配图单元取代表镜（不含片头） */
+
+/** 镜头合成/导出：每个配图单元取代表镜（不含片头） */
 export function getComposeUnitLeaders(
   storyboards: any[],
   groups?: { key: string; members: any[]; startIdx: number }[],
@@ -669,9 +1354,13 @@ export function getComposeUnitLeaders(
 }
 
 /** 镜头合成列表：每个合成单元只显示代表镜 */
+
+/** 镜头合成列表：每个合成单元只显示代表镜 */
 export function isParagraphComposeLeader(sb: any, storyboards: any[]) {
   return getComposeUnitLeaders(storyboards).some(leader => leader.id === sb.id)
 }
+
+/** 批量合成 scope：命中合成单元时纳入单元内全部镜头 */
 
 /** 批量合成 scope：命中合成单元时纳入单元内全部镜头 */
 export function collectComposeScopeStoryboardIds(targets: any[], storyboards: any[]): number[] {
@@ -689,12 +1378,16 @@ export function collectComposeScopeStoryboardIds(targets: any[], storyboards: an
 }
 
 /** 与后端 compose-status 的 composable 口径一致（不含片头） */
+
+/** 与后端 compose-status 的 composable 口径一致（不含片头） */
 export function isComposableStoryboard(sb: any, storyboards: any[]) {
   if (sb?.video_url || sb?.videoUrl) return true
   if (String(sb?.dialogue || '').trim()) return true
   if (sb?.composed_image || sb?.composedImage || sb?.first_frame_image || sb?.firstFrameImage) return true
   return !!resolveNarrationEffectiveImage(storyboards, sb).path
 }
+
+/** 镜头合成列表/批量：正文镜，片头在导出页单独处理 */
 
 /** 镜头合成列表/批量：正文镜，片头在导出页单独处理 */
 export function isComposeScopeStoryboard(sb: any, storyboards: any[]) {
@@ -727,6 +1420,8 @@ export function hasComposedStoryboard(
 }
 
 /** 批量合成：每个配图段只触发一次 */
+
+/** 批量合成：每个配图段只触发一次 */
 export function pickVisualGroupComposeLeaders(targets: any[], storyboards: any[]) {
   const ordered = sortStoryboards(storyboards)
   const targetIds = new Set(targets.map(sb => sb.id))
@@ -752,6 +1447,8 @@ export function pickVisualGroupComposeLeaders(targets: any[], storyboards: any[]
 
   return leaders
 }
+
+/** 收集当前镜头之前的全部旁白句，供配图【剧情】全文连贯 */
 
 /** 收集当前镜头之前的全部旁白句，供配图【剧情】全文连贯 */
 export function collectPriorNarrationLines(storyboards: any[], currentSb: any): string[] {
@@ -855,6 +1552,8 @@ export function resolveSceneContentForShot(storyboards: any[], sb: any): string 
   if (sentences.length === 2) return `${first}。${last}`
   return `${first}。${sentences.slice(1, -1).join('，')}。${last}`
 }
+
+/** 配图模块展示用：优先 scene_content / narration_lines，完整旁白不截断 */
 
 /** 配图模块展示用：优先 scene_content / narration_lines，完整旁白不截断 */
 export function getNarrationShotDisplayText(sb: any, storyboards?: any[]): string {
@@ -997,6 +1696,8 @@ export function findPortraitReferenceCharacter(
 }
 
 /** 跨角色画风锚定：取同项目已有定妆（优先青年形态） */
+
+/** 跨角色画风锚定：取同项目已有定妆（优先青年形态） */
 export function findDramaStyleAnchorCharacter(
   chars: any[],
   char: { id?: number },
@@ -1024,6 +1725,8 @@ export function formatCharacterDisplayName(char: { name?: string | null; variant
   const label = normalizeVariantLabel(char?.variantLabel ?? char?.variant_label)
   return label ? `${name} · ${label}` : name
 }
+
+/** 定妆卡片副标题：解说主人公固定身份不展示；职业/情节误标也不展示 */
 
 /** 定妆卡片副标题：解说主人公固定身份不展示；职业/情节误标也不展示 */
 export function formatCharacterRoleSubtitle(char: { name?: string | null; role?: string | null }) {
@@ -1088,12 +1791,33 @@ export function collectNarrationCharacterReferenceImages(
   chars: any[],
   characterIds: number[],
   max = 4,
+  prompt?: string | null,
 ) {
   const refs: string[] = []
+  const seen = new Set<string>()
+  const pushUrl = (url?: string | null) => {
+    const u = String(url || '').trim()
+    if (!u || seen.has(u) || refs.length >= max) return
+    seen.add(u)
+    refs.push(u)
+  }
+
+  // 按文案对照定妆顺序优先（含「我」）
+  const labels = [...String(prompt || '').matchAll(/对照定妆「([^」]+)」/g)]
+    .map(m => m[1].split(/[·•]/)[0]?.trim())
+    .filter(Boolean)
+  for (const name of labels) {
+    const sameName = chars.filter(ch => String(ch.name || '').trim() === name)
+    const withImg = sameName.find(ch => ch.image_url || ch.imageUrl)
+      || (name === '我'
+        ? chars.find(ch => /男主|女主|主角|主人公/.test(String(ch.role || '')) && (ch.image_url || ch.imageUrl))
+        : null)
+    pushUrl(withImg?.image_url || withImg?.imageUrl)
+  }
+
   for (const id of characterIds) {
     const char = chars.find(ch => ch.id === id)
-    const url = char?.image_url || char?.imageUrl
-    if (url && !refs.includes(url) && refs.length < max) refs.push(url)
+    pushUrl(char?.image_url || char?.imageUrl)
   }
   return refs
 }
@@ -1115,7 +1839,7 @@ export function buildNarrationImageGeneratePayload(
   const minimal = isNarrationMinimalStyle(style)
   const maxRefs = imageModelMaxReferenceImages(model)
   const referenceImages = !minimal && imageModelSupportsReferenceImages(model)
-    ? collectNarrationCharacterReferenceImages(chars, resolvedIds, maxRefs)
+    ? collectNarrationCharacterReferenceImages(chars, resolvedIds, maxRefs, prompt)
     : []
   return {
     ...extra,
@@ -1130,9 +1854,13 @@ export function narrationShotsNeedingImage(storyboards: any[]) {
 }
 
 /** 需配图但尚未生成/上传自有配图的镜头（已排序） */
+
+/** 需配图但尚未生成/上传自有配图的镜头（已排序） */
 export function narrationShotsPendingImage(storyboards: any[]) {
   return narrationShotsNeedingImage(storyboards).filter(sb => !getNarrationShotOwnImage(sb))
 }
+
+/** 配图文案分批：每批段落数（1～20，默认 6） */
 
 /** 配图文案分批：每批段落数（1～20，默认 6） */
 export function normalizeParagraphPromptBatchSize(size?: number | null) {
@@ -1173,6 +1901,8 @@ export function buildNarrationParagraphBatchOptions(
 }
 
 /** 指定段落批次内的锚点镜（batchIndex 从 1 起） */
+
+/** 指定段落批次内的锚点镜（batchIndex 从 1 起） */
 export function narrationShotsInParagraphBatch(
   storyboards: any[],
   batchIndex: number,
@@ -1186,11 +1916,15 @@ export function narrationShotsInParagraphBatch(
 }
 
 /** 仍缺配图文案的锚点镜 */
+
+/** 仍缺配图文案的锚点镜 */
 export function narrationShotsMissingPrompt(storyboards: any[]) {
   return narrationShotsNeedingImage(storyboards).filter(
     sb => !String(sb?.image_prompt || sb?.imagePrompt || '').trim(),
   )
 }
+
+/** 指定段批内、仍缺配图文案的锚点镜 */
 
 /** 指定段批内、仍缺配图文案的锚点镜 */
 export function narrationShotsMissingPromptInBatch(
@@ -1208,6 +1942,8 @@ export function getNarrationShotDisplayNo(sb: any) {
   if (n == null || Number.isNaN(Number(n))) return '??'
   return String(n).padStart(2, '0')
 }
+
+/** 格式化为 #01、#05、#21 */
 
 /** 格式化为 #01、#05、#21 */
 export function formatNarrationShotDisplayList(
@@ -1323,9 +2059,29 @@ export interface WorkflowState {
   openingVideoUrl?: boolean
   titleVideoUrl?: boolean
   bgmAppliedCount?: number
+  /** 对话立绘：场景背景就绪 */
+  scenesCount?: number
+  sceneImgCount?: number
+  scenesReady?: boolean
+  /** 对话立绘：定妆+表情包就绪角色数 */
+  expressionPackReadyCount?: number
 }
 
 export function workflowProgress(mode: ProductionMode, s: WorkflowState) {
+  if (mode === 'dialogue_portrait') {
+    let p = 0
+    if (s.rawContent) p++
+    if (s.charsCount > 0) p++
+    if (s.sbsCount) p++
+    if (s.narratorReady) p++
+    if (s.sbsCount && (s.narrationTtsReady ?? (!s.ttsEligibleCount || s.ttsGeneratedCount === s.ttsEligibleCount))) p++
+    if (s.scenesReady ?? ((s.scenesCount ?? 0) > 0 && s.sceneImgCount === s.scenesCount)) p++
+    if (s.sbsCount && s.composedCount === s.sbsCount) p++
+    if (s.openingVideoUrl) p++
+    if (s.titleVideoUrl) p++
+    if (s.mergeUrl) p++
+    return Math.min(p, workflowStepTotal(mode))
+  }
   if (isNarrationLikeMode(mode)) {
     let p = 0
     if (s.rawContent) p++
@@ -1356,17 +2112,54 @@ export function workflowProgress(mode: ProductionMode, s: WorkflowState) {
 }
 
 export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
-  if (mode === 'narration' || mode === 'motion_comic') {
-    const scriptLabel = mode === 'motion_comic' ? '漫画解说' : '解说'
+  if (mode === 'dialogue_portrait') {
+    const scenesReady = s.scenesReady ?? ((s.scenesCount ?? 0) > 0 && s.sceneImgCount === s.scenesCount)
+    const charsDone = s.charsCount > 0 && (s.expressionPackReadyCount ?? 0) >= Math.min(s.charsCount, DIALOGUE_PORTRAIT_MAX_CHARS)
+    return [
+      {
+        id: 'script',
+        label: '对话立绘',
+        items: [
+          { key: 'script:chat', label: '剧本生成', desc: 'AI 写对话稿或直接输入', done: s.rawContent },
+          { key: 'script:raw', label: '文案输入', desc: '粘贴对话脚本', done: s.rawContent },
+          { key: 'script:storyboard', label: '对话分镜', desc: '按句拆镜+说话人', done: s.sbsCount > 0 },
+        ],
+      },
+      {
+        id: 'production',
+        label: '制作',
+        items: [
+          { key: 'prod:voice', label: '角色音色', desc: '多角色配音', done: s.narratorReady },
+          { key: 'prod:chars', label: '定妆/表情包', desc: '基图+idle/talk/react', done: charsDone },
+          { key: 'prod:scenes', label: '场景背景', desc: '无人固定背景', done: scenesReady },
+          { key: 'prod:dubbing', label: '生成配音', desc: '按句 TTS', done: s.sbsCount > 0 && (s.narrationTtsReady ?? (!s.ttsEligibleCount || s.ttsGeneratedCount === s.ttsEligibleCount)) },
+          { key: 'prod:compose', label: '镜头合成', desc: '固定背景+立绘叠层', done: s.sbsCount > 0 && s.composedCount === s.sbsCount },
+        ],
+      },
+      {
+        id: 'export',
+        label: '导出',
+        items: [
+          { key: 'export:opening', label: '开幕视频', desc: '翻页片头', done: !!s.openingVideoUrl },
+          { key: 'export:title', label: '片头视频', desc: '剧中红字', done: !!s.titleVideoUrl },
+          { key: 'export:merge', label: '拼接导出', desc: '完整 MP4', done: s.mergeUrl },
+        ],
+      },
+    ]
+  }
+  if (mode === 'narration' || mode === 'motion_comic' || mode === 'novel_comic') {
+    const scriptLabel = mode === 'novel_comic'
+      ? '小说漫画讲解'
+      : (mode === 'motion_comic' ? '漫画解说' : '解说')
     const storyboardLabel = '旁白分镜'
-    const composeDesc = mode === 'motion_comic' ? '漫画图+旁白+上下运镜' : '配图+旁白'
+    const composeDesc = usesMotionComicVisuals(mode) ? '漫画图+旁白+上下运镜' : '配图+旁白'
     return [
       {
         id: 'script',
         label: scriptLabel,
         items: [
-          { key: 'script:chat', label: '剧本生成', desc: mode === 'motion_comic' ? 'AI 写短剧稿' : 'AI 写解说稿或直接输入', done: s.rawContent },
-          { key: 'script:raw', label: '文案输入', desc: '粘贴文稿', done: s.rawContent },
+          { key: 'script:chat', label: mode === 'novel_comic' ? '本章朗读稿' : '剧本生成', desc: mode === 'novel_comic' ? '改本章旁白朗读稿' : (mode === 'motion_comic' ? 'AI 写短剧稿' : 'AI 写解说稿或直接输入'), done: s.rawContent },
+          { key: 'script:raw', label: '文案输入', desc: mode === 'novel_comic' ? '粘贴/编辑本章朗读稿' : '粘贴文稿', done: s.rawContent },
           { key: 'script:storyboard', label: storyboardLabel, desc: '拆成镜头', done: s.sbsCount > 0 },
         ],
       },
@@ -1376,9 +2169,10 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
         items: [
           { key: 'prod:voice', label: '旁白音色', desc: '选择配音', done: s.narratorReady },
           { key: 'prod:chars', label: '定妆参考', desc: '角色参考图', done: s.charsCount > 0 },
-          { key: 'prod:shots', label: '生成配图', desc: mode === 'motion_comic' ? '漫画插画+换镜' : '换场景配图', done: s.sbsCount > 0 && (s.narrationImagesReady ?? s.shotImgCount === s.sbsCount) },
+          { key: 'prod:shots', label: '生成配图', desc: usesMotionComicVisuals(mode) ? '漫画插画+换镜' : '换场景配图', done: s.sbsCount > 0 && (s.narrationImagesReady ?? s.shotImgCount === s.sbsCount) },
           { key: 'prod:dubbing', label: '生成配音', desc: 'TTS 旁白', done: s.sbsCount > 0 && (s.narrationTtsReady ?? (!s.ttsEligibleCount || s.ttsGeneratedCount === s.ttsEligibleCount)) },
           { key: 'prod:bgm', label: 'BGM 配乐', desc: 'Suno / PixVerse', done: s.sbsCount > 0 && (s.bgmAppliedCount ?? 0) > 0 },
+          { key: 'prod:videos', label: '本地视频', desc: 'Wan / 动图漫（可选）', done: s.sbsCount > 0 && (s.shotVidCount ?? 0) > 0 },
           { key: 'prod:compose', label: '镜头合成', desc: composeDesc, done: s.sbsCount > 0 && s.composedCount === s.sbsCount },
         ],
       },
@@ -1394,6 +2188,30 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
     ]
   }
   return null
+}
+/** 本地漫剧：根据侧栏导航推断应加载的模型阶段（与漫剧短剧完整流程步骤对齐） */
+export type LocalModelStage = 'idle' | 'llm' | 'image' | 'video' | 'audio'
+
+export function resolveLocalModelStageFromNav(navKey: string): LocalModelStage {
+  if (navKey === 'script:voice') return 'audio'
+  if (navKey.startsWith('script:')) return 'llm'
+  if (navKey.startsWith('prod:')) {
+    const tab = navKey.replace('prod:', '')
+    if (['chars', 'scenes', 'shots'].includes(tab)) return 'image'
+    // 视频页默认轻量动态（FFmpeg），不预热 Wan；选 Wan 时再 ensure video
+    if (tab === 'videos') return 'idle'
+    if (tab === 'voice' || tab === 'dubbing') return 'audio'
+    return 'idle'
+  }
+  return 'idle'
+}
+
+export function localModelStageLabel(stage: LocalModelStage | string): string {
+  if (stage === 'llm') return 'LLM'
+  if (stage === 'image') return '生图'
+  if (stage === 'video') return '视频'
+  if (stage === 'audio') return '配音'
+  return '待机'
 }
 
 export function narrationScriptChatStep() {

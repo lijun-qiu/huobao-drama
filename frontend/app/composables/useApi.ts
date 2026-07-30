@@ -9,8 +9,22 @@ async function req<T = any>(method: string, path: string, body?: any, options?: 
 
   try {
     const resp = await fetch(`${BASE}${path}`, opts)
-    const json = await resp.json()
     const ms = Math.round(performance.now() - start)
+
+    let json: any
+    const raw = await resp.text()
+    if (raw.trim()) {
+      try {
+        json = JSON.parse(raw)
+      } catch {
+        console.log(`%c[API] %c${method} ${path} %c${resp.status} %c${ms}ms`, 'color:#888', 'color:#ef5350', 'color:#ef5350;font-weight:bold', 'color:#888', raw.slice(0, 200))
+        throw new Error(raw.slice(0, 200) || `${resp.status}`)
+      }
+    } else if (!resp.ok) {
+      throw new Error(`${resp.status}`)
+    } else {
+      throw new Error('服务器返回空响应（可能后端重启或 ComfyUI 无响应）')
+    }
 
     if (!resp.ok || (json.code && json.code >= 400)) {
       console.log(`%c[API] %c${method} ${path} %c${resp.status} %c${ms}ms`, 'color:#888', 'color:#ef5350', 'color:#ef5350;font-weight:bold', 'color:#888', json.message || '')
@@ -41,11 +55,18 @@ export const api = {
 }
 
 async function readJsonErrorMessage(resp: Response) {
+  let text = ''
   try {
-    const json = await resp.json()
-    return String(json.message || resp.status)
+    text = await resp.text()
   } catch {
-    return String(await resp.text() || resp.status)
+    return String(resp.status)
+  }
+  if (!text.trim()) return String(resp.status)
+  try {
+    const json = JSON.parse(text) as { message?: string; error?: string }
+    return String(json.message || json.error || text)
+  } catch {
+    return text.slice(0, 500)
   }
 }
 
@@ -92,6 +113,23 @@ export const dramaAPI = {
   create: (data: any) => api.post('/dramas', data),
   update: (id: number, data: any) => api.put(`/dramas/${id}`, data),
   del: (id: number) => api.del(`/dramas/${id}`),
+  novelComic: {
+    get: (id: number) => api.get(`/dramas/${id}/novel-comic`),
+    saveSource: (id: number, data: { source_novel: string }) =>
+      api.put(`/dramas/${id}/novel-comic/source`, data),
+    generateOutline: (id: number, data?: {
+      target_chapters?: number
+      model?: string
+      thinking_enabled?: boolean
+    }) => api.post(`/dramas/${id}/novel-comic/outline`, data || {}),
+    saveOutline: (id: number, data: { chapter_outline: any[] }) =>
+      api.put(`/dramas/${id}/novel-comic/outline`, data),
+    applyOutline: (id: number, data?: {
+      model?: string
+      thinking_enabled?: boolean
+      chapter_numbers?: number[]
+    }) => api.post(`/dramas/${id}/novel-comic/apply-outline`, data || {}),
+  },
 }
 
 export const episodeAPI = {
@@ -204,6 +242,7 @@ export const episodeAPI = {
       signal?: AbortSignal
       onDelta?: (content: string) => void
       onThinking?: (content: string) => void
+      onStatus?: (message: string) => void
     },
   ) => {
     const resp = await fetch(`${BASE}/episodes/${id}/narration-script-chat`, {
@@ -221,6 +260,17 @@ export const episodeAPI = {
       model?: string
       text_thinking?: boolean
       generated_at?: string
+      char_count?: number
+      min_chars?: number
+      max_chars?: number
+      target_chars?: number
+      user_length_specified?: boolean
+      below_min?: boolean
+      auto_expanded?: boolean
+      expand_rounds?: number
+      narration_ratio?: number | null
+      dialogue_ratio?: number | null
+      dialogue_ratio_repaired?: boolean
     } | null = null
     let streamError: Error | null = null
 
@@ -233,6 +283,10 @@ export const episodeAPI = {
         options?.onThinking?.(payload.content)
         return
       }
+      if (payload.type === 'status' && typeof payload.message === 'string') {
+        options?.onStatus?.(payload.message)
+        return
+      }
       if (payload.type === 'error') {
         streamError = new Error(String(payload.message || '生成失败'))
         return
@@ -243,6 +297,17 @@ export const episodeAPI = {
           model: payload.model ? String(payload.model) : undefined,
           text_thinking: payload.text_thinking as boolean | undefined,
           generated_at: payload.generated_at != null ? String(payload.generated_at) : undefined,
+          char_count: typeof payload.char_count === 'number' ? payload.char_count : undefined,
+          min_chars: typeof payload.min_chars === 'number' ? payload.min_chars : undefined,
+          max_chars: typeof payload.max_chars === 'number' ? payload.max_chars : undefined,
+          target_chars: typeof payload.target_chars === 'number' ? payload.target_chars : undefined,
+          user_length_specified: payload.user_length_specified as boolean | undefined,
+          below_min: payload.below_min as boolean | undefined,
+          auto_expanded: payload.auto_expanded as boolean | undefined,
+          expand_rounds: typeof payload.expand_rounds === 'number' ? payload.expand_rounds : undefined,
+          narration_ratio: typeof payload.narration_ratio === 'number' ? payload.narration_ratio : null,
+          dialogue_ratio: typeof payload.dialogue_ratio === 'number' ? payload.dialogue_ratio : null,
+          dialogue_ratio_repaired: payload.dialogue_ratio_repaired === true,
         }
       }
     }, options?.signal)
@@ -402,7 +467,7 @@ export const episodeAPI = {
         options?.onStatus?.(payload.content)
         return
       }
-      if (payload.type === 'prompt_done') {
+      if (payload.type === 'prompt_done' || payload.type === 'prompts_saved') {
         options?.onProgress?.(payload)
         return
       }
@@ -450,6 +515,10 @@ export const episodeAPI = {
     api.post(`/episodes/${id}/narration-storyboard-breakdown`, { script: options?.script }),
   extractNarrationCharacters: (id: number, options?: { script?: string; style?: string; text_model?: string; text_thinking?: boolean }) =>
     api.post(`/episodes/${id}/extract-narration-characters`, options || {}),
+  extract: (id: number, options?: { script?: string; text_model?: string; text_thinking?: boolean }) =>
+    api.post(`/episodes/${id}/extract`, options || {}),
+  storyboardBreakdown: (id: number, options?: { script?: string; text_model?: string; video_model_label?: string }) =>
+    api.post(`/episodes/${id}/storyboard-breakdown`, options || {}),
   assignLocalVoices: (id: number, options?: { overwrite?: boolean; voicebox_model_size?: '0.6B' | '1.7B' }) =>
     api.post(`/episodes/${id}/assign-local-voices`, options || {}),
   linkNarrationCharacters: (id: number) => api.post(`/episodes/${id}/link-narration-characters`),
@@ -480,7 +549,7 @@ export const episodeAPI = {
       audio_path: audioPath,
       ...(subtitleText !== undefined ? { subtitle_text: subtitleText } : {}),
     }),
-  generateOpeningAudio: (id: number, options?: { subtitle_text?: string; local_tts_engine?: 'edge' | 'voicebox'; local_voice?: string; tts_speed?: number; voicebox_instruct?: string; voicebox_model_size?: '0.6B' | '1.7B' }) =>
+  generateOpeningAudio: (id: number, options?: { subtitle_text?: string; local_tts_engine?: 'edge' | 'voicebox' | 'gptsovits' | 'indextts'; local_voice?: string; tts_speed?: number; voicebox_instruct?: string; voicebox_model_size?: '0.6B' | '1.7B' }) =>
     api.post(`/episodes/${id}/generate-opening-audio`, options || {}),
   splitNarrationAudio: (id: number, audioPaths: string | string[]) =>
     api.post(`/episodes/${id}/split-narration-audio`, {
@@ -492,7 +561,18 @@ export const episodeAPI = {
     }),
   cropNarrationImages: (id: number) => api.post(`/episodes/${id}/crop-narration-images`, {}),
   restoreNarrationImages: (id: number) => api.post(`/episodes/${id}/restore-narration-images`, {}),
-  clearNarrationImages: (id: number) => api.post(`/episodes/${id}/clear-narration-images`, {}),
+  clearNarrationImages: (id: number, opts?: { characterIds?: number[]; storyboardIds?: number[] }) =>
+    api.post(`/episodes/${id}/clear-narration-images`, {
+      ...(opts?.characterIds?.length ? { character_ids: opts.characterIds } : {}),
+      ...(opts?.storyboardIds?.length ? { storyboard_ids: opts.storyboardIds } : {}),
+    }),
+  translateFluxPrompts: (id: number, storyboardIds?: number[]) =>
+    api.post(`/episodes/${id}/translate-flux-prompts`, storyboardIds?.length ? { storyboard_ids: storyboardIds } : {}),
+  startFluxTranslateSession: (id: number) => api.post(`/episodes/${id}/flux-translate-session/start`, {}),
+  endFluxTranslateSession: (id: number) => api.post(`/episodes/${id}/flux-translate-session/end`, {}),
+  getFluxTranslateProgress: (id: number) => api.get(`/episodes/${id}/flux-translate-progress`),
+  clearFluxPrompts: (id: number) => api.post(`/episodes/${id}/clear-flux-prompts`, {}),
+  repairFluxPrompts: (id: number) => api.post(`/episodes/${id}/repair-flux-prompts`, {}),
   clearNarrationImageDetect: (id: number) => api.post(`/episodes/${id}/clear-narration-image-detect`, {}),
   clearNarrationImagePrompts: (id: number) => api.post(`/episodes/${id}/clear-narration-image-prompts`, {}),
   clearNarrationTts: (id: number) => api.post(`/episodes/${id}/clear-narration-tts`, {}),
@@ -503,13 +583,15 @@ export const episodeAPI = {
 export const storyboardAPI = {
   create: (data: any) => api.post('/storyboards', data),
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
-  generateTTS: (id: number, options?: { force?: boolean; async?: boolean; local_tts?: boolean; local_tts_engine?: 'edge' | 'voicebox'; local_voice?: string; use_speaker_voice?: boolean; tts_speed?: number; voicebox_instruct?: string; voicebox_model_size?: '0.6B' | '1.7B'; unit_tts?: boolean; tts_text?: string }) =>
+  generateTTS: (id: number, options?: { force?: boolean; async?: boolean; local_tts?: boolean; local_tts_engine?: 'edge' | 'voicebox' | 'gptsovits' | 'indextts'; local_voice?: string; use_speaker_voice?: boolean; tts_speed?: number; voicebox_instruct?: string; voicebox_model_size?: '0.6B' | '1.7B'; unit_tts?: boolean; tts_text?: string }) =>
     api.post(`/storyboards/${id}/generate-tts`, options || {}),
   uploadTTS: (id: number, audioPath: string) =>
     api.post(`/storyboards/${id}/upload-tts`, { audio_path: audioPath }),
-  scanNarrationImage: (id: number, options?: { text_model?: string; text_thinking?: boolean }) =>
+  scanNarrationImage: (id: number, options?: { text_model?: string; vision_model?: string; text_thinking?: boolean }) =>
     api.post(`/storyboards/${id}/scan-narration-image`, options || {}),
   resolveCharacters: (id: number) => api.post(`/storyboards/${id}/resolve-characters`, {}),
+  translateFluxPrompt: (id: number, options?: { hold_ollama?: boolean }) =>
+    api.post(`/storyboards/${id}/translate-flux-prompt`, options?.hold_ollama ? { hold_ollama: true } : {}),
   del: (id: number) => api.del(`/storyboards/${id}`),
 }
 
@@ -570,6 +652,8 @@ export const characterAPI = {
       image_style: options?.imageStyle,
     }),
   recognizePortrait: (id: number, episodeId: number) => api.post(`/characters/${id}/recognize-portrait`, { episode_id: episodeId }),
+  validatePortraitStyle: (id: number, options?: { vision_model?: string }) =>
+    api.post(`/characters/${id}/validate-portrait-style`, options || {}),
   generateAppearance: (id: number, data: { episode_id?: number; script?: string; content?: string; text_model?: string; text_thinking?: boolean; image_style?: string }) =>
     api.post(`/characters/${id}/generate-appearance`, data),
   batchImages: (ids: number[], episodeId: number, options?: { useReference?: boolean; imageStyle?: string }) =>
@@ -579,10 +663,31 @@ export const characterAPI = {
       use_reference: options?.useReference !== false,
       image_style: options?.imageStyle,
     }),
+  /**
+   * 对话立绘表情包：基于定妆基图生成 idle/talk/react，写入 referenceImages.dialogue_portrait。
+   * Expected response: { idle, talk, react } paths and/or updated character.reference_images
+   */
+  generateDialogueExpressions: (id: number, episodeId: number, options?: { imageStyle?: string; force?: boolean }) =>
+    api.post(`/characters/${id}/dialogue-expressions`, {
+      episode_id: episodeId,
+      ...(options?.imageStyle ? { image_style: options.imageStyle } : {}),
+      ...(options?.force ? { force: true } : {}),
+    }),
+  batchDialogueExpressions: (ids: number[], episodeId: number, options?: { imageStyle?: string; force?: boolean }) =>
+    api.post('/characters/batch-dialogue-expressions', {
+      character_ids: ids,
+      episode_id: episodeId,
+      ...(options?.imageStyle ? { image_style: options.imageStyle } : {}),
+      ...(options?.force ? { force: true } : {}),
+    }),
 }
 
 export const sceneAPI = {
-  generateImage: (id: number, episodeId: number) => api.post(`/scenes/${id}/generate-image`, { episode_id: episodeId }),
+  generateImage: (id: number, episodeId: number, options?: { imageStyle?: string }) =>
+    api.post(`/scenes/${id}/generate-image`, {
+      episode_id: episodeId,
+      ...(options?.imageStyle ? { image_style: options.imageStyle } : {}),
+    }),
 }
 
 export const imageAPI = {
@@ -643,6 +748,27 @@ export const aiConfigAPI = {
   del: (id: number) => api.del(`/ai-configs/${id}`),
   test: (d: any) => api.post('/ai-configs/test', d),
   huobaoPreset: (apiKey: string) => api.post('/ai-configs/huobao-preset', { api_key: apiKey }),
+  localPreset: () => api.post('/ai-configs/local-preset', {}),
+}
+
+export const localModelAPI = {
+  status: () => api.get('/local-models/status'),
+  setStage: (stage: string, opts?: { ollamaModel?: string; ttsEngine?: string; comfyVideoModel?: string; lightMotion?: boolean }) =>
+    api.post('/local-models/stage', {
+      stage,
+      ollama_model: opts?.ollamaModel,
+      tts_engine: opts?.ttsEngine,
+      comfy_video_model: opts?.comfyVideoModel,
+      light_motion: opts?.lightMotion || undefined,
+    }),
+  ensure: (stage: string, opts?: { ollamaModel?: string; ttsEngine?: string; comfyVideoModel?: string; lightMotion?: boolean }) =>
+    api.post('/local-models/ensure', {
+      stage,
+      ollama_model: opts?.ollamaModel,
+      tts_engine: opts?.ttsEngine,
+      comfy_video_model: opts?.comfyVideoModel,
+      light_motion: opts?.lightMotion || undefined,
+    }),
 }
 
 export const agentConfigAPI = {
@@ -671,6 +797,20 @@ export const voicesAPI = {
   },
   sync: () => api.post('/ai-voices/sync', {}),
   voiceboxHealth: () => api.get('/ai-voices/voicebox/health'),
+  gptsovitsHealth: () => api.get('/ai-voices/gptsovits/health'),
+  indexttsHealth: () => api.get('/ai-voices/indextts/health'),
+  gptsovitsConfig: () => api.get('/ai-voices/gptsovits/config'),
+  gptsovitsCatalog: () => api.get('/ai-voices/gptsovits/voices'),
+  saveGptsovitsVoice: (data: Record<string, unknown>) => api.post('/ai-voices/gptsovits/voices', data),
+  deleteGptsovitsVoice: (id: string) => api.del(`/ai-voices/gptsovits/voices/${encodeURIComponent(id.replace(/^gsv:/i, ''))}`),
+  uploadGptsovitsRef: async (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const resp = await fetch(`${BASE}/ai-voices/gptsovits/upload-ref`, { method: 'POST', body: form })
+    const json = await resp.json()
+    if (!resp.ok) throw new Error(json?.message || json?.error || '上传失败')
+    return json.data ?? json
+  },
   localCast: (options?: { model_size?: '0.6B' | '1.7B' }) => {
     const params = new URLSearchParams()
     if (options?.model_size) params.set('model_size', options.model_size)
@@ -678,7 +818,7 @@ export const voicesAPI = {
     return api.get(`/ai-voices/local-cast${query ? `?${query}` : ''}`)
   },
   previewLocal: (options?: {
-    local_tts_engine?: 'edge' | 'voicebox'
+    local_tts_engine?: 'edge' | 'voicebox' | 'gptsovits' | 'indextts'
     local_voice?: string
     tts_speed?: number
     voicebox_instruct?: string
@@ -688,7 +828,7 @@ export const voicesAPI = {
   previewTts: (options?: {
     text?: string
     local_tts?: boolean
-    local_tts_engine?: 'edge' | 'voicebox'
+    local_tts_engine?: 'edge' | 'voicebox' | 'gptsovits' | 'indextts'
     local_voice?: string
     voice_id?: string
     config_id?: number | null
@@ -711,6 +851,7 @@ export const musicAPI = {
     episode_id?: number
     storyboard_id?: number
     model?: string
+    text_model?: string
     description?: string
     content?: string
   }) => api.post('/music/suggest-description', data),

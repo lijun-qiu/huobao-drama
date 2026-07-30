@@ -40,3 +40,19 @@ export async function saveRemoteMediaAsBgmAudio(mediaUrl: string): Promise<strin
 
   return `static/audio/${filename}`
 }
+
+/** 保存 data:audio/...;base64,... 或纯 base64 为本地 BGM mp3 */
+export function saveBase64MediaAsBgmAudio(dataUrlOrBase64: string, ext = 'mp3'): string {
+  const raw = String(dataUrlOrBase64 || '').trim()
+  if (!raw) throw new Error('空音频数据')
+  const comma = raw.indexOf(',')
+  const b64 = raw.startsWith('data:') && comma >= 0 ? raw.slice(comma + 1) : raw
+  const buf = Buffer.from(b64, 'base64')
+  if (buf.length < 256) throw new Error('音频数据过短，可能未生成成功')
+  const filename = `${uuid()}.${ext.replace(/^\./, '')}`
+  const dir = path.join(STORAGE_ROOT, 'audio')
+  fs.mkdirSync(dir, { recursive: true })
+  const outputAbs = path.join(dir, filename)
+  fs.writeFileSync(outputAbs, buf)
+  return `static/audio/${filename}`
+}

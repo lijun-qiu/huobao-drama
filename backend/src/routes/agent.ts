@@ -2,9 +2,12 @@
  * Agent 聊天路由 — 非流式版本
  */
 import { Hono } from 'hono'
-import { createAgent, validAgentTypes } from '../agents/index.js'
+import { createAgent, getAgentModelName, validAgentTypes } from '../agents/index.js'
+import { getTextConfig } from '../services/ai.js'
+import { ensureLocalModelStage, beginOllamaUse, endOllamaUse } from '../services/local-model-manager.js'
+import { db, schema } from '../db/index.js'
+import { eq } from 'drizzle-orm'
 import { success, badRequest } from '../utils/response.js'
-import { llmGeneratedAt } from '../utils/llm-meta.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -31,7 +34,7 @@ app.post('/:type/chat', async (c) => {
   }
 
   const body = await c.req.json()
-  const { message, drama_id, episode_id } = body
+  const { message, drama_id, episode_id, text_model } = body
 
   logTaskStart('Agent', agentType, {
     dramaId: drama_id,
@@ -45,13 +48,31 @@ app.post('/:type/chat', async (c) => {
     return badRequest(c, 'drama_id and episode_id are required')
   }
 
-  const agent = createAgent(agentType, episode_id, drama_id)
+  if (agentType === 'extractor' || agentType === 'script_rewriter' || agentType === 'storyboard_breaker') {
+    const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(episode_id))).all()
+    const script = String(ep?.scriptContent || ep?.content || '').trim()
+    if (!script) {
+      return badRequest(c, '当前集尚无剧本内容，请先在「原始内容」或「AI 改写」步骤填写并保存剧本')
+    }
+  }
+
+  const textConfig = getTextConfig()
+  const requestedModel = String(text_model || '').trim()
+  const ollamaModel = requestedModel || getAgentModelName(agentType)
+
+  const agent = createAgent(agentType, episode_id, drama_id, ollamaModel)
   if (!agent) {
     logTaskError('Agent', agentType, { reason: 'agent not found' })
     return badRequest(c, 'Agent not found')
   }
 
+  if (textConfig.provider.toLowerCase() === 'ollama') {
+    await ensureLocalModelStage('llm', { ollamaModel })
+  }
+
   const startTime = performance.now()
+  const ollamaInUse = textConfig.provider.toLowerCase() === 'ollama'
+  if (ollamaInUse) beginOllamaUse()
 
   try {
     const result = await agent.generate(
@@ -86,13 +107,14 @@ app.post('/:type/chat', async (c) => {
       text: result.text || '',
       toolCalls: normalizedToolCalls,
       toolResults: normalizedToolResults,
-      generated_at: llmGeneratedAt(),
     })
   } catch (err: any) {
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(1)
     logTaskError('Agent', agentType, { elapsedSeconds: elapsed, error: err.message })
     console.error(err.stack || err)
     return badRequest(c, err.message || 'Agent execution failed')
+  } finally {
+    if (ollamaInUse) endOllamaUse()
   }
 })
 

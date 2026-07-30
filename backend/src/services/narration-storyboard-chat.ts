@@ -2,7 +2,7 @@
  * 旁白分镜 — 多轮聊天（讨论拆镜策略、流式展示过程、触发整稿拆镜）
  */
 import { eq } from 'drizzle-orm'
-import { parseProductionMode, isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { parseProductionMode, usesMotionComicStoryboardRules, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 import { MOTION_COMIC_STORYBOARD_CHAT_SYSTEM } from '../constants/motion-comic.js'
 import { db, schema } from '../db/index.js'
 import { resolveEpisodeTextThinking, resolveNarrationStoryboardTextModel } from '../constants/text-models.js'
@@ -38,7 +38,7 @@ function resolveStoryboardChatSystem(episodeId: number): string {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return STORYBOARD_CHAT_SYSTEM
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
-  if (isMotionComicMode(parseProductionMode(drama?.metadata))) {
+  if (usesMotionComicStoryboardRules(parseProductionMode(drama?.metadata))) {
     return MOTION_COMIC_STORYBOARD_CHAT_SYSTEM
   }
   return STORYBOARD_CHAT_SYSTEM
@@ -115,7 +115,7 @@ export async function streamNarrationStoryboardChat(
 
   if (params.action === 'run') {
     const script = String(params.script || '').trim()
-    const motionComic = isMotionComicMode(resolveEpisodeProductionMode(params.episodeId))
+    const motionComic = usesMotionComicStoryboardRules(resolveEpisodeProductionMode(params.episodeId))
     if (!script) throw new Error(motionComic ? '请先填写漫剧旁白稿' : '请先填写解说文案')
 
     const reportStatus = createWorkflowChatStatusReporter(send)

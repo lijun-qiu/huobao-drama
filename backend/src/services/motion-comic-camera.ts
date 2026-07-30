@@ -8,8 +8,8 @@ import { appendMotionComicVfxFilter } from './motion-comic-vfx.js'
 
 const COMPOSE_FPS = 25
 
-/** 全局运镜幅度倍率（推/拉/横移/上下共用） */
-const MOTION_COMIC_AMPLITUDE = 1.45
+/** 全局运镜幅度倍率（推/拉/横移/上下共用）——过大易把全身图裁成半身 */
+const MOTION_COMIC_AMPLITUDE = 1.12
 
 function amp(value: number): number {
   return value * MOTION_COMIC_AMPLITUDE
@@ -74,7 +74,7 @@ export function buildMotionComicPanTbFilter(
   const shotIndex = options?.shotIndex ?? 0
   const shotCount = Math.max(1, options?.shotCount ?? 1)
   const motionScale = options?.motionScale ?? resolveMotionComicMotionScale(shotCount, durationSec)
-  const z = 1.28
+  const z = 1.12
   const segmentSize = (1 / shotCount) * clampScale(motionScale)
   const startFrac = shotIndex * segmentSize
   const endFrac = Math.min(1, startFrac + segmentSize)
@@ -97,7 +97,7 @@ export function buildMotionComicPanBtFilter(
   const shotIndex = options?.shotIndex ?? 0
   const shotCount = Math.max(1, options?.shotCount ?? 1)
   const motionScale = options?.motionScale ?? resolveMotionComicMotionScale(shotCount, durationSec)
-  const z = 1.28
+  const z = 1.12
   const segmentSize = (1 / shotCount) * clampScale(motionScale)
   const startFrac = 1 - shotIndex * segmentSize
   const endFrac = Math.max(0, startFrac - segmentSize)
@@ -164,7 +164,7 @@ export function buildMotionComicPanFilter(
   const progress = fmtMotionProgress(frames, motionScale)
   return [
     'scale=8000:-1',
-    `zoompan=z='1.22':x='(iw-iw/zoom)*${travel}*on/${progress}':y='ih/2-(ih/zoom/2)':d=${frames}:s=1280x720:fps=${fps}`,
+    `zoompan=z='1.10':x='(iw-iw/zoom)*${travel}*on/${progress}':y='ih/2-(ih/zoom/2)':d=${frames}:s=1280x720:fps=${fps}`,
     'format=yuv420p',
   ].join(',')
 }
@@ -180,7 +180,7 @@ export function buildMotionComicPanReverseFilter(
   const progress = fmtMotionProgress(frames, motionScale)
   return [
     'scale=8000:-1',
-    `zoompan=z='1.22':x='(iw-iw/zoom)*${travel}*(1-on/${progress})':y='ih/2-(ih/zoom/2)':d=${frames}:s=1280x720:fps=${fps}`,
+    `zoompan=z='1.10':x='(iw-iw/zoom)*${travel}*(1-on/${progress})':y='ih/2-(ih/zoom/2)':d=${frames}:s=1280x720:fps=${fps}`,
     'format=yuv420p',
   ].join(',')
 }
@@ -192,8 +192,8 @@ export function buildMotionComicDriftFilter(
   fps = COMPOSE_FPS,
 ): string {
   const frames = durationToFrameCount(durationSec, fps)
-  const startZ = 1.06
-  const endZ = 1.06 + amp(0.11) * clampScale(motionScale)
+  const startZ = 1.04
+  const endZ = 1.04 + amp(0.08) * clampScale(motionScale)
   const delta = endZ - startZ
   const panTravel = amp(0.48) * clampScale(motionScale)
   const progress = fmtMotionProgress(frames, motionScale)

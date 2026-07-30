@@ -13,6 +13,7 @@ type AssetField =
   | 'ttsAudioUrl'
   | 'subtitleUrl'
   | 'composedVideoUrl'
+  | 'videoUrl'
 
 export function normalizeStaticRel(relativePath: string | null | undefined): string {
   return String(relativePath || '').trim().replace(/^\/+/, '')
@@ -167,6 +168,49 @@ export function purgeStoryboardComposedVideoBeforeRegenerate(
     })
     .where(eq(schema.storyboards.id, storyboardId))
     .run()
+}
+
+/** 删除镜头 AI/本地生成视频（videoUrl），并清理生成记录文件 */
+export function purgeStoryboardShotVideo(
+  storyboardId: number,
+  sbInput?: StoryboardRow,
+): { cleared: boolean; filesDeleted: number } {
+  const sb = sbInput
+    ?? db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboardId)).all()[0]
+  if (!sb) return { cleared: false, filesDeleted: 0 }
+
+  let filesDeleted = 0
+  if (sb.videoUrl) {
+    if (deleteEpisodeAssetFileIfUnreferenced(sb.videoUrl, sb.episodeId, 'videoUrl', storyboardId)) {
+      filesDeleted++
+    }
+  }
+
+  const gens = db.select().from(schema.videoGenerations)
+    .where(eq(schema.videoGenerations.storyboardId, storyboardId))
+    .all()
+  for (const gen of gens) {
+    for (const p of [gen.localPath, gen.videoUrl]) {
+      const rel = normalizeStaticRel(p)
+      if (!rel) continue
+      // 若仍挂在本镜 videoUrl 上，上面已按引用删；此处删生成中间产物
+      if (normalizeStaticRel(sb.videoUrl) === rel) continue
+      if (countEpisodePathRefs(sb.episodeId, 'videoUrl', rel, storyboardId) > 0) continue
+      if (deleteStaticFileIfExists(rel)) filesDeleted++
+    }
+  }
+  if (gens.length) {
+    db.delete(schema.videoGenerations).where(eq(schema.videoGenerations.storyboardId, storyboardId)).run()
+  }
+
+  if (sb.videoUrl) {
+    db.update(schema.storyboards)
+      .set({ videoUrl: null, updatedAt: now() })
+      .where(eq(schema.storyboards.id, storyboardId))
+      .run()
+  }
+
+  return { cleared: !!sb.videoUrl || gens.length > 0, filesDeleted }
 }
 
 /** storyboard 更新字段时，若路径变更则删旧文件 */

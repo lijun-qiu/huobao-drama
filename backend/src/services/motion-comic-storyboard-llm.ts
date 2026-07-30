@@ -8,7 +8,7 @@ import { resolveNarrationStoryboardTextModel } from '../constants/text-models.js
 import { logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 import { isMotionComicOutroLine, sanitizeMotionComicScript } from '../utils/motion-comic-script.js'
 import { compactMotionComicStoryboardShots } from './motion-comic-shot-merge.js'
-import { getTextConfig } from './ai.js'
+import { assertTextConfigHasCredentials, getTextConfig } from './ai.js'
 import { callTextChat } from './text-chat.js'
 
 const STORYBOARD_LLM_TIMEOUT_MS = 300_000
@@ -192,9 +192,7 @@ export async function buildMotionComicStoryboardShotsWithLLM(
     options?.textModel,
   )
   const config = getTextConfig(textModel)
-  if (!config.apiKey) {
-    throw new Error('未配置文本模型 API Key')
-  }
+  assertTextConfigHasCredentials(config)
 
   logTaskProgress('MotionComicStoryboardLLM', 'start', {
     model: textModel,

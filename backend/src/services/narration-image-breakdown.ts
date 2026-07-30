@@ -22,24 +22,26 @@ import {
 } from './narration-scene-detect.js'
 import {
   createNarrationImageBreakdownProgressReporter,
+  getNarrationImageBreakdownProgress,
   startNarrationImageBreakdownProgress,
   updateNarrationImageBreakdownProgress,
   type NarrationImageBreakdownProgressCallback,
 } from './narration-image-breakdown-progress.js'
 import { loadEpisodeContinuityContext } from './episode-continuity.js'
-import { isMotionComicMode, parseProductionMode } from '../constants/production-mode.js'
+import { usesMotionComicVisuals, parseProductionMode } from '../constants/production-mode.js'
+import { resolveStoryboardNarrationText } from '../constants/motion-comic.js'
 import { buildMotionComicAnchorMotionMeta, buildMotionComicSegmentMotionMeta } from './motion-comic-meta.js'
 import { now } from '../utils/response.js'
 import { llmGeneratedAt } from '../utils/llm-meta.js'
-import { applySubtitleLinesToStoryboards } from './narration-emphasis-apply.js'
+import { mergeStoryboardFluxPromptMeta } from './flux-storyboard-translate.js'
+import { logTaskWarn } from '../utils/task-logger.js'
 
+/** 配图/检测用正文：动态漫 description 是机位串时改用对白 */
 function storyboardNarrationSentence(sb: {
   description?: string | null
   dialogue?: string | null
 }): string {
-  const desc = String(sb.description || '').trim()
-  if (desc) return desc
-  return String(sb.dialogue || '').trim().replace(/^(旁白|剧中)[：:]\s*/, '')
+  return resolveStoryboardNarrationText(sb)
 }
 
 function preserveShotMeta(existing: ReturnType<typeof parseNarrationImageMeta>) {
@@ -98,7 +100,7 @@ function resolveDetectImageMode(isParagraphAnchor: boolean): 'new' | 'inherit' {
 }
 
 export type NarrationImageBreakdownOptions = {
-  /** 仅对已有配图段、但 image_prompt 为空的镜头重新调用 AI（不重新换镜检测） */
+  /** ????????? image_prompt ????????? AI????????? */
   retryMissingPrompts?: boolean
   textModel?: string | null
   textThinking?: boolean | null
@@ -161,7 +163,11 @@ function buildPromptAnchorMap(
   paragraphs: NarrationParagraph[],
   promptsByStartIndex: Map<number, string>,
 ) {
-  const paragraphPromptByAnchor = new Map<number, { content: string; prompt: string; layout: 'single' | 'diptych' }>()
+  const paragraphPromptByAnchor = new Map<number, {
+    content: string
+    prompt: string
+    layout: 'single' | 'diptych'
+  }>()
   for (const para of paragraphs) {
     const llmPrompt = String(promptsByStartIndex.get(para.startIndex) || '').trim()
     if (!llmPrompt) continue
@@ -177,7 +183,7 @@ function buildPromptAnchorMap(
 
 export type NarrationImagePromptOptions = {
   batchSize?: number
-  /** 测试：仅生成指定段批（从 1 起，按全量配图段落 + batchSize 划分） */
+  /** ???????????? 1 ????????? + batchSize ??? */
   testBatchIndex?: number
   textModel?: string | null
   textThinking?: boolean | null
@@ -211,18 +217,18 @@ async function runNarrationImagePromptGeneration(
     const { allParagraphs, pendingParagraphs, missingWithoutMeta } = collectPendingParagraphs(ctx)
 
     if (!allParagraphs.length) {
-      throw new Error('请先执行「① 检测配图」')
+      throw new Error('?????? ?????')
     }
     if (missingWithoutMeta.length) {
       throw new Error(
-        `镜头 #${missingWithoutMeta.join('、#')} 缺少配图段落信息，请重新执行「① 检测配图」`,
+        `?? #${missingWithoutMeta.join('?#')} ???????????????? ?????`,
       )
     }
     if (!pendingParagraphs.length && options?.testBatchIndex == null) {
       reportProgress({
         status: 'completed',
         phase: 'done',
-        message: `全部 ${allParagraphs.length} 条配图文案已就绪`,
+        message: `?? ${allParagraphs.length} ????????`,
         percent: 100,
         paragraph_count: allParagraphs.length,
       })
@@ -246,9 +252,9 @@ async function runNarrationImagePromptGeneration(
       const batchSlice = sliceParagraphBatchByIndex(allParagraphs, promptBatchSize, testBatchIndex)
       const totalBatches = Math.max(1, Math.ceil(allParagraphs.length / promptBatchSize))
       if (!batchSlice.length) {
-        throw new Error(`段批 ${testBatchIndex} 不存在（共 ${totalBatches} 批）`)
+        throw new Error(`?? ${testBatchIndex} ????? ${totalBatches} ??`)
       }
-      // 测试：始终生成该段批全部段落（含已有文案，便于试跑/覆盖）
+      // ?????????????????????????/???
       targetParagraphs = batchSlice
     }
 
@@ -259,16 +265,17 @@ async function runNarrationImagePromptGeneration(
     reportProgress({
       phase: 'prompts',
       message: testBatchIndex != null
-        ? `测试生成段批 ${testBatchIndex}：${targetParagraphs.length} 段配图文案…`
+        ? `?????? ${testBatchIndex}?${targetParagraphs.length} ??????`
         : alreadyDone > 0
-          ? `补全 ${pendingParagraphs.length} 段缺失配图文案（已完成 ${alreadyDone}/${allParagraphs.length}，约 ${batchCount} 批）…`
-          : `正在生成 ${pendingParagraphs.length} 段纯 LLM 配图文案（约 ${batchCount} 批）…`,
+          ? `?? ${pendingParagraphs.length} ??????????? ${alreadyDone}/${allParagraphs.length}?? ${batchCount} ???`
+          : `???? ${pendingParagraphs.length} ??????? ${batchCount} ???`,
       percent: 12,
       paragraph_count: targetParagraphs.length,
       batch: testBatchIndex ?? undefined,
       batch_count: batchCount,
     })
 
+    const genBatchSize = testBatchIndex != null ? targetParagraphs.length : promptBatchSize
     const llmPrompts = await generateParagraphImagePromptsWithLLM(
       targetParagraphs.map(para => ({
         index: para.index,
@@ -281,50 +288,88 @@ async function runNarrationImagePromptGeneration(
       {
         style,
         textModel: ctx.textModel,
-        textThinking: ctx.textThinking,
+        // ???????? JSON?????????????????
+        textThinking: false,
         characters: ctx.episodeCharacters,
         fullNarrationLines: ctx.allSentences,
         previousEpisodeNarration: ctx.continuity.previousEpisodeNarration,
         onProgress: reportProgress,
         pureLlm: true,
-        batchSize: testBatchIndex != null ? targetParagraphs.length : promptBatchSize,
-        onBatchComplete: async ({ batch, promptsByStartIndex, subtitleLinesByStartIndex }) => {
+        batchSize: genBatchSize,
+        episodeId,
+        inlineFluxEnglish: false,
+        onBatchComplete: async ({ batch, promptsByStartIndex }) => {
           const anchorMap = buildPromptAnchorMap(
             targetParagraphs.filter(p => batch.some(item => item.startIndex === p.startIndex)),
             promptsByStartIndex,
           )
-          savePromptAnchorsOnly(ctx, allParagraphs, anchorMap)
-          applySubtitleLinesToStoryboards(ctx.orderedStoryboards, allParagraphs, subtitleLinesByStartIndex)
+          const saved = savePromptAnchorsOnly(ctx, allParagraphs, anchorMap)
+          const live = getNarrationImageBreakdownProgress(episodeId)
+          const promptsSaved = Number(live?.prompts_saved || 0) + saved
+          const seq = Number(live?.prompts_saved_seq || 0) + 1
+          reportProgress({
+            status: 'processing',
+            phase: 'prompts',
+            message: `?????????? ${promptsSaved} ?`,
+            percent: Math.min(92, 15 + Math.round((promptsSaved / Math.max(1, targetParagraphs.length)) * 70)),
+            prompts_saved: promptsSaved,
+            prompts_saved_seq: seq,
+            paragraph_count: targetParagraphs.length,
+          })
         },
       },
     )
 
-    if (!llmPrompts) throw new Error('配图 AI 文案生成失败')
-
-    applySubtitleLinesToStoryboards(
-      ctx.orderedStoryboards,
-      allParagraphs,
-      llmPrompts.subtitleLinesByStartIndex,
-    )
+    if (!llmPrompts) throw new Error('配图 AI 未返回结果')
 
     const stillMissing = targetParagraphs.filter(
       para => !String(llmPrompts.promptsByStartIndex.get(para.startIndex) || '').trim(),
     )
+    const savedNow = targetParagraphs.length - stillMissing.length
     if (stillMissing.length) {
-      const hint = testBatchIndex != null
-        ? `测试段批 ${testBatchIndex} 仍有 ${stillMissing.length} 段未返回 prompt`
-        : `配图 AI 未返回 ${stillMissing.length} 段的 image_prompt，请点「补全缺失文案」继续`
-      throw new Error(hint)
+      // 部分成功：不整任务失败，已落库的保留；前端点「补全缺失」即可
+      const msg = testBatchIndex != null
+        ? `测试批次 ${testBatchIndex} 仍有 ${stillMissing.length} 段缺 prompt`
+        : `本轮已生成 ${savedNow} 段，仍有 ${stillMissing.length} 段失败已跳过；请点「补全缺失文案」继续`
+      logTaskWarn('NarrationImageBreakdown', 'prompts-partial', {
+        episodeId,
+        savedNow,
+        stillMissing: stillMissing.length,
+        retryMissing: !!options?.retryMissing,
+      })
+      reportProgress({
+        status: 'completed',
+        phase: 'done',
+        message: msg,
+        percent: 100,
+        paragraph_count: allParagraphs.length,
+        prompts_saved: Number(getNarrationImageBreakdownProgress(episodeId)?.prompts_saved || 0),
+        generated_at: llmGeneratedAt(),
+      })
+      return {
+        step: 'prompts',
+        paragraph_count: allParagraphs.length,
+        image_needed_count: allParagraphs.length,
+        prompts_generated: allParagraphs.length - stillMissing.length,
+        image_prompt_source: 'llm_raw',
+        image_prompt_at: now(),
+        generated_at: llmGeneratedAt(),
+        retry_missing_prompts: !!options?.retryMissing,
+        prompts_updated: savedNow,
+        prompts_missing: stillMissing.length,
+        paragraphs_retried: options?.retryMissing ? pendingParagraphs.length : undefined,
+        partial: true,
+      }
     }
 
     reportProgress({
       status: 'completed',
       phase: 'done',
       message: testBatchIndex != null
-        ? `测试完成：段批 ${testBatchIndex} 已生成 ${targetParagraphs.length} 段配图文案`
+        ? `测试批次 ${testBatchIndex} 已生成 ${targetParagraphs.length} 段文案`
         : options?.retryMissing
-          ? `已补全 ${pendingParagraphs.length} 条配图文案`
-          : `已生成 ${allParagraphs.length} 条纯 LLM 配图文案`,
+          ? `已补全 ${pendingParagraphs.length} 段配图文案`
+          : `已生成 ${allParagraphs.length} 段配图文案`,
       percent: 100,
       paragraph_count: allParagraphs.length,
       generated_at: llmGeneratedAt(),
@@ -343,18 +388,18 @@ async function runNarrationImagePromptGeneration(
       paragraphs_retried: options?.retryMissing ? pendingParagraphs.length : undefined,
     }
   } catch (err: any) {
-    const message = String(err?.message || err || '配图文案生成失败')
+    const message = String(err?.message || err || '????????')
     updateNarrationImageBreakdownProgress(episodeId, {
       status: 'failed',
       phase: 'error',
-      message: message.includes('补全缺失文案') ? message : `${message}（已成功的批次已保存，请点「补全缺失文案」继续）`,
+      message: message.includes('??????') ? message : `${message}????????????????????????`,
       error: message,
     })
     throw err
   }
 }
 
-/** 仅补全缺失的 AI 配图文案（沿用已有配图段落，不重新换镜检测） */
+/** ?????? AI ?????????????????????? */
 export async function retryMissingNarrationImagePrompts(
   episodeId: number,
   style = 'comic',
@@ -394,7 +439,7 @@ function loadEpisodeStoryboardContext(
     .orderBy(asc(schema.storyboards.storyboardNumber))
     .all()
   if (!orderedStoryboards.length) {
-    throw new Error('请先完成旁白分镜')
+    throw new Error('????????')
   }
 
   const sentenceItems: NarrationSentenceItem[] = orderedStoryboards.map((sb) => {
@@ -411,7 +456,7 @@ function loadEpisodeStoryboardContext(
   })
 
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
-  const motionComicMode = isMotionComicMode(parseProductionMode(drama?.metadata))
+  const motionComicMode = usesMotionComicVisuals(parseProductionMode(drama?.metadata))
 
   return {
     ep,
@@ -478,7 +523,12 @@ function saveDetectResults(
 function savePromptAnchorsOnly(
   ctx: ReturnType<typeof loadEpisodeStoryboardContext>,
   paragraphs: NarrationParagraph[],
-  paragraphPromptByAnchor: Map<number, { content: string; prompt: string; layout: 'single' | 'diptych' }>,
+  paragraphPromptByAnchor: Map<number, {
+    content: string
+    prompt: string
+    layout: 'single' | 'diptych'
+    fluxPromptEn?: string
+  }>,
 ) {
   if (!paragraphPromptByAnchor.size) return 0
   const ts = now()
@@ -492,23 +542,28 @@ function savePromptAnchorsOnly(
     const sentence = storyboardNarrationSentence(sb)
     const shotMeta = preserveShotMeta(existing)
 
+    let referenceImages = buildNarrationImageMeta('new', {
+      ...shotMeta,
+      narration_tts_mode: 'new',
+      script_paragraph_index: existing.script_paragraph_index ?? ctx.sentenceItems[startIndex]?.paragraphIndex,
+      scene_content: paraInfo.content ?? existing.scene_content,
+      narration_lines: para?.sentences ?? existing.narration_lines,
+      image_narration_lines: para
+        ? mergeStoryboardLinesForImagePrompt(para.sentences)
+        : existing.image_narration_lines,
+      paragraph_index: para?.index ?? existing.paragraph_index,
+      paragraph_layout: para?.layout || existing.paragraph_layout || 'single',
+      image_prompt_source: 'llm_raw',
+      image_prompt_llm_raw: paraInfo.prompt,
+    })
+    if (paraInfo.fluxPromptEn) {
+      referenceImages = mergeStoryboardFluxPromptMeta(referenceImages, paraInfo.fluxPromptEn)
+    }
+
     db.update(schema.storyboards)
       .set({
         imagePrompt: paraInfo.prompt,
-        referenceImages: buildNarrationImageMeta('new', {
-          ...shotMeta,
-          narration_tts_mode: 'new',
-          script_paragraph_index: existing.script_paragraph_index ?? ctx.sentenceItems[startIndex]?.paragraphIndex,
-          scene_content: paraInfo.content ?? existing.scene_content,
-          narration_lines: para?.sentences ?? existing.narration_lines,
-          image_narration_lines: para
-            ? mergeStoryboardLinesForImagePrompt(para.sentences)
-            : existing.image_narration_lines,
-          paragraph_index: para?.index ?? existing.paragraph_index,
-          paragraph_layout: para?.layout || existing.paragraph_layout || 'single',
-          image_prompt_source: 'llm_raw',
-          image_prompt_llm_raw: paraInfo.prompt,
-        }),
+        referenceImages,
         updatedAt: ts,
       })
       .where(eq(schema.storyboards.id, sb.id))
@@ -591,7 +646,7 @@ function paragraphsFromAnchors(
   return paragraphs
 }
 
-/** 第一步：LLM 检测哪些镜头需要配图（不写配图文案） */
+/** ????LLM ?????????????????? */
 export async function detectNarrationImageAnchors(
   episodeId: number,
   style = 'comic',
@@ -655,8 +710,8 @@ export async function detectNarrationImageAnchors(
       status: 'completed',
       phase: 'done',
       message: detectSource === 'llm'
-        ? `换镜检测完成：${paragraphs.length} 张需配图`
-        : `换镜检测完成（规则兜底）：${paragraphs.length} 张需配图`,
+        ? `???????${paragraphs.length} ????`
+        : `?????????????${paragraphs.length} ????`,
       percent: 100,
       paragraph_count: paragraphs.length,
       image_detect_source: detectSource,
@@ -676,7 +731,7 @@ export async function detectNarrationImageAnchors(
       generated_at: llmGeneratedAt(),
     }
   } catch (err: any) {
-    const message = String(err?.message || err || '配图换镜检测失败')
+    const message = String(err?.message || err || '????????')
     updateNarrationImageBreakdownProgress(episodeId, {
       status: 'failed',
       phase: 'error',
@@ -687,7 +742,7 @@ export async function detectNarrationImageAnchors(
   }
 }
 
-/** 第二步：根据已检测锚点，纯 LLM 生成六维配图文案（跳过已有文案，按批增量保存） */
+/** ????????????? LLM ??????????????????????? */
 export async function generateNarrationImagePromptsOnly(
   episodeId: number,
   style = 'comic',
@@ -696,7 +751,7 @@ export async function generateNarrationImagePromptsOnly(
   return runNarrationImagePromptGeneration(episodeId, style, options)
 }
 
-/** @deprecated 请分步调用 detectNarrationImageAnchors + generateNarrationImagePromptsOnly */
+/** @deprecated ????? detectNarrationImageAnchors + generateNarrationImagePromptsOnly */
 export async function breakdownNarrationImages(
   episodeId: number,
   style = 'comic',

@@ -18,6 +18,41 @@ function collectEpisodeStoryboards(episodeId: number) {
   )
 }
 
+/** 本集正在进行中的分镜配图任务数（processing / pending） */
+export function countEpisodeProcessingNarrationImages(episodeId: number): number {
+  const storyboardIds = collectEpisodeStoryboards(episodeId).map(sb => sb.id)
+  if (!storyboardIds.length) return 0
+  return db.select().from(schema.imageGenerations)
+    .where(inArray(schema.imageGenerations.storyboardId, storyboardIds))
+    .all()
+    .filter(g => g.status === 'processing' || g.status === 'pending')
+    .length
+}
+
+function normalizeIdFilter(ids?: number[] | null): number[] {
+  if (!Array.isArray(ids) || !ids.length) return []
+  return [...new Set(ids.map(Number).filter(n => Number.isFinite(n) && n > 0))]
+}
+
+function normalizeCharacterIdFilter(characterIds?: number[] | null): number[] {
+  return normalizeIdFilter(characterIds)
+}
+
+/** 取本集中绑定了指定角色的 storyboard id */
+function storyboardIdsLinkedToCharacters(episodeId: number, characterIds: number[]): Set<number> {
+  const ids = normalizeCharacterIdFilter(characterIds)
+  if (!ids.length) return new Set()
+  const epSbIds = new Set(collectEpisodeStoryboards(episodeId).map(sb => sb.id))
+  const rows = db.select().from(schema.storyboardCharacters)
+    .where(inArray(schema.storyboardCharacters.characterId, ids))
+    .all()
+  return new Set(
+    rows
+      .map(r => r.storyboardId)
+      .filter(id => epSbIds.has(id)),
+  )
+}
+
 function stripImageClearMeta(referenceImages: string | null | undefined): string | undefined {
   if (!referenceImages) return undefined
   try {
@@ -36,17 +71,46 @@ function stripImageClearMeta(referenceImages: string | null | undefined): string
   }
 }
 
-/** 清除本集所有镜头配图（含上传与 AI 生成），删除文件并清空数据库字段 */
-export async function clearEpisodeNarrationImages(episodeId: number) {
+/** 清除本集镜头配图（含上传与 AI 生成）；可按 character_ids / storyboard_ids 过滤 */
+export async function clearEpisodeNarrationImages(
+  episodeId: number,
+  options?: { characterIds?: number[] | null; storyboardIds?: number[] | null },
+) {
+  const processing = countEpisodeProcessingNarrationImages(episodeId)
+  if (processing > 0) {
+    throw new Error(`有 ${processing} 个配图任务正在生成中，请等待完成后再清除`)
+  }
+
+  const characterIds = normalizeCharacterIdFilter(options?.characterIds)
+  const storyboardIdFilter = normalizeIdFilter(options?.storyboardIds)
+  const linkedIds = characterIds.length
+    ? storyboardIdsLinkedToCharacters(episodeId, characterIds)
+    : null
+  const explicitIds = storyboardIdFilter.length ? new Set(storyboardIdFilter) : null
+
   const storyboards = collectEpisodeStoryboards(episodeId)
-  const withImage = storyboards.filter(sb => normalizeStaticRel(sb.composedImage))
+  const withImage = storyboards.filter(sb => {
+    if (!normalizeStaticRel(sb.composedImage)) return false
+    // storyboard_ids 优先（与前端角色筛选一致，含文案名回退匹配）
+    if (explicitIds) return explicitIds.has(sb.id)
+    if (linkedIds) return linkedIds.has(sb.id)
+    return true
+  })
   if (!withImage.length) {
-    return { cleared: 0, files_deleted: 0, generations_deleted: 0 }
+    return {
+      cleared: 0,
+      files_deleted: 0,
+      generations_deleted: 0,
+      character_ids: characterIds,
+      storyboard_ids: storyboardIdFilter,
+      filtered: characterIds.length > 0 || storyboardIdFilter.length > 0,
+    }
   }
 
   logTaskStart('EpisodeAssetClear', 'narration-images', {
     episodeId,
     storyboardCount: withImage.length,
+    characterIds: characterIds.length ? characterIds : undefined,
   })
 
   const pathsToDelete: string[] = []
@@ -86,6 +150,13 @@ export async function clearEpisodeNarrationImages(episodeId: number) {
 
   let generationsDeleted = 0
   for (const gen of gens) {
+    if (gen.status === 'processing' || gen.status === 'pending') {
+      db.update(schema.imageGenerations)
+        .set({ status: 'failed', errorMsg: '配图已清除，任务已取消', updatedAt: ts })
+        .where(eq(schema.imageGenerations.id, gen.id))
+        .run()
+      continue
+    }
     db.delete(schema.imageGenerations)
       .where(eq(schema.imageGenerations.id, gen.id))
       .run()
@@ -97,12 +168,16 @@ export async function clearEpisodeNarrationImages(episodeId: number) {
     cleared,
     filesDeleted,
     generationsDeleted,
+    characterIds: characterIds.length ? characterIds : undefined,
   })
 
   return {
     cleared,
     files_deleted: filesDeleted,
     generations_deleted: generationsDeleted,
+    character_ids: characterIds,
+    storyboard_ids: withImage.map(sb => sb.id),
+    filtered: characterIds.length > 0 || storyboardIdFilter.length > 0,
   }
 }
 

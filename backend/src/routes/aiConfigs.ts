@@ -6,11 +6,12 @@ import { toSnakeCase } from '../utils/transform.js'
 import { parseModelField } from '../services/ai.js'
 import { redactUrl, logTaskError, logTaskProgress, logTaskSuccess } from '../utils/task-logger.js'
 import { joinProviderUrl } from '../services/adapters/url.js'
+import { LOCAL_PRESET_SERVICES, LOCAL_COMIC_ENV } from '../constants/local-comic.js'
 
 const app = new Hono()
 
 const HUOBAO_PRESET_SERVICES = [
-  { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'deepseek-v4-pro,qwen3.5-plus,gpt-4o', priority: 100 },
+  { serviceType: 'text', label: '文本', provider: 'openrouter', baseUrl: 'https://openrouter.ai/api', model: 'nvidia/nemotron-3-ultra-550b-a55b:free,openrouter/deepseek-v4-flash,openrouter/deepseek-v4-pro', priority: 110 },
   { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'vidu', baseUrl: 'https://api.4022543.xyz', model: 'viduq3-turbo', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.4022543.xyz/minimax', model: 'speech-2.8-hd', priority: 97 },
@@ -25,7 +26,7 @@ const HUOBAO_AGENT_DEFAULTS = [
   { agentType: 'grid_prompt_generator', name: '图片提示词生成' },
 ] as const
 
-const HUOBAO_AGENT_MODEL = 'deepseek-v4-pro'
+const HUOBAO_AGENT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
 
 function bearerHeaders(apiKey?: string, withJson = false) {
   const headers: Record<string, string> = {}
@@ -67,6 +68,59 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
       url: joinProviderUrl(baseUrl, '/v1', '/models'),
       headers: bearerHeaders(apiKey),
       body: undefined,
+    }
+  }
+
+  if (p === 'zhipu' || p === 'bigmodel' || p === 'zai') {
+    if (serviceType === 'image') {
+      return {
+        method: 'POST',
+        url: joinProviderUrl(baseUrl, '', '/images/generations'),
+        headers: bearerHeaders(apiKey, true),
+        body: {
+          model: m || 'cogview-3-flash',
+          prompt: 'probe',
+          size: '1024x1024',
+        },
+      }
+    }
+    if (serviceType === 'video') {
+      return {
+        method: 'POST',
+        url: joinProviderUrl(baseUrl, '', '/videos/generations'),
+        headers: bearerHeaders(apiKey, true),
+        body: {
+          model: m || 'cogvideox-flash',
+          prompt: 'probe',
+          size: '1344x768',
+          fps: 30,
+        },
+      }
+    }
+    return {
+      method: 'POST',
+      url: joinProviderUrl(baseUrl, '', '/chat/completions'),
+      headers: bearerHeaders(apiKey, true),
+      body: {
+        model: m || 'glm-4.7-flash',
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 8,
+        thinking: { type: 'disabled' },
+      },
+    }
+  }
+
+  if (p === 'agnes') {
+    return {
+      method: 'POST',
+      url: joinProviderUrl(baseUrl, '', '/images/generations'),
+      headers: bearerHeaders(apiKey, true),
+      body: {
+        model: m || 'agnes-image-2.0-flash',
+        prompt: 'probe character portrait anime',
+        size: '1024x1024',
+        extra_body: { response_format: 'url' },
+      },
     }
   }
 
@@ -131,6 +185,24 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
         n: 1,
         aspect_ratio: '16:9',
       },
+    }
+  }
+
+  if (p === 'ollama') {
+    return {
+      method: 'GET',
+      url: joinProviderUrl(baseUrl, '', '/models'),
+      headers: bearerHeaders(apiKey),
+      body: undefined,
+    }
+  }
+
+  if (p === 'comfyui') {
+    return {
+      method: 'GET',
+      url: joinProviderUrl(baseUrl, '', '/system_stats'),
+      headers: {},
+      body: undefined,
     }
   }
 
@@ -269,6 +341,105 @@ app.post('/huobao-preset', async (c) => {
     agents,
     agent_model: HUOBAO_AGENT_MODEL,
   })
+})
+
+// POST /ai-configs/local-preset — 本地短剧：智谱文本/视频 + Agnes 定妆生图 + Edge TTS
+app.post('/local-preset', async (c) => {
+  const ts = now()
+
+  for (const preset of LOCAL_PRESET_SERVICES) {
+    const existing = db.select().from(schema.aiServiceConfigs).all()
+      .find(row => row.serviceType === preset.serviceType && row.provider === preset.provider)
+
+    const isZhipu = String(preset.provider).toLowerCase() === 'zhipu'
+    const isAgnes = String(preset.provider).toLowerCase() === 'agnes'
+    const values = {
+      serviceType: preset.serviceType,
+      provider: preset.provider,
+      name: `本地短剧${preset.label}服务`,
+      baseUrl: preset.baseUrl,
+      apiKey: isZhipu
+        ? (LOCAL_COMIC_ENV.zhipuApiKey || '')
+        : isAgnes
+          ? (LOCAL_COMIC_ENV.agnesApiKey || '')
+          : '',
+      model: JSON.stringify(
+        preset.serviceType === 'text'
+          ? [LOCAL_COMIC_ENV.zhipuTextModel, 'glm-4.7-flash', 'glm-4-flash-250414']
+          : preset.model.split(',').map(s => s.trim()).filter(Boolean),
+      ),
+      priority: preset.priority,
+      isActive: true,
+      updatedAt: ts,
+    }
+
+    if (existing) {
+      db.update(schema.aiServiceConfigs).set(values).where(eq(schema.aiServiceConfigs.id, existing.id)).run()
+    } else {
+      db.insert(schema.aiServiceConfigs).values({ ...values, createdAt: ts }).run()
+    }
+  }
+
+  // 停用冲突的本地 Ollama 文本 / Comfy 默认图视频（保留可选，但降低优先级并取消激活以免抢默认）
+  for (const row of db.select().from(schema.aiServiceConfigs).all()) {
+    const provider = String(row.provider || '').toLowerCase()
+    if (row.serviceType === 'text' && provider === 'ollama' && row.isActive) {
+      db.update(schema.aiServiceConfigs)
+        .set({ isActive: false, updatedAt: ts })
+        .where(eq(schema.aiServiceConfigs.id, row.id))
+        .run()
+      continue
+    }
+    if ((row.serviceType === 'image' || row.serviceType === 'video') && provider === 'comfyui' && row.isActive) {
+      db.update(schema.aiServiceConfigs)
+        .set({ priority: Math.min(row.priority || 90, 90), updatedAt: ts })
+        .where(eq(schema.aiServiceConfigs.id, row.id))
+        .run()
+    }
+  }
+
+  const localAgentModel = LOCAL_COMIC_ENV.zhipuAgentModel
+  for (const agent of HUOBAO_AGENT_DEFAULTS) {
+    const [existing] = db.select().from(schema.agentConfigs).where(eq(schema.agentConfigs.agentType, agent.agentType)).all()
+    const values = {
+      name: agent.name,
+      model: localAgentModel,
+      isActive: true,
+      updatedAt: ts,
+    }
+
+    if (existing) {
+      db.update(schema.agentConfigs).set(values).where(eq(schema.agentConfigs.id, existing.id)).run()
+    } else {
+      db.insert(schema.agentConfigs).values({
+        agentType: agent.agentType,
+        description: '',
+        model: localAgentModel,
+        name: agent.name,
+        systemPrompt: '',
+        temperature: 0.7,
+        maxTokens: 4096,
+        maxIterations: 10,
+        isActive: true,
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+    }
+  }
+
+  const configs = db.select().from(schema.aiServiceConfigs).all().map(row => ({
+    ...toSnakeCase(row),
+    model: parseModelField(row.model),
+  }))
+  const agents = db.select().from(schema.agentConfigs).all().map(row => toSnakeCase(row))
+
+  logTaskSuccess('AIConfig', 'local-preset-applied', {
+    serviceCount: LOCAL_PRESET_SERVICES.length,
+    agentCount: HUOBAO_AGENT_DEFAULTS.length,
+    agentModel: localAgentModel,
+  })
+
+  return success(c, { configs, agents, agent_model: localAgentModel })
 })
 
 // POST /ai-configs/test

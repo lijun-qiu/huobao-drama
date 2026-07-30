@@ -1,6 +1,11 @@
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { getEpisodeVisualCharacters } from './narration-characters.js'
+import {
+  findYouthBaseCharacter,
+  formatCharacterDisplayName,
+  getEpisodeVisualCharacters,
+  getVariantAgeGroup,
+} from './narration-characters.js'
 
 function splitScriptLines(text: string): string[] {
   return String(text || '')
@@ -10,26 +15,62 @@ function splitScriptLines(text: string): string[] {
     .filter(Boolean)
 }
 
-export function extractCharacterMentions(script: string, name: string, maxChars = 2200): string {
+export function extractCharacterMentions(
+  script: string,
+  name: string,
+  options?: { role?: string | null; storyboardSnippets?: string[] },
+  maxChars = 2200,
+): string {
   const trimmedName = String(name || '').trim()
-  if (!trimmedName || !script.trim()) return script.trim().slice(0, maxChars)
+  if (!script.trim()) return ''
+  if (!trimmedName) return script.trim().slice(0, maxChars)
 
   const lines = splitScriptLines(script)
   const direct = lines.filter(line => line.includes(trimmedName))
-  if (direct.length) return direct.join('\n').slice(0, maxChars)
+  if (direct.length >= 2) return direct.join('\n').slice(0, maxChars)
 
-  // 单字名容易误匹配，退回较短摘录
+  const firstPerson = /(^|\n)\s*你[\s，,。.]|(^|\n)\s*我[\s，,。.]/.test(script)
+    || /男主|女主|主人公/.test(String(options?.role || ''))
+  if (direct.length <= 1 && firstPerson) {
+    const opening = script.trim().slice(0, 1500)
+    const sbHints = (options?.storyboardSnippets || []).slice(0, 5).join('\n')
+    return [opening, sbHints].filter(Boolean).join('\n\n').slice(0, maxChars)
+  }
+
+  if (direct.length) return direct.join('\n').slice(0, maxChars)
   return script.trim().slice(0, Math.min(maxChars, 1200))
+}
+
+function summarizeAppearanceIdentity(appearance: string): string {
+  const raw = String(appearance || '').replace(/\bEnglish tags:[\s\S]*$/i, '').replace(/\s+/g, ' ').trim()
+  if (!raw) return ''
+  const face = raw.match(/(?:脸型|下颌|面相|鹅蛋|棱角|国字|方正|长脸|圆脸)[^，,；;。]{0,18}/)?.[0]
+  const hair = raw.match(/(?:发型|短发|长发|碎发|寸头|中分|侧分|束发|卷发|刘海|发色|黑发|白发)[^，,；;。]{0,22}/)?.[0]
+  const browEye = raw.match(/(?:剑眉|浓眉|细眉|一字眉|眉|细长眼|圆大|丹凤|深褐眼|黑瞳)[^，,；;。]{0,18}/)?.[0]
+  const outfit = raw.match(/#[0-9A-Fa-f]{3,8}[^，,；;。]{0,20}/)?.[0]
+  const bits = [face, browEye, hair, outfit].filter(Boolean)
+  if (bits.length) return bits.join('·').slice(0, 72)
+  return raw.slice(0, 56)
 }
 
 export function buildCharacterAppearanceContext(params: {
   characterId: number
   characterName: string
+  characterVariantLabel?: string | null
+  characterRole?: string | null
   episodeId?: number
   dramaId: number
   script?: string
 }) {
-  const { characterId, characterName, episodeId, dramaId, script = '' } = params
+  const {
+    characterId,
+    characterName,
+    characterVariantLabel,
+    characterRole,
+    episodeId,
+    dramaId,
+    script = '',
+  } = params
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
 
   let episodeScript = script
@@ -42,13 +83,10 @@ export function buildCharacterAppearanceContext(params: {
     }
   }
 
-  const mentionExcerpt = extractCharacterMentions(episodeScript, characterName)
-  const otherChars = episodeId
-    ? getEpisodeVisualCharacters(episodeId, dramaId).filter(ch => ch.id !== characterId)
-    : db.select().from(schema.characters).all()
-      .filter(ch => ch.dramaId === dramaId && !ch.deletedAt && ch.id !== characterId)
-      .slice(0, 6)
-      .map(ch => ({ id: ch.id, name: ch.name, appearance: ch.appearance }))
+  const mentionExcerpt = extractCharacterMentions(episodeScript, characterName, {
+    role: characterRole,
+    storyboardSnippets: [],
+  }, 1200)
 
   const storyboardSnippets: string[] = []
   if (episodeId) {
@@ -60,7 +98,8 @@ export function buildCharacterAppearanceContext(params: {
     const links = db.select().from(schema.storyboardCharacters).all()
     for (const sb of storyboards) {
       const linked = links.some(l => l.storyboardId === sb.id && l.characterId === characterId)
-      const text = [sb.dialogue, sb.description, sb.title, sb.imagePrompt, sb.action].filter(Boolean).join(' ')
+      // 定妆外貌不需要配图文案（image_prompt 很长且易撑爆 4k 上下文）
+      const text = [sb.dialogue, sb.description, sb.title, sb.action].filter(Boolean).join(' ')
       const mentioned = text.includes(characterName)
       if (!linked && !mentioned) continue
 
@@ -68,25 +107,52 @@ export function buildCharacterAppearanceContext(params: {
         `#${sb.storyboardNumber || '?'}`,
         sb.title,
         sb.location ? `地点:${sb.location}` : '',
-        sb.atmosphere ? `氛围:${sb.atmosphere}` : '',
-        sb.dialogue ? `旁白/对白:${String(sb.dialogue).slice(0, 200)}` : '',
-        sb.description ? `画面:${String(sb.description).slice(0, 160)}` : '',
-        sb.imagePrompt ? `配图:${String(sb.imagePrompt).slice(0, 160)}` : '',
+        sb.dialogue ? `旁白:${String(sb.dialogue).slice(0, 80)}` : '',
+        sb.description ? `画面:${String(sb.description).slice(0, 80)}` : '',
+        sb.action ? `动作:${String(sb.action).slice(0, 40)}` : '',
       ].filter(Boolean).join(' | '))
+      if (storyboardSnippets.length >= 5) break
     }
   }
+
+  const resolvedMentionExcerpt = mentionExcerpt.length < 160
+    ? extractCharacterMentions(episodeScript, characterName, {
+      role: characterRole,
+      storyboardSnippets,
+    }, 1200)
+    : mentionExcerpt
+
+  const otherChars = episodeId
+    ? getEpisodeVisualCharacters(episodeId, dramaId).filter(ch => ch.id !== characterId)
+    : db.select().from(schema.characters).all()
+      .filter(ch => ch.dramaId === dramaId && !ch.deletedAt && ch.id !== characterId)
+      .slice(0, 6)
+      .map(ch => ({ id: ch.id, name: ch.name, appearance: ch.appearance }))
+
+  const targetGroup = getVariantAgeGroup(characterVariantLabel)
+  const youthSibling = (targetGroup === 'middle' || targetGroup === 'elder')
+    ? findYouthBaseCharacter(dramaId, characterName, characterId)
+    : null
 
   return {
     dramaTitle: drama?.title || '',
     dramaGenre: drama?.genre || '',
     dramaStyle: drama?.style || 'comic',
     episodeTitle,
-    mentionExcerpt,
-    storyboardSnippets: storyboardSnippets.slice(0, 8),
-    otherCharacters: otherChars.map(ch => {
+    mentionExcerpt: resolvedMentionExcerpt.slice(0, 1200),
+    storyboardSnippets: storyboardSnippets.slice(0, 5),
+    otherCharacters: otherChars.slice(0, 5).map(ch => {
       const app = ('appearance' in ch ? ch.appearance : (ch as { appearance?: string }).appearance) || ''
-      return app ? `${ch.name}（${String(app).slice(0, 60)}）` : ch.name
+      const identity = summarizeAppearanceIdentity(String(app))
+      return identity ? `${ch.name}：${identity}` : ch.name
     }),
+    portraitYouthReference: youthSibling?.appearance?.trim()
+      ? {
+        variantLabel: youthSibling.variantLabel,
+        displayName: formatCharacterDisplayName(youthSibling),
+        appearance: String(youthSibling.appearance).trim().slice(0, 360),
+      }
+      : null,
     hasScript: !!episodeScript.trim(),
   }
 }

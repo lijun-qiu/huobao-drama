@@ -6,6 +6,11 @@ import { generateImage } from '../services/image-generation.js'
 import { splitGridImage } from '../services/grid-split.js'
 import { createAgent } from '../agents/index.js'
 import { logTaskError, logTaskPayload, logTaskProgress } from '../utils/task-logger.js'
+import { getTextConfig } from '../services/ai.js'
+import { isLocalComicMode, resolveEpisodeProductionMode, usesLocalModelPipeline } from '../constants/production-mode.js'
+import { resolveSceneImageModel } from '../constants/image-models.js'
+import { resolveEpisodeVisualStyle } from '../constants/art-styles.js'
+import { ensureLocalModelStage, beginOllamaUse, endOllamaUse } from '../services/local-model-manager.js'
 
 const app = new Hono()
 
@@ -356,6 +361,9 @@ async function tryAgentGridPrompt(
   const agent = createAgent('grid_prompt_generator', episodeId, dramaId)
   if (!agent) return null
 
+  const ollamaInUse = getTextConfig().provider.toLowerCase() === 'ollama'
+  if (ollamaInUse) beginOllamaUse()
+  try {
   const result = await agent.generate(
     [{
       role: 'user',
@@ -381,6 +389,9 @@ async function tryAgentGridPrompt(
   if (fromText) return fromText
 
   return null
+  } finally {
+    if (ollamaInUse) endOllamaUse()
+  }
 }
 
 // POST /grid/prompt
@@ -485,6 +496,7 @@ app.post('/generate', async (c) => {
   const {
     storyboard_ids,
     drama_id,
+    episode_id,
     rows,
     cols,
     mode = 'first_frame', // first_frame | first_last | multi_ref
@@ -501,6 +513,8 @@ app.post('/generate', async (c) => {
 
   if (!storyboards.length) return badRequest(c, 'No storyboards found')
 
+  const episodeId = Number(episode_id || storyboards[0]?.episodeId || 0)
+
   // Get drama style
   let dramaStyle = ''
   if (drama_id) {
@@ -508,9 +522,28 @@ app.post('/generate', async (c) => {
     dramaStyle = drama?.style || ''
   }
 
+  let configId: number | undefined
+  let imageModel: string | undefined
+  let visualStyle: string | undefined
+  let useLocalComfy = false
+
+  if (episodeId) {
+    const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+    if (ep) {
+      const productionMode = resolveEpisodeProductionMode(ep.id)
+      configId = ep.imageConfigId ?? undefined
+      visualStyle = resolveEpisodeVisualStyle(ep.id, { dramaStyle })
+      if (usesLocalModelPipeline(productionMode)) {
+        useLocalComfy = true
+        imageModel = resolveSceneImageModel(ep, undefined, productionMode)
+        await ensureLocalModelStage('image')
+      }
+    }
+  }
+
   const referenceAssets = collectGridReferenceAssets(storyboards)
   const prompt = custom_prompt || buildGridPrompt(mode, storyboards, rows, cols, dramaStyle, referenceAssets)
-  const referenceImages = referenceAssets.map((asset) => asset.path)
+  const referenceImages = useLocalComfy ? undefined : referenceAssets.map((asset) => asset.path)
 
   // Size: first_last mode uses Nx2 layout
   const cellW = 960, cellH = 540
@@ -522,17 +555,23 @@ app.post('/generate', async (c) => {
     const genId = await generateImage({
       dramaId: drama_id,
       prompt,
+      model: imageModel,
+      style: visualStyle,
       size,
       frameType: `grid_${mode}_${actualRows}x${actualCols}`,
       referenceImages,
+      configId,
     })
 
     logTaskProgress('GridGenerate', 'reference-images', {
       dramaId: drama_id,
+      episodeId,
       mode,
       rows: actualRows,
       cols: actualCols,
-      referenceCount: referenceImages.length,
+      referenceCount: referenceImages?.length || 0,
+      provider: useLocalComfy ? 'comfyui' : 'cloud',
+      model: imageModel,
     })
 
     return success(c, {

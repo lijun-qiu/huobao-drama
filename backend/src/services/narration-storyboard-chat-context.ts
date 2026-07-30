@@ -3,7 +3,8 @@
  */
 import { asc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { usesMotionComicStoryboardRules, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { resolveStoryboardNarrationText } from '../constants/motion-comic.js'
 import { parseNarrationScript } from './narration-breakdown.js'
 import { parseNarrationImageMeta } from './narration-image.js'
 
@@ -11,9 +12,7 @@ function storyboardNarrationSentence(sb: {
   description?: string | null
   dialogue?: string | null
 }): string {
-  const desc = String(sb.description || '').trim()
-  if (desc) return desc
-  return String(sb.dialogue || '').trim().replace(/^(旁白|剧中)[：:]\s*/, '')
+  return resolveStoryboardNarrationText(sb)
 }
 
 export type NarrationStoryboardChatTurn = {
@@ -46,7 +45,7 @@ export function buildStoryboardChatContextBlock(episodeId: number, scriptOverrid
     `集序号：第 ${ep.episodeNumber} 集`,
   ].filter(Boolean)
 
-  const motionComic = isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+  const motionComic = usesMotionComicStoryboardRules(resolveEpisodeProductionMode(episodeId))
 
   if (script) {
     const { title, body } = parseNarrationScript(script)

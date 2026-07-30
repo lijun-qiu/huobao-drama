@@ -3,7 +3,7 @@
  */
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { resolveEpisodeTextThinking, resolveNarrationImageTextModel } from '../constants/text-models.js'
+import { resolveEpisodeTextThinking, resolveNarrationImageTextModel, isZhipuGlmTextModel } from '../constants/text-models.js'
 import { resolveNarrationImageStyle } from '../constants/art-styles.js'
 import { detectNarrationImageAnchors } from './narration-image-breakdown.js'
 import {
@@ -20,7 +20,7 @@ import {
   type NarrationImageChatTurn,
 } from './narration-image-chat-context.js'
 import { createWorkflowChatStatusReporter } from './workflow-chat-status.js'
-import { isMotionComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { usesMotionComicVisuals, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 
 const NARRATION_DETECT_CHAT_SYSTEM = [
   '你是火宝解说流水线的「配图换镜检测」助手，帮助创作者决定哪些旁白镜头需要单独配图。',
@@ -61,7 +61,7 @@ const MOTION_COMIC_DETECT_CHAT_SYSTEM = [
 ].join('\n')
 
 function resolveDetectChatSystem(episodeId: number): string {
-  return isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+  return usesMotionComicVisuals(resolveEpisodeProductionMode(episodeId))
     ? MOTION_COMIC_DETECT_CHAT_SYSTEM
     : NARRATION_DETECT_CHAT_SYSTEM
 }
@@ -88,7 +88,10 @@ function buildDetectChatMessages(params: NarrationImageDetectChatParams) {
   }
 
   const textModel = resolveNarrationImageTextModel(ep, params.textModel)
-  const textThinking = resolveEpisodeTextThinking(ep, params.textThinking)
+  // 智谱免费 Flash：开思考易空正文 / 吃配额；检测对话一律关思考
+  const textThinking = isZhipuGlmTextModel(textModel)
+    ? false
+    : resolveEpisodeTextThinking(ep, params.textThinking)
   const context = buildDetectChatContextBlock(params.episodeId)
 
   const apiMessages: TextChatMessage[] = [
@@ -126,7 +129,14 @@ export async function streamNarrationImageDetectChat(
 
     const reportStatus = createWorkflowChatStatusReporter(send)
     const onProgress: NarrationImageBreakdownProgressCallback = patch => {
-      reportStatus(patch.message)
+      const parts = [patch.message]
+      if (patch.batch && patch.batch_count) {
+        parts.push(`第 ${patch.batch}/${patch.batch_count} 批`)
+      }
+      if (typeof patch.percent === 'number') {
+        parts.push(`${patch.percent}%`)
+      }
+      reportStatus(parts.filter(Boolean).join(' · '))
     }
 
     try {
@@ -164,15 +174,20 @@ export async function streamNarrationImageDetectChat(
     turnCount: turns.length,
   })
 
-  const systemWithResult = detectSummary
-    ? apiMessages.map((m, i) => i === 0 && m.role === 'system'
-      ? { ...m, content: `${m.content}\n\n【刚完成的检测结果】\n${detectSummary}` }
-      : m)
-    : apiMessages
+  // 检测刚结束：直接回摘要，勿再开一轮思考聊天（同配图文案：thinking 吃满 4096 会像「断了」）
+  if (detectSummary && params.action === 'run') {
+    send({ type: 'delta', content: detectSummary })
+    return {
+      reply: detectSummary,
+      model: textModel,
+      text_thinking: false,
+      detect: { summary: detectSummary },
+    }
+  }
 
   let reply = ''
   reply = await streamTextChatMessages(
-    systemWithResult,
+    apiMessages,
     (_delta, full) => send({ type: 'delta', content: full }),
     textModel,
     textThinking,
@@ -185,13 +200,13 @@ export async function streamNarrationImageDetectChat(
     },
   )
 
-  reply = reply.trim() || detectSummary
+  reply = reply.trim()
   if (!reply) throw new Error('AI 未返回内容')
 
   return {
     reply,
     model: textModel,
     text_thinking: textThinking,
-    detect: detectSummary ? { summary: detectSummary } : undefined,
+    detect: undefined,
   }
 }

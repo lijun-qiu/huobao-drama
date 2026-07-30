@@ -7,8 +7,15 @@ import { db, schema } from '../../db/index.js'
 import { eq } from 'drizzle-orm'
 import { now } from '../../utils/response.js'
 import { logTaskProgress, logTaskSuccess } from '../../utils/task-logger.js'
+import { usesLocalModelPipeline, resolveEpisodeProductionMode } from '../../constants/production-mode.js'
+import { listGptSovitsVoices, toGptSovitsVoiceRef } from '../../services/gpt-sovits-tts.js'
+import { EDGE_VOICE_OPTIONS } from '../../services/edge-tts-local.js'
 
 export function createVoiceTools(episodeId: number, dramaId: number) {
+  function getProductionMode() {
+    return resolveEpisodeProductionMode(episodeId)
+  }
+
   function getEpisodeAudioProvider() {
     const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
     if (!episode?.audioConfigId) return null
@@ -43,6 +50,40 @@ export function createVoiceTools(episodeId: number, dramaId: number) {
     description: 'List all available voice options for TTS.',
     inputSchema: z.object({}),
     execute: async () => {
+      if (usesLocalModelPipeline(getProductionMode())) {
+        const rows = await listGptSovitsVoices()
+        const gsvVoices = rows.map(v => {
+          const desc = Array.isArray(v.description) ? v.description : []
+          const refId = toGptSovitsVoiceRef(v.voice_id)
+          return {
+            id: refId,
+            name: v.voice_name,
+            gender: inferGender(v.voice_name, desc),
+            traits: 'GPT-SoVITS 克隆',
+            suitable_for: desc.length ? desc.join('、') : (v.prompt_text || '参考音频克隆'),
+            language: v.language || '中文',
+            provider: 'gptsovits',
+          }
+        })
+        const edgeVoices = EDGE_VOICE_OPTIONS.map(v => ({
+          id: v.voice_id,
+          name: v.voice_name,
+          gender: inferGender(v.voice_name, []),
+          traits: '微软 Edge TTS',
+          suitable_for: '系统音色 · 免本地模型',
+          language: v.language,
+          provider: 'edge',
+        }))
+        const voices = [...gsvVoices, ...edgeVoices]
+        const payload = {
+          provider: 'local',
+          voices,
+          instruction: '优先匹配 GPT-SoVITS 克隆音色（gsv: 前缀）；无合适克隆音色时可用微软 Edge TTS（zh- 前缀）。voice_id 必须使用 list_voices 返回的 id。',
+        }
+        logTaskSuccess('VoiceTool', 'list-voices', { episodeId, provider: 'local', count: payload.voices.length })
+        return payload
+      }
+
       const provider = getEpisodeAudioProvider() || 'minimax'
       const rows = db.select().from(schema.aiVoices).where(eq(schema.aiVoices.provider, provider)).all()
       const voices = rows.length ? rows.map(v => {
@@ -84,7 +125,9 @@ export function createVoiceTools(episodeId: number, dramaId: number) {
       reason: z.string().optional().describe('Why this voice fits'),
     }),
     execute: async ({ character_id, voice_id, reason }) => {
-      const provider = getEpisodeAudioProvider() || 'minimax'
+      const provider = usesLocalModelPipeline(getProductionMode())
+        ? (/^(zh|en|ja|ko)-/i.test(String(voice_id || '')) ? 'edge' : 'gptsovits')
+        : (getEpisodeAudioProvider() || 'minimax')
       logTaskProgress('VoiceTool', 'assign-begin', { episodeId, dramaId, characterId: character_id, voiceId: voice_id, provider, reason })
       db.update(schema.characters)
         .set({ voiceStyle: voice_id, voiceProvider: provider, voiceSampleUrl: null, updatedAt: now() })
@@ -104,6 +147,6 @@ function inferGender(name: string, desc: unknown) {
   if (/(?:^|[\s:/_-])male(?:[-_]|$)/i.test(text)) return '男声'
   if (/(?:^|[\s:/_-])female(?:[-_]|$)/i.test(text)) return '女声'
   if (/(男|青年|大爷|学长|\bboy\b|\bman\b|\bmale\b)/i.test(text)) return '男声'
-  if (/(女|少女|御姐|奶奶|\bgirl\b|\bwoman\b|\bfemale\b)/i.test(text)) return '女声'
+  if (/(女|少女|御姐|奶奶|晓晨|晨宝|笑笑|翠兰|老板娘|\bgirl\b|\bwoman\b|\bfemale\b)/i.test(text)) return '女声'
   return '中性'
 }
