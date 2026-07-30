@@ -5,8 +5,15 @@ export type NarrationImageBreakdownProgress = {
   phase: NarrationImageBreakdownPhase
   message: string
   percent: number
+  /** @deprecated 并发时请用 batches_done；保留兼容旧前端 */
   batch?: number
   batch_count?: number
+  /** 已完成批次数 */
+  batches_done?: number
+  /** 当前进行中批次数 */
+  batches_active?: number
+  /** 云端批并发上限 */
+  concurrency?: number
   paragraph_count?: number
   /** 本任务已落库的配图文案条数（中文） */
   prompts_saved?: number
@@ -102,6 +109,9 @@ export function updateNarrationImageBreakdownProgress(
     percent: patch.percent ?? prev?.percent ?? 0,
     batch: patch.batch ?? prev?.batch,
     batch_count: patch.batch_count ?? prev?.batch_count,
+    batches_done: patch.batches_done ?? prev?.batches_done,
+    batches_active: patch.batches_active ?? prev?.batches_active,
+    concurrency: patch.concurrency ?? prev?.concurrency,
     paragraph_count: patch.paragraph_count ?? prev?.paragraph_count,
     prompts_saved: patch.prompts_saved ?? prev?.prompts_saved,
     flux_en_saved: patch.flux_en_saved ?? prev?.flux_en_saved,

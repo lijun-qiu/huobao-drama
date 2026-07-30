@@ -1517,16 +1517,22 @@ const narrationImageBreakdownProgressMessage = computed(() => {
   if (progress.status === 'failed' || progress.status === 'cancelled') {
     return progress.message || progress.error || '配图任务失败'
   }
-  const batch = progress.batch ?? progress.batchCount
+  // 后端 message 已含「已完成 x/y、进行中 z 路」，优先原样展示
+  if (progress.message) return progress.message
+  const done = progress.batches_done ?? progress.batch
+  const active = progress.batches_active
   const batchCount = progress.batch_count ?? progress.batchCount
-  if (batch && batchCount && (progress.phase === 'prompts' || progress.phase === 'detecting')) {
-    return progress.message || (
-      progress.phase === 'detecting'
-        ? `正在检测换镜（第 ${batch}/${batchCount} 批）…`
-        : `正在生成配图文案（第 ${batch}/${batchCount} 批）…`
-    )
+  const concurrency = progress.concurrency
+  if (done != null && batchCount && (progress.phase === 'prompts' || progress.phase === 'detecting')) {
+    if (progress.phase === 'detecting') {
+      return `正在检测换镜（已完成 ${done}/${batchCount} 批）…`
+    }
+    if (active != null && concurrency != null) {
+      return `配图文案：已完成 ${done}/${batchCount} 批，进行中 ${active} 路（并发 ${concurrency}）…`
+    }
+    return `正在生成配图文案（已完成 ${done}/${batchCount} 批）…`
   }
-  return progress.message || '配图分镜进行中…'
+  return '配图分镜进行中…'
 })
 const narrationImageBreakdownModalOpen = ref(false)
 const narrationShotImageModalOpen = ref(false)
@@ -1628,10 +1634,15 @@ const narrationImageBreakdownModalFailed = computed(() => {
 })
 const narrationImageBreakdownModalBatchLabel = computed(() => {
   const progress = narrationImageBreakdownProgress.value
-  const batch = progress?.batch ?? progress?.batchCount
+  const done = progress?.batches_done ?? progress?.batch
+  const active = progress?.batches_active
   const batchCount = progress?.batch_count ?? progress?.batchCount
-  if (batch && batchCount) return `第 ${batch} / ${batchCount} 批`
-  return ''
+  const concurrency = progress?.concurrency
+  if (done == null || !batchCount) return ''
+  if (progress?.phase === 'prompts' && (active != null || concurrency != null)) {
+    return `已完成 ${done}/${batchCount} · 进行中 ${active ?? 0}${concurrency != null ? `/${concurrency}` : ''}`
+  }
+  return `已完成 ${done} / ${batchCount} 批`
 })
 const narrationImageBreakdownModalSummary = computed(() => {
   const progress = narrationImageBreakdownProgress.value

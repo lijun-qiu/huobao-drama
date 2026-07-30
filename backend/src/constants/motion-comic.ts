@@ -198,17 +198,33 @@ export const MOTION_COMIC_PORTRAIT_REFERENCE_LLM_RULE = [
   '场所变化须换装；同一配图段内同一人物（身穿…）须一致；无定妆时须写性别。',
 ].join('')
 
-/** 景别 / 视线 / 场景陈设硬性（解决半身正对镜头、场景空） */
+/** 漫画解说配图文案最低信息量（汉字+陈设+镜头）；过短拒收重写 */
+export const MOTION_COMIC_IMAGE_PROMPT_MIN_LEN = 180
+
+/** 景别 / 视线 / 场景陈设硬性（按旁白 beat 选镜，禁止万能全身平视句） */
 export const MOTION_COMIC_CAMERA_GAZE_SCENE_LLM_RULE = [
-  '【景别·硬性】禁止全片默认半身/中近景：站立、行走、进门、离去、指路、室外、对话站姿 → 一律写中景或中远景全身（头高约10–14%，双脚可见，须写「从头顶到脚完整入镜」）；新场所/时间跳转 → 全景或远景建立环境；双人互动 → 中景/过肩全身，头高≤14%；坐姿/蹲姿持物互动 → 才可用中近景（头高≤24%）；纯神情无动作 → 才允许近景。严禁「中近景+朝向上半身+头高18%+」万能句；站立严禁头高≥17%。',
-  '【视线·硬性】必须写「视线落在{戏内目标}而非镜头」（对方脸/手腕/手机屏/账本/门外/猫眼等）；禁止「视线：A看向B」简写；禁止直视镜头、望向镜头、目视前方（无目标）、正面面向镜头摆拍；身体默认三分之四侧或侧面，禁止「正面站立」。',
-  '【多人构图·硬性】≥2 人须左右或前后拉开站位（画面左/中/右或柜台前/后），禁止三人并排挤脸、禁止重叠站桩；≥3 人优先过肩（一人背影/侧影+对方正面）或一主两辅前后层次；须写「单帧剧情场景」，禁止白底定妆拼贴/角色设定表/多头拼贴。',
-  '【场景布置·硬性】年代场景至少写出 5 个具体陈设点（含材质/颜色/状态），前中后景都要有可指认物件；按场所补功能陈设：卤肉店→砧板/卤锅/铁钩腊肉/油腻柜台/价目牌；走廊玄关→防盗门猫眼/门把手/鞋箱/声控灯/电表箱/剥落墙皮；医院→护士站/电子钟/长椅/指示牌/护栏；街道→路灯/招牌/路边摊/井盖/远处警车。禁止空泛「昏暗墙壁与模糊窗框」。',
+  '【景别·按 beat】优先遵守本段 shot_card；无 card 时按旁白选镜，禁止全片同一句「中远景略侧平视+头高12%+全身入镜」：',
+  '· 场所/时间跳转、进门出门、远望 → 全景或远景建立（头高约6–10%）；',
+  '· 冲/跑/刺/追/逃/扑等位移 → 跟拍或侧向中景/中远景，写清重心与迈步，头高约10–14%；',
+  '· 对峙/拦挡/质问/递接 → 优先双人中景错位，过肩约每 2–3 段用一次（头高约12–18%），可到膝盖或半身；禁止大半段都写过肩；',
+  '· 对话站谈 → 默认中景半身（头高约14–20%），过肩穿插使用，勿强制从头顶到脚；',
+  '· 坐/蹲/跪持物 → 中近景（头高约18–24%）；',
+  '· 纯神情（吓/哭/愣/惊恐且无肢体大位移）→ 必须近景或中近景（头高约22–30%），突出眉眼嘴型；禁止仍写全身/过肩远站；',
+  '相邻段须交替景别与俯仰（略俯/平视/略仰），禁止连续多段同一机位口吻；过肩占比宜 ≤ 约 1/4。',
+  '【姿态·硬性】有冲跑刺拦跪推等动词时，禁止只写「三分之四侧站立」比划；须写位移/重心偏移/手脚连续动作。三分之四侧仅为站谈默认倾向，不是全片唯一姿态；禁止无动作的正面摆拍站桩。',
+  '【信息量·硬性】每条须含：短画风标记 + 景别俯仰头高% + 前中后景陈设 + 定妆标签与身穿#hex + 表情动作；总长建议 ≥180 字，禁止只有一句站立概述。',
+  '【视线·硬性】必须写「视线落在{戏内目标}而非镜头」；禁止直视镜头、望向镜头、无目标目视前方。',
+  '【多人构图·硬性】≥2 人须左右或前后拉开站位；≥3 人优先中景层次或偶发过肩；须写「单帧剧情场景」，禁止白底定妆拼贴/角色设定表/多头拼贴。',
+  '【场景布置·硬性】年代场景至少写出 5 个具体陈设点（含材质/颜色/状态），前中后景都要有可指认物件；按场所补功能陈设。禁止空泛「昏暗墙壁与模糊窗框」。',
 ].join('\n')
 
+/** 旁白位移/对峙等 — repair 时勿强行改成「三分之四侧站立」 */
+const MOTION_COMIC_DYNAMIC_POSE_RE =
+  /冲|跑|奔|刺|挥|追|逃|扑|踢|踹|打|揍|撞|闪|躲|跃|跳|迈|踏|拦|挡|推|拉|拽|跪|蹲|坐|躺|倒|前倾|后仰|侧身|转身|举起|高举/
+
 /**
- * 漫画解说整段文案规则修复（无【】六维括号时，旧的站立全身 repair 不会生效）。
- * 纠正：半身头高、正面站立、视线简写、缺全身入镜、多人挤脸/定妆拼贴倾向。
+ * 漫画解说整段文案规则修复（无【】六维括号时）。
+ * 只做必要纠偏：极端半身裁切、视线简写、多人挤脸；不再把镜头/站姿压成万能句。
  */
 export function repairMotionComicContinuousImagePrompt(prompt?: string | null): string {
   let s = String(prompt || '').trim()
@@ -218,28 +234,36 @@ export function repairMotionComicContinuousImagePrompt(prompt?: string | null): 
   if (!/对照定妆「/.test(s) && !/短剧解说高清国漫|锋利细线稿/.test(s)) return s
 
   const labelCount = [...s.matchAll(/对照定妆「/g)].length
+  const hasDynamicPose = MOTION_COMIC_DYNAMIC_POSE_RE.test(s)
 
-  s = s
-    .replace(/以正面站立姿态/g, '以三分之四侧站立姿态')
-    .replace(/正面站立/g, '三分之四侧站立')
-    .replace(/从头顶到腰部入镜/g, '从头顶到脚完整入镜，双脚可见')
-    .replace(/镜头朝向([^；]{0,28})上半身/g, '镜头朝向全身站姿与互动点')
-    .replace(/中近景([^；]{0,80})/g, (_m, rest: string) => {
+  // 仅无动态姿态时，把空洞正面站桩改成三分之四侧；有冲刺/对峙等则保留
+  if (!hasDynamicPose) {
+    s = s
+      .replace(/以正面站立姿态/g, '以三分之四侧站立姿态')
+      .replace(/正面站立/g, '三分之四侧站立')
+  }
+
+  s = s.replace(/从头顶到腰部入镜/g, '从头顶到脚完整入镜，双脚可见')
+
+  // 仅纠正「站谈却写成大头半身」的极端裁切；情绪近景/过肩中近景保留
+  if (/站立|站姿/.test(s) && !hasDynamicPose && !/过肩|近景|特写/.test(s)) {
+    s = s.replace(/镜头朝向([^；]{0,28})上半身/g, '镜头朝向人物与互动点')
+    s = s.replace(/中近景([^；]{0,80})/g, (_m, rest: string) => {
       const body = String(rest || '')
-      if (/上半身|头高约占画面\s*(1[8-9]|[2-9]\d)/.test(`中近景${body}`) || /腰部入镜/.test(s)) {
-        return '中远景略侧平视，镜头朝向全身站姿与互动点，头高约占画面12%，从头顶到脚完整入镜，双脚可见'
+      if (/上半身|腰部入镜|头高约占画面\s*(2[6-9]|[3-9]\d)/.test(`中近景${body}`)) {
+        return `中景${body.replace(/上半身/g, '人物与互动点')}`
       }
-      return `中景${body}`
+      return `中近景${body}`
     })
+  }
 
-  // 站立/对话镜：头高≥17% 压到 12%
-  if (/站立|站姿|完整入镜/.test(s)) {
-    s = s.replace(/头高约占画面\s*(1[7-9]|[2-9]\d)\s*%/g, '头高约占画面12%')
-  }
-  // 多人同框再压一档
-  if (labelCount >= 2) {
-    s = s.replace(/头高约占画面\s*(1[5-9]|[2-9]\d)\s*%/g, '头高约占画面12%')
-  }
+  // 只压极端大头（≥35%）；保留 12–28% 的景别多样性
+  s = s.replace(/头高约占画面\s*(\d{1,2})\s*%/g, (_m, n: string) => {
+    const pct = Number(n)
+    if (!Number.isFinite(pct)) return _m
+    if (pct >= 35) return '头高约占画面26%'
+    return `头高约占画面${pct}%`
+  })
 
   // 视线：A看向B → 视线落在…
   s = s.replace(/视线：([^；]+)/g, (_m, body: string) => {
@@ -260,13 +284,17 @@ export function repairMotionComicContinuousImagePrompt(prompt?: string | null): 
     return rewritten.join('，')
   })
 
-  if (/站立|站姿/.test(s) && !/完整入镜/.test(s)) {
+  // 全身入镜：仅「站谈全身建立镜」缺句时补；近景/过肩/坐姿不强制
+  if (
+    /站立|站姿/.test(s)
+    && !hasDynamicPose
+    && /中远景|全景|远景/.test(s)
+    && !/完整入镜|近景|过肩|坐姿|蹲|跪/.test(s)
+  ) {
     if (/双脚可见/.test(s)) {
       s = s.replace(/双脚可见/, '从头顶到脚完整入镜，双脚可见')
     } else if (/无文字无水印无字幕/.test(s)) {
       s = s.replace(/无文字无水印无字幕/, '从头顶到脚完整入镜，双脚可见；无文字无水印无字幕')
-    } else {
-      s = `${s}；从头顶到脚完整入镜，双脚可见`
     }
   }
 
@@ -291,12 +319,12 @@ export function repairMotionComicContinuousImagePrompt(prompt?: string | null): 
 export const MOTION_COMIC_SIX_DIM_LLM_RULE = [
   '【漫画解说整段文案】每条 image_prompt 写成一整段通顺中文（可用逗号/分号衔接），禁止输出【画风规格】【画面主体】【年代场景】【核心细节动作】【光影色调】【镜头视角】【质感要求】等固定【】标签。',
   '信息仍须齐全（顺序建议如下，写成自然叙述即可）：',
-  `1) 画风：须体现短剧解说高清国漫（16:9 横屏，${MOTION_COMIC_ART_STYLE_CORE}）；禁止新海诚暖金柔光/水彩糊边/粗条漫黑线/速度线`,
-  '2) 画面主体：位置+姿态+本段表情（贴合 narration_lines 情绪，禁止无故面无表情/中性冷静）；有定妆写对照定妆「portrait_label」（须含 characters.distinct_identity_cue 短辨识差+本镜表情）+（身穿#hex本镜服装）；同框对照定妆人数跟 required_portrait_labels（不封顶）；多人必须异脸异发型禁止同框撞脸/克隆；身体默认三分之四侧或侧面，禁止正面对镜头摆拍',
+  `1) 画风：开头用短标记即可（如「16:9横屏短剧解说高清国漫，锋利细线稿硬边赛璐璐」），勿每条重复整段光影套话；禁止新海诚暖金柔光/水彩糊边/粗条漫黑线/速度线`,
+  '2) 画面主体：位置+姿态+本段表情（贴合 narration_lines 情绪，禁止无故面无表情/中性冷静）；有定妆写对照定妆「portrait_label」（须含 characters.distinct_identity_cue 短辨识差+本镜表情）+（身穿#hex本镜服装）；同框对照定妆人数跟 required_portrait_labels（不封顶）；多人必须异脸异发型禁止同框撞脸/克隆；站谈可用三分之四侧，位移/对峙须写动态姿态，禁止无动作正面摆拍',
   '3) 年代场景：时代+具体地点+前/中/后景分层；前景≥2、中景≥2、后景≥1 个可辨物件（写清材质/颜色/新旧/污渍/灯光状态）；须写出场所功能陈设（柜台器具、门窗猫眼、路灯招牌、沙发茶几、病床护栏等），禁止只写「昏暗墙壁/模糊窗框/楼宇剪影」等空泛背景',
-  '4) 核心细节动作：本段旁白正在发生的可见动作（塞钱/接物/僵住/后退/打电话等），肢体方向与重心清晰；视线须落在物件/对方/门外/手机屏幕等戏内目标，禁止直视镜头；禁止速度线；禁止站桩或上一段残留动作；手持物写在此',
-  '5) 光影色调：冷蓝/青紫夜色戏剧光（强单侧硬光、半脸深阴影、发丝冷白轮廓光），背景暗部浅景深虚化；禁止暖金柔光',
-  '6) 镜头视角：须写景别+俯仰+身体朝向+镜头朝向（人+物件/动作点）+头高%；站立默认中景/中远景全身（从头顶到脚入镜，头高约10–16%）；对话/情绪镜也优先过肩或中景，禁止默认中近景半身；仅纯神情且无肢体动作时才可用近景；相邻段须交替景别，禁止连续多段「中近景+头高26%+朝向上半身」',
+  '4) 核心细节动作：本段旁白正在发生的可见动作（塞钱/接物/僵住/后退/打电话/冲刺等），肢体方向与重心清晰；视线须落在物件/对方/门外/手机屏幕等戏内目标，禁止直视镜头；禁止速度线；禁止站桩或上一段残留动作；手持物写在此',
+  '5) 光影色调：优先遵守 shot_card.suggested_light；按时段/场所写（夜巷冷蓝侧光、店内暖黄顶灯、白天街道自然光、紧张戏硬侧光）；禁止全片复读「冷蓝强侧光半脸深阴影与发丝冷白轮廓光」；背景可浅景深虚化',
+  '6) 镜头视角：优先遵守 shot_card；须写景别+俯仰+身体朝向+镜头朝向（人+物件/动作点）+头高%；相邻段交替景别与俯仰；禁止连续多段「中远景略侧平视+头高12%+全身入镜」万能句',
   '7) 质感：锋利细线稿，硬边赛璐璐高对比，无文字无水印无字幕',
   MOTION_COMIC_CAMERA_GAZE_SCENE_LLM_RULE,
   '【屏幕朝向】禁止只画手机背面或显示器机箱背面；须正面或略侧可见屏幕内容',
@@ -317,7 +345,8 @@ export const MOTION_COMIC_PORTRAIT_OUTFIT_LLM_RULE =
 export const MOTION_COMIC_PARAGRAPH_BEAT_MATCH_LLM_RULE = [
   '【段落贴合·硬性】本条 image_prompt 只服务本段 narration_lines（可含 2～4 句），表情与动作必须能对上这段旁白正在发生的事与情绪。',
   '先从 narration_lines 抽出：谁、在做什么、什么情绪（震惊/愤怒/害怕/尴尬/哀求/冷漠等），再写入表情与动作；禁止套用上一段或通用站桩。',
-  '对照示例：旁白写「塞钱/塞红包」→动作须伸手递钱或掏钱前伸，表情可为殷勤/紧张；旁白写「全身僵住/吓傻」→瞳孔微缩、肩背绷紧、汗珠，禁止笑或闲聊手势；旁白写「问/喊/质问」→张嘴或指向，禁止沉默面无表情。',
+  '对照示例：旁白写「塞钱/塞红包」→动作须伸手递钱或掏钱前伸，表情可为殷勤/紧张；旁白写「全身僵住/吓傻」→瞳孔微缩、肩背绷紧、汗珠，禁止笑或闲聊手势；旁白写「问/喊/质问」→张嘴或指向，禁止沉默面无表情；旁白写「冲进/跑向/刺向」→须写迈步重心与身体前倾，禁止只写站立抬手。',
+  '若本段含 shot_card：镜头/姿态/光影必须按 card 写，禁止无视 card 改回万能全身平视站立句。',
   '旁白写指向/伸手/拉袖/攥物：须肩→肘→手连续成臂，手持物挂在该连续臂上；禁止只写前景大手而同侧臂下垂；双人互动时双方肢体均须连续成臂，禁止第三人肢体入镜。',
   '禁止：写「面无表情、中性冷静」（那是定妆专用）；配图必须有本段情绪表情。',
   '禁止：动作与旁白施受关系反了（如旁白李伯塞钱给我，却画「我」递钱）。',
@@ -338,14 +367,14 @@ export const MOTION_COMIC_LLM_ANALYSIS_STEPS_PROMPT = [
   '1) 通读 full_narration（及 previous_episode_narration 若有），把握主线、人物关系、场景变迁与情绪节奏',
   '2) 读 prior 与 characters；同一配图段内同一人物服装款式+#hex 须一致',
   '3) 精读本段 narration_lines：抽出「谁 + 动词 + 情绪 + 视线目标」，按点名/对白判断在场人数（可多人同框），锁定单帧拍点（位置+姿态+动作+表情+看向何处）',
-  '4) 先选景别（站立优先全身中景/中远景，禁止默认半身），再写一整段连贯中文 image_prompt（禁止【】六维标签）；须覆盖画风、主体、丰富场景陈设、动作、光影、镜头、质感；视线勿朝镜头；full_narration / prior / scene_enrichment 用来加厚场景陈设，禁止把别段高潮动作/表情塞进本段',
+  '4) 先读本段 shot_card（若有）选定景别/姿态/光影，再写一整段连贯中文 image_prompt（禁止【】六维标签）；画风用短标记，勿复读长光影壳；场景陈设靠 full_narration/prior/scene_enrichment 加厚，禁止把别段高潮动作/表情塞进本段',
 ].join('\n')
 
 export const MOTION_COMIC_DYNAMIC_IMAGE_LLM_RULE = [
   '【一段一图】每条 prompt 对应一个配图段（narration_lines 可含 2～4 句），写出该段最具叙事力的单一瞬间；同场景同焦点勿拆成多张无关图。',
   '【运镜友好构图】画面留前中后景层次（前景道具/中景主体/背景环境），主体姿态与肢体方向明确，便于后续推近/拉远/横移；避免主体贴边、画面过满；环境物件面积宜占画面主要部分，人物不要挤满画面中央。',
   '【动态表现】优先写本段可见动作与对应表情、物体互动；禁止速度线/放射线/气流线；情绪镜写眉眼嘴型与肢体语言。',
-  '【镜头视角多样化】相邻配图段必须交替：全景/中远景全身/中景/过肩/略俯/略仰；身体朝向交替三分之四侧与侧面；禁止连续多镜「中近景平视半身正对」。',
+  '【镜头视角多样化】相邻配图段必须交替：全景建立/跟拍中景/过肩对峙/中近景神情/略俯/略仰；姿态在站谈三分之四侧、侧面迈步、前倾冲刺、错位对峙间切换；禁止连续多镜同一「全身平视站立」口吻。',
   '【手脚与持物】须写清左右手脚落点、握持方式与坐蹲臀膝脚关系；禁止只写「站着/坐着/拿着」。',
 ].join('\n')
 
@@ -430,8 +459,133 @@ export function buildMotionComicCharacterAppearanceSystem(): string {
   ].join('\n')
 }
 
-export const MOTION_COMIC_SCENE_BODY_EXAMPLE =
-  `16:9横屏短剧解说高清国漫，锋利细线稿硬边赛璐璐，冷蓝强侧光半脸深阴影与发丝冷白轮廓光；对照定妆「我」（青年·清秀鹅蛋脸细眉碎发，眉头紧锁、瞳孔微缩，嘴角抿紧，摇头拒绝）位于堂屋桌前以三分之四侧站立微退姿态（身穿#2563eb蓝色夹克），无配角；现代老旧堂屋，前景斑驳木桌、泛黄账本与半截红包，中景昏暗木门、铜烛台与油腻碗筷，后景剥落墙皮、糊纸窗棂与歪挂年画；右手已握住红包却向外侧推开，肩→肘→手连续成臂，身体微退半步，视线落在桌上红包而非镜头；冷蓝戏剧光，背景暗部浅景深虚化；中远景略侧平视，镜头朝向全身站姿与桌上红包，头高约占画面12%，从头顶到脚完整入镜，双脚可见；锋利细线稿高对比赛璐璐，无文字无水印无字幕`
+/** 多样示例：建立 / 中景对峙 / 动作跟拍 / 情绪近景（禁止模型只学一种壳） */
+export const MOTION_COMIC_SCENE_BODY_EXAMPLES = [
+  '国漫赛璐璐，16:9；对照定妆「我」（青年·碎发，神色警惕）刚推开卤肉店铁门迈入（身穿#64748b灰蓝针织立领衫）；夜店街景全景建立：前景油腻门槛与铁门把手，中景卤锅蒸汽与挂腊肉，后景巷口霓虹与路灯；暖黄店内顶灯混室外冷蓝；远景略仰，头高约8%，人物偏画面一侧留环境',
+  '国漫赛璐璐，16:9；单帧剧情；对照定妆「黑衣人」（中年·短寸，眉头紧锁）在走廊左侧三分之四侧对峙抬掌（身穿#1f2937黑西装），对照定妆「我」在右侧错位中景张嘴喝止（身穿#64748b灰蓝针织立领衫）；前景门把手与猫眼，中景剥落墙皮，后景声控灯；冷白楼道灯+硬侧光；双人中景略俯，头高约16%，左右拉开肩线对抗，勿滥用过肩',
+  '国漫赛璐璐，16:9；对照定妆「我」（青年·碎发，双目圆睁）持桃木剑身体前倾冲刺迈右脚（身穿#64748b灰蓝针织立领衫），无配角；走廊玄关：前景地面反光与散落钥匙，中景防盗门洞开，后景楼梯口暗影；紧张戏硬侧光；侧向跟拍中景，头高约12%，写清迈步重心与剑尖朝向，禁止只写站立抬手',
+  '国漫赛璐璐，16:9；对照定妆「刘翠兰」（中年·花白寸发，双眼圆睁泛白、嘴角微张惊骇）双手紧抓围裙边缘（身穿#3d4e1f深橄榄绿工装立领夹克）；卤肉店内：前景热气模糊虚化，中景挂钟与菜单牌虚影；中性顶灯；近景略俯，头高约26%，面部占画面大部，禁止全身站立远站',
+] as const
+
+/** @deprecated 使用 MOTION_COMIC_SCENE_BODY_EXAMPLES */
+export const MOTION_COMIC_SCENE_BODY_EXAMPLE = MOTION_COMIC_SCENE_BODY_EXAMPLES[0]
+
+export type MotionComicShotCard = {
+  beat: 'establish' | 'action' | 'confront' | 'dialogue' | 'emotion' | 'sit' | 'default'
+  suggested_shot: string
+  suggested_pose: string
+  suggested_light: string
+  head_height_hint: string
+  forbid: string[]
+}
+
+const SHOT_CARD_ACTION_RE =
+  /冲|跑|奔|刺|挥|追|逃|扑|踢|踹|打|揍|撞|闪|躲|跃|跳|迈|踏|举起|高举|冲进|冲出|跑向|刺向/
+const SHOT_CARD_CONFRONT_RE =
+  /对峙|拦|挡|质问|对骂|对吼|指着|吼|喊|怒喝|喝止|拦住|挡住|对骂|对视/
+const SHOT_CARD_ESTABLISH_RE =
+  /来到|走进|走到|门外|街上|巷口|医院|走廊|进门|出门|远处|天亮|夜深|到了|抵达|推开.*门|打开.*门/
+const SHOT_CARD_EMOTION_RE =
+  /吓|愣|呆|哭|泪|颤抖|僵住|崩溃|震惊|害怕|泪光|吓傻|吓得|惊恐|惨白|慌乱|绝望|茫然|咬牙|冷汗|脸色苍白|吓得/
+const SHOT_CARD_SIT_RE = /坐|蹲|跪|躺|倒地/
+/** 对峙里的「硬对抗」——有这些才优先过肩/对峙卡；纯惊吓走情绪近景 */
+const SHOT_CARD_HARD_CONFRONT_RE = /对峙|拦|挡|质问|对骂|对吼|指着|怒喝|喝止|拦住|挡住|对视/
+const SHOT_CARD_DAY_RE = /白天|上午|午后|阳光|晨光|早晨|晴天|日光/
+const SHOT_CARD_WARM_RE = /卤肉|堂屋|店内|店里|暖黄|烛|灯笼|灶/
+const SHOT_CARD_NIGHT_RE = /夜|深夜|夜里|楼道|玄关|黑|昏暗|凌晨/
+
+/** 按旁白规则生成镜头卡，供配图 LLM 强制多样化 */
+export function buildMotionComicShotCard(
+  narrationLines: string[],
+  options?: { paragraphIndex?: number },
+): MotionComicShotCard {
+  const text = (narrationLines || []).map(s => String(s || '').trim()).filter(Boolean).join('\n')
+  const idx = Math.max(0, Number(options?.paragraphIndex) || 0)
+  const tilt = idx % 3 === 0 ? '略俯' : idx % 3 === 1 ? '平视' : '略仰'
+
+  let light = '中性环境光，主光方向明确，背景浅景深'
+  if (SHOT_CARD_DAY_RE.test(text)) light = '白天自然光，阴影清晰，避免夜戏冷蓝口吻'
+  else if (SHOT_CARD_WARM_RE.test(text)) light = '室内暖黄顶灯/灶火感，可混少量冷色轮廓，禁止复读冷蓝半脸深阴影套话'
+  else if (SHOT_CARD_NIGHT_RE.test(text)) light = '夜戏冷蓝或冷白侧光，半脸可有阴影，但勿每条复读同一句'
+
+  const forbidBase = [
+    '连续复用「中远景略侧平视+头高12%+全身入镜」万能句',
+    '无视旁白动作只写三分之四侧站立比划',
+    '每条都写「冷蓝强侧光半脸深阴影与发丝冷白轮廓光」',
+  ]
+
+  if (SHOT_CARD_ACTION_RE.test(text)) {
+    return {
+      beat: 'action',
+      suggested_shot: `侧向跟拍中景或中远景，${tilt}`,
+      suggested_pose: '迈步/前倾冲刺/重心偏移，手脚连续成臂，禁止只站立抬手',
+      suggested_light: light,
+      head_height_hint: '头高约10–14%',
+      forbid: [...forbidBase, '站桩对峙冒充冲刺'],
+    }
+  }
+  if (SHOT_CARD_SIT_RE.test(text)) {
+    return {
+      beat: 'sit',
+      suggested_shot: `中近景，${tilt}`,
+      suggested_pose: '坐/蹲/跪的臀膝脚关系写清，持物分工明确',
+      suggested_light: light,
+      head_height_hint: '头高约18–24%',
+      forbid: [...forbidBase, '把坐姿硬改成站立全身'],
+    }
+  }
+  // 情绪近景优先于「喊/吼」类弱对峙，避免惊吓段全写成过肩站谈
+  if (SHOT_CARD_EMOTION_RE.test(text) && !SHOT_CARD_ACTION_RE.test(text) && !SHOT_CARD_HARD_CONFRONT_RE.test(text)) {
+    return {
+      beat: 'emotion',
+      suggested_shot: `近景或中近景，${tilt}`,
+      suggested_pose: '肩背绷紧/微缩/抬手捂脸等情绪肢体，突出眉眼嘴型',
+      suggested_light: light,
+      head_height_hint: '头高约22–28%',
+      forbid: [...forbidBase, '情绪镜仍写全身远景或滥用过肩'],
+    }
+  }
+  if (SHOT_CARD_CONFRONT_RE.test(text) || isMotionComicDualPortraitBeat(text)) {
+    const useOts = idx % 3 === 0
+    return {
+      beat: 'confront',
+      suggested_shot: useOts ? `过肩中景，${tilt}` : `双人中景错位，${tilt}`,
+      suggested_pose: '左右错位对峙/拦挡，肩线对抗，禁止并排正面站桩',
+      suggested_light: light,
+      head_height_hint: '头高约12–18%',
+      forbid: [...forbidBase, '强制从头顶到脚全身入镜', '连续多段复读过肩'],
+    }
+  }
+  if (SHOT_CARD_ESTABLISH_RE.test(text)) {
+    return {
+      beat: 'establish',
+      suggested_shot: `全景或远景建立，${tilt}`,
+      suggested_pose: '进门/迈入/远望，人物可偏画面一侧留环境',
+      suggested_light: light,
+      head_height_hint: '头高约6–10%',
+      forbid: [...forbidBase, '建立镜写成半身特写'],
+    }
+  }
+  if (/说|问|答|道|：|「|」/.test(text)) {
+    const useOts = idx % 4 === 0
+    return {
+      beat: 'dialogue',
+      suggested_shot: useOts ? `过肩，${tilt}` : `中景半身，${tilt}`,
+      suggested_pose: '三分之四侧站谈或侧身交谈，视线落在对方/物件',
+      suggested_light: light,
+      head_height_hint: '头高约14–20%',
+      forbid: [...forbidBase, '对话镜强制从头顶到脚', '对话段过半写成过肩'],
+    }
+  }
+  return {
+    beat: 'default',
+    suggested_shot: `中景，${tilt}`,
+    suggested_pose: '按旁白动词写姿态，站谈可用三分之四侧',
+    suggested_light: light,
+    head_height_hint: '头高约12–18%',
+    forbid: forbidBase,
+  }
+}
 
 export function formatMotionComicStyleSpecBracket(): string {
   return `【画风规格：${MOTION_COMIC_STYLE_SPEC}】`
@@ -691,6 +845,121 @@ export function motionComicShotDescription(shot: MotionComicStoryboardShot): str
   return parts.join('｜') || shot.dialogue?.trim() || ''
 }
 
+/** 从配图文案反推分镜 description / 景别字段，避免长期停在「未指定场景｜自然状态｜中景·平视·固定」 */
+export function deriveMotionComicShotMetaFromImagePrompt(prompt?: string | null): {
+  description: string
+  location: string
+  shotType: string
+  angle: string
+  movement: string
+  expressionAction: string
+} {
+  const s = String(prompt || '').trim()
+  if (!s) {
+    return {
+      description: '未指定场景｜自然状态｜中景·平视·固定',
+      location: '未指定场景',
+      shotType: '中景',
+      angle: '平视',
+      movement: '固定',
+      expressionAction: '自然状态',
+    }
+  }
+
+  let shotType = '中景'
+  if (/特写/.test(s)) shotType = '特写'
+  else if (/近景/.test(s)) shotType = '近景'
+  else if (/中近景/.test(s)) shotType = '中近景'
+  else if (/过肩/.test(s)) shotType = '过肩中景'
+  else if (/全景/.test(s)) shotType = '全景'
+  else if (/远景/.test(s)) shotType = '远景'
+  else if (/中远景/.test(s)) shotType = '中远景'
+  else if (/跟拍/.test(s)) shotType = '中景'
+  else if (/中景/.test(s)) shotType = '中景'
+
+  let angle = '平视'
+  if (/略俯/.test(s)) angle = '略俯'
+  else if (/俯视/.test(s)) angle = '俯视'
+  else if (/略仰/.test(s)) angle = '略仰'
+  else if (/仰视/.test(s)) angle = '仰视'
+
+  let movement = '固定'
+  if (/跟拍|侧向跟/.test(s)) movement = '跟拍'
+  else if (/推镜|推近|推进/.test(s)) movement = '推镜'
+  else if (/拉镜|拉远/.test(s)) movement = '拉镜'
+  else if (/微移/.test(s)) movement = '微移'
+
+  let expressionAction = '自然状态'
+  const exprLabeled = s.match(/(?:神色|神情|面色|表情)([^，；。、（()）｜·\s身对照]{1,10})/)
+  if (exprLabeled) {
+    expressionAction = `${exprLabeled[0]}`.replace(/[）)].*$/, '').slice(0, 16)
+  } else {
+    const faceBit = s.match(/(双眼[^，；。）)｜·]{2,10}|眉头[^，；。）)｜·]{2,8}|嘴角[^，；。）)｜·]{2,8})/)
+    if (faceBit) expressionAction = faceBit[0].replace(/[）)].*$/, '').slice(0, 16)
+    else {
+      const mood = s.match(/惊骇|惊恐|警惕|坚定|微笑|不屑|慌乱|愤怒|哭泣|错愣|冷漠|焦急|惨白/)
+      if (mood) expressionAction = mood[0]
+    }
+  }
+
+  let location = ''
+  const placeOnly = s.match(/卤肉店|堂屋|走廊玄关|走廊|玄关|巷口|街道|楼道|店内|店里|门外|街上|室内|室外|夜店/)
+  if (placeOnly) location = placeOnly[0]
+  if (!location) {
+    const fg = s.match(/前景([^，；。｜]{2,14})/)
+    const mg = s.match(/中景([^，；。｜]{2,14})/)
+    const cleanProp = (raw?: string) => String(raw || '')
+      .replace(/对照定妆[\s\S]*$/, '')
+      .replace(/身穿#[0-9a-fA-F]{3,8}.*$/, '')
+      .replace(/[（(][^）)]*[）)]/g, '')
+      .replace(/视线落在[^，；]*/g, '')
+      .replace(/过肩|略俯|略仰|平视|跟拍|视角|镜头|头高.*$/g, '')
+      .trim()
+    const parts = [cleanProp(fg?.[1]), cleanProp(mg?.[1])]
+      .filter(p => p.length >= 2 && !/身穿|定妆/.test(p))
+    if (parts.length) location = parts.join('·').slice(0, 24)
+  }
+  if (!location) location = '场景待辨'
+
+  const description = motionComicShotDescription({
+    speaker: '',
+    dialogue: '',
+    background: location,
+    expression_action: expressionAction,
+    shot_type: shotType,
+    angle,
+    movement,
+  })
+
+  return { description, location, shotType, angle, movement, expressionAction }
+}
+
+/** 旁白有位移/对抗动词，但文案只写站立比划 */
+export function isMotionComicStandPoseShellPrompt(
+  prompt?: string | null,
+  narrationLines?: string[] | null,
+): boolean {
+  const promptText = String(prompt || '')
+  const narr = (narrationLines || []).join('\n')
+  if (!promptText || !narr) return false
+  if (!MOTION_COMIC_DYNAMIC_POSE_RE.test(narr)) return false
+  if (MOTION_COMIC_DYNAMIC_POSE_RE.test(promptText)) return false
+  return /站立|站姿|站谈/.test(promptText)
+}
+
+/** 情绪旁白却仍全身/过肩远站 */
+export function isMotionComicEmotionWithoutCloseupPrompt(
+  prompt?: string | null,
+  narrationLines?: string[] | null,
+): boolean {
+  const promptText = String(prompt || '')
+  const narr = (narrationLines || []).join('\n')
+  if (!promptText || !narr) return false
+  if (!SHOT_CARD_EMOTION_RE.test(narr)) return false
+  if (SHOT_CARD_ACTION_RE.test(narr) || SHOT_CARD_HARD_CONFRONT_RE.test(narr)) return false
+  return !/近景|特写|中近景/.test(promptText)
+}
+
 /** 漫画解说分镜 description 常为「场景｜表情｜景别·角度·运镜」，不能当旁白正文 */
 export function isMotionComicCameraMetaDescription(text: string): boolean {
   const t = String(text || '').trim()
@@ -906,7 +1175,8 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
   hasDiptych?: boolean
 }): string {
   return [
-    '你是漫画解说分镜美术指导。每个配图段含 2～4 句旁白，须为该段写一张短剧解说高清国漫（冷色高对比戏剧光）的中文配图文案：一整段连贯叙述，禁止【】六维标签，但画风/主体/场景/动作/光影/镜头/质感信息须齐全。',
+    '你是漫画解说分镜美术指导。每个配图段含 2～4 句旁白，须为该段写一张短剧解说高清国漫的中文配图文案：一整段连贯叙述，禁止【】六维标签，但画风/主体/场景/动作/光影/镜头/质感信息须齐全。',
+    '【shot_card·硬性】每段 paragraphs[].shot_card 已按旁白给出建议景别/姿态/光影：必须遵守；禁止无视 card 复读「中远景略侧平视+头高12%+全身入镜+冷蓝半脸深阴影」万能句。',
     '分析流程：',
     MOTION_COMIC_LLM_ANALYSIS_STEPS_PROMPT,
     MOTION_COMIC_BODY_CONSISTENCY_LLM_RULE,
@@ -924,7 +1194,7 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
     options?.hasCharacters
       ? `characters 提供 portrait_label、has_portrait 与外貌；正文须写对照定妆「portrait_label」与（身穿#hex…）。${MOTION_COMIC_MAJOR_SUPPORTING_LLM_RULE}`
       : MOTION_COMIC_CROWD_LLM_RULE,
-    `整段示例（仅格式，禁止照抄示例情节/动作；每段必须按本段 narration_lines 重写）：${MOTION_COMIC_SCENE_BODY_EXAMPLE}`,
+    `整段示例（四种不同景别/姿态/光影，仅格式；禁止照抄情节；每段按本段 narration_lines + shot_card 重写）：\n1) ${MOTION_COMIC_SCENE_BODY_EXAMPLES[0]}\n2) ${MOTION_COMIC_SCENE_BODY_EXAMPLES[1]}\n3) ${MOTION_COMIC_SCENE_BODY_EXAMPLES[2]}\n4) ${MOTION_COMIC_SCENE_BODY_EXAMPLES[3]}`,
     MOTION_COMIC_STYLE_FORBIDDEN,
     '只输出 JSON，不要解释。',
   ].filter(Boolean).join('\n')

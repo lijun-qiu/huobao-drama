@@ -682,9 +682,12 @@ app.post('/:id/narration-image-detect', async (c) => {
   let style = resolveNarrationImageStyle(body.style)
   if (!String(body.style || '').trim()) {
     const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
-    if (drama?.style === 'narration-anime' || drama?.style === 'narration-minimal') {
-      style = resolveNarrationImageStyle(drama.style)
-    }
+    style = resolveNarrationImageStyle(
+      resolveEpisodeVisualStyle(episodeId, {
+        imageStyle: (ep as { imageStyle?: string | null }).imageStyle,
+        dramaStyle: drama?.style,
+      }),
+    )
   }
 
   try {
@@ -726,9 +729,12 @@ app.post('/:id/narration-image-prompts', async (c) => {
   let style = resolveNarrationImageStyle(body.style)
   if (!String(body.style || '').trim()) {
     const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
-    if (drama?.style === 'narration-anime' || drama?.style === 'narration-minimal') {
-      style = resolveNarrationImageStyle(drama.style)
-    }
+    style = resolveNarrationImageStyle(
+      resolveEpisodeVisualStyle(episodeId, {
+        imageStyle: (ep as { imageStyle?: string | null }).imageStyle,
+        dramaStyle: drama?.style,
+      }),
+    )
   }
 
   try {

@@ -29,7 +29,7 @@ import {
 } from './narration-image-breakdown-progress.js'
 import { loadEpisodeContinuityContext } from './episode-continuity.js'
 import { usesMotionComicVisuals, parseProductionMode } from '../constants/production-mode.js'
-import { resolveStoryboardNarrationText } from '../constants/motion-comic.js'
+import { resolveStoryboardNarrationText, deriveMotionComicShotMetaFromImagePrompt } from '../constants/motion-comic.js'
 import { buildMotionComicAnchorMotionMeta, buildMotionComicSegmentMotionMeta } from './motion-comic-meta.js'
 import { now } from '../utils/response.js'
 import { llmGeneratedAt } from '../utils/llm-meta.js'
@@ -560,10 +560,24 @@ function savePromptAnchorsOnly(
       referenceImages = mergeStoryboardFluxPromptMeta(referenceImages, paraInfo.fluxPromptEn)
     }
 
+    const derived = ctx.motionComicMode
+      ? deriveMotionComicShotMetaFromImagePrompt(paraInfo.prompt)
+      : null
+
     db.update(schema.storyboards)
       .set({
         imagePrompt: paraInfo.prompt,
         referenceImages,
+        ...(derived
+          ? {
+            description: derived.description,
+            location: derived.location,
+            shotType: derived.shotType,
+            angle: derived.angle,
+            movement: derived.movement,
+            action: derived.expressionAction,
+          }
+          : {}),
         updatedAt: ts,
       })
       .where(eq(schema.storyboards.id, sb.id))
@@ -614,6 +628,10 @@ function savePromptResults(
       image_prompt_llm_raw: isParagraphAnchor ? (paraInfo?.prompt || undefined) : existing.image_prompt_llm_raw,
     }
 
+    const derived = ctx.motionComicMode && isParagraphAnchor && paraInfo?.prompt
+      ? deriveMotionComicShotMetaFromImagePrompt(paraInfo.prompt)
+      : null
+
     db.update(schema.storyboards)
       .set({
         imagePrompt: isParagraphAnchor ? (paraInfo?.prompt || null) : null,
@@ -621,6 +639,16 @@ function savePromptResults(
           ? mergeMotionMetaIntoReferenceImages(imageMode, refBase, motionMeta)
           : buildNarrationImageMeta(imageMode, refBase),
         ...(motionMeta ? { movement: motionMeta.movement, shotType: motionMeta.shotType } : {}),
+        ...(derived
+          ? {
+            description: derived.description,
+            location: derived.location,
+            shotType: derived.shotType,
+            angle: derived.angle,
+            movement: derived.movement,
+            action: derived.expressionAction,
+          }
+          : {}),
         updatedAt: ts,
       })
       .where(eq(schema.storyboards.id, sb.id))

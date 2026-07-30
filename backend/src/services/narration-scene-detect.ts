@@ -48,8 +48,12 @@ import {
   MOTION_COMIC_IMAGE_DETECT_TARGET_STORYBOARD_RATIO,
   MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS,
   MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS,
+  MOTION_COMIC_IMAGE_PROMPT_MIN_LEN,
   MOTION_COMIC_PORTRAIT_OUTFIT_LLM_RULE,
   repairMotionComicContinuousImagePrompt,
+  buildMotionComicShotCard,
+  isMotionComicStandPoseShellPrompt,
+  isMotionComicEmotionWithoutCloseupPrompt,
 } from '../constants/motion-comic.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 import {
@@ -888,7 +892,7 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-/** 有限并发执行（保序领取任务，不保完成顺序） */
+/** 有限并发执行：任一 worker 完成后立刻领取下一批（不按波次等待） */
 async function mapPool(
   count: number,
   concurrency: number,
@@ -2089,10 +2093,42 @@ export async function generateParagraphImagePromptsWithLLM(
     let skippedBatches = 0
     let consecutiveBatchFails = 0
     let completedBatches = 0
+    let activeBatches = 0
+    let launchSeq = 0
+    /** 全局限流：失败后推迟「新开批」时间，但不阻塞已完成 worker 立刻领下一批的逻辑之外的额外长睡 */
+    let rateLimitUntil = 0
     const withSharedLock = createAsyncMutex()
     const batchConcurrency = ollamaLlm
       ? 1
       : Math.max(1, Math.min(PARAGRAPH_PROMPT_LLM_BATCH_CONCURRENCY, batches.length || 1))
+
+    const emitPromptProgress = (extra?: {
+      message?: string
+      percent?: number
+      lastBatch?: number
+    }) => {
+      const done = completedBatches
+      const active = activeBatches
+      const total = batches.length
+      const message = extra?.message ?? (
+        batchConcurrency > 1
+          ? `配图文案：已完成 ${done}/${total} 批，进行中 ${active} 路（并发 ${batchConcurrency}）…`
+          : `正在生成配图文案（${done}/${total} 批）…`
+      )
+      reportProgress?.({
+        status: 'processing',
+        phase: 'prompts',
+        // 兼容旧前端：batch 表示已完成批次数，避免显示「当前批号」乱跳
+        batch: done,
+        batch_count: total,
+        batches_done: done,
+        batches_active: active,
+        concurrency: batchConcurrency,
+        paragraph_count: paragraphs.length,
+        message,
+        percent: extra?.percent ?? calcPromptBatchPercent(done, total),
+      })
+    }
 
     logTaskProgress('NarrationScene', 'llm-paragraph-prompt-start', {
       paragraphCount: paragraphs.length,
@@ -2109,13 +2145,26 @@ export async function generateParagraphImagePromptsWithLLM(
         assertNarrationImageBreakdownNotCancelled(options.episodeId)
       }
       const batch = batches[batchIndex]
-      // 串行：批间间隔；并发：轻微错峰，避免同时打满上游
-      if (batchConcurrency <= 1) {
-        if (batchIndex > 0) await sleep(batchGapMs)
-      } else {
-        await sleep(120 * (batchIndex % batchConcurrency))
-      }
 
+      // 仅首波并发启动错峰；任一完成后立刻领下一批，不再按批号 sleep
+      const myLaunch = launchSeq++
+      if (batchConcurrency > 1 && myLaunch < batchConcurrency) {
+        await sleep(80 * myLaunch)
+      } else if (batchConcurrency <= 1 && batchIndex > 0) {
+        await sleep(batchGapMs)
+      }
+      // 失败退避：只在开新批前短等，避免占着并发槽长睡
+      const rateWait = Math.max(0, rateLimitUntil - Date.now())
+      if (rateWait > 0) await sleep(Math.min(rateWait, 3_000))
+
+      activeBatches++
+      emitPromptProgress({
+        message: batchConcurrency > 1
+          ? `配图文案：已完成 ${completedBatches}/${batches.length} 批，进行中 ${activeBatches} 路（正在跑第 ${batchIndex + 1} 批）…`
+          : `正在生成配图文案（第 ${batchIndex + 1}/${batches.length} 批）…`,
+      })
+
+      try {
       const batchHasDiptych = batch.some(p => p.layout === 'diptych')
       const batchSystem = batchHasDiptych === episodeHasDiptych
         ? system
@@ -2125,17 +2174,7 @@ export async function generateParagraphImagePromptsWithLLM(
           weightArc,
         })
 
-      reportProgress?.({
-        status: 'processing',
-        phase: 'prompts',
-        batch: batchIndex + 1,
-        batch_count: batches.length,
-        paragraph_count: paragraphs.length,
-        message: batchConcurrency > 1
-          ? `正在生成配图文案（第 ${batchIndex + 1}/${batches.length} 批，并发 ${batchConcurrency}）…`
-          : `正在生成配图文案（第 ${batchIndex + 1}/${batches.length} 段）…`,
-        percent: calcPromptBatchPercent(completedBatches, batches.length),
-      })
+      // （原 reportProgress 启动文案已由 emitPromptProgress 覆盖）
 
       // 每段只带：全文摘要 + 本段旁白 + enrichment；不再塞长 prior_narration 原文数组
       const user = JSON.stringify({
@@ -2166,6 +2205,12 @@ export async function generateParagraphImagePromptsWithLLM(
             start_index: p.startIndex,
             layout: p.layout,
             narration_lines: p.sentences,
+            ...(motionComic
+              ? {
+                shot_card: buildMotionComicShotCard(p.sentences, { paragraphIndex: p.index }),
+                shot_card_rule: '必须按 shot_card 写景别/姿态/光影；禁止无视 card 复读万能全身平视站立句',
+              }
+              : {}),
             ...(priorTimelineSnip ? { prior_timeline_snip: priorTimelineSnip } : {}),
             ...(p.sceneDescription ? { detect_scene_description: p.sceneDescription } : {}),
             ...(sceneEnrichment ? { scene_enrichment: sceneEnrichment } : {}),
@@ -2219,12 +2264,12 @@ export async function generateParagraphImagePromptsWithLLM(
         output_format: {
           paragraph_prompts: paragraphOutputHint,
           writing_rule: motionComic
-            ? '只根据本段 narration_lines 写一整段连贯中文（禁止【】六维标签，须覆盖画风/主体/场景/动作/光影/镜头/质感）：表情与动作必须符合该段旁白正在发生的事与情绪，禁止面无表情站桩、禁止搬用别段动作；full_narration_summary/prior/scene_enrichment 只补场景；有定妆须含对照定妆「label」与（身穿#hex…）；严格 JSON'
+            ? '只根据本段 narration_lines + shot_card 写一整段连贯中文（禁止【】六维标签）：必须遵守 shot_card 景别/姿态/光影；表情与动作必须符合该段旁白，禁止面无表情站桩、禁止搬用别段动作、禁止复读万能全身平视句；画风用短标记；full_narration_summary/prior/scene_enrichment 只补场景；有定妆须含对照定妆「label」与（身穿#hex…）；严格 JSON'
             : inlineFluxEnglish
               ? 'image_prompt 必须是中文七维（含【画风规格】【画面主体】等全角括号），禁止把英文写进 image_prompt；flux_prompt_en 为短英文七维，Subjects 用 portrait_label；两项都要有；严格 JSON'
               : '只根据本段 narration_lines 写七维中文：【画面主体】表情与【核心细节动作】必须符合该段旁白正在发生的事与情绪，禁止面无表情站桩、禁止搬用别段动作；full_narration_summary/prior 只补场景；勿复述长旁白原文；输出严格 JSON',
           paragraph_beat_match: motionComic
-            ? '硬性：先从 narration_lines 提取动作动词与情绪词，再写入人物表情与可见动作；塞钱就画递钱、僵住就画僵住、质问就画张嘴/指向；禁止与本段无关的通用姿势'
+            ? '硬性：先从 narration_lines 提取动作动词与情绪词，再写入人物表情与可见动作；冲跑刺拦须写位移重心，禁止只写三分之四侧站立比划；塞钱就画递钱、僵住就画僵住、质问就画张嘴/指向；禁止与本段无关的通用姿势'
             : '硬性：先从 narration_lines 提取动作动词与情绪词，再写入【核心细节动作】与【画面主体】表情；塞钱就画递钱、僵住就画僵住、质问就画张嘴/指向；禁止与本段无关的通用姿势',
           scene_enrichment_rule: motionComic
             ? '若含 scene_enrichment：场景陈设写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入动作描述；执行 must_use'
@@ -2272,13 +2317,8 @@ export async function generateParagraphImagePromptsWithLLM(
             waitMs,
             lastError: lastError.slice(0, 200),
           })
-          reportProgress?.({
-            status: 'processing',
-            phase: 'prompts',
-            batch: batchIndex + 1,
-            batch_count: batches.length,
-            message: `第 ${batchIndex + 1}/${batches.length} 批重试中（${attempt + 1}/${batchAttempts}）…`,
-            percent: calcPromptBatchPercent(batchIndex, batches.length),
+          emitPromptProgress({
+            message: `第 ${batchIndex + 1} 批重试中（${attempt + 1}/${batchAttempts}）；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`,
           })
           await sleep(waitMs)
         }
@@ -2383,7 +2423,17 @@ export async function generateParagraphImagePromptsWithLLM(
         // 硬性：须含汉字且达最低信息量；不再强制【】六维标签
         const hasCn = /[\u4e00-\u9fff]/.test(prompt)
         const hasPortraitTag = /对照定妆「/.test(prompt)
-        const acceptOk = hasCn && prompt.length >= 24
+        const minLen = motionComic ? MOTION_COMIC_IMAGE_PROMPT_MIN_LEN : 24
+        const narrLines = batchItem?.sentences || []
+        const forceAccept = !!opts?.forceAfterAlign
+        const tooThin = motionComic && !forceAccept && prompt.length < minLen
+        const standShell = motionComic && !forceAccept && isMotionComicStandPoseShellPrompt(prompt, narrLines)
+        const emotionFar = motionComic && !forceAccept && isMotionComicEmotionWithoutCloseupPrompt(prompt, narrLines)
+        const acceptOk = hasCn
+          && prompt.length >= (forceAccept ? 24 : minLen)
+          && !tooThin
+          && !standShell
+          && !emotionFar
         if (!acceptOk) {
           rejectReasonByStart.set(startIndex, 'format')
           logTaskWarn('NarrationScene', 'llm-paragraph-prompt-cn-missing', {
@@ -2392,6 +2442,10 @@ export async function generateParagraphImagePromptsWithLLM(
             hasCn,
             hasPortraitTag,
             length: prompt.length,
+            minLen,
+            tooThin: !!tooThin,
+            standShell: !!standShell,
+            emotionFar: !!emotionFar,
           })
           const fluxEn = String(row?.flux_prompt_en || '').trim()
           if (fluxEn) englishByStartIndex.set(startIndex, fluxEn)
@@ -2491,7 +2545,9 @@ export async function generateParagraphImagePromptsWithLLM(
         const isFormatRetry = rejectReason === 'format'
         const retryHintExtra = isDuplicateRetry
           ? '【动作去重·硬性】禁止照抄填空示例或其它段的同一套动作（如推开红包/堂屋账本）；必须严格按本段 narration_lines 写全新表情与动作，场景与镜头也须贴合本段。'
-          : ''
+          : isFormatRetry
+            ? '【信息量/景别·硬性】文案须≥180字；须含前中后景陈设+定妆+身穿#hex+景别俯仰头高%；旁白有冲跑刺拦等动词时禁止只写站立比划；纯惊吓/哭愣须近景或中近景，禁止全身远站或滥用过肩。'
+            : ''
         const mergedPortraitFields = retryHintExtra
           ? {
             ...portraitFields,
@@ -2500,22 +2556,14 @@ export async function generateParagraphImagePromptsWithLLM(
               .join(''),
           }
           : portraitFields
-        const portraitLabels = Array.isArray((mergedPortraitFields as { required_portrait_labels?: string[] }).required_portrait_labels)
-          ? (mergedPortraitFields as { required_portrait_labels: string[] }).required_portrait_labels.join('/')
-          : ''
-        reportProgress?.({
-          status: 'processing',
-          phase: 'prompts',
-          batch: batchIndex + 1,
-          batch_count: batches.length,
+        emitPromptProgress({
           message: isDuplicateRetry
-            ? `第 ${batchIndex + 1} 批文案与已有段过近，重写 ${mi + 1}/${missing.length}（start ${item.startIndex}，须按本段旁白换动作）…`
+            ? `第 ${batchIndex + 1} 批近重复重写 ${mi + 1}/${missing.length}；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`
             : isPortraitRetry
-              ? `第 ${batchIndex + 1} 批定妆标签不符，重写 ${mi + 1}/${missing.length}（start ${item.startIndex}${portraitLabels ? ` → ${portraitLabels}` : ''}）…`
+              ? `第 ${batchIndex + 1} 批定妆不符重写 ${mi + 1}/${missing.length}；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`
               : isFormatRetry
-                ? `第 ${batchIndex + 1} 批文案过短/无效，重写 ${mi + 1}/${missing.length}（start ${item.startIndex}）…`
-                : `第 ${batchIndex + 1} 批缺段，单段补写 ${mi + 1}/${missing.length}（start ${item.startIndex}${portraitLabels ? `，定妆 ${portraitLabels}` : ''}）…`,
-          percent: calcPromptBatchPercent(completedBatches, batches.length),
+                ? `第 ${batchIndex + 1} 批格式重写 ${mi + 1}/${missing.length}；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`
+                : `第 ${batchIndex + 1} 批缺段补写 ${mi + 1}/${missing.length}；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`,
         })
         const singleUser = JSON.stringify({
           ...(previousEpisodeSummary ? { previous_episode_summary: previousEpisodeSummary } : {}),
@@ -2534,6 +2582,15 @@ export async function generateParagraphImagePromptsWithLLM(
               start_index: item.startIndex,
               layout: item.layout,
               narration_lines: (item.ttsSentences?.length ? item.ttsSentences : item.sentences),
+              ...(motionComic
+                ? {
+                  shot_card: buildMotionComicShotCard(
+                    item.ttsSentences?.length ? item.ttsSentences : item.sentences,
+                    { paragraphIndex: item.index },
+                  ),
+                  shot_card_rule: '必须按 shot_card 写景别/姿态/光影；禁止无视 card 复读万能全身平视站立句',
+                }
+                : {}),
               ...(priorTimelineSnip ? { prior_timeline_snip: priorTimelineSnip } : {}),
               ...(item.sceneDescription ? { detect_scene_description: item.sceneDescription } : {}),
               ...(sceneEnrichment ? { scene_enrichment: sceneEnrichment } : {}),
@@ -2547,12 +2604,12 @@ export async function generateParagraphImagePromptsWithLLM(
                 ? '[{ start_index, image_prompt, flux_prompt_en }]，仅 1 条；中文七维 + 短英文七维'
                 : '[{ start_index: number, image_prompt: string }]，仅 1 条；按七维中文输出完整 image_prompt',
             writing_rule: motionComic
-              ? '只根据本段 narration_lines 写一整段连贯中文；表情与动作必须符合该段旁白正在发生的事，禁止面无表情站桩、禁止搬用别段动作、禁止照抄填空示例、禁止【】六维标签；full_narration_summary/prior 只补场景；严格 JSON'
+              ? '只根据本段 narration_lines + shot_card 写一整段连贯中文；必须遵守 shot_card 景别/姿态/光影；表情与动作必须符合该段旁白，禁止面无表情站桩、禁止搬用别段动作、禁止照抄填空示例、禁止【】六维标签；full_narration_summary/prior 只补场景；严格 JSON'
               : inlineFluxEnglish
                 ? '写中文七维并同步短英文 flux_prompt_en；严格 JSON'
                 : '只根据本段 narration_lines 写七维；表情与【核心细节动作】必须符合该段旁白正在发生的事，禁止面无表情站桩、禁止搬用别段动作、禁止照抄填空示例；full_narration_summary/prior 只补场景；严格 JSON',
             paragraph_beat_match: motionComic
-              ? '硬性：从 narration_lines 提取动作与情绪再写入人物表情与可见动作；禁止与本段无关的通用姿势；禁止复用其它段或示例里的推红包/站桩动作'
+              ? '硬性：从 narration_lines 提取动作与情绪再写入人物表情与可见动作；有冲跑刺拦时禁止只写站立比划；禁止与本段无关的通用姿势；禁止复用其它段或示例里的推红包/站桩动作'
               : '硬性：从 narration_lines 提取动作与情绪再写入【核心细节动作】与表情；禁止与本段无关的通用姿势；禁止复用其它段或示例里的推红包/站桩动作',
             scene_enrichment_rule: motionComic
               ? '若含 scene_enrichment：场景陈设写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入动作描述'
@@ -2676,47 +2733,35 @@ export async function generateParagraphImagePromptsWithLLM(
           responsePreview: lastRaw.slice(0, 400),
           lastError: lastError.slice(0, 200),
         })
-        // 整批失败：不中断后续批次；限流时多歇一会再继续
-        const coolMs = Math.min(12_000, 2_000 * Math.max(1, consecutiveBatchFails))
-        reportProgress?.({
-          status: 'processing',
-          phase: 'prompts',
-          batch: batchIndex + 1,
-          batch_count: batches.length,
-          message: `第 ${batchIndex + 1}/${batches.length} 批失败，已跳过（稍后可补全），继续下一批…`,
-          percent: calcPromptBatchPercent(completedBatches + 1, batches.length),
+        // 整批失败：不中断后续；限流写入 shared window，本 worker 立刻可领下一批
+        const coolMs = Math.min(8_000, 1_500 * Math.max(1, consecutiveBatchFails))
+        rateLimitUntil = Math.max(rateLimitUntil, Date.now() + coolMs)
+        emitPromptProgress({
+          message: `第 ${batchIndex + 1} 批失败已跳过；已完成 ${completedBatches}/${batches.length}，进行中 ${Math.max(0, activeBatches - 1)} 路…`,
         })
-        await sleep(coolMs)
       } else {
         await withSharedLock(() => {
           consecutiveBatchFails = 0
         })
-
-        reportProgress?.({
-          status: 'processing',
-          phase: 'prompts',
-          batch: batchIndex + 1,
-          batch_count: batches.length,
+        emitPromptProgress({
           message: missing.length
-            ? `第 ${batchIndex + 1}/${batches.length} 批部分完成（缺 ${missing.length} 段，稍后可补全）`
-            : `第 ${batchIndex + 1}/${batches.length} 批配图文案已完成`,
-          percent: calcPromptBatchPercent(completedBatches + 1, batches.length),
+            ? `第 ${batchIndex + 1} 批部分完成（缺 ${missing.length} 段）；已完成 ${completedBatches}/${batches.length}，进行中 ${Math.max(0, activeBatches - 1)} 路…`
+            : undefined,
         })
       }
-
-      completedBatches++
+      } finally {
+        activeBatches = Math.max(0, activeBatches - 1)
+        completedBatches++
+        emitPromptProgress()
+      }
     }
 
-    if (batchConcurrency > 1) {
-      reportProgress?.({
-        status: 'processing',
-        phase: 'prompts',
-        batch_count: batches.length,
-        paragraph_count: paragraphs.length,
-        message: `配图文案并发生成中（最多同时 ${batchConcurrency} 批）…`,
-        percent: 4,
-      })
-    }
+    emitPromptProgress({
+      message: batchConcurrency > 1
+        ? `配图文案并发生成中（最多同时 ${batchConcurrency} 批，完成一路立即开下一路）…`
+        : `正在生成配图文案（共 ${batches.length} 批）…`,
+      percent: 4,
+    })
 
     await mapPool(batches.length, batchConcurrency, runOneBatch)
 

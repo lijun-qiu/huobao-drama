@@ -20,6 +20,7 @@ import {
   VIOLENCE_IMAGE_DETECT_RE,
   sanitizeSceneImagePrompt,
 } from '../constants/art-styles.js'
+import { deriveMotionComicShotMetaFromImagePrompt } from '../constants/motion-comic.js'
 import { parseNarrationImageMeta, buildNarrationImageMeta } from './narration-image.js'
 import { now } from '../utils/response.js'
 
@@ -301,6 +302,9 @@ export function optimizeEpisodeNarrationImagePrompts(
     const meta = parseNarrationImageMeta(sb.referenceImages)
     const { narration_image_mode, ...restMeta } = meta
     const llmRawBackup = meta.image_prompt_llm_raw || before
+    const derived = isMotionComicStyle(style)
+      ? deriveMotionComicShotMetaFromImagePrompt(after)
+      : null
     db.update(schema.storyboards)
       .set({
         imagePrompt: after,
@@ -309,6 +313,16 @@ export function optimizeEpisodeNarrationImagePrompts(
           image_prompt_source: 'optimized',
           image_prompt_llm_raw: llmRawBackup,
         }),
+        ...(derived
+          ? {
+            description: derived.description,
+            location: derived.location,
+            shotType: derived.shotType,
+            angle: derived.angle,
+            movement: derived.movement,
+            action: derived.expressionAction,
+          }
+          : {}),
         updatedAt: ts,
       })
       .where(eq(schema.storyboards.id, sb.id))
