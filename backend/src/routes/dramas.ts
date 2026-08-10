@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { eq, isNull, desc } from 'drizzle-orm'
+import { and, eq, isNull, desc } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, notFound, created, now } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
@@ -12,6 +12,12 @@ import {
   saveNovelComicSource,
 } from '../services/novel-comic-outline.js'
 import type { NovelComicChapterOutline } from '../constants/novel-comic.js'
+import {
+  mergeNovelBible,
+  normalizeNovelBibleInput,
+  parseNovelBible,
+} from '../constants/novel-bible.js'
+import { linkDramaCastToEpisode, normalizeExtractedCharacterRole } from '../services/narration-characters.js'
 
 const app = new Hono()
 
@@ -239,6 +245,116 @@ app.post('/:id/novel-comic/apply-outline', async (c) => {
   } catch (e: any) {
     return badRequest(c, String(e?.message || e))
   }
+})
+
+// GET /dramas/:id/novel-bible — 剧级小说设定（大纲/世界观/主要角色）
+app.get('/:id/novel-bible', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, id)).all()
+  if (!drama || drama.deletedAt) return notFound(c, '剧本不存在')
+  return success(c, parseNovelBible(drama.metadata))
+})
+
+// PUT /dramas/:id/novel-bible — 保存小说设定（合并 metadata，不覆盖其它键）
+app.put('/:id/novel-bible', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, id)).all()
+  if (!drama || drama.deletedAt) return notFound(c, '剧本不存在')
+  const body = await c.req.json().catch(() => ({}))
+  const patch = normalizeNovelBibleInput(body)
+  const metadata = mergeNovelBible(drama.metadata, patch)
+  db.update(schema.dramas).set({ metadata, updatedAt: now() }).where(eq(schema.dramas.id, id)).run()
+  return success(c, parseNovelBible(metadata))
+})
+
+// POST /dramas/:id/novel-bible/sync-characters — 主要角色同步到项目角色表（不覆盖已有定妆/图）
+app.post('/:id/novel-bible/sync-characters', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, id)).all()
+  if (!drama || drama.deletedAt) return notFound(c, '剧本不存在')
+  const body = await c.req.json().catch(() => ({}))
+  const episodeId = Number(body.episode_id || body.episodeId || 0) || null
+  const bible = parseNovelBible(drama.metadata)
+  if (!bible.main_characters.length) {
+    return badRequest(c, '小说设定中尚无主要角色，请先填写后再同步')
+  }
+
+  const ts = now()
+  const existing = db.select().from(schema.characters)
+    .where(and(eq(schema.characters.dramaId, id), isNull(schema.characters.deletedAt)))
+    .all()
+
+  let createdCount = 0
+  let updatedCount = 0
+  const syncedIds: number[] = []
+
+  for (const entry of bible.main_characters) {
+    const name = String(entry.name || '').trim()
+    if (!name) continue
+    const role = normalizeExtractedCharacterRole(name, entry.role || '')
+    const description = String(entry.brief || '').trim() || null
+    const hit = existing.find(ch => String(ch.name || '').trim() === name
+      && !String(ch.variantLabel || '').trim())
+      || existing.find(ch => String(ch.name || '').trim() === name)
+
+    if (hit) {
+      const updates: Record<string, unknown> = { updatedAt: ts }
+      if (role && (!hit.role || hit.role === '角色')) updates.role = role
+      else if (role && entry.role) updates.role = role
+      if (description && !String(hit.description || '').trim()) updates.description = description
+      else if (description) updates.description = description
+      db.update(schema.characters).set(updates).where(eq(schema.characters.id, hit.id)).run()
+      updatedCount++
+      syncedIds.push(hit.id)
+    } else {
+      const res = db.insert(schema.characters).values({
+        dramaId: id,
+        name,
+        role: role || null,
+        description,
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      const newId = Number(res.lastInsertRowid)
+      createdCount++
+      syncedIds.push(newId)
+      existing.push({
+        id: newId,
+        dramaId: id,
+        name,
+        role: role || null,
+        description,
+        appearance: null,
+        variantLabel: null,
+        personality: null,
+        voiceStyle: null,
+        imageUrl: null,
+        referenceImages: null,
+        seedValue: null,
+        sortOrder: null,
+        localPath: null,
+        voiceSampleUrl: null,
+        voiceProvider: null,
+        createdAt: ts,
+        updatedAt: ts,
+        deletedAt: null,
+      })
+    }
+  }
+
+  if (episodeId) {
+    const [ep] = db.select().from(schema.episodes)
+      .where(and(eq(schema.episodes.id, episodeId), eq(schema.episodes.dramaId, id)))
+      .all()
+    if (ep) linkDramaCastToEpisode(episodeId, id)
+  }
+
+  return success(c, {
+    created: createdCount,
+    updated: updatedCount,
+    character_ids: syncedIds,
+    bible: parseNovelBible(drama.metadata),
+  })
 })
 
 // PUT /dramas/:id/characters - Save characters

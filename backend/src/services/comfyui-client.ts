@@ -15,11 +15,23 @@ import {
   sanitizePortraitEyeColorText,
   sanitizePortraitExpressionText,
 } from '../constants/portrait-reference.js'
-import { artStylePrompt, normalizeArtStyle, NARRATION_MINIMAL_STYLE, NARRATION_ANIME_STYLE, isMotionComicStyle } from '../constants/art-styles.js'
+import {
+  artStylePrompt,
+  normalizeArtStyle,
+  NARRATION_MINIMAL_STYLE,
+  NARRATION_ANIME_STYLE,
+  isMotionComicStyle,
+  isNovelComicSketchStyle,
+  usesComicIllustrationPipeline,
+} from '../constants/art-styles.js'
 import {
   MOTION_COMIC_ART_STYLE_EN,
   MOTION_COMIC_PORTRAIT_STYLE_EN,
 } from '../constants/motion-comic.js'
+import {
+  NOVEL_COMIC_SKETCH_ART_STYLE_EN,
+  NOVEL_COMIC_SKETCH_PORTRAIT_STYLE_EN,
+} from '../constants/novel-comic.js'
 import { compressFluxChinesePrompt, compressFluxEnglishPrompt, compressSdxlInstantIdStoryboardEnglish, parseFluxEnglishSections } from '../constants/flux-prompt-compact.js'
 import { enrichFluxStoryboardPrompt } from './flux-storyboard-enrich.js'
 import { purgeChineseFromFluxEnglish } from '../constants/flux-prompt-en-sanitize.js'
@@ -77,7 +89,7 @@ export function resolveComfyPromptFamily(style?: string | null): ComfyVisualFami
 
 function shortComfyStylePrompt(style?: string | null, context: 'portrait' | 'scene' = 'scene'): string {
   const key = normalizeArtStyle(style)
-  if (isMotionComicStyle(key)) {
+  if (usesComicIllustrationPipeline(key)) {
     return comfyVisualStylePrompt(style, context)
   }
   const full = artStylePrompt(style, context).trim()
@@ -85,17 +97,22 @@ function shortComfyStylePrompt(style?: string | null, context: 'portrait' | 'sce
   return full.split(',').slice(0, 5).join(',').trim()
 }
 
-/** Comfy 场景/定妆英文画风（motion-comic 对齐短剧高清国漫，禁止落到新海诚） */
+/** Comfy 场景/定妆英文画风（motion-comic 国漫 / novel-comic-sketch：配图彩漫四格、定妆黑白素笔） */
 function comfyVisualStylePrompt(style?: string | null, context: 'portrait' | 'scene' = 'scene'): string {
   const key = normalizeArtStyle(style)
   if (key === NARRATION_MINIMAL_STYLE) {
     return 'simple flat 2D cartoon, bold black outline, round face with eye highlights, minimalist proportions'
   }
+  if (isNovelComicSketchStyle(key)) {
+    return context === 'portrait' ? NOVEL_COMIC_SKETCH_PORTRAIT_STYLE_EN : NOVEL_COMIC_SKETCH_ART_STYLE_EN
+  }
   if (isMotionComicStyle(key)) {
     return context === 'portrait' ? MOTION_COMIC_PORTRAIT_STYLE_EN : MOTION_COMIC_ART_STYLE_EN
   }
   if (key === NARRATION_ANIME_STYLE) {
-    return 'high quality cinematic anime illustration, Makoto Shinkai Kyoto Animation style, thin clean lineart, soft painterly cel shading, large expressive anime eyes with catchlights, golden hour window light, rim light on hair, shallow depth of field bokeh background'
+    return context === 'portrait'
+      ? 'Japanese 2D anime illustration portrait, Anime Style, large expressive anime eyes with catchlights, high-contrast cinematic modeling, pure white background, even soft studio lighting, normal young adult body proportions, NOT 3D CGI, NOT photorealistic, NOT chibi'
+      : 'Japanese 2D anime illustration, Anime Style, high-contrast cinematic lighting, cool tones when tense, normal young adult body proportions, NOT 3D CGI, NOT photorealistic, NOT chibi'
   }
   if (key === 'short-drama') {
     return 'Chinese short drama 2D animation style, thin clean anime line art, flat soft cel shading, normal young adult body proportions, expressive anime face'
@@ -123,12 +140,93 @@ function stripCjkFromPrompt(text: string): string {
     .trim()
 }
 
-function resolveGenderHint(raw: string, characterName?: string | null, role?: string | null): string {
+/** 从姓名/定位推断性别（优先于定妆文案，避免 LLM 错写成异性后锁死） */
+const PORTRAIT_FEMALE_ROLE_RE =
+  /女主|女主角|女性主角|女配|母亲|妈妈|女儿|妻子|老婆|女友|闺蜜|姐妹|师姐|师妹|阿姨|婶|奶奶|姥姥|外婆|小姐|女士|姑娘|夫人|媳妇|女王|女同学|女老师|女同事|嫂/
+const PORTRAIT_MALE_ROLE_RE =
+  /男主|男主角|男性主角|男配|父亲|爸爸|儿子|丈夫|老公|男友|师兄|师弟|叔叔|大爷|爷爷|外公|姥爷|老哥|小弟|男同学|男老师|男同事|伯/
+const PORTRAIT_FEMALE_NAME_RE = /[姐婶婆妹姨娘奶]|小姐|女士|姑娘|阿姨/
+const PORTRAIT_MALE_NAME_RE = /[爷伯叔哥弟汉]|先生|大叔/
+
+export type PortraitGender = 'male' | 'female' | 'unknown'
+
+/** 仅凭姓名+定位的性别（不含 appearance，供定妆生成前锁定） */
+export function resolveIdentityPortraitGender(
+  characterName?: string | null,
+  role?: string | null,
+): PortraitGender {
   const roleStr = String(role || '').trim()
-  if (/^男主$|男主角|男性主角/i.test(roleStr)) return '1boy, solo male, male focus'
-  if (/^女主$|女主角|女性主角/i.test(roleStr)) return '1girl, solo female'
-  const text = `${characterName || ''} ${roleStr} ${raw}`
-  if (/女|姐|娘|婆|妹|阿姨|婶|female|girl|woman|1girl/i.test(text) && !/男性|男主|1man|1boy|middle.?aged man/i.test(text)) {
+  const nameStr = String(characterName || '').trim()
+  if (/^女主$|^女主人?$/.test(roleStr) || /女主角|女性主角/.test(roleStr)) return 'female'
+  if (/^男主$|^男主人?$/.test(roleStr) || /男主角|男性主角/.test(roleStr)) return 'male'
+  if (/^女主$/.test(nameStr)) return 'female'
+  if (/^(男主|主角|我)$/.test(nameStr)) return 'male'
+  // 「主要配角·妻子」等：先看身份词，勿被「配角」里的歧义带偏
+  if (PORTRAIT_FEMALE_ROLE_RE.test(roleStr)) return 'female'
+  if (PORTRAIT_MALE_ROLE_RE.test(roleStr)) return 'male'
+  if (PORTRAIT_FEMALE_NAME_RE.test(nameStr) || (/女/.test(nameStr) && !/男女/.test(nameStr))) return 'female'
+  if (PORTRAIT_MALE_NAME_RE.test(nameStr)) return 'male'
+  return 'unknown'
+}
+
+/**
+ * 从旁白/剧本片段补性别：她/他、妻子/丈夫等靠近角色名时生效。
+ * 仅在 identity 未知时使用。
+ */
+export function inferPortraitGenderFromScript(
+  characterName?: string | null,
+  script?: string | null,
+): PortraitGender {
+  const name = String(characterName || '').trim()
+  const s = String(script || '')
+  if (!name || !s) return 'unknown'
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const near = new RegExp(`${esc}[^。！？\\n]{0,24}(她|妻子|老婆|女友|母亲|女儿|姐姐|妹妹|姑娘)|(?:她|妻子|老婆|女友)[^。！？\\n]{0,24}${esc}`)
+  if (near.test(s)) return 'female'
+  const nearMale = new RegExp(`${esc}[^。！？\\n]{0,24}(他(?![们妈])|丈夫|老公|男友|父亲|儿子|哥哥|弟弟)|(?:他(?![们妈])|丈夫|老公|男友)[^。！？\\n]{0,24}${esc}`)
+  if (nearMale.test(s)) return 'male'
+  return 'unknown'
+}
+
+export function resolvePortraitGender(
+  rawPrompt: string,
+  characterName?: string | null,
+  role?: string | null,
+): PortraitGender {
+  // 1) 姓名/定位优先：即使定妆误写「男性」，女主/妻子仍锁女性
+  const identity = resolveIdentityPortraitGender(characterName, role)
+  if (identity !== 'unknown') return identity
+
+  const app = String(rawPrompt || '')
+    .replace(/【画风规格[：:][^】]*】/g, ' ')
+    .replace(/\bEnglish tags:\s*[\s\S]*$/i, ' ')
+  // 2) 定妆正文显式性别
+  if (/女性|女主|少女|女孩|女人|女士|1girl|female|woman/i.test(app) && !/男性|男主|1man|1boy/i.test(app)) {
+    return 'female'
+  }
+  if (/男性|男主|中年男|1man|1boy|middle.?aged man|mature male|mature man/i.test(app)) {
+    return 'male'
+  }
+  if (/女性/.test(app)) return 'female'
+  if (/男性/.test(app)) return 'male'
+
+  // 3) 弱线索（姓名称谓等）
+  const text = `${characterName || ''} ${role || ''} ${app}`
+  if (PORTRAIT_FEMALE_ROLE_RE.test(text) || PORTRAIT_FEMALE_NAME_RE.test(text) || /1girl|female|woman|少女/i.test(text)) {
+    return 'female'
+  }
+  if (PORTRAIT_MALE_ROLE_RE.test(text) || PORTRAIT_MALE_NAME_RE.test(text) || /1man|1boy|male|boy/i.test(text)) {
+    return 'male'
+  }
+  if (/男/.test(text) && !/女/.test(text)) return 'male'
+  if (/女/.test(text)) return 'female'
+  return 'unknown'
+}
+
+function resolveGenderHint(raw: string, characterName?: string | null, role?: string | null): string {
+  const gender = resolvePortraitGender(raw, characterName, role)
+  const text = `${characterName || ''} ${role || ''} ${raw}`
+  if (gender === 'female') {
     if (/老年|晚年|白发|苍老|年迈|奶奶|姥姥|外婆|\d{2}\s*岁/.test(text)) {
       const age = text.match(/(\d{2})\s*岁/)
       const n = age ? Number(age[1]) : null
@@ -136,38 +234,26 @@ function resolveGenderHint(raw: string, characterName?: string | null, role?: st
         return '1woman, elderly woman, old woman, solo female, mature female'
       }
     }
+    if (/中年|母亲|妈妈|婶|阿姨|mature|middle.?aged/.test(text)) {
+      return '1woman, mature woman, solo female'
+    }
     return '1girl, solo female'
   }
-  // 爷/伯/叔等称谓优先于笼统「男」→ 禁止落到 1boy/young man
-  if (/爷爷|外公|姥爷|老太爷|老汉|老年|晚年|白发|苍老|年迈|elderly|old man|\d{2}\s*岁/.test(text) || /[爷伯]/.test(String(characterName || ''))) {
-    const age = text.match(/(\d{2})\s*岁/)
-    const n = age ? Number(age[1]) : null
-    if ((n != null && n >= 55) || /爷爷|外公|姥爷|老太爷|老汉|老年|晚年|白发|苍老|年迈|elderly|old man|[爷伯]/.test(`${characterName || ''}${text}`)) {
-      return '1man, elderly man, old man, solo male, male focus, wrinkled face, gray hair'
+  if (gender === 'male') {
+    // 爷/伯/叔等称谓优先于笼统「男」→ 禁止落到 1boy/young man
+    if (/爷爷|外公|姥爷|老太爷|老汉|老年|晚年|白发|苍老|年迈|elderly|old man|\d{2}\s*岁/.test(text) || /[爷伯]/.test(String(characterName || ''))) {
+      const age = text.match(/(\d{2})\s*岁/)
+      const n = age ? Number(age[1]) : null
+      if ((n != null && n >= 55) || /爷爷|外公|姥爷|老太爷|老汉|老年|晚年|白发|苍老|年迈|elderly|old man|[爷伯]/.test(`${characterName || ''}${text}`)) {
+        return '1man, elderly man, old man, solo male, male focus, wrinkled face, gray hair'
+      }
     }
+    if (/中年|middle.?aged|mature man|熟男|中年男|叔叔|大叔/.test(text) || /叔/.test(String(characterName || ''))) {
+      return '1man, solo male, middle-aged man, male focus'
+    }
+    return '1boy, solo male, male focus'
   }
-  if (/中年|middle.?aged|mature man|熟男|中年男|叔叔|大叔/.test(text) || /叔/.test(String(characterName || ''))) {
-    return '1man, solo male, middle-aged man, male focus'
-  }
-  if (/男|哥|小伙|男生|男友|丈夫|male|boy|1boy/i.test(text)) return '1boy, solo male, male focus'
   return 'solo, single character'
-}
-
-export type PortraitGender = 'male' | 'female' | 'unknown'
-
-export function resolvePortraitGender(
-  rawPrompt: string,
-  characterName?: string | null,
-  role?: string | null,
-): PortraitGender {
-  const roleStr = String(role || '').trim()
-  if (/^男主$|男主角|男性主角|父亲|爸爸|儿子|男配/i.test(roleStr)) return 'male'
-  if (/^女主$|女主角|女性主角|母亲|妈妈|女儿|女配/i.test(roleStr)) return 'female'
-  const text = `${characterName || ''} ${roleStr} ${rawPrompt || ''}`
-  if (/中年男|男性|男主|父亲|爸爸|儿子|1man|middle.?aged man|mature male|mature man/i.test(text)) return 'male'
-  if (/女|女主|母亲|妈妈|女儿|1girl|female|woman|少女/i.test(text) && !/男性|男主|1man|1boy|父亲|爸爸|儿子/i.test(text)) return 'female'
-  if (/男|1boy|1man|male|boy/i.test(text)) return 'male'
-  return 'unknown'
 }
 
 /** 角色性别中文标签（配图文案【画面主体】用） */
@@ -177,7 +263,7 @@ export function resolveCharacterGenderLabelCn(
   appearance?: string | null,
 ): '男性' | '女性' | null {
   const gender = resolvePortraitGender(
-    `${name || ''} ${appearance || ''}`.trim(),
+    String(appearance || '').trim(),
     name,
     role,
   )
@@ -360,7 +446,12 @@ function sanitizeStoryboardEnglishTags(tags: string): string {
 }
 
 /** appearance 中的 English tags → ComfyUI 定妆提示（布局词必须靠前，CLIP 约 77 token） */
-export function toComfyPortraitPrompt(rawPrompt: string, characterName?: string | null, visualStyle?: string | null): string {
+export function toComfyPortraitPrompt(
+  rawPrompt: string,
+  characterName?: string | null,
+  visualStyle?: string | null,
+  role?: string | null,
+): string {
   const raw = String(rawPrompt || '').trim()
   const cnBody = raw
     .replace(/\s*\bEnglish tags:\s*[\s\S]*$/i, '')
@@ -379,7 +470,7 @@ export function toComfyPortraitPrompt(rawPrompt: string, characterName?: string 
     )
   }
 
-  const genderHint = resolveGenderHint(raw, characterName)
+  const genderHint = resolveGenderHint(raw, characterName, role)
   const family = resolveComfyVisualFamily(visualStyle)
   const styleTag = comfyPortraitStylePrompt(visualStyle)
   const minimal = normalizeArtStyle(visualStyle) === 'narration-minimal'
@@ -597,7 +688,7 @@ function comfyPortraitRenderStyle(visualStyle?: string | null): string {
     return 'flat 2D cartoon, bold black outline'
   }
   if (key === NARRATION_ANIME_STYLE) {
-    return 'high quality modern anime illustration, highly detailed anime eyes with catchlights, thin clean lineart, soft cel shading, polished character art'
+    return 'Japanese 2D anime illustration, Anime Style, highly detailed anime eyes with catchlights, high-contrast cinematic modeling, polished character art, NOT thin-lineart recipe, NOT cel-shading recipe'
   }
   return comfyPortraitStylePrompt(visualStyle)
 }
@@ -1404,7 +1495,7 @@ export function extractOutfitClauseChinese(text: string): string | null {
  * 正向前置：身份锁脸、单人、按本镜换装。
  */
 export function enrichQwenPortraitRefStoryboardChinese(text: string, _options?: {
-  /** @deprecated 配图已改为单定妆入镜，忽略双人模式 */
+  /** @deprecated 配图同框最多双定妆；保留参数兼容旧调用 */
   dualPortrait?: boolean
 }): string {
   const raw = String(text || '').trim()
@@ -2087,9 +2178,12 @@ export function toComfyFluxPortraitPrompt(
   const raw = String(rawPrompt || '').trim()
   if (!raw) return ''
   const gender = resolvePortraitGender(raw, characterName, role)
+  const sketch = isNovelComicSketchStyle(visualStyle)
   const motionComic = isMotionComicStyle(visualStyle)
-  const isAnime = !motionComic && (/动漫|anime|新海诚|京都动画/i.test(raw) || String(visualStyle || '').includes('anime'))
-  const styleEn = motionComic
+  const isAnime = !motionComic && !sketch && (/动漫|anime|新海诚|京都动画/i.test(raw) || String(visualStyle || '').includes('anime'))
+  const styleEn = sketch
+    ? `${NOVEL_COMIC_SKETCH_PORTRAIT_STYLE_EN}, masterpiece, best quality, sharp focus, monochrome`
+    : motionComic
     ? `${MOTION_COMIC_PORTRAIT_STYLE_EN}, masterpiece, best quality, ultra detailed, sharp focus`
     : isAnime
     ? 'masterpiece, best quality, ultra detailed, sharp focus, cinematic anime illustration, Makoto Shinkai and Kyoto Animation quality, clean detailed lineart, soft cel shading'

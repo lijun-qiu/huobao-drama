@@ -78,7 +78,7 @@
         </div>
 
         <div class="lmb-row lmb-deepseek-row">
-          <span class="lmb-field-label">Nemotron 3 Ultra</span>
+          <span class="lmb-field-label">OpenRouter 免费</span>
           <div class="prod-tabs lmb-channel-tabs">
             <button
               v-for="tab in freeTextTabs"
@@ -227,12 +227,14 @@ import { useEpisodeStudioInject } from '~/composables/useEpisodeStudio'
 import { normalizeTextModelId, textModelLabel } from '~/composables/useEpisodeWorkflow'
 
 const FREE_TABS = [
-  { value: 'nvidia/nemotron-3-ultra-550b-a55b:free', short: 'OR 免费', label: 'Nemotron 3 Ultra · OpenRouter 免费' },
+  { value: 'poolside/laguna-s-2.1:free', short: 'Laguna', label: 'Laguna S 2.1 · OpenRouter 免费' },
+  { value: 'nvidia/nemotron-3-ultra-550b-a55b:free', short: 'Ultra', label: 'Nemotron 3 Ultra · OpenRouter 免费（备选）' },
+  { value: 'nvidia/nemotron-3-super-120b-a12b:free', short: 'Super', label: 'Nemotron 3 Super · OpenRouter 免费（备选）' },
 ] as const
 
 const FLASH_TABS = [
+  { value: 'deepseek-v4-flash', short: '妙飞', label: 'DeepSeek V4 Flash · 妙飞（默认）' },
   { value: 'openrouter/deepseek-v4-flash', short: 'OR 付费', label: 'DeepSeek V4 Flash · OpenRouter 付费' },
-  { value: 'deepseek-v4-flash', short: '官网', label: 'DeepSeek V4 Flash · 官网' },
 ] as const
 
 const PRO_TABS = [
@@ -241,13 +243,15 @@ const PRO_TABS = [
 ] as const
 
 const TRIGGER_SHORT: Record<string, string> = {
-  'nvidia/nemotron-3-ultra-550b-a55b:free': 'Nemotron免费',
-  'openrouter/deepseek-v4-flash:free': 'Nemotron免费',
-  'openrouter/deepseek-v4-flash': 'OR付费',
-  'deepseek-v4-flash': '官网Flash',
+  'poolside/laguna-s-2.1:free': 'Laguna免费',
+  'nvidia/nemotron-3-super-120b-a12b:free': 'Super免费',
+  'nvidia/nemotron-3-ultra-550b-a55b:free': 'Ultra高质量',
+  'openrouter/deepseek-v4-flash:free': 'Laguna免费',
+  'openrouter/deepseek-v4-flash': '妙速',
+  'deepseek-v4-flash': '妙飞',
   'openrouter/deepseek-v4-pro': 'OR Pro',
   'deepseek-v4-pro': '官网Pro',
-  'deepseek-v4-flash:free': 'Nemotron免费',
+  'deepseek-v4-flash:free': 'Laguna免费',
   'glm-4.7-flash': '智谱4.7',
   'glm-4-flash-250414': '智谱Flash',
 }

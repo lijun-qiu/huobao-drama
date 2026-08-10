@@ -5,7 +5,7 @@
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
-                <span class="step-num">01</span>
+                <span class="step-num">{{ usesExplainScriptFlow ? '02' : '01' }}</span>
                 <span class="step-name">{{ scriptChatStepTitle }}</span>
               </div>
               <span class="dim" style="font-size:12px;margin-left:8px">{{ scriptChatGenModeHint }}</span>
@@ -53,6 +53,15 @@
                 />
               </div>
               <button
+                v-if="scriptGenMode === 'chat' && usesExplainScriptFlow"
+                type="button"
+                class="btn btn-sm btn-primary"
+                :disabled="scriptChatGenerating"
+                @click="optimizeNovelComicNarration"
+              >
+                {{ optimizeExplainScriptButtonLabel }}
+              </button>
+              <button
                 v-if="scriptGenMode === 'chat'"
                 type="button"
                 class="btn btn-sm"
@@ -66,20 +75,31 @@
 
           <div v-if="scriptGenMode === 'manual'" class="script-manual-panel">
             <div class="script-manual-toolbar">
-              <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
+              <span v-if="usesExplainScriptFlow ? scriptLen : rawLen" class="char-count">{{ usesExplainScriptFlow ? scriptLen : rawLen }} 字</span>
               <button
-                v-if="rawHasEmphasis"
+                v-if="!usesExplainScriptFlow && rawHasEmphasis"
                 type="button"
                 class="btn btn-sm"
                 @click="stripRawEmphasis"
               >
                 去掉 ** 标记
               </button>
-              <button type="button" class="btn btn-sm btn-primary" @click="saveRaw(); toast.success('已保存')">
+              <button
+                type="button"
+                class="btn btn-sm btn-primary"
+                @click="usesExplainScriptFlow ? (saveNovelComicNarrationScript(), toast.success(`${explainScriptStepLabel}已保存`)) : (saveRaw(), toast.success('已保存'))"
+              >
                 保存
               </button>
             </div>
             <textarea
+              v-if="usesExplainScriptFlow"
+              v-model="localScript"
+              class="fill-textarea script-manual-textarea"
+              :placeholder="scriptChatManualPlaceholder"
+            />
+            <textarea
+              v-else
               v-model="localRaw"
               class="fill-textarea script-manual-textarea"
               :placeholder="scriptChatManualPlaceholder"
@@ -139,8 +159,12 @@
                 >
                   去掉 ** 标记
                 </button>
-                <button type="button" class="btn btn-sm btn-primary" :disabled="scriptChatGenerating" @click="applyScriptChatToEditor('replace', true)">填入文案并编辑</button>
-                <button type="button" class="btn btn-sm" :disabled="scriptChatGenerating" @click="applyScriptChatToEditor('append', true)">追加到文案</button>
+                <button type="button" class="btn btn-sm btn-primary" :disabled="scriptChatGenerating" @click="applyScriptChatToEditor('replace', true)">
+                  {{ usesExplainScriptFlow ? `填入${explainScriptStepLabel}并编辑` : '填入文案并编辑' }}
+                </button>
+                <button type="button" class="btn btn-sm" :disabled="scriptChatGenerating" @click="applyScriptChatToEditor('append', true)">
+                  {{ usesExplainScriptFlow ? `追加到${explainScriptStepLabel}` : '追加到文案' }}
+                </button>
               </div>
               <div class="script-chat-hints">
                 <button
@@ -176,7 +200,81 @@
           </div>
         </div>
 
-        <div v-else-if="scriptStep === dramaRawStep" class="step-editor">
+        <!-- 旁白类「文案输入」须先于 dramaRawStep，避免 novel_comic 步 0 误进「原始内容」 -->
+        <div v-else-if="isNarrationMode && scriptStep === narrationRawStep" class="step-editor">
+          <div class="step-toolbar">
+            <div class="toolbar-left">
+              <div class="step-indicator">
+                <span class="step-num">{{ isNovelComicMode || usesExplainScriptFlow ? '01' : '02' }}</span>
+                <span class="step-name">文案输入</span>
+              </div>
+            </div>
+            <div class="toolbar-right">
+              <button
+                v-if="isNovelComicMode"
+                type="button"
+                class="btn btn-sm btn-primary"
+                @click="goSubStep('script:storyboard')"
+              >
+                去旁白分镜
+              </button>
+              <button
+                v-else-if="!usesExplainScriptFlow"
+                type="button"
+                class="btn btn-sm"
+                @click="goSubStep('script:chat')"
+              >
+                返回 AI 对话
+              </button>
+              <button
+                v-else
+                type="button"
+                class="btn btn-sm btn-primary"
+                @click="goSubStep('script:chat')"
+              >
+                去写{{ explainScriptStepLabel }}
+              </button>
+              <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
+              <button
+                v-if="rawHasEmphasis"
+                type="button"
+                class="btn btn-sm"
+                @click="stripRawEmphasis"
+              >
+                去掉 ** 标记
+              </button>
+              <button class="btn btn-sm" @click="saveRaw(); toast.success('已保存')">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                保存
+              </button>
+            </div>
+          </div>
+
+          <textarea
+            class="fill-textarea"
+            v-model="localRaw"
+            :placeholder="isDialoguePortraitMode ? '粘贴对话脚本（角色名：台词），或在「剧本生成」写稿后点「填入文案并编辑」…' : (isNovelComicMode ? '粘贴本章小说原文（直接按原文拆镜，无需讲解稿）…' : (isNarrationVideoMode ? '粘贴本章小说原文或大纲（后续「解说脚本」会改成旁白+对白）…' : (isMotionComicMode ? '粘贴漫画解说稿，或在「剧本生成」写稿后点「填入文案并编辑」…' : '粘贴解说文案，或在「剧本生成」写稿后点「填入文案并编辑」…')))"
+          />
+          <div class="narration-hint" style="margin-top:12px">
+            <template v-if="isDialoguePortraitMode">
+              <strong>对话立绘格式：</strong>视觉小说式——每行「角色名：台词」；可写（点头）等短动作；本集 1～2 人；段间空行或「【场景名】」换景。合成时背景锁定，立绘切表情并微动。
+            </template>
+            <template v-else-if="isNovelComicMode">
+              <strong>小说漫画讲解：</strong>这里贴本章小说原文。下一步直接「旁白分镜」按原文拆镜；配图与合成都按原文走（无配音；全文画在图上；BGM+左右翻页）。不再生成讲解稿。
+            </template>
+            <template v-else-if="isNarrationVideoMode">
+              <strong>解说视频：</strong>这里贴小说/大纲原文。下一步「解说脚本」产出旁白（>20%）+人物对白；再进「分镜脚本」分段并写画面描述；制作台出图/配音/剪辑。
+            </template>
+            <template v-else-if="isMotionComicMode">
+              <strong>漫画解说稿格式：</strong>首行「本期故事：…」；每行「说话人：台词」；一句一行（8～18字），段间空行换场景；目标约旁白 30% / 对白 70%（对白单独成行，禁止空桥接旁白）；分镜后约 2～4 镜一图、按场景/动作换图（换人不强制换图），同图整段一种运镜。
+            </template>
+            <template v-else>
+              <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。
+            </template>
+          </div>
+        </div>
+
+        <div v-else-if="!isNarrationMode && scriptStep === dramaRawStep" class="step-editor">
           <div class="step-toolbar">
             <div class="toolbar-left">
               <div class="step-indicator">
@@ -201,56 +299,6 @@
             v-model="localRaw"
             :placeholder="isLocalComicMode ? '粘贴小说原文、故事大纲，或在「剧本生成」写稿后点「填入文案并编辑」…' : '粘贴小说原文、故事大纲或分镜描述...'"
           />
-        </div>
-
-        <!-- Step 1: Raw Content (narration) -->
-        <div v-else-if="isNarrationMode && scriptStep === 1" class="step-editor">
-          <div class="step-toolbar">
-            <div class="toolbar-left">
-              <div class="step-indicator">
-                <span class="step-num">02</span>
-                <span class="step-name">文案输入</span>
-              </div>
-            </div>
-            <div class="toolbar-right">
-              <button type="button" class="btn btn-sm" @click="goSubStep('script:chat')">
-                返回 AI 对话
-              </button>
-              <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
-              <button
-                v-if="rawHasEmphasis"
-                type="button"
-                class="btn btn-sm"
-                @click="stripRawEmphasis"
-              >
-                去掉 ** 标记
-              </button>
-              <button class="btn btn-sm" @click="saveRaw(); toast.success('已保存')">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                保存
-              </button>
-            </div>
-          </div>
-
-          <textarea
-            class="fill-textarea"
-            v-model="localRaw"
-            :placeholder="isDialoguePortraitMode ? '粘贴对话脚本（角色名：台词），或在「剧本生成」写稿后点「填入文案并编辑」…' : (isNovelComicMode ? '粘贴本章旁白朗读稿，或从剧集页确认大纲后自动填入…' : (isMotionComicMode ? '粘贴漫画解说稿，或在「剧本生成」写稿后点「填入文案并编辑」…' : '粘贴解说文案，或在「剧本生成」写稿后点「填入文案并编辑」…'))"
-          />
-          <div class="narration-hint" style="margin-top:12px">
-            <template v-if="isDialoguePortraitMode">
-              <strong>对话立绘格式：</strong>视觉小说式——每行「角色名：台词」；可写（点头）等短动作；本集 1～2 人；段间空行或「【场景名】」换景。合成时背景锁定，立绘切表情并微动。
-            </template>
-            <template v-else-if="isNovelComicMode">
-              <strong>小说漫画讲解：</strong>本章旁白朗读正文（叙述为主，可少量讲解）。请先在剧集页完成「粘贴小说 → 大纲 → 确认建集」。分镜后漫画配图 + 运镜合成。
-            </template>
-            <template v-else-if="isMotionComicMode">
-              <strong>漫画解说稿格式：</strong>首行「本期故事：…」；每行「说话人：台词」；一句一行（8～18字），段间空行换场景；目标约旁白 30% / 对白 70%（对白单独成行，禁止空桥接旁白）；分镜后约 2～4 镜一图、按场景/动作换图（换人不强制换图），同图整段一种运镜。
-            </template>
-            <template v-else>
-              <strong>解说模式：</strong>片头按标点逐句拆镜（与正文相同），<strong>共用 1 张无字背景图</strong>；合成时<strong>剧中红字居中</strong>逐句叠加。正文为旁白白字底栏。
-            </template>
-          </div>
         </div>
 
         <!-- Step: Rewrite (drama / local drama) -->
@@ -627,7 +675,7 @@
                 <span class="step-num">{{ isNarrationMode ? '03' : (isLocalComicMode ? '06' : '05') }}</span>
                 <span class="step-name">{{ isComicStoryboardMode ? stepLabels[storyboardStep] : '分镜列表' }}</span>
               </div>
-              <span v-if="isComicStoryboardMode" class="dim" style="font-size:12px;margin-left:8px">{{ usesComicStoryboardRules ? 'AI 对话 · 旁白拆镜' : 'AI 对话 · 整稿拆镜' }}</span>
+              <span v-if="isComicStoryboardMode" class="dim" style="font-size:12px;margin-left:8px">{{ isNarrationVideoMode ? 'AI 对话 · 分镜+画面描述' : (usesComicStoryboardRules ? 'AI 对话 · 旁白拆镜' : 'AI 对话 · 整稿拆镜') }}</span>
             </div>
             <div class="toolbar-right">
               <span v-if="sbs.length" class="char-count">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
@@ -782,7 +830,7 @@
           <div v-if="isComicStoryboardMode && narrationStoryboardBreakdownPanel" class="narration-breakdown-panel">
             <div class="narration-breakdown-head">
               <div>
-                <strong>{{ isDialoguePortraitMode ? '对话分镜结果' : '旁白分镜结果' }}</strong>
+                <strong>{{ isDialoguePortraitMode ? '对话分镜结果' : (isNarrationVideoMode ? '分镜脚本结果' : '旁白分镜结果') }}</strong>
                 <span v-if="narrationStoryboardBreakdownPanel.failedAt" class="llm-failed-at" style="font-size:11px;margin-left:8px">失败于 {{ formatBreakdownTime(narrationStoryboardBreakdownPanel.failedAt) }}<template v-if="narrationStoryboardBreakdownPanel.errorMessage">：{{ narrationStoryboardBreakdownPanel.errorMessage }}</template></span>
                 <span v-else-if="narrationStoryboardBreakdownPanel.generatedAt" class="dim" style="font-size:11px;margin-left:8px">生成于 {{ formatBreakdownTime(narrationStoryboardBreakdownPanel.generatedAt) }}</span>
               </div>

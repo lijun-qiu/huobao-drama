@@ -21,7 +21,12 @@ import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../
 import { isNarrationStoryboard, isStoryboardTitleShot, parseNarrationImageMeta, buildNarrationImageMeta, resolveStoryboardImageAnchorShot, resolveStoryboardVisualSource, resolveStoryboardSubtitleNarration, sortStoryboardsByOrder } from './narration-image.js'
 import { deleteEpisodeAssetFileIfUnreferenced } from './storyboard-asset-replace.js'
 import { TITLE_SUBTITLE_FONT } from '../constants/title-subtitle-font.js'
-import { parseProductionMode, usesMotionComicVisuals, isDialoguePortraitMode } from '../constants/production-mode.js'
+import { isNovelComicMode, parseProductionMode, usesMotionComicVisuals, isDialoguePortraitMode } from '../constants/production-mode.js'
+import {
+  NOVEL_COMIC_COMPOSE_HEIGHT,
+  NOVEL_COMIC_COMPOSE_WIDTH,
+  NOVEL_COMIC_SHOT_DURATION_SEC,
+} from '../constants/novel-comic.js'
 import {
   DIALOGUE_PORTRAIT_CANVAS,
   buildDialoguePortraitBgFilter,
@@ -34,6 +39,7 @@ import {
 import { parseMotionComicPreset } from '../constants/motion-comic.js'
 import { resolveMotionComicComposeOptions } from './motion-comic-meta.js'
 import { buildMotionComicComposeFilter, resolveMotionComicMotionScale } from './motion-comic-camera.js'
+import { appendMotionComicVfxFilter, resolveMotionComicVfxKind } from './motion-comic-vfx.js'
 import { joinNarrationTtsParts, parseDialogueForTTS, resolveNarrationVoiceId, resolveStoryboardTtsSource } from './narration-tts.js'
 import { appendWatermarkFilter, resolveWatermarkAnimated, resolveWatermarkText } from './ffmpeg-watermark.js'
 import { PAGE_FLIP_TRANSITION_SEC } from './ffmpeg-page-transition.js'
@@ -532,6 +538,32 @@ function buildShotZoomMotionFilter(info: VisualGroupInfo, durationSec: number, f
     `zoompan=z='${startZ}+${delta}*on/${frames - 1}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=1280x720:fps=${fps}`,
     'format=yuv420p',
   ].join(',')
+}
+
+/** 解说静图：Ken Burns + 语义 VFX（震屏/闪白等） */
+function buildNarrationStillMotionFilter(
+  zoomFilter: string,
+  shotText: string | null | undefined,
+  durationSec: number,
+  fps = COMPOSE_FPS,
+): string {
+  const vfxKind = resolveMotionComicVfxKind(String(shotText || ''))
+  return appendMotionComicVfxFilter(zoomFilter, vfxKind, durationSec, fps)
+}
+
+function resolveNarrationComposeShotText(sb: {
+  description?: string | null
+  dialogue?: string | null
+  referenceImages?: string | null
+}): string {
+  const meta = parseNarrationImageMeta(sb.referenceImages)
+  if (meta.narration_lines?.length) return meta.narration_lines.join(' ')
+  if (meta.scene_content) return String(meta.scene_content)
+  return [
+    sb.description,
+    String(sb.dialogue || '').replace(/^(旁白|剧中)[：:]\s*/, ''),
+    meta.highlight_reason,
+  ].filter(Boolean).join(' ')
 }
 
 /** 同配图多句：整组一条线性推/拉镜，缩放速率随总时长均匀分布 */
@@ -1144,7 +1176,9 @@ export async function renderSameImageGroupSegment(
         contentDuration,
       })
     } else {
-      filters.push(buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount))
+      const zoom = buildGroupProgressiveZoomFilter(shotDurationsSec, pageIndex, prevGroupShotCount)
+      const segmentText = memberRows.map(row => resolveNarrationComposeShotText(row)).filter(Boolean).join(' ')
+      filters.push(buildNarrationStillMotionFilter(zoom, segmentText, contentDuration))
     }
     appendComposeVideoPostFilters(
       filters,
@@ -1254,11 +1288,11 @@ export function buildComposeUnitGroups(episodeStoryboards: EpisodeStoryboardRow[
 export function listComposeMergeUnitStoryboards(
   episodeStoryboards: EpisodeStoryboardRow[],
 ): EpisodeStoryboardRow[] {
-  return buildComposeUnitGroups(episodeStoryboards).map((group) => {
-    const url = group.members.map(m => m.composedVideoUrl).find(Boolean)
+  return buildComposeUnitGroups(episodeStoryboards).map((group): EpisodeStoryboardRow | null => {
+    const url = group.members.map(m => m.composedVideoUrl).find(Boolean) ?? null
     if (!url) return null
     return { ...group.members[0], composedVideoUrl: url }
-  }).filter((row): row is EpisodeStoryboardRow => !!row)
+  }).filter((row): row is EpisodeStoryboardRow => row != null)
 }
 
 export function findComposeUnitMembers(
@@ -1407,7 +1441,7 @@ export function pickVisualGroupComposeLeaders<T extends { id: number }>(
     ? sortStoryboardsByOrder(episodeStoryboards)
     : []
   const targetIds = new Set(targets.map(t => t.id))
-  const groups = buildComposeUnitGroups(ordered.length ? ordered : targets as EpisodeStoryboardRow[])
+  const groups = buildComposeUnitGroups(ordered.length ? ordered : targets as unknown as EpisodeStoryboardRow[])
   const seenKeys = new Set<string>()
   const leaders: T[] = []
 
@@ -1588,8 +1622,10 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
   const [drama] = ep
     ? db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
     : [undefined]
-  const motionComicMode = usesMotionComicVisuals(parseProductionMode(drama?.metadata))
-  const dialoguePortraitMode = isDialoguePortraitMode(parseProductionMode(drama?.metadata))
+  const productionMode = parseProductionMode(drama?.metadata)
+  const novelComicMode = isNovelComicMode(productionMode)
+  const motionComicMode = usesMotionComicVisuals(productionMode) && !novelComicMode
+  const dialoguePortraitMode = isDialoguePortraitMode(productionMode)
   const motionPreset = parseMotionComicPreset(drama?.metadata)
   const watermarkText = resolveWatermarkText(ep?.watermarkText)
   const watermarkAnimated = resolveWatermarkAnimated(ep?.watermarkAnimated)
@@ -1600,9 +1636,9 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
   const parsedDialogue = parseDialogueForTTS(sb.dialogue)
   const isTitleShot = isStoryboardTitleShot(sb)
 
-  // 1. 解析 TTS 音频（解说每镜独立配音，不复用）
+  // 1. 解析 TTS 音频（解说每镜独立配音，不复用；小说漫画无配音）
   try {
-    if (!parsedDialogue.ignorable) {
+    if (!novelComicMode && !parsedDialogue.ignorable) {
       const usesOwnNarrationTts = isNarrationStoryboard(sb) || isTitleShot
       if (usesOwnNarrationTts && sb.ttsAudioUrl) {
         const ownPath = toAbsPath(sb.ttsAudioUrl)
@@ -1679,9 +1715,11 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
       }
     }
 
-    const clipDuration = audioPath
-      ? await probeMediaDuration(audioPath)
-      : (sb.duration || 10)
+    const clipDuration = novelComicMode
+      ? NOVEL_COMIC_SHOT_DURATION_SEC
+      : audioPath
+        ? await probeMediaDuration(audioPath)
+        : (sb.duration || 10)
 
     if (sb.bgmAudioUrl) {
       const candidate = toAbsPath(sb.bgmAudioUrl)
@@ -1706,25 +1744,28 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
     const outputDuration = resolveComposeOutputDuration(clipDuration, transitionPads)
 
     // 2. 生成字幕：旁白统一 ASS；片头 ASS 剧中红字（时间轴偏移 startPad，对齐首段 hold）
-    const subtitleMarkedText = resolveStoryboardSubtitleNarration(sb)
-    const displayText = stripSubtitlePunctuationPreservingEmphasis(subtitleMarkedText)
-    const useEmphasisAss = !isTitleShot && hasEmphasisMarkers(subtitleMarkedText)
-    if (displayText && (!parsedDialogue.ignorable || isTitleShot)) {
-      const srtDir = path.join(STORAGE_ROOT, 'subtitles')
-      fs.mkdirSync(srtDir, { recursive: true })
-      const subtitleFilename = `${uuid()}.ass`
-      subtitlePath = path.join(srtDir, subtitleFilename)
+    // 小说漫画：文字已画在图上，不烧字幕、不配音
+    if (!novelComicMode) {
+      const subtitleMarkedText = resolveStoryboardSubtitleNarration(sb)
+      const displayText = stripSubtitlePunctuationPreservingEmphasis(subtitleMarkedText)
+      const useEmphasisAss = !isTitleShot && hasEmphasisMarkers(subtitleMarkedText)
+      if (displayText && (!parsedDialogue.ignorable || isTitleShot)) {
+        const srtDir = path.join(STORAGE_ROOT, 'subtitles')
+        fs.mkdirSync(srtDir, { recursive: true })
+        const subtitleFilename = `${uuid()}.ass`
+        subtitlePath = path.join(srtDir, subtitleFilename)
 
-      const subtitleContent = isTitleShot
-        ? buildTitleAssContent(displayText, clipDuration, transitionPads.startPadSec)
-        : useEmphasisAss
-          ? buildNarrationEmphasisAssContent(displayText, clipDuration, transitionPads.startPadSec)
-          : buildNarrationPlainAssContent(displayText, clipDuration, transitionPads.startPadSec)
-      fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
+        const subtitleContent = isTitleShot
+          ? buildTitleAssContent(displayText, clipDuration, transitionPads.startPadSec)
+          : useEmphasisAss
+            ? buildNarrationEmphasisAssContent(displayText, clipDuration, transitionPads.startPadSec)
+            : buildNarrationPlainAssContent(displayText, clipDuration, transitionPads.startPadSec)
+        fs.writeFileSync(subtitlePath, subtitleContent, 'utf-8')
 
-      const subtitleRelative = `static/subtitles/${subtitleFilename}`
-      db.update(schema.storyboards).set({ subtitleUrl: subtitleRelative, updatedAt: now() })
-        .where(eq(schema.storyboards.id, storyboardId)).run()
+        const subtitleRelative = `static/subtitles/${subtitleFilename}`
+        db.update(schema.storyboards).set({ subtitleUrl: subtitleRelative, updatedAt: now() })
+          .where(eq(schema.storyboards.id, storyboardId)).run()
+      }
     }
 
     // 3. FFmpeg 合成
@@ -1819,9 +1860,25 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
       const filters: string[] = []
 
       if (useBlackFrame) {
-        cmd = cmd.input(`color=c=black:s=1280x720:r=25:d=${clipDuration}`).inputOptions(['-f', 'lavfi'])
+        const blackSize = novelComicMode
+          ? `${NOVEL_COMIC_COMPOSE_WIDTH}x${NOVEL_COMIC_COMPOSE_HEIGHT}`
+          : '1280x720'
+        cmd = cmd.input(`color=c=black:s=${blackSize}:r=25:d=${clipDuration}`).inputOptions(['-f', 'lavfi'])
         filters.push('fps=25,format=yuv420p')
         logTaskProgress('ComposeTask', 'black-frame-compose', { storyboardId, duration: clipDuration, outputDuration })
+      } else if (visual!.type === 'image' && novelComicMode) {
+        // 小说漫画：9:16 静图 3s，无运镜；成片靠 BGM + 分镜左右翻页
+        filters.push(
+          `scale=${NOVEL_COMIC_COMPOSE_WIDTH}:${NOVEL_COMIC_COMPOSE_HEIGHT}:force_original_aspect_ratio=increase,`
+          + `crop=${NOVEL_COMIC_COMPOSE_WIDTH}:${NOVEL_COMIC_COMPOSE_HEIGHT},fps=${COMPOSE_FPS},format=yuv420p`,
+        )
+        cmd = cmd.input(visual!.path).inputOptions(['-loop', '1', '-t', String(clipDuration)])
+        logTaskProgress('ComposeTask', 'novel-comic-still-compose', {
+          storyboardId,
+          duration: clipDuration,
+          size: `${NOVEL_COMIC_COMPOSE_WIDTH}x${NOVEL_COMIC_COMPOSE_HEIGHT}`,
+          inherited: visual!.inherited || false,
+        })
       } else if (visual!.type === 'image') {
         const useTitleDynamic = !!isTitleShot
         const titleGroupInfo = useTitleDynamic
@@ -1873,7 +1930,8 @@ async function composeStoryboardSingle(storyboardId: number): Promise<string> {
             vfxKind: motionOpts.vfxKind,
           }))
         } else {
-          filters.push(buildShotZoomMotionFilter(visualGroupInfo!, clipDuration))
+          const zoom = buildShotZoomMotionFilter(visualGroupInfo!, clipDuration)
+          filters.push(buildNarrationStillMotionFilter(zoom, resolveNarrationComposeShotText(sb), clipDuration))
         }
         cmd = cmd.input(visual!.path).inputOptions(['-loop', '1'])
         logTaskProgress('ComposeTask', 'image-slideshow-compose', {

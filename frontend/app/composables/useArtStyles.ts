@@ -5,7 +5,7 @@ export const DEFAULT_ART_STYLE = 'short-drama'
 /** 解说素体极简叙事画风（项目级视觉风格 value） */
 export const NARRATION_MINIMAL_STYLE = 'narration-minimal'
 
-/** 解说配图动漫风格（正常头身比 2D 动漫，七维结构与素体相同） */
+/** 解说配图默认画风：日系2D动漫漫画风（高对比电影光影，氛围随小说情节） */
 export const NARRATION_ANIME_STYLE = 'narration-anime'
 
 /** 漫画解说（高对比国漫 + 运镜） */
@@ -13,12 +13,16 @@ export const MOTION_COMIC_STYLE = 'motion-comic'
 
 export const MOTION_COMIC_DEFAULT_STYLE = MOTION_COMIC_STYLE
 
+/** 小说漫画讲解（素笔彩画竖页 + 黑白素笔定妆） */
+export const NOVEL_COMIC_SKETCH_STYLE = 'novel-comic-sketch'
+export const NOVEL_COMIC_DEFAULT_STYLE = NOVEL_COMIC_SKETCH_STYLE
+
 /** 解说动漫 / 漫画解说共用：正面全身定妆 */
 export const THREE_VIEW_PORTRAIT_SCENE_CN =
   '纯白色背景，单张正面全身定妆参考图，清晰展示脸型五官、发型与全身服装，无环境无场景元素'
 
 export const THREE_VIEW_PORTRAIT_PLOT_ANIME_CN =
-  '英俊帅气动漫脸型，五官立体清晰，正常头身比，正面全身站姿，服装与标志配饰清晰可见'
+  '日系2D动漫插画脸型，五官清晰，正常头身比，正面全身站姿，服装与标志配饰清晰可见'
 
 export const THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN =
   '白色素体小人，正常卡通脸圆眼带高光，正面全身站姿，简化年代服装简笔轮廓，体型比例清晰可见'
@@ -29,13 +33,14 @@ export const THREE_VIEW_PORTRAIT_SCENE_MINIMAL_CN =
 /** 解说配图可选画风（定妆参考与配图共用） */
 export const NARRATION_IMAGE_STYLE_OPTIONS = [
   { value: NARRATION_MINIMAL_STYLE, label: '简体素人' },
-  { value: NARRATION_ANIME_STYLE, label: '动漫风格' },
+  { value: NARRATION_ANIME_STYLE, label: '日系漫画' },
 ] as const
 
 export function resolveNarrationImageStyle(style?: string | null): string {
-  const key = String(style || '').trim().toLowerCase()
+  const key = String(style || '').trim().toLowerCase().replace(/_/g, '-')
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
   if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
+  if (key === NOVEL_COMIC_SKETCH_STYLE) return NOVEL_COMIC_SKETCH_STYLE
   return NARRATION_ANIME_STYLE
 }
 
@@ -157,17 +162,17 @@ export const NARRATION_CROWD_EYE_LLM_RULE =
 export const NARRATION_UNIVERSAL_STYLE_SPEC_BODY =
   `16:9 横屏，2D 扁平插画，全员${NARRATION_CROWD_BODY}简笔身形纯色平涂无复杂光影（${NARRATION_CROWD_FACE}），黑色轮廓线，${NARRATION_BODY_CONSISTENCY_CORE}`
 
-/** 解说配图动漫风格：画风规格维固定正文 */
+/** 解说配图日系2D漫画：画风规格维固定正文 */
 export const NARRATION_ANIME_STYLE_SPEC_BODY =
-  '16:9 横屏，现代高质量 2D 动漫插画，清晰线稿，赛璐璐平涂结合柔和渐变，正常青年头身比（非Q版非三头身），大而富有表现力的动漫眼睛带瞳孔高光，日常叙事 slice-of-life 质感，低饱和写实配色'
+  '16:9 横屏，日系2D动漫插画（Anime Style），正常青年头身比（非Q版非三头身），大而传神的动漫眼睛含瞳孔高光，高对比电影感戏剧光影；色温与氛围须贴合本段小说情节（紧张/悬疑/冲突可用冷蓝紫与锐利高光烘托，日常与温馨段落勿硬套末日废土）'
 
-/** 动漫风格固定后缀 */
+/** 日系2D漫画固定后缀 */
 export const NARRATION_ANIME_SCENE_SUFFIX =
-  '电影感叙事构图，干净整洁的画面，无文字无水印'
+  '日系2D漫画构图，高对比电影光影，无文字无水印'
 
-/** LLM 写【质感要求】时的短补充项（动漫） */
+/** LLM 写【质感要求】时的短补充项（日系2D漫画） */
 export const NARRATION_ANIME_TEXTURE_LLM_HINT =
-  '清晰线稿，赛璐璐平涂与柔和渐变，表情夸张生动，环境陈设有细节，无文字无水印'
+  '高对比电影光影，动漫插画质感，无文字无水印'
 
 export function getNarrationStyleSpecBody(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
@@ -291,8 +296,8 @@ export const ART_STYLES = [
   },
   {
     value: NARRATION_ANIME_STYLE,
-    label: '解说动漫（正常比例）',
-    description: '现代 2D 动漫插画，清晰线稿、赛璐璐+柔和渐变，正常头身比，表情夸张',
+    label: '解说日系漫画',
+    description: '日系2D动漫漫画风，高对比电影光影；紧张可用冷蓝紫，日常随小说情节，勿硬套末日',
   },
   {
     value: MOTION_COMIC_STYLE,
@@ -349,7 +354,7 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
     diptych: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，单张横向两宫格，【左格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，【右格】【画面主体】，【年代场景】，【核心细节动作】，【光影色调】，【镜头视角】，【质感要求】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     title: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【片头背景场景】，【主题氛围】，${NARRATION_ANIME_SCENE_SUFFIX}`,
     portrait: `${formatNarrationStyleSpecBracket(undefined, NARRATION_ANIME_STYLE)}，【场景：${THREE_VIEW_PORTRAIT_SCENE_CN}】，【剧情：${THREE_VIEW_PORTRAIT_PLOT_ANIME_CN}】，${NARRATION_ANIME_SCENE_SUFFIX}`,
-    agent: `${NARRATION_ANIME_STYLE_SPEC_BODY}，禁止Q版三头身、3D渲染、真人照片`,
+    agent: `${NARRATION_ANIME_STYLE_SPEC_BODY}，禁止3D/CGI写实、Q版三头身、真人照片、每镜强制末日爆炸光`,
   },
   [MOTION_COMIC_STYLE]: {
     scene: 'Chinese short-drama manhua key visual, high-fidelity digital anime, sharp clean thin lineart, hard-edge cel shading, deep chiaroscuro, high contrast cool blue purple grey night tones, strong side key light with deep face shadows, cool white rim light on hair, intense expressive anime eyes, dark shallow-DOF bokeh background, normal young adult body proportions, NOT Makoto Shinkai soft golden hour, NOT watercolor blur, NOT chibi, NOT thick webtoon outlines, NOT speed lines',
@@ -417,9 +422,10 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
 }
 
 export function normalizeArtStyle(style?: string | null): string {
-  const key = String(style || '').trim().toLowerCase()
+  const key = String(style || '').trim().toLowerCase().replace(/_/g, '-')
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
   if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
+  if (key === NOVEL_COMIC_SKETCH_STYLE) return NOVEL_COMIC_SKETCH_STYLE
   if (STYLE_PROMPTS[key]) return key
   return DEFAULT_ART_STYLE
 }
@@ -448,8 +454,15 @@ export function isMotionComicStyle(style?: string | null): boolean {
   return normalizeArtStyle(style) === MOTION_COMIC_STYLE
 }
 
+export function isNovelComicSketchStyle(style?: string | null): boolean {
+  return normalizeArtStyle(style) === NOVEL_COMIC_SKETCH_STYLE
+}
+
 export function isNarrationStructuredStyle(style?: string | null): boolean {
-  return isNarrationMinimalStyle(style) || isNarrationAnimeStyle(style) || isMotionComicStyle(style)
+  return isNarrationMinimalStyle(style)
+    || isNarrationAnimeStyle(style)
+    || isMotionComicStyle(style)
+    || isNovelComicSketchStyle(style)
 }
 
 export const SCENE_STYLE_GUARD = [
@@ -2057,8 +2070,9 @@ export function normalizeAnimeTextureBracket(body?: string | null): string {
     trimmed.length > 55
     || /现代高质量\s*2D\s*动漫/.test(trimmed)
     || /赛璐璐平涂结合柔和渐变/.test(trimmed)
+    || /细线稿/.test(trimmed)
   if (isLongBlob) return NARRATION_ANIME_TEXTURE_LLM_HINT
-  const hasEssentials = /无文字/.test(trimmed) && (/线稿|赛璐璐|渐变/.test(trimmed))
+  const hasEssentials = /无文字/.test(trimmed) && (/电影光影|动漫插画|高对比/.test(trimmed))
   if (trimmed.length <= 48 && hasEssentials) return trimmed
   return NARRATION_ANIME_TEXTURE_LLM_HINT
 }

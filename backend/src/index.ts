@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
@@ -10,6 +11,7 @@ import episodes from './routes/episodes.js'
 import storyboards from './routes/storyboards.js'
 import scenes from './routes/scenes.js'
 import characters from './routes/characters.js'
+import props from './routes/props.js'
 import images from './routes/images.js'
 import videos from './routes/videos.js'
 import upload from './routes/upload.js'
@@ -42,7 +44,8 @@ const app = new Hono()
 
 // Middleware
 app.use('*', cors({
-  origin: ['http://localhost:3013', 'http://localhost:5679'],
+  // 开发默认 3013；端口被占用时 Nuxt 可能落到 3000
+  origin: ['http://localhost:3013', 'http://localhost:3000', 'http://localhost:5679'],
   credentials: true,
 }))
 app.use('*', requestLogger)
@@ -58,6 +61,7 @@ api.route('/episodes', episodes)
 api.route('/storyboards', storyboards)
 api.route('/scenes', scenes)
 api.route('/characters', characters)
+api.route('/props', props)
 api.route('/images', images)
 api.route('/videos', videos)
 api.route('/upload', upload)
@@ -81,10 +85,14 @@ app.route('/webhooks', webhooks)
 // Serve static files (storage)
 app.use('/static/*', serveStatic({ root: path.join(projectRoot, 'data') }))
 
-// Serve frontend (production build)
+// 生产构建产物：仅当 frontend/dist 存在时挂载（日常 npm run dev 无 dist，勿报警）
 const distPath = path.join(projectRoot, 'frontend', 'dist')
-app.use('*', serveStatic({ root: distPath }))
-app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
+if (fs.existsSync(distPath)) {
+  app.use('*', serveStatic({ root: distPath }))
+  app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
+} else {
+  console.log('[Static] frontend/dist 未构建，跳过静态前端（开发请用 http://localhost:3013）')
+}
 
 const port = Number(process.env.PORT || 5679)
 console.log(`🚀 Huobao Drama TS server on http://localhost:${port}`)

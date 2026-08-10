@@ -3,6 +3,7 @@ import {
   buildNarrationDiptychImagePromptContent,
   buildNarrationSceneImagePromptFromSentences,
   isNarrationMinimalStyle,
+  isNovelComicSketchStyle,
   SCENE_STYLE_GUARD,
   type NarrationScenePromptOptions,
 } from '../constants/art-styles.js'
@@ -10,7 +11,7 @@ import { ensureSentenceEmphasisMark } from '../utils/subtitle-emphasis.js'
 
 export type NarrationImageMode = 'new' | 'inherit' | 'copy'
 export type NarrationShotType = 'title' | 'normal'
-export type ParagraphLayout = 'single' | 'diptych'
+export type ParagraphLayout = 'single' | 'diptych' | 'quad'
 
 export interface NarrationImageMeta {
   narration_image_mode: NarrationImageMode
@@ -33,8 +34,8 @@ export interface NarrationImageMeta {
   script_paragraph_index?: number
   /** 正文分镜序号（旁白分镜时写入） */
   body_sentence_index?: number
-  /** 配图文案来源：llm_raw=第二步纯LLM，optimized=第三步规则优化 */
-  image_prompt_source?: 'llm_raw' | 'optimized' | 'upload' | 'manual'
+  /** 配图文案来源：llm_raw=第二步纯LLM，optimized=第三步规则优化，toonflow=画面描述忠实转换 */
+  image_prompt_source?: 'llm_raw' | 'optimized' | 'upload' | 'manual' | 'toonflow'
   /** 第二步 LLM 原文备份，第三步优化前写入，用于还原 */
   image_prompt_llm_raw?: string
   /** 配图分镜写入：本镜烧录字幕旁白（可含 **强调**，TTS 仍用 dialogue 纯文本） */
@@ -67,6 +68,12 @@ export interface NarrationImageMeta {
   image_validate_matches_narration?: boolean
   image_validate_matches_prompt?: boolean
   image_validate_style_ok?: boolean
+  /** 小说漫画格字：short=空框叠字 | full=模型画字 */
+  panel_text_mode?: 'short' | 'full'
+  /** 可选：强化运动提示词（解说默认每镜图生视频，本标记不再决定是否出视频） */
+  highlight_motion?: boolean
+  /** 强化运动命中摘要（关键词等） */
+  highlight_reason?: string
 }
 
 /**
@@ -119,13 +126,20 @@ export function parseNarrationImageMeta(referenceImages?: string | null): Narrat
         ? parsed.image_narration_lines.map((s: unknown) => String(s || '').trim()).filter(Boolean)
         : undefined,
       paragraph_index: typeof parsed?.paragraph_index === 'number' ? parsed.paragraph_index : undefined,
-      paragraph_layout: parsed?.paragraph_layout === 'diptych' ? 'diptych' : parsed?.paragraph_layout === 'single' ? 'single' : undefined,
+      paragraph_layout: parsed?.paragraph_layout === 'quad'
+        ? 'quad'
+        : parsed?.paragraph_layout === 'diptych'
+          ? 'diptych'
+          : parsed?.paragraph_layout === 'single'
+            ? 'single'
+            : undefined,
       script_paragraph_index: typeof parsed?.script_paragraph_index === 'number' ? parsed.script_paragraph_index : undefined,
       body_sentence_index: typeof parsed?.body_sentence_index === 'number' ? parsed.body_sentence_index : undefined,
       image_prompt_source: parsed?.image_prompt_source === 'llm_raw'
         || parsed?.image_prompt_source === 'optimized'
         || parsed?.image_prompt_source === 'upload'
         || parsed?.image_prompt_source === 'manual'
+        || parsed?.image_prompt_source === 'toonflow'
         ? parsed.image_prompt_source
         : undefined,
       image_prompt_llm_raw: typeof parsed?.image_prompt_llm_raw === 'string' && parsed.image_prompt_llm_raw.trim()
@@ -174,6 +188,19 @@ export function parseNarrationImageMeta(referenceImages?: string | null): Narrat
         : undefined,
       image_validate_style_ok: typeof parsed?.image_validate_style_ok === 'boolean'
         ? parsed.image_validate_style_ok
+        : undefined,
+      panel_text_mode: parsed?.panel_text_mode === 'full'
+        ? 'full'
+        : parsed?.panel_text_mode === 'short'
+          ? 'short'
+          : undefined,
+      highlight_motion: typeof parsed?.highlight_motion === 'boolean'
+        ? parsed.highlight_motion
+        : parsed?.highlight_motion === 'true' || parsed?.highlight_motion === 'false'
+          ? parsed.highlight_motion === 'true'
+          : undefined,
+      highlight_reason: typeof parsed?.highlight_reason === 'string' && parsed.highlight_reason.trim()
+        ? parsed.highlight_reason.trim()
         : undefined,
     }
   } catch {}
@@ -303,6 +330,27 @@ export function buildNarrationSceneImagePrompt(
   }
   const main = summarizeSceneMainContent(sentences)
   if (!main) return ''
+  if (isNovelComicSketchStyle(style)) {
+    const lines = sentences.map(s => String(s || '').trim()).filter(Boolean).slice(0, 3)
+    while (lines.length < 2) lines.push(main)
+    const panels = lines.length >= 3
+      ? [
+        `上格：${lines[0]}，旁白框「${lines[0]}」`,
+        `中格：${lines[1]}，旁白框「${lines[1]}」`,
+        `下格：${lines[2]}，旁白框「${lines[2]}」`,
+      ]
+      : [
+        `上格：${lines[0]}，旁白框「${lines[0]}」`,
+        `下格：${lines[1] || lines[0]}，旁白框「${lines[1] || lines[0]}」`,
+      ]
+    return [
+      '【格字模式：长文画字】',
+      artStylePrompt(style, 'scene'),
+      '【画风规格：素笔彩画竖页】9:16 竖屏二列或三列分格，深色细分格线',
+      ...panels,
+      '素笔彩画淡彩，格内完整中文讲解清晰可读，须淡彩禁止纯黑白无平台水印 logo',
+    ].join('，')
+  }
   return [
     SCENE_STYLE_GUARD,
     'single full illustration, one complete scene only',

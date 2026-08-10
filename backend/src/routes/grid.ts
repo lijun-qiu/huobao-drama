@@ -158,11 +158,12 @@ function buildGridPrompt(
       return `${cellLabel(i, rows, cols)}: ${refs.length ? `参考${refs.join('、')}，` : ''}${desc}`
     })
     return [
-      `${rows}x${cols} grid layout, consistent art style, ${style},`,
+      `${rows}x${cols} grid layout, storyboard contact sheet, consistent art style, ${style},`,
+      'score_9, score_8_up, source_anime, anime storyboard sheet, clean lineart, cel shading,',
       legend ? `参考图映射：${legend}` : '',
       '当画面涉及角色或场景时，优先使用对应的图片编号来约束一致性。',
       ...cells,
-      'high quality, cinematic lighting, no text, no watermark',
+      '16:9 widescreen, high quality, cinematic lighting, no text, no watermark',
     ].filter(Boolean).join('\n')
   }
 

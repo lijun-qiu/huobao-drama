@@ -130,6 +130,25 @@ export const dramaAPI = {
       chapter_numbers?: number[]
     }) => api.post(`/dramas/${id}/novel-comic/apply-outline`, data || {}),
   },
+  novelBible: {
+    get: (id: number) => api.get<{
+      outline: string
+      setting: string
+      main_characters: Array<{ name: string; role?: string; brief?: string }>
+      updated_at?: string | null
+    }>(`/dramas/${id}/novel-bible`),
+    update: (id: number, data: {
+      outline?: string
+      setting?: string
+      main_characters?: Array<{ name: string; role?: string; brief?: string }>
+    }) => api.put(`/dramas/${id}/novel-bible`, data),
+    syncCharacters: (id: number, data?: { episode_id?: number }) =>
+      api.post<{
+        created: number
+        updated: number
+        character_ids: number[]
+      }>(`/dramas/${id}/novel-bible/sync-characters`, data || {}),
+  },
 }
 
 export const episodeAPI = {
@@ -139,6 +158,19 @@ export const episodeAPI = {
   scenes: (id: number) => api.get(`/episodes/${id}/scenes`),
   storyboards: (id: number) => api.get(`/episodes/${id}/storyboards`),
   pipelineStatus: (id: number) => api.get(`/episodes/${id}/pipeline-status`),
+  autoMarkNarrationHighlights: (id: number) => api.post(`/episodes/${id}/auto-mark-narration-highlights`, {}),
+  generateVideoPrompts: (id: number, options?: {
+    force?: boolean
+    only_missing?: boolean
+    text_model?: string
+    text_thinking?: boolean
+  }) =>
+    api.post(`/episodes/${id}/generate-video-prompts`, {
+      force: !!options?.force,
+      only_missing: options?.only_missing !== false && !options?.force,
+      text_model: options?.text_model,
+      text_thinking: options?.text_thinking === true,
+    }),
   narrationStoryboardBreakdown: (
     id: number,
     options?: { script?: string; text_model?: string; text_thinking?: boolean },
@@ -243,6 +275,7 @@ export const episodeAPI = {
       onDelta?: (content: string) => void
       onThinking?: (content: string) => void
       onStatus?: (message: string) => void
+      onPhase?: (phase: string, content: string) => void
     },
   ) => {
     const resp = await fetch(`${BASE}/episodes/${id}/narration-script-chat`, {
@@ -271,6 +304,7 @@ export const episodeAPI = {
       narration_ratio?: number | null
       dialogue_ratio?: number | null
       dialogue_ratio_repaired?: boolean
+      beat_outline?: string
     } | null = null
     let streamError: Error | null = null
 
@@ -283,8 +317,15 @@ export const episodeAPI = {
         options?.onThinking?.(payload.content)
         return
       }
-      if (payload.type === 'status' && typeof payload.message === 'string') {
-        options?.onStatus?.(payload.message)
+      if (
+        payload.type === 'status'
+        && (typeof payload.message === 'string' || typeof payload.content === 'string')
+      ) {
+        options?.onStatus?.(String(payload.message || payload.content || ''))
+        return
+      }
+      if (payload.type === 'phase' && typeof payload.content === 'string') {
+        options?.onPhase?.(String(payload.phase || ''), payload.content)
         return
       }
       if (payload.type === 'error') {
@@ -308,6 +349,7 @@ export const episodeAPI = {
           narration_ratio: typeof payload.narration_ratio === 'number' ? payload.narration_ratio : null,
           dialogue_ratio: typeof payload.dialogue_ratio === 'number' ? payload.dialogue_ratio : null,
           dialogue_ratio_repaired: payload.dialogue_ratio_repaired === true,
+          beat_outline: typeof payload.beat_outline === 'string' ? payload.beat_outline : undefined,
         }
       }
     }, options?.signal)
@@ -515,6 +557,9 @@ export const episodeAPI = {
     api.post(`/episodes/${id}/narration-storyboard-breakdown`, { script: options?.script }),
   extractNarrationCharacters: (id: number, options?: { script?: string; style?: string; text_model?: string; text_thinking?: boolean }) =>
     api.post(`/episodes/${id}/extract-narration-characters`, options || {}),
+  extractNarrationEnv: (id: number, options?: { text_model?: string; text_thinking?: boolean }) =>
+    api.post(`/episodes/${id}/extract-narration-env`, options || {}),
+  listProps: (id: number) => api.get(`/episodes/${id}/props`),
   extract: (id: number, options?: { script?: string; text_model?: string; text_thinking?: boolean }) =>
     api.post(`/episodes/${id}/extract`, options || {}),
   storyboardBreakdown: (id: number, options?: { script?: string; text_model?: string; video_model_label?: string }) =>
@@ -585,6 +630,16 @@ export const storyboardAPI = {
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
   generateTTS: (id: number, options?: { force?: boolean; async?: boolean; local_tts?: boolean; local_tts_engine?: 'edge' | 'voicebox' | 'gptsovits' | 'indextts'; local_voice?: string; use_speaker_voice?: boolean; tts_speed?: number; voicebox_instruct?: string; voicebox_model_size?: '0.6B' | '1.7B'; unit_tts?: boolean; tts_text?: string }) =>
     api.post(`/storyboards/${id}/generate-tts`, options || {}),
+  generateVideoPrompt: (id: number, options?: {
+    force?: boolean
+    text_model?: string
+    text_thinking?: boolean
+  }) =>
+    api.post(`/storyboards/${id}/generate-video-prompt`, {
+      force: options?.force !== false,
+      text_model: options?.text_model,
+      text_thinking: options?.text_thinking === true,
+    }),
   uploadTTS: (id: number, audioPath: string) =>
     api.post(`/storyboards/${id}/upload-tts`, { audio_path: audioPath }),
   scanNarrationImage: (id: number, options?: { text_model?: string; vision_model?: string; text_thinking?: boolean }) =>
@@ -688,6 +743,19 @@ export const sceneAPI = {
       episode_id: episodeId,
       ...(options?.imageStyle ? { image_style: options.imageStyle } : {}),
     }),
+  update: (id: number, data: { location?: string; time?: string; prompt?: string; image_url?: string | null }) =>
+    api.put(`/scenes/${id}`, data),
+}
+
+export const propAPI = {
+  generateImage: (id: number, episodeId: number, options?: { imageStyle?: string; model?: string }) =>
+    api.post(`/props/${id}/generate-image`, {
+      episode_id: episodeId,
+      ...(options?.imageStyle ? { image_style: options.imageStyle } : {}),
+      ...(options?.model ? { model: options.model } : {}),
+    }),
+  update: (id: number, data: { name?: string; description?: string; prompt?: string; image_url?: string }) =>
+    api.put(`/props/${id}`, data),
 }
 
 export const imageAPI = {

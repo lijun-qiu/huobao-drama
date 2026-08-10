@@ -446,12 +446,12 @@ try {
   // ignore migration errors on fresh DB
 }
 
-// 管线默认生图：旧 CogView 默认 → Agnes 定妆（支持参考图）
+// 管线默认生图：旧 CogView / Agnes 2.0 → Agnes 2.1（复杂构图更好）
 try {
   sqlite.exec(`
     UPDATE episodes
-    SET image_model = 'agnes-image-2.0-flash'
-    WHERE image_model = 'cogview-3-flash'
+    SET image_model = 'agnes-image-2.1-flash'
+    WHERE image_model IN ('cogview-3-flash', 'agnes-image-2.0-flash', 'agnes-image-2.0')
       AND drama_id IN (
         SELECT id FROM dramas
         WHERE metadata LIKE '%"production_mode":"narration"%'
@@ -465,34 +465,26 @@ try {
   // ignore
 }
 
-// 文本模型：默认 Nemotron Ultra 免费；旧 free Flash 别名迁移
+// 文本模型：默认 DeepSeek V4 Flash（妙飞）；旧 free Flash / Ling / Ultra / 空值迁移
 try {
   sqlite.exec(`
     UPDATE episodes
-    SET text_model = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+    SET text_model = 'deepseek-v4-flash'
     WHERE text_model IS NULL
        OR TRIM(text_model) = ''
        OR text_model IN (
          'gemini-3-pro-preview', 'gemini-3-flash-preview', 'google/gemini-3-flash-preview', 'gpt-4.1-mini',
          'deepseek-v4-flash:free', 'openrouter/deepseek-v4-flash:free',
+         'inclusionai/ling-3.0-flash:free', 'inclusionai/ling-3.0-flash',
+         'nvidia/nemotron-3-ultra-550b-a55b:free',
          'nvidia/nemotron-3-ultra:free', 'nvidia/nemotron-3-ultra-550b:free',
+         'poolside/laguna-s-2.1:free',
          'glm-4.7-flash', 'glm-4-flash-250414'
        )
   `)
-  // 历史默认曾把付费 Flash/Pro 短名当 OpenRouter 用，迁移到显式 openrouter/ 前缀
-  sqlite.exec(`
-    UPDATE episodes
-    SET text_model = 'openrouter/deepseek-v4-flash'
-    WHERE text_model = 'deepseek-v4-flash'
-  `)
-  sqlite.exec(`
-    UPDATE episodes
-    SET text_model = 'openrouter/deepseek-v4-pro'
-    WHERE text_model = 'deepseek-v4-pro'
-  `)
   sqlite.exec(`
     UPDATE ai_service_configs
-    SET model = '["nvidia/nemotron-3-ultra-550b-a55b:free","openrouter/deepseek-v4-flash","openrouter/deepseek-v4-pro"]',
+    SET model = '["poolside/laguna-s-2.1:free","nvidia/nemotron-3-ultra-550b-a55b:free","nvidia/nemotron-3-super-120b-a12b:free","openrouter/deepseek-v4-flash","openrouter/deepseek-v4-pro"]',
         updated_at = datetime('now')
     WHERE service_type = 'text'
       AND LOWER(COALESCE(provider, '')) = 'openrouter'
@@ -512,15 +504,17 @@ try {
   `)
   sqlite.exec(`
     UPDATE agent_configs
-    SET model = 'nvidia/nemotron-3-ultra-550b-a55b:free',
+    SET model = 'deepseek-v4-flash',
         updated_at = datetime('now')
     WHERE model IS NULL
        OR TRIM(model) = ''
        OR model IN (
          'gemini-3-pro-preview', 'gemini-3-flash-preview', 'google/gemini-3-flash-preview', 'gpt-4.1-mini',
          'deepseek-v4-flash:free', 'openrouter/deepseek-v4-flash:free',
+         'inclusionai/ling-3.0-flash:free', 'inclusionai/ling-3.0-flash',
+         'nvidia/nemotron-3-ultra-550b-a55b:free',
          'nvidia/nemotron-3-ultra:free', 'nvidia/nemotron-3-ultra-550b:free',
-         'deepseek-v4-flash', 'deepseek-v4-pro',
+         'poolside/laguna-s-2.1:free',
          'glm-4.7-flash', 'glm-4-flash-250414'
        )
   `)

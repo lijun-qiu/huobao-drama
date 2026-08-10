@@ -11,23 +11,38 @@ import {
   imageModelSupportsReferenceImages,
 } from '../constants/image-models.js'
 import { resolveEpisodeProductionMode, usesLocalModelPipeline } from '../constants/production-mode.js'
-import { compileNarrationImageGenerationBundle, isNarrationStructuredStyle, normalizeArtStyle, resolveEpisodeVisualStyle } from '../constants/art-styles.js'
-import { isFluxImageModel, isKolorsImageModel, isQwenImageEditModel, isSdxlInstantIdImageModel } from '../services/comfyui-client.js'
-import { ensureMultiPortraitDistinctCuesInPrompt } from '../constants/portrait-appearance-spec.js'
-import { extractPortraitDistinctCueCn } from '../constants/portrait-reference.js'
-import { isMotionComicStyle, repairMotionComicContinuousImagePrompt } from '../constants/motion-comic.js'
+import {
+  normalizeArtStyle,
+  resolveEpisodeVisualStyle,
+} from '../constants/art-styles.js'
+import { isFluxImageModel, isKolorsImageModel, isSdxlInstantIdImageModel } from '../services/comfyui-client.js'
+import { collapseToSinglePortraitLabelInImagePromptCn } from '../constants/portrait-appearance-spec.js'
+import { MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS } from '../constants/motion-comic.js'
 import {
   collectCharacterReferenceImages,
   collectCharacterReferenceImagesByPortraitLabels,
-  enrichImagePromptWithCharacters,
   formatCharacterDisplayName,
   getEpisodeVisualCharacters,
-  prependMultiPortraitReferenceHint,
   resolveStoryboardCharacterIdsForShot,
 } from '../services/narration-characters.js'
+import {
+  collectPropReferenceImagesByLabels,
+  collectSceneReferenceImagesByLabels,
+  enrichImagePromptWithEnvAssets,
+  listEpisodeNarrationProps,
+  listEpisodeNarrationScenes,
+  matchPropsForNarrationLines,
+  prioritizeTypedImageRefs,
+  sceneLabelOf,
+  storyboardNarrationLinesForEnv,
+  type TypedImageRef,
+} from '../services/narration-scene-assets.js'
+import {
+  isToonflowStyleImagePrompt,
+  parseToonflowAtImageSlots,
+} from '../services/toonflow-storyboard-prompt.js'
 import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
-import { resolveCharacterGenderLabelCn } from '../services/comfyui-client.js'
 
 const app = new Hono()
 
@@ -38,11 +53,21 @@ app.post('/', async (c) => {
 
   try {
     let configId: number | undefined = body.config_id
-    let episode: { imageConfigId?: number | null; imageModel?: string | null; dramaId?: number } | null = null
+    let episode: { id?: number; imageConfigId?: number | null; imageModel?: string | null; dramaId?: number } | null = null
     let prompt = String(body.prompt || '')
     let referenceImages: string[] | Array<{ url?: string }> | undefined = body.reference_images
     let dramaStyle: string | null = null
     let imageStyle: string | null = body.image_style ?? body.imageStyle ?? null
+    // 默认开；显式 false 时不挂定妆参考（场面优先）
+    const usePortraitReference = body.use_portrait_reference !== false && body.usePortraitReference !== false
+    const useSceneReference = body.use_scene_reference !== false && body.useSceneReference !== false
+    const usePropReference = body.use_prop_reference !== false && body.usePropReference !== false
+    const panelTextModeRaw = body.panel_text_mode ?? body.panelTextMode
+    const panelTextMode = panelTextModeRaw === 'full' || panelTextModeRaw === 'long'
+      ? 'full' as const
+      : panelTextModeRaw === 'short'
+        ? 'short' as const
+        : undefined
 
     if (body.storyboard_id) {
       const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()
@@ -60,73 +85,208 @@ app.post('/', async (c) => {
         dramaStyle = drama?.style ?? null
         if (!imageStyle) imageStyle = resolveEpisodeVisualStyle(ep.id, { dramaStyle })
         let portraitLabelsForRefs: string[] = []
-        if (imageModelSupportsReferenceImages(model)) {
-          const maxRefs = imageModelMaxReferenceImages(model)
-          const byLabels = collectCharacterReferenceImagesByPortraitLabels(prompt, allChars, maxRefs)
-          const charRefs = byLabels.refs.length
-            ? byLabels.refs
-            : (resolved.characterIds.length
-              ? collectCharacterReferenceImages(allChars, resolved.characterIds, maxRefs)
-              : [])
-          const bodyRefs = Array.isArray(referenceImages)
-            ? referenceImages.map(item => (typeof item === 'string' ? item : item?.url || '')).filter(Boolean)
-            : []
-          const finalRefs = charRefs.length ? charRefs : bodyRefs
-          referenceImages = finalRefs
-          portraitLabelsForRefs = byLabels.names.length
-            ? byLabels.names
-            : (byLabels.allLabels.length ? byLabels.allLabels.slice(0, finalRefs.length) : [])
-          // 生图前补辨识差：LLM 常只写表情，同框两名男角（尤其同色夹克）易撞脸
-          if (byLabels.allLabels.length >= 2 || byLabels.characterIds.length >= 2) {
-            prompt = ensureMultiPortraitDistinctCuesInPrompt(prompt, allChars)
+        let sceneLabelsForRefs: string[] = []
+        let propLabelsForRefs: string[] = []
+        const typedRefs: TypedImageRef[] = []
+        // 按文案内容挂参考；仅用模型软上限兜底，不再额外卡死 4 张
+        const maxTotal = Math.max(1, imageModelMaxReferenceImages(model))
+
+        if (!usePortraitReference && !useSceneReference && !usePropReference) {
+          referenceImages = []
+          logTaskStart('ImageAPI', 'refs-disabled', { storyboardId: sb.id })
+        } else if (imageModelSupportsReferenceImages(model)) {
+          const epScenes = listEpisodeNarrationScenes(sb.episodeId)
+          const epProps = listEpisodeNarrationProps(sb.episodeId)
+          const toonflowPrompt = isToonflowStyleImagePrompt(prompt)
+          // Toonflow 文案已含对照/@图N；勿再灌场景 bible。旧文案仍补标签。
+          if (!toonflowPrompt) {
+            prompt = enrichImagePromptWithEnvAssets(prompt, sb, { scenes: epScenes, props: epProps })
           }
-          // 漫画解说整段文案：纠正半身/正面/视线/多人挤脸
-          if (isMotionComicStyle(imageStyle || dramaStyle)) {
-            prompt = repairMotionComicContinuousImagePrompt(prompt)
+
+          if (useSceneReference) {
+            const byScene = collectSceneReferenceImagesByLabels(prompt, epScenes, 1)
+            for (let i = 0; i < byScene.refs.length; i++) {
+              typedRefs.push({ url: byScene.refs[i], kind: 'scene' })
+            }
+            sceneLabelsForRefs = byScene.labels
+            // 无标签时回退 storyboard.scene_id
+            if (!typedRefs.length && sb.sceneId) {
+              const sc = epScenes.find(s => s.id === sb.sceneId)
+              const url = String(sc?.imageUrl || '').trim()
+              if (sc && url) {
+                typedRefs.push({ url, kind: 'scene' })
+                sceneLabelsForRefs = [sceneLabelOf(sc)]
+              }
+            }
           }
-          if (byLabels.names.length >= 2 || (byLabels.names.length >= 1 && byLabels.missingLabels.length >= 1)) {
-            const genders = byLabels.characterIds.map((id) => {
-              const ch = allChars.find(c => c.id === id)
-              return resolveCharacterGenderLabelCn(ch?.name, ch?.role, ch?.appearance) || null
-            })
-            const cues = byLabels.characterIds.map((id) => {
-              const ch = allChars.find(c => c.id === id)
-              return extractPortraitDistinctCueCn(ch?.appearance) || null
-            })
-            const uniqueLabelCount = new Set(byLabels.allLabels).size
-            prompt = prependMultiPortraitReferenceHint(prompt, byLabels.names, {
-              genders,
-              cues,
-              totalCount: uniqueLabelCount,
-              missingLabels: byLabels.missingLabels,
-            })
-            if (byLabels.missingLabels.length || byLabels.refs.length < uniqueLabelCount) {
-              logTaskStart('ImageAPI', 'same-frame-face-collision-risk', {
+
+          if (usePortraitReference) {
+            // 定妆张数按文案点名，不因「给道具留坑」而提前砍掉
+            const maxPortrait = MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS
+            const byLabels = collectCharacterReferenceImagesByPortraitLabels(prompt, allChars, maxPortrait)
+            const charRefs = byLabels.refs.length
+              ? byLabels.refs.slice(0, maxPortrait)
+              : (resolved.characterIds.length
+                ? collectCharacterReferenceImages(allChars, resolved.characterIds, maxPortrait)
+                : [])
+            for (const url of charRefs) typedRefs.push({ url, kind: 'portrait' })
+            portraitLabelsForRefs = (byLabels.names.length
+              ? byLabels.names
+              : (byLabels.allLabels.length ? byLabels.allLabels.slice(0, charRefs.length) : [])
+            ).slice(0, maxPortrait)
+
+            // 仅裁剪超限定妆标签以对齐参考图槽位；不在生图时注入辨识差/动作壳
+            if ([...prompt.matchAll(/对照定妆「/g)].length > maxPortrait) {
+              const keepLabel = byLabels.names[0] || byLabels.allLabels[0] || ''
+              if (keepLabel) {
+                prompt = collapseToSinglePortraitLabelInImagePromptCn(prompt, keepLabel, allChars)
+              }
+            }
+            if (byLabels.characterIds.length > resolved.characterIds.length) {
+              logTaskStart('ImageAPI', 'portrait-label-refs', {
                 storyboardId: sb.id,
-                labels: byLabels.allLabels,
-                refCount: finalRefs.length,
-                missingLabels: byLabels.missingLabels,
-                hint: '定妆参考图数量少于对照定妆人数，同框易撞脸',
+                labels: byLabels.names,
+                characterIds: byLabels.characterIds,
               })
             }
           }
-          // 同步绑定：把文案点名的定妆角色也写进 characterIds（含「我」）
-          if (byLabels.characterIds.length > resolved.characterIds.length) {
-            logTaskStart('ImageAPI', 'portrait-label-refs', {
+
+          if (usePropReference) {
+            // 本镜旁白/文案命中的道具全部挂上（再由 maxTotal 软截）
+            const propCap = Math.max(epProps.length, 8)
+            let byProp = collectPropReferenceImagesByLabels(prompt, epProps, propCap)
+            if (!byProp.refs.length) {
+              const hit = matchPropsForNarrationLines(
+                storyboardNarrationLinesForEnv(sb),
+                epProps.map(p => ({
+                  id: p.id,
+                  prop_label: p.name,
+                  has_prop_ref: !!String(p.imageUrl || '').trim(),
+                  description: String(p.description || p.prompt || ''),
+                })),
+              ).filter(p => p.has_prop_ref)
+              const refs: string[] = []
+              const labels: string[] = []
+              for (const p of hit) {
+                const row = epProps.find(x => x.id === p.id)
+                const url = String(row?.imageUrl || '').trim()
+                if (!url) continue
+                refs.push(url)
+                labels.push(p.prop_label)
+              }
+              byProp = { refs, labels, propIds: hit.map(p => p.id) }
+            }
+            for (let i = 0; i < byProp.refs.length; i++) {
+              typedRefs.push({ url: byProp.refs[i], kind: 'prop' })
+            }
+            propLabelsForRefs = byProp.labels
+          }
+
+          const bodyRefs = Array.isArray(referenceImages)
+            ? referenceImages.map(item => (typeof item === 'string' ? item : item?.url || '')).filter(Boolean)
+            : []
+          if (!typedRefs.length && bodyRefs.length) {
+            for (const url of bodyRefs.slice(0, maxTotal)) typedRefs.push({ url, kind: 'portrait' })
+          }
+
+          // Toonflow：严格按 @图N 顺序挂参考；按 label 对齐，禁止同 kind 池序号错位
+          const atSlots = parseToonflowAtImageSlots(prompt)
+          if (atSlots.length) {
+            const scenePool = typedRefs.filter(r => r.kind === 'scene')
+            const portraitPool = typedRefs.filter(r => r.kind === 'portrait')
+            const propPool = typedRefs.filter(r => r.kind === 'prop')
+            const used = new Set<string>()
+            const takeByLabel = (
+              pool: TypedImageRef[],
+              labels: string[],
+              slotLabel: string,
+            ): TypedImageRef | undefined => {
+              const base = slotLabel.split(/[·•]/)[0]?.trim() || slotLabel
+              const want = (lab: string) => {
+                const lb = String(lab || '').trim()
+                return lb === slotLabel || lb === base
+                  || lb.startsWith(base) || slotLabel.startsWith(lb.split(/[·•]/)[0] || '')
+              }
+              // 优先：同序 labels 与 pool 对齐后的精确下标
+              const li = labels.findIndex(want)
+              if (li >= 0 && li < pool.length && !used.has(pool[li].url)) {
+                used.add(pool[li].url)
+                return pool[li]
+              }
+              // 回退：按 pool 顺序取第一个未用
+              for (const r of pool) {
+                if (used.has(r.url)) continue
+                used.add(r.url)
+                return r
+              }
+              return undefined
+            }
+            const ordered: TypedImageRef[] = []
+            const nextPortraitLabels: string[] = []
+            const nextSceneLabels: string[] = []
+            const nextPropLabels: string[] = []
+            for (const slot of atSlots) {
+              if (ordered.length >= maxTotal) break
+              let hit: TypedImageRef | undefined
+              if (slot.kind === 'scene') {
+                hit = takeByLabel(scenePool, sceneLabelsForRefs, slot.label)
+                if (hit) nextSceneLabels.push(slot.label)
+              } else if (slot.kind === 'portrait') {
+                hit = takeByLabel(portraitPool, portraitLabelsForRefs, slot.label)
+                if (hit) nextPortraitLabels.push(slot.label)
+              } else if (slot.kind === 'prop') {
+                hit = takeByLabel(propPool, propLabelsForRefs, slot.label)
+                if (hit) nextPropLabels.push(slot.label)
+              }
+              if (hit) ordered.push(hit)
+            }
+            for (const pool of [scenePool, portraitPool, propPool]) {
+              for (const r of pool) {
+                if (ordered.length >= maxTotal) break
+                if (used.has(r.url) || ordered.some(x => x.url === r.url)) continue
+                used.add(r.url)
+                ordered.push(r)
+              }
+            }
+            referenceImages = ordered
+            portraitLabelsForRefs = nextPortraitLabels
+            sceneLabelsForRefs = nextSceneLabels
+            propLabelsForRefs = nextPropLabels
+            logTaskStart('ImageAPI', 'refs-toonflow-order', {
               storyboardId: sb.id,
-              labels: byLabels.names,
-              characterIds: byLabels.characterIds,
+              slots: atSlots.map(s => `@图${s.index}:${s.kind}:${s.label}`),
+              kept: ordered.map(r => r.kind),
             })
+          } else {
+            // 软截断：1 场景 → 点名道具 → 肖像(≤2) → 其余
+            const namedPropUrls = typedRefs.filter(r => r.kind === 'prop').map(r => r.url)
+            referenceImages = prioritizeTypedImageRefs(typedRefs, {
+              maxTotal,
+              maxPortrait: MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS,
+              namedPropUrls,
+            })
+            if (typedRefs.length > maxTotal || referenceImages.length < typedRefs.length) {
+              const kept = referenceImages as TypedImageRef[]
+              sceneLabelsForRefs = sceneLabelsForRefs.slice(0, kept.filter(r => r.kind === 'scene').length)
+              portraitLabelsForRefs = portraitLabelsForRefs.slice(0, kept.filter(r => r.kind === 'portrait').length)
+              propLabelsForRefs = propLabelsForRefs.slice(0, kept.filter(r => r.kind === 'prop').length)
+              logTaskStart('ImageAPI', 'refs-soft-capped', {
+                storyboardId: sb.id,
+                wanted: typedRefs.length,
+                kept: kept.length,
+                kinds: kept.map(r => r.kind),
+                priority: 'scene>namedProp>portrait>restProp',
+              })
+            }
           }
         }
-        if (resolved.characterIds.length && !useLocalPipeline) {
-          prompt = enrichImagePromptWithCharacters(prompt, allChars, resolved.characterIds, imageStyle || dramaStyle)
-        }
-        if (resolved.characterIds.length || portraitLabelsForRefs.length) {
+        if (resolved.characterIds.length || portraitLabelsForRefs.length || sceneLabelsForRefs.length || propLabelsForRefs.length) {
           logTaskStart('ImageAPI', 'resolve-characters', {
             storyboardId: sb.id,
             characterIds: resolved.characterIds,
             portraitLabels: portraitLabelsForRefs,
+            sceneLabels: sceneLabelsForRefs,
+            propLabels: propLabelsForRefs,
             labels: resolved.characters.map(ch => formatCharacterDisplayName(ch)),
           })
         }
@@ -139,6 +299,12 @@ app.post('/', async (c) => {
         ) {
           prompt = `【定妆参考顺序：${portraitLabelsForRefs.join('、')}】${prompt}`
         }
+        if (sceneLabelsForRefs.length && !/【场景参考：/.test(prompt)) {
+          prompt = `【场景参考：${sceneLabelsForRefs.join('、')}】${prompt}`
+        }
+        if (propLabelsForRefs.length && !/【道具参考顺序：/.test(prompt)) {
+          prompt = `【道具参考顺序：${propLabelsForRefs.join('、')}】${prompt}`
+        }
       }
     } else if (body.drama_id) {
       const [drama] = db.select({ style: schema.dramas.style }).from(schema.dramas).where(eq(schema.dramas.id, Number(body.drama_id))).all()
@@ -146,6 +312,7 @@ app.post('/', async (c) => {
       if (!imageStyle) imageStyle = normalizeArtStyle(dramaStyle)
     }
 
+    // 所有生图：只按传入/落库文案，禁止六维/画风壳编译（画风等须在文案生成阶段写入）
     let negativePrompt: string | undefined
     const localPipeline = episode?.id ? usesLocalModelPipeline(resolveEpisodeProductionMode(episode.id)) : false
     const productionMode = episode?.id ? resolveEpisodeProductionMode(episode.id) : undefined
@@ -155,33 +322,20 @@ app.post('/', async (c) => {
         ? resolveStoryboardImageModel(episode, body.model, productionMode)
         : resolveSceneImageModel(episode, body.model, productionMode)
 
-    if (isNarrationStructuredStyle(imageStyle || dramaStyle) && !isFluxImageModel(resolvedModel) && !isKolorsImageModel(resolvedModel) && !isSdxlInstantIdImageModel(resolvedModel) && !isQwenImageEditModel(resolvedModel)) {
-      const compiled = compileNarrationImageGenerationBundle(prompt, imageStyle || dramaStyle)
-      prompt = compiled.prompt
-      negativePrompt = compiled.negativePrompt
-    }
-
+    // 本地 Flux/Kolors：以分镜落库文案为准；但保留上方刚挂的场景/道具参考标签前缀，并补齐对照标签
     if (body.storyboard_id && localPipeline && (isFluxImageModel(resolvedModel) || isKolorsImageModel(resolvedModel) || isSdxlInstantIdImageModel(resolvedModel))) {
       const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()
       if (sb?.imagePrompt?.trim()) {
-        prompt = String(sb.imagePrompt).trim()
-      }
-    }
-
-    if (isMotionComicStyle(imageStyle || dramaStyle)) {
-      prompt = repairMotionComicContinuousImagePrompt(prompt)
-    }
-
-    if (body.storyboard_id && localPipeline && !isFluxImageModel(resolvedModel) && !isKolorsImageModel(resolvedModel) && !isSdxlInstantIdImageModel(resolvedModel)) {
-      const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()
-      if (sb) {
-        const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
-        const resolved = resolveStoryboardCharacterIdsForShot(sb.id, { sync: true })
-        if (resolved.characterIds.length && ep) {
-          const allChars = getEpisodeVisualCharacters(sb.episodeId, ep.dramaId)
-          if (!imageStyle) imageStyle = resolveEpisodeVisualStyle(ep.id, { dramaStyle })
-          prompt = enrichImagePromptWithCharacters(prompt, allChars, resolved.characterIds, imageStyle || dramaStyle)
+        const prefixBits = [
+          (prompt.match(/【定妆参考顺序：[^】]+】/) || [])[0],
+          (prompt.match(/【场景参考：[^】]+】/) || [])[0],
+          (prompt.match(/【道具参考顺序：[^】]+】/) || [])[0],
+        ].filter(Boolean)
+        let base = enrichImagePromptWithEnvAssets(String(sb.imagePrompt).trim(), sb)
+        for (const bit of prefixBits) {
+          if (bit && !base.includes(bit)) base = `${bit}${base}`
         }
+        prompt = base
       }
     }
 
@@ -206,6 +360,8 @@ app.post('/', async (c) => {
       style: imageStyle || dramaStyle || undefined,
       size: body.size,
       referenceImages: Array.isArray(referenceImages) ? referenceImages as string[] : undefined,
+      usePortraitReference,
+      panelTextMode,
       frameType: body.frame_type,
       configId,
     })

@@ -4,7 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import { v4 as uuid } from 'uuid'
 import ffmpeg from 'fluent-ffmpeg'
-import { getActiveConfig, getConfigById, ensureZhipuVideoConfig } from './ai.js'
+import { getActiveConfig, getConfigById, ensureZhipuVideoConfig, ensureAgnesVideoConfig } from './ai.js'
 import { now } from '../utils/response.js'
 import { downloadFile, getAbsolutePath, readImageAsCompressedDataUrl } from '../utils/storage.js'
 import { getVideoAdapter } from './adapters/registry'
@@ -12,7 +12,7 @@ import type { AIConfig } from './adapters/types'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 import { ensureComfyWorkflowFamily, ensureLocalModelStage, getActiveComfyVideoModel } from './local-model-manager.js'
 import { LOCAL_COMIC_ENV } from '../constants/local-comic.js'
-import { DEFAULT_LOCAL_VIDEO_MODEL, isZhipuVideoModel } from '../constants/video-models.js'
+import { DEFAULT_LOCAL_VIDEO_MODEL, isZhipuVideoModel, isAgnesVideoModel } from '../constants/video-models.js'
 import {
   copyComfyVideoOutput,
   injectWanFlf2vWorkflow,
@@ -30,10 +30,17 @@ import {
 } from './ffmpeg-compose.js'
 import { renderGlideClip } from './glide-ffmpeg.js'
 import {
+  isStoryboardTitleShot,
   parseNarrationImageMeta,
   resolveStoryboardImageAnchorShot,
   resolveStoryboardVisualSource,
+  sortStoryboardsByOrder,
 } from './narration-image.js'
+import { buildNarrationVideoMotionPrompt, extractVideoPromptForModel } from './narration-video-prompt.js'
+import {
+  canChainVideoContinuityByPrompts,
+  storyboardPromptForContinuity,
+} from './video-continuity-guard.js'
 
 interface GenerateVideoParams {
   storyboardId?: number
@@ -79,6 +86,9 @@ function resolveVideoConfig(params: GenerateVideoParams): AIConfig {
   if (params.configId) {
     const config = getConfigById(params.configId)
     if (config) {
+      if (isAgnesVideoModel(params.model) || isAgnesVideoModel(config.model)) {
+        return ensureAgnesVideoConfig(params.model || config.model)
+      }
       if (isZhipuVideoModel(params.model) || isZhipuVideoModel(config.model)) {
         return ensureZhipuVideoConfig(params.model || config.model)
       }
@@ -94,6 +104,9 @@ function resolveVideoConfig(params: GenerateVideoParams): AIConfig {
       model: prefersGlideMotion(m) ? 'glide' : 'kenburns',
     }
   }
+  if (isAgnesVideoModel(params.model)) {
+    return ensureAgnesVideoConfig(params.model)
+  }
   // 未指定 / 智谱模型：默认免费 CogVideoX-Flash
   if (!params.model || isZhipuVideoModel(params.model)) {
     return ensureZhipuVideoConfig(params.model || DEFAULT_LOCAL_VIDEO_MODEL)
@@ -108,6 +121,9 @@ function resolveVideoConfig(params: GenerateVideoParams): AIConfig {
   }
   const active = getActiveConfig('video')
   if (active) {
+    if (isAgnesVideoModel(params.model) || String(active.provider).toLowerCase() === 'agnes') {
+      return ensureAgnesVideoConfig(params.model || active.model)
+    }
     if (String(active.provider).toLowerCase() === 'zhipu' || String(active.provider).toLowerCase() === 'bigmodel') {
       return ensureZhipuVideoConfig(params.model || active.model)
     }
@@ -134,6 +150,94 @@ function cleanWanPromptText(raw: string): string {
     .trim()
 }
 
+/** 镜头静帧（配图/首帧），不含已生成视频 */
+function resolveShotStartStill(
+  sb: typeof schema.storyboards.$inferSelect,
+  episodeStoryboards: typeof schema.storyboards.$inferSelect[],
+): string | undefined {
+  const visual = resolveStoryboardVisualSource(episodeStoryboards, sb.id)
+  const fromVisual = String(visual?.path || '').trim()
+  if (fromVisual) return fromVisual
+  const anchor = resolveStoryboardImageAnchorShot(episodeStoryboards, sb.id) ?? sb
+  const own = String(sb.firstFrameImage || sb.composedImage || '').trim()
+  if (own) return own
+  return String(anchor.firstFrameImage || anchor.composedImage || '').trim() || undefined
+}
+
+/**
+ * 镜间连贯：下一镜首帧（静帧）作为本镜尾帧。
+ * 仅当下一镜与本镜同定妆角色且服装相近时才串；否则返回 undefined（单图图生视频）。
+ */
+function resolveNextShotContinuityStill(
+  sb: typeof schema.storyboards.$inferSelect,
+  episodeStoryboards: typeof schema.storyboards.$inferSelect[],
+  currentFirst?: string,
+): string | undefined {
+  const ordered = sortStoryboardsByOrder(episodeStoryboards)
+  const idx = ordered.findIndex(s => s.id === sb.id)
+  if (idx < 0) return undefined
+  const cur = String(currentFirst || '').trim()
+  const currentPrompt = storyboardPromptForContinuity(sb, parseNarrationImageMeta)
+  for (let i = idx + 1; i < ordered.length; i++) {
+    const next = ordered[i]
+    if (isStoryboardTitleShot(next)) continue
+    const still = resolveShotStartStill(next, episodeStoryboards)
+    if (!still) continue
+    if (cur && still === cur) continue
+    const nextPrompt = storyboardPromptForContinuity(next, parseNarrationImageMeta)
+    const check = canChainVideoContinuityByPrompts(currentPrompt, nextPrompt)
+    if (!check.ok) {
+      logTaskWarn('VideoTask', 'continuity-skip', {
+        storyboardId: sb.id,
+        nextStoryboardId: next.id,
+        reason: check.reason,
+      })
+      // 下一张不同静帧已不满足门禁：不再跨镜硬找更远的图
+      return undefined
+    }
+    return still
+  }
+  return undefined
+}
+
+/** 若 last 来自「下一镜配图」但不满足门禁，则清空，避免前端强传导致换装 */
+function sanitizeChainedLastFrame(
+  sb: typeof schema.storyboards.$inferSelect,
+  episodeStoryboards: typeof schema.storyboards.$inferSelect[],
+  firstFrameUrl?: string | null,
+  lastFrameUrl?: string | null,
+): string | undefined {
+  const first = String(firstFrameUrl || '').trim()
+  const last = String(lastFrameUrl || '').trim()
+  if (!last || !first || last === first) return last || undefined
+
+  const ordered = sortStoryboardsByOrder(episodeStoryboards)
+  const idx = ordered.findIndex(s => s.id === sb.id)
+  if (idx < 0) return last
+
+  const currentPrompt = storyboardPromptForContinuity(sb, parseNarrationImageMeta)
+  for (let i = idx + 1; i < ordered.length; i++) {
+    const next = ordered[i]
+    if (isStoryboardTitleShot(next)) continue
+    const still = resolveShotStartStill(next, episodeStoryboards)
+    if (!still || still !== last) continue
+    const check = canChainVideoContinuityByPrompts(
+      currentPrompt,
+      storyboardPromptForContinuity(next, parseNarrationImageMeta),
+    )
+    if (!check.ok) {
+      logTaskWarn('VideoTask', 'continuity-strip-last', {
+        storyboardId: sb.id,
+        nextStoryboardId: next.id,
+        reason: check.reason,
+      })
+      return undefined
+    }
+    return last
+  }
+  return last
+}
+
 /** 合成单元配图（锚点镜 inherit 链上的 composedImage） */
 function resolveComposeUnitVisual(
   sb: typeof schema.storyboards.$inferSelect,
@@ -147,7 +251,12 @@ function resolveComposeUnitVisual(
   const anchor = resolveStoryboardImageAnchorShot(episodeStoryboards, sb.id) ?? sb
   const imageUrl = String(visual?.path || anchor.composedImage || anchor.firstFrameImage || '').trim() || undefined
   const firstFrameUrl = String(anchor.firstFrameImage || anchor.composedImage || imageUrl || '').trim() || undefined
-  const lastFrameUrl = String(sb.lastFrameImage || anchor.lastFrameImage || '').trim() || undefined
+  let lastFrameUrl = String(sb.lastFrameImage || anchor.lastFrameImage || '').trim() || undefined
+  // 无显式尾帧时：用下一镜首帧做连贯（FLF / Agnes keyframes）
+  if (!lastFrameUrl || lastFrameUrl === firstFrameUrl) {
+    const nextStill = resolveNextShotContinuityStill(sb, episodeStoryboards, firstFrameUrl)
+    if (nextStill) lastFrameUrl = nextStill
+  }
   return {
     imageUrl: imageUrl || firstFrameUrl,
     firstFrameUrl,
@@ -155,13 +264,16 @@ function resolveComposeUnitVisual(
   }
 }
 
-/** 段落旁白 + 配图场景描述 → Wan 提示词 */
+/** 段落旁白 + 配图【画面】→ 专用视频运动描述（每次可强制重算） */
 function buildVideoPromptFromComposeUnit(
   sb: typeof schema.storyboards.$inferSelect,
   episodeStoryboards: typeof schema.storyboards.$inferSelect[],
+  opts?: { force?: boolean },
 ): string {
-  const existing = String(sb.videoPrompt || '').trim()
-  if (existing) return existing
+  if (!opts?.force) {
+    const existing = String(sb.videoPrompt || '').trim()
+    if (existing) return existing
+  }
 
   const anchor = resolveStoryboardImageAnchorShot(episodeStoryboards, sb.id) ?? sb
   const meta = parseNarrationImageMeta(anchor.referenceImages)
@@ -169,28 +281,20 @@ function buildVideoPromptFromComposeUnit(
     buildComposeUnitMergedTtsText(sb.id, episodeStoryboards)
       || String(sb.dialogue || sb.description || '').trim(),
   )
-  const imageScene = cleanWanPromptText(
-    String(
-      anchor.imagePrompt
-      || meta.image_prompt_llm_raw
-      || meta.scene_content
-      || anchor.description
-      || '',
-    ).trim(),
-  )
+  const imagePrompt = String(
+    anchor.imagePrompt
+    || meta.image_prompt_llm_raw
+    || meta.scene_content
+    || anchor.description
+    || '',
+  ).trim()
 
-  const paraClip = paragraph.slice(0, 90)
-  const sceneClip = imageScene.slice(0, 110)
-  if (sceneClip && paraClip) {
-    return `${sceneClip}。旁白情境：${paraClip}。画面与配图一致，角色轻微自然动作，镜头稳定，动漫风格`
-  }
-  if (paraClip) {
-    return `旁白情境：${paraClip}。画面与配图一致，角色轻微自然动作，镜头稳定，动漫风格`
-  }
-  if (sceneClip) {
-    return `${sceneClip}。画面轻微自然运动，镜头稳定，动漫风格`
-  }
-  return '画面与配图一致，角色轻微自然动作，镜头稳定，动漫风格'
+  return buildNarrationVideoMotionPrompt({
+    imagePrompt,
+    paragraph,
+    highlight: !!meta.highlight_motion,
+    highlightReason: meta.highlight_reason,
+  })
 }
 
 /** 合成单元时长：优先累加各句 TTS 实测，否则按字数估 */
@@ -276,19 +380,45 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     storyboard = sb
     if (sb) {
       const episodeSbs = loadEpisodeStoryboardsForShot(sb)
-      if (!prompt) prompt = buildVideoPromptFromComposeUnit(sb, episodeSbs)
+      // 优先用已生成的 video_prompt；Toonflow 双语结构提交前抽取 EN/动作段
+      const stored = String(sb.videoPrompt || '').trim()
+      const fromClient = String(params.prompt || '').trim()
+      let rawPrompt = stored || fromClient
+      if (!rawPrompt) {
+        rawPrompt = buildVideoPromptFromComposeUnit(sb, episodeSbs, { force: true })
+        db.update(schema.storyboards)
+          .set({ videoPrompt: rawPrompt, updatedAt: now() })
+          .where(eq(schema.storyboards.id, sb.id))
+          .run()
+      }
+      prompt = extractVideoPromptForModel(rawPrompt) || rawPrompt
       const imgs = resolveComposeUnitVisual(sb, episodeSbs)
       if (!imageUrl) imageUrl = imgs.imageUrl
       if (!firstFrameUrl) firstFrameUrl = imgs.firstFrameUrl
       if (!lastFrameUrl) lastFrameUrl = imgs.lastFrameUrl
+      lastFrameUrl = sanitizeChainedLastFrame(sb, episodeSbs, firstFrameUrl, lastFrameUrl)
       if (!params.duration) {
         duration = await estimateComposeUnitDurationSec(sb.id, episodeSbs)
+      }
+      /** Agnes：按分镜 duration 生成动作片段，成片仍可由旁白/合成对齐 */
+      if (isAgnesVideoModel(params.model) || isAgnesVideoModel(config.model)) {
+        duration = Math.min(13, Math.max(2, duration))
       }
     }
   }
   if (!prompt) prompt = '画面轻微运动，镜头稳定，动作自然流畅，动漫风格，高清细节'
 
   const model = String(params.model || config.model || DEFAULT_LOCAL_VIDEO_MODEL)
+  // Agnes / Wan：有不同首尾帧时自动走镜间连贯（下一镜首帧 = 本镜尾帧）
+  let referenceMode = params.referenceMode || 'none'
+  const canFlf = !!(lastFrameUrl && firstFrameUrl && lastFrameUrl !== firstFrameUrl)
+  if (canFlf && (isAgnesVideoModel(model) || isWanVideoModel(model))) {
+    if (!referenceMode || referenceMode === 'none' || referenceMode === 'single') {
+      referenceMode = 'first_last'
+    }
+  } else if (isAgnesVideoModel(model) && (!referenceMode || referenceMode === 'none')) {
+    referenceMode = 'single'
+  }
 
   const res = db.insert(schema.videoGenerations).values({
     storyboardId: params.storyboardId,
@@ -296,7 +426,7 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     prompt,
     model,
     provider: config.provider,
-    referenceMode: params.referenceMode || 'none',
+    referenceMode,
     imageUrl,
     firstFrameUrl,
     lastFrameUrl,
@@ -315,7 +445,7 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     model,
     storyboardId: params.storyboardId,
     dramaId: params.dramaId,
-    referenceMode: params.referenceMode || 'none',
+    referenceMode,
     duration,
   })
   logTaskPayload('VideoTask', 'enqueue params', {
@@ -325,13 +455,55 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
       model: config.model,
       baseUrl: config.baseUrl,
     },
-    params: { ...params, prompt, imageUrl, firstFrameUrl, lastFrameUrl, duration, model },
+    params: { ...params, prompt, imageUrl, firstFrameUrl, lastFrameUrl, duration, model, referenceMode },
   })
   processVideoGeneration(lastId, { ...config, model }).catch(err => {
     logTaskError('VideoTask', 'process', { id: lastId, error: err.message })
     console.error(`Video generation ${lastId} failed:`, err)
   })
   return lastId
+}
+
+function formatFetchError(err: unknown): string {
+  const e = err as any
+  const cause = e?.cause
+  const code = String(cause?.code || e?.code || '').trim()
+  const detail = String(cause?.message || e?.message || err || 'fetch failed').trim()
+  if (code && !detail.includes(code)) return `${detail} (${code})`
+  return detail
+}
+
+function isTransientNetworkError(err: unknown): boolean {
+  const e = err as any
+  const msg = `${e?.message || ''} ${e?.cause?.message || ''} ${e?.cause?.code || ''} ${e?.code || ''}`.toLowerCase()
+  return /fetch failed|econnreset|etimedout|econnrefused|enotfound|socket|tls|handshake|network|und_err|aborted|eai_again/.test(msg)
+}
+
+async function fetchWithNetworkRetry(
+  url: string,
+  init: RequestInit,
+  opts?: { retries?: number; label?: string; id?: number },
+): Promise<Response> {
+  const retries = Math.max(1, opts?.retries ?? 3)
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fetch(url, init)
+    } catch (err) {
+      lastErr = err
+      if (attempt >= retries || !isTransientNetworkError(err)) throw err
+      const waitMs = 700 * attempt * (attempt >= 3 ? 2 : 1)
+      logTaskWarn('VideoTask', 'network-retry', {
+        id: opts?.id,
+        label: opts?.label,
+        attempt,
+        waitMs,
+        error: formatFetchError(err),
+      })
+      await new Promise(r => setTimeout(r, waitMs))
+    }
+  }
+  throw lastErr
 }
 
 async function processVideoGeneration(id: number, config: AIConfig) {
@@ -391,11 +563,31 @@ async function processVideoGeneration(id: number, config: AIConfig) {
       body,
     })
 
-    const resp = await fetch(url, {
+    const bodyJson = JSON.stringify(body)
+    let resp = await fetchWithNetworkRetry(url, {
       method,
       headers,
-      body: JSON.stringify(body),
-    })
+      body: bodyJson,
+    }, { retries: 3, label: 'generate', id })
+
+    // Agnes 视频限流：约 1 次/分钟，等待后重试
+    for (let rateAttempt = 1; rateAttempt <= 3 && resp.status === 429; rateAttempt++) {
+      const errText = await resp.text().catch(() => '')
+      const waitMs = 65_000 * rateAttempt
+      logTaskWarn('VideoTask', 'rate-limit-retry', {
+        id,
+        provider: config.provider,
+        attempt: rateAttempt,
+        waitMs,
+        error: errText.slice(0, 240),
+      })
+      await new Promise(r => setTimeout(r, waitMs))
+      resp = await fetchWithNetworkRetry(url, {
+        method,
+        headers,
+        body: bodyJson,
+      }, { retries: 2, label: 'generate-ratelimit', id })
+    }
 
     if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`)
     const result = await resp.json() as any
@@ -424,9 +616,10 @@ async function processVideoGeneration(id: number, config: AIConfig) {
 
     pollVideoTask(id, config, taskId!, record.storyboardId)
   } catch (err: any) {
-    logTaskError('VideoTask', 'process', { id, provider: config.provider, error: err.message })
+    const msg = formatFetchError(err)
+    logTaskError('VideoTask', 'process', { id, provider: config.provider, error: msg })
     db.update(schema.videoGenerations)
-      .set({ status: 'failed', errorMsg: err.message, updatedAt: now() })
+      .set({ status: 'failed', errorMsg: msg, updatedAt: now() })
       .where(eq(schema.videoGenerations.id, id))
       .run()
   }
@@ -541,7 +734,9 @@ async function processComfyUIVideoGeneration(id: number, config: AIConfig) {
 
     const preferredModel = String(record.model || config.model || getActiveComfyVideoModel() || 'wan_i2v').toLowerCase()
     const useFusionx = preferredModel.includes('fusionx')
-    const comfyVideoModel = preferredModel.includes('flf')
+    const modeEarly = String(record.referenceMode || 'single')
+    const willFlf = preferredModel.includes('flf') || modeEarly === 'first_last'
+    const comfyVideoModel = willFlf
       ? 'wan_flf2v'
       : useFusionx
         ? 'wan_i2v_fusionx'
@@ -574,8 +769,11 @@ async function processComfyUIVideoGeneration(id: number, config: AIConfig) {
     if (!promptText) promptText = '画面轻微运动，镜头稳定，动作自然流畅，动漫风格，高清细节'
 
     const mode = String(record.referenceMode || 'single')
-    const wantFlf = preferredModel.includes('flf') || mode === 'first_last'
-    const useFlf2v = wantFlf && !!(firstFrameUrl && lastFrameUrl)
+    // 有不同首尾帧时强制 FLF（与 enqueue 时镜间连贯一致）
+    const wantFlf = preferredModel.includes('flf')
+      || mode === 'first_last'
+      || !!(firstFrameUrl && lastFrameUrl && firstFrameUrl !== lastFrameUrl)
+    const useFlf2v = wantFlf && !!(firstFrameUrl && lastFrameUrl && firstFrameUrl !== lastFrameUrl)
     const workflowName = useFlf2v ? 'wan_flf2v' : useFusionx ? 'wan_i2v_fusionx' : 'wan_i2v'
     const length = wanDurationToLength(record.duration)
     const prompt = loadWorkflowTemplate(workflowName)
@@ -938,7 +1136,11 @@ async function pollVideoTask(id: number, config: AIConfig, taskId: string, story
         url: redactUrl(url),
         attempt: i + 1,
       })
-      const resp = await fetch(url, { method, headers })
+      const resp = await fetchWithNetworkRetry(url, { method, headers }, {
+        retries: 2,
+        label: 'poll',
+        id,
+      })
       if (!resp.ok) continue
       const result = await resp.json() as any
 
@@ -955,14 +1157,15 @@ async function pollVideoTask(id: number, config: AIConfig, taskId: string, story
       }
     } catch (err: any) {
       if (i === 299) {
-        logTaskError('VideoTask', 'poll-timeout', { id, taskId, error: err.message })
+        const msg = formatFetchError(err)
+        logTaskError('VideoTask', 'poll-timeout', { id, taskId, error: msg })
         db.update(schema.videoGenerations)
-          .set({ status: 'failed', errorMsg: `Timeout: ${err.message}`, updatedAt: now() })
+          .set({ status: 'failed', errorMsg: `Timeout: ${msg}`, updatedAt: now() })
           .where(eq(schema.videoGenerations.id, id))
           .run()
         return
       }
-      logTaskWarn('VideoTask', 'poll-retry', { id, taskId, attempt: i + 1, error: err.message })
+      logTaskWarn('VideoTask', 'poll-retry', { id, taskId, attempt: i + 1, error: formatFetchError(err) })
     }
   }
 }

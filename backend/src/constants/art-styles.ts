@@ -10,7 +10,30 @@ import {
   MOTION_COMIC_SCENE_BODY_EXAMPLE,
   MOTION_COMIC_STYLE_SPEC,
   MOTION_COMIC_NEGATIVE_PROMPT,
+  PROP_HOLDER_PLACEMENT_LLM_RULE,
 } from './motion-comic.js'
+import {
+  NOVEL_COMIC_SKETCH_STYLE,
+  isNovelComicSketchStyle,
+  isNovelComicPortraitPromptText,
+  novelComicSketchStylePrompt,
+  buildNovelComicSketchParagraphImagePromptLLMSystem,
+  buildNovelComicSketchTitleImagePromptLLMSystem,
+  buildNovelComicSketchImageDetectLLMSystem,
+  NOVEL_COMIC_SKETCH_STYLE_SPEC,
+  NOVEL_COMIC_SKETCH_SCENE_SUFFIX,
+  NOVEL_COMIC_SKETCH_PORTRAIT_SUFFIX,
+  NOVEL_COMIC_SKETCH_NEGATIVE_PROMPT,
+  NOVEL_COMIC_SKETCH_PORTRAIT_NEGATIVE_PROMPT,
+  normalizeNovelComicPanelTextMode,
+  novelComicPanelTextModeFromPrompt,
+  novelComicPanelTextModeMarker,
+  novelComicSketchSceneSuffix,
+  novelComicSketchStyleSpec,
+  NOVEL_COMIC_PANEL_TEXT_MODE_SHORT,
+  NOVEL_COMIC_PANEL_TEXT_MODE_FULL,
+  type NovelComicPanelTextMode,
+} from './novel-comic.js'
 import {
   THREE_VIEW_PORTRAIT_PLOT_ANIME_CN,
   THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN,
@@ -23,7 +46,19 @@ import {
   NARRATION_FLUX_COMPACT_LLM_RULE,
   NARRATION_FLUX_COMPACT_TEXTURE_CN,
 } from './flux-prompt-compact.js'
-import { usesMotionComicVisuals, resolveEpisodeProductionMode } from './production-mode.js'
+import {
+  buildToonflowParagraphImagePromptLLMSystem,
+} from './toonflow-llm.js'
+import {
+  usesMotionComicVisuals,
+  resolveEpisodeProductionMode,
+  isNovelComicMode,
+} from './production-mode.js'
+
+/** 漫画插画流水线（国漫彩绘 or 小说彩漫四格）：连续中文配图文案（密度各自独立） */
+export function usesComicIllustrationPipeline(style?: string | null): boolean {
+  return isMotionComicStyle(style) || isNovelComicSketchStyle(style)
+}
 
 export type ArtStyleContext = 'scene' | 'diptych' | 'title' | 'portrait' | 'agent'
 
@@ -32,7 +67,7 @@ export const DEFAULT_ART_STYLE = 'short-drama'
 /** 解说素体极简叙事画风（项目级视觉风格 value） */
 export const NARRATION_MINIMAL_STYLE = 'narration-minimal'
 
-/** 解说配图动漫风格（正常头身比 2D 动漫，七维结构与素体相同） */
+/** 解说配图默认画风：日系2D动漫漫画风（高对比电影光影，氛围随小说情节） */
 export const NARRATION_ANIME_STYLE = 'narration-anime'
 
 /** 漫画解说（条漫平涂 + 上下运镜，独立于素体解说） */
@@ -45,16 +80,24 @@ export {
   MOTION_COMIC_NEGATIVE_PROMPT,
 } from './motion-comic.js'
 
+export {
+  NOVEL_COMIC_SKETCH_STYLE,
+  isNovelComicSketchStyle,
+  novelComicSketchStylePrompt,
+  NOVEL_COMIC_SKETCH_NEGATIVE_PROMPT,
+} from './novel-comic.js'
+
 /** 解说配图可选画风（定妆参考与配图共用） */
 export const NARRATION_IMAGE_STYLE_OPTIONS = [
   { value: NARRATION_MINIMAL_STYLE, label: '简体素人' },
-  { value: NARRATION_ANIME_STYLE, label: '动漫风格' },
+  { value: NARRATION_ANIME_STYLE, label: '日系漫画' },
 ] as const
 
 export function resolveNarrationImageStyle(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase()
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
   if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
+  if (key === NOVEL_COMIC_SKETCH_STYLE || key === 'novel_comic_sketch') return NOVEL_COMIC_SKETCH_STYLE
   return NARRATION_ANIME_STYLE
 }
 
@@ -65,6 +108,11 @@ export function resolveEpisodeVisualStyle(
 ): string {
   const explicit = String(options?.imageStyle || '').trim()
   const mode = resolveEpisodeProductionMode(episodeId)
+  if (isNovelComicMode(mode)) {
+    if (explicit && isNovelComicSketchStyle(explicit)) return NOVEL_COMIC_SKETCH_STYLE
+    if (explicit && isMotionComicStyle(explicit)) return MOTION_COMIC_STYLE
+    return NOVEL_COMIC_SKETCH_STYLE
+  }
   if (usesMotionComicVisuals(mode)) return MOTION_COMIC_STYLE
   if (mode === 'local_comic' || mode === 'drama') {
     if (explicit) return normalizeArtStyle(explicit)
@@ -406,24 +454,28 @@ export const NARRATION_ERA_PROP_CONSISTENCY_LLM_RULE =
 export const NARRATION_UNIVERSAL_STYLE_SPEC_BODY =
   `16:9 横屏，2D 扁平插画，全员${NARRATION_CROWD_BODY}简笔身形纯色平涂无复杂光影（${NARRATION_CROWD_FACE}），黑色轮廓线，${NARRATION_BODY_CONSISTENCY_CORE}`
 
-/** 解说配图动漫风格：画风规格维固定正文 */
+/** 解说配图日系2D漫画：画风规格维固定正文 */
 export const NARRATION_ANIME_STYLE_SPEC_BODY =
-  '16:9 横屏，现代高质量电影感日系动漫插画（新海诚/京都动画级），干净细腻线稿，柔和水彩质感赛璐璐与明暗塑造体积感，正常青年头身比（非Q版非三头身），大而传神的双眸含层次高光与瞳孔反光，温暖黄金时刻窗光与发丝轮廓逆光，背景高度写实细节加浅景深虚化'
+  '16:9 横屏，日系2D动漫插画（Anime Style），正常青年头身比（非Q版非三头身），大而传神的动漫眼睛含瞳孔高光，高对比电影感戏剧光影；色温与氛围须贴合本段小说情节（紧张/悬疑/冲突可用冷蓝紫与锐利高光烘托，日常与温馨段落勿硬套末日废土）'
 
-/** 动漫风格禁止偏离项 */
+/** 日系2D漫画禁止偏离项 */
 export const NARRATION_ANIME_STYLE_FORBIDDEN =
-  '禁止Q版三头身、像素风、3D渲染、真人照片、粗劣平涂、低精度草图、条漫'
+  '禁止3D建模/CGI写实、真人照片、Q版三头身、像素风、粗劣条漫黑线、每镜强制末日爆炸光'
 
-/** 动漫风格固定后缀 */
+/** 日系2D漫画固定后缀 */
 export const NARRATION_ANIME_SCENE_SUFFIX =
-  '电影感叙事构图，精致干净的画面'
+  '日系2D漫画构图，高对比电影光影，无文字无水印'
+
+/** LLM：光影随小说情节，勿全片锁死末日调 */
+export const NARRATION_ANIME_MOOD_ADAPT_LLM_RULE =
+  '【光影随戏·硬性】画风固定日系2D高对比电影感；【光影色调】必须按本段 narration_lines 的情绪与题材写：紧张/悬疑/战斗→冷蓝紫+戏剧高光（可偏暗）；日常/对话/温馨→柔和自然光或室内光，禁止无依据整集统一末日废土/爆炸白蓝光；色温服务本段小说内容，不服务固定滤镜'
 
 /** LLM 写【质感要求】时的短补充项（动漫） */
 export const NARRATION_ANIME_TEXTURE_LLM_HINT = NARRATION_FLUX_COMPACT_TEXTURE_CN
 
-/** 动漫/动态漫：统一人物审美（不写胖瘦体型词，只保持标准比例动漫风） */
+/** 日系2D漫画/动态漫：统一人物审美（不写胖瘦体型词，只保持标准比例） */
 export const NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE = [
-  '【人物审美·硬性】全片统一标准成年比例动漫/漫画人物（以【画风规格】为准），禁止写「微胖」「肥胖」「瘦削」「腰腹略鼓」「肩背厚实」等胖瘦体型词，禁止幼态/萝莉化面容与身材描写；',
+  '【人物审美·硬性】全片统一标准成年比例日系2D动漫/漫画人物（以【画风规格】为准），禁止写「微胖」「肥胖」「瘦削」「腰腹略鼓」「肩背厚实」等胖瘦体型词，禁止幼态/萝莉化面容与身材描写；',
   '【定妆固定·硬性】有定妆时脸型与发型参照定妆图固定不变，【画面主体】禁止重写脸型/发型/发色/眉形/身形；本镜服装+#hex 只写在位于…以…姿态之后的（身穿…）中，可按剧情换装；',
   '禁止写「躯干X份高×Y份宽」「三头身」「圆头直径」等素体份数计量（素体画风除外）；',
   '【表情细化·硬性】身份括号内只写本镜可变表情（眉眼开合、瞳孔缩放、嘴型、汗珠/脸红/泪光/咬牙/颤线等），按 narration_lines 情绪写细，勿只写「表情紧张/神情放松」一词带过；禁止追加幼态面容词。',
@@ -446,7 +498,7 @@ export const NARRATION_ANIME_BODY_WEIGHT_ARC_LLM_RULE = ''
 
 /** 动漫 / 动态漫：是否用自然语言锁定全片主人公体型（禁止素体份数计量） */
 export function usesNarrationNaturalBodyLock(style?: string | null): boolean {
-  return isNarrationAnimeStyle(style) || isMotionComicStyle(style)
+  return isNarrationAnimeStyle(style) || usesComicIllustrationPipeline(style)
 }
 
 /** 剥离外貌/定妆中的素体份数与胖瘦体型词 */
@@ -515,9 +567,10 @@ export function normalizeAnimeProtagonistBodyInPrompt(
 
 /** 按画风取【画风规格】固定正文 */
 export function getNarrationStyleSpecBody(style?: string | null): string {
-  const key = String(style || '').trim().toLowerCase()
+  const key = String(style || '').trim().toLowerCase().replace(/_/g, '-')
   if (key === NARRATION_ANIME_STYLE) return NARRATION_ANIME_STYLE_SPEC_BODY
   if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE_SPEC
+  if (key === NOVEL_COMIC_SKETCH_STYLE) return NOVEL_COMIC_SKETCH_STYLE_SPEC
   return NARRATION_UNIVERSAL_STYLE_SPEC_BODY
 }
 
@@ -593,13 +646,21 @@ export const NARRATION_CAMERA_FRAMING_LLM_RULE = [
 export const NARRATION_NO_YOUTHFUL_FACE_LLM_RULE =
   '【禁幼态·硬性】【画面主体】【质感要求】及全文七维禁止写幼态、萝莉、稚气、娃娃脸、娇小少女感、圆脸幼态、软萌幼顔、童颜、幼女气质、1girl 气质等；按角色年龄写成年动漫面容与标准比例，成年人禁止未成年/幼齿化描写；表情可夸张（汗珠/脸红/颤抖线）但勿写成幼态卖萌'
 
+/**
+ * 持物归属：旁白里「手里/握着」的道具必须写进人物动作，禁止当成桌面陈设。
+ * 定义见 motion-comic.PROP_HOLDER_PLACEMENT_LLM_RULE（本文件 re-export）。
+ */
+export { PROP_HOLDER_PLACEMENT_LLM_RULE }
+
 /** 万能模板：动作与场景细化（构图五要素同帧可见；无剧本特例） */
 export const NARRATION_ACTION_SCENE_DETAIL_LLM_RULE = [
-  '【动作细化·硬性】【核心细节动作】须同时含：①具体肢体（哪只手/脚在做什么）②视线落点③与道具/配角/环境的接触；禁止用「氛围感/专注感/光晕/情绪张力」替代可画动作；禁止整维只有神情描写而无肢体姿态',
-  '【场景细化·硬性】【年代场景】须写：时代+具体地点+前/中/后景分层+至少2–3个可辨认物件（含颜色/材质/状态）；物件优先取自 narration_lines；禁止只写场所类别词',
+  '【动作细化·硬性】【核心细节动作】须同时含：①具体肢体（哪只手/脚在做什么）②视线落点③与道具/配角/环境的接触；禁止用「氛围感/专注感/光晕/情绪张力」替代可画动作；禁止整维只有神情描写而无肢体姿态；左右手与动词以本段 narration_lines 为准，禁止改左右、禁止发明旁白未写的拖拽/指认/接过等，禁止把下一段动作提前画进本镜',
+  '【视线·硬性】按剧情写视线落点：对话看向对方、递接看向手/物件、进门看向室内、惊恐看向声源/门口、读写看向试卷/屏幕、发呆可低垂或望向窗外；禁止全片统一「望向前方/直视镜头/看向镜头」；仅当旁白明确第四面墙/看向镜头时才写看向镜头',
+  '【场景细化·硬性】【年代场景】须写：时代+具体地点+前/中/后景分层+至少2–3个可辨认物件（含颜色/材质/状态）；物件优先取自 narration_lines；禁止只写场所类别词；手持中的关键道具勿写入前景桌面陈设',
   '【场景禁特写词】【年代场景】【镜头视角】【光影色调】禁止写「面部特写/脸部特写/只映出脸/只拍脸/大特写局部」；有反射面时写「映出人物上半身/姿态/动作」，勿写「映出面部特写」',
   '【镜面反射·硬性】凡出现镜子/镜面/镜中/照镜子/橱窗玻璃反光等：①场景只设一面落地镜/穿衣镜，禁止壁挂小圆镜或多面镜；②镜中是光学左右镜像（同一瞬间同一服装姿态），不是可互动的第二个人；③主人公始终只有两只手，双手自然下垂或放在身前，禁止伸手摸镜、触碰镜中脸、与镜中人互动（此类动作极易多生第三只手）；④【核心细节动作】写「站在单面镜子前注视映像，双手不接触镜面，镜中左右镜像与本人一致」',
-  '【手持解剖·硬性】手持手机/杯/袋/文件等：①【核心细节动作】须写清「恰好两只手两条手臂」与左右分工（如「右手持手机于胸前，左手自然垂于身侧」或「双手捧杯」）；②禁止一手撑墙/扶门+另一手持物贴墙/举物（极易生出第三只手）；靠墙时写「肩背轻靠墙，手不撑墙」；③禁止同时写抬手、撑墙、握物三种手部动作；④手指五指正常、无多余手指；物件只由已写明的那一只或两只手握住',
+  '【手持解剖·硬性】手持手机/杯/袋/文件/香烟等：①【核心细节动作】须写清「恰好两只手两条手臂」与左右分工（如「右手持手机于胸前，左手自然垂于身侧」或「王志刚右手攥着没点着的香烟」）；②禁止一手撑墙/扶门+另一手持物贴墙/举物（极易生出第三只手）；靠墙时写「肩背轻靠墙，手不撑墙」；③禁止同时写抬手、撑墙、握物三种手部动作；④手指五指正常、无多余手指；物件只由已写明的那一只或两只手握住',
+  PROP_HOLDER_PLACEMENT_LLM_RULE,
   '【主体一致】【画面主体】有配角/路人时禁止写「无配角」；主人公姿态与【核心细节动作】【镜头视角】须同一瞬间；表情写在主体（细化眉眼嘴），动作写在核心维，构图须同帧可见',
 ].join('')
 
@@ -620,6 +681,10 @@ export const NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE =
 /** LLM：【年代场景】陈设（权威表述，纯 AI 输出，无后处理补全） */
 export const NARRATION_FIXTURES_LLM_RULE =
   '【年代场景·陈设·硬性】陈设唯一写入【年代场景】：有桌面/柜台/货架/展台/工位/墙面/地面等载体时，须写「{时代氛围}{具体场所}，{载体}上陈列/摆放至少2个具体物件（含材质或颜色）」；物件从 prior_narration、full_narration 或 narration_lines 提取或合理推断；同场所可延续仍相关物件，场景切换时重设；须与【核心细节动作】一致；禁止只写「货物/商品/工具」等泛称；无载体则写门窗、灯具、墙面、地面材质等至少1项环境细节'
+
+/** 解说视频/漫画解说：陈设只跟本段，勿强制「至少2件全书物件」 */
+export const NARRATION_SEGMENT_LOCAL_FIXTURES_LLM_RULE =
+  '【年代场景·本段陈设】写入【年代场景】：时代氛围+本段地点；物件优先用本段旁白已出现或暗示的；本段未点名时可略补 1～2 个同场氛围物件（门窗/灯光/地面材质），禁止为凑数塞入全文其它场次的道具清单'
 
 /** @deprecated 使用 NARRATION_FIXTURES_LLM_RULE */
 export const NARRATION_FIXTURES_FORMAT_LLM_RULE = NARRATION_FIXTURES_LLM_RULE
@@ -668,7 +733,7 @@ export const NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE = [
   NARRATION_STAGE_HAIR_LLM_RULE,
   NARRATION_DUAL_PROTAGONIST_LLM_RULE,
   NARRATION_CROWD_EYE_LLM_RULE,
-  NARRATION_FIXTURES_LLM_RULE,
+  NARRATION_SEGMENT_LOCAL_FIXTURES_LLM_RULE,
   NARRATION_ATMOSPHERE_LLM_RULE,
   NARRATION_ERA_CLOTHING_LLM_RULE,
   NARRATION_SCREEN_DEVICE_ORIENTATION_LLM_RULE,
@@ -678,28 +743,29 @@ export const NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE = [
 
 /** 解说配图动漫风格：LLM 七维结构规范（场景六维复用，仅替换画风/人物/质感规则） */
 export const NARRATION_ANIME_STYLE_SPEC_LLM_RULE =
-  `【画风规格·固定】须写一行短锚：「${NARRATION_FLUX_COMPACT_ART_STYLE_CN}」；禁止写新海诚/京阿尼/正常头身比/浅景深/无文字无水印，禁止照抄长段画风规格，禁止在此维写人物姿态或具体场景`
+  `【画风规格·固定】须写一行短锚：「${NARRATION_FLUX_COMPACT_ART_STYLE_CN}」；禁止写3D/CGI/正常头身比/浅景深/无文字无水印，禁止照抄长段画风规格，禁止在此维写人物姿态或具体场景`
 
 /** 动漫风格七维正文模板（景别/动作/场景细则见万能模板规则，此处仅保留动漫主体/质感差异） */
 export const NARRATION_ANIME_SCENE_BODY_TEMPLATE =
-  `【画风规格：${NARRATION_FLUX_COMPACT_ART_STYLE_CN}】，【画面主体：无配角时写「对照定妆「name·阶段」（只写本镜细化表情，禁止写脸型/发型/发色/服装）位于{位置}以{姿态}（身穿#hex本镜服装款式），无配角」；有配角时写「对照定妆主人公…，一位或几位配角位于{配角位置}（低饱和便装+#hex，简笔表情）」；有他人互动时禁止写无配角；禁止素体小人/圆点眼/三头身；禁止在主体写面部特写】，【年代场景：时代+具体地点+前/中/后景+至少2–3个具体物件（含材质/颜色/状态）；禁止写面部特写】，【核心细节动作：须含肢体+视线+与道具/环境接触（含屏幕UI）；禁止只写盯脸/氛围词】，【光影色调：具体时段+冷暖+主光源，贴合剧情；禁「聚焦面部局部」替代构图】，【镜头视角：按【景别选择·叙事可见性优先】写景别+俯仰+朝向（人+物件/动作点）+景深+头高%；站立写中景全身从头顶到脚，坐姿可中近景】，【质感要求：${NARRATION_FLUX_COMPACT_TEXTURE_CN}】`
+  `【画风规格：${NARRATION_FLUX_COMPACT_ART_STYLE_CN}】，【画面主体：无配角时写「对照定妆「name·阶段」（只写本镜细化表情，禁止写脸型/发型/发色/服装）位于{位置}以{姿态}（身穿#hex本镜服装款式），无配角」；有配角时写「对照定妆主人公…，一位或几位配角位于{配角位置}（低饱和便装+#hex，简笔表情）」；有他人互动时禁止写无配角；禁止素体小人/圆点眼/三头身；禁止在主体写面部特写】，【年代场景：时代+具体地点+前/中/后景+至少2–3个具体物件（含材质/颜色/状态）；禁止写面部特写】，【核心细节动作：须含肢体+视线+与道具/环境接触（含屏幕UI）；禁止只写盯脸/氛围词】，【光影色调：具体时段+冷暖+主光源，高对比电影感，色温贴合本段情节（紧张可用冷蓝紫，日常勿硬套末日）；禁「聚焦面部局部」替代构图】，【镜头视角：按【景别选择·叙事可见性优先】写景别+俯仰+朝向（人+物件/动作点）+景深+头高%；站立写中景全身从头顶到脚，坐姿可中近景】，【质感要求：${NARRATION_FLUX_COMPACT_TEXTURE_CN}】`
 
 /** 动漫风格 LLM 唯一结构规范 */
 export const NARRATION_ANIME_SIX_DIM_LLM_RULE = [
-  `【动漫模板】完整 prompt = ${formatNarrationAnimeStyleSpecBracketForLLM()} + 场景六维 + ${NARRATION_ANIME_SCENE_SUFFIX}；${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
+  `【日系2D漫画模板】完整 prompt = ${formatNarrationAnimeStyleSpecBracketForLLM()} + 场景六维 + ${NARRATION_ANIME_SCENE_SUFFIX}；${NARRATION_LLM_ANTI_REDUNDANCY_RULE}`,
   NARRATION_FLUX_COMPACT_LLM_RULE,
   NARRATION_ANIME_STYLE_SPEC_LLM_RULE,
+  NARRATION_ANIME_MOOD_ADAPT_LLM_RULE,
   NARRATION_CAMERA_FRAMING_LLM_RULE,
   NARRATION_ACTION_SCENE_DETAIL_LLM_RULE,
   `【七维正文·严格按序填空】${NARRATION_ANIME_SCENE_BODY_TEMPLATE}`,
   NARRATION_PORTRAIT_REFERENCE_LLM_RULE,
   '【单帧一致】写七维前先锁定唯一可画瞬间（位置+姿态+动作+关键物件）；【画面主体】【核心细节动作】【年代场景】【镜头视角】须同一瞬间同帧可见；配角须分句写位置。',
-  '【人物规格】主人公与配角均为标准成年比例动漫人物；有定妆不写脸型发型（定妆图锁定），表情须细化可夸张；禁止素体小人、圆点眼、三头身、Q版比例。',
+  '【人物规格】主人公与配角均为标准成年比例日系2D动漫人物；有定妆不写脸型发型（定妆图锁定），表情须细化可夸张；禁止素体小人、圆点眼、三头身、Q版比例、3D/CGI写实。',
   NARRATION_NO_YOUTHFUL_FACE_LLM_RULE,
   NARRATION_PARTIAL_CLOSEUP_LLM_RULE,
   NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE,
   NARRATION_MINIMAL_CLOTHING_LLM_RULE,
-  NARRATION_FIXTURES_LLM_RULE,
+  NARRATION_SEGMENT_LOCAL_FIXTURES_LLM_RULE,
   NARRATION_ATMOSPHERE_LLM_RULE,
   NARRATION_ERA_CLOTHING_LLM_RULE,
   NARRATION_SCREEN_DEVICE_ORIENTATION_LLM_RULE,
@@ -709,7 +775,7 @@ export const NARRATION_ANIME_SIX_DIM_LLM_RULE = [
 
 /** 动漫风格六维填表示例：情绪动作中近景（须见姿态+手部+陈设，勿写成大头特写） */
 export const NARRATION_ANIME_SCENE_BODY_EXAMPLE =
-  `${formatNarrationAnimeStyleSpecBracketForLLM()}，【画面主体：对照定妆「男主·青年」（眉头紧锁、瞳孔微缩，嘴角抿紧，两颊泛红，额头细汗）位于客厅沙发前以坐姿僵直（身穿#64748b休闲T恤与#334155长裤），无配角】，【年代场景：现代都市客厅，前景蓝色布艺沙发扶手，中景木质茶几上摆啤酒罐与烟盒与遥控，后景落地窗与窗帘】，【核心细节动作：双手紧握膝盖，视线低垂落在茶几边缘，肩背绷直】，【光影色调：室内自然光偏冷，低饱和蓝灰色调】，【镜头视角：中近景平视，镜头朝向主人公上半身与紧握膝盖的双手，主人公头高约占画面高度26%，须可见坐姿肩线与双手】，【质感要求：${NARRATION_ANIME_TEXTURE_LLM_HINT}】`
+  `${formatNarrationAnimeStyleSpecBracketForLLM()}，【画面主体：对照定妆「男主·青年」（眉头紧锁、瞳孔微缩，嘴角抿紧，两颊泛红，额头细汗）位于客厅沙发前以坐姿僵直（身穿#64748b休闲T恤与#334155长裤），无配角】，【年代场景：现代都市客厅，前景蓝色布艺沙发扶手，中景木质茶几上摆啤酒罐与茶杯与遥控，后景落地窗与窗帘】，【核心细节动作：双手紧握膝盖，视线低垂落在茶几边缘，肩背绷直】，【光影色调：夜间室内冷蓝紫侧光，高对比半脸阴影，戏剧感】，【镜头视角：中近景平视，镜头朝向主人公上半身与紧握膝盖的双手，主人公头高约占画面高度26%，须可见坐姿肩线与双手】，【质感要求：${NARRATION_ANIME_TEXTURE_LLM_HINT}】`
 
 /** 动漫反例（勿模仿）：结构冲突，非某剧本 */
 export const NARRATION_ANIME_SCENE_BODY_BAD_EXAMPLE_FACE_CLOSEUP = [
@@ -719,7 +785,7 @@ export const NARRATION_ANIME_SCENE_BODY_BAD_EXAMPLE_FACE_CLOSEUP = [
 
 /** 动漫风格六维示例：全身/环境建立（行走/进门类镜头参考，勿照抄具体题材） */
 export const NARRATION_ANIME_SCENE_BODY_EXAMPLE_FULL_BODY =
-  `${formatNarrationAnimeStyleSpecBracketForLLM()}，【画面主体：对照定妆「男主·青年」（眉目舒展，嘴角微扬，眼神轻松望向前方）位于室内走廊以站立姿态（身穿#64748b休闲外套与#334155长裤），无配角】，【年代场景：现代室内走廊，前景门把手与鞋垫，中景白墙与挂钟，后景尽头窗光】，【核心细节动作：一手扶门框，刚推门进入，视线望向室内，脚步刚踏入】，【光影色调：侧窗自然光，柔和中性色调】，【镜头视角：中远景平视，镜头朝向进门站立的主人公与门把手，主人公头高约占画面高度12%，站立全身约占画面高度32%，从头顶到脚完整入镜，前景门把手、中景挂钟与白墙、后景尽头窗光占画面主要面积】，【质感要求：${NARRATION_ANIME_TEXTURE_LLM_HINT}】`
+  `${formatNarrationAnimeStyleSpecBracketForLLM()}，【画面主体：对照定妆「男主·青年」（眉目舒展，嘴角微扬）位于室内走廊以站立姿态（身穿#64748b休闲外套与#334155长裤），无配角】，【年代场景：现代室内走廊，前景门把手与鞋垫，中景白墙与挂钟，后景尽头窗光】，【核心细节动作：一手扶门框，刚推门进入，视线望向室内深处，脚步刚踏入】，【光影色调：日间侧窗自然光，柔和中性，略有体积阴影】，【镜头视角：中远景平视，镜头朝向进门站立的主人公与门把手，主人公头高约占画面高度12%，站立全身约占画面高度32%，从头顶到脚完整入镜，前景门把手、中景挂钟与白墙、后景尽头窗光占画面主要面积】，【质感要求：${NARRATION_ANIME_TEXTURE_LLM_HINT}】`
 
 /** @deprecated 使用 NARRATION_ANIME_SCENE_BODY_EXAMPLE_FULL_BODY */
 export const NARRATION_ANIME_SCENE_BODY_EXAMPLE_WIDE = NARRATION_ANIME_SCENE_BODY_EXAMPLE_FULL_BODY
@@ -763,6 +829,9 @@ export const NARRATION_IMAGE_DETECT_BATCH_THRESHOLD_DEFAULT = 80
 /** 配图换镜检测：分批时每批覆盖的镜头数上限 */
 export const NARRATION_IMAGE_DETECT_BATCH_SIZE_DEFAULT = 30
 
+/** 配图换镜检测：云端批并发（与配图文案类似；本地 Ollama 强制 1） */
+export const NARRATION_IMAGE_DETECT_BATCH_CONCURRENCY_DEFAULT = 4
+
 /** 配图文案生成：每批段落数默认值（结构化 JSON，偏大可少打几次 LLM） */
 export const NARRATION_IMAGE_PROMPT_BATCH_SIZE_DEFAULT = 5
 
@@ -782,18 +851,18 @@ export const NARRATION_LLM_ANALYSIS_STEPS_DETECT = [
   '3) 对每句旁白判定 needs_image：true=本句须开新配图，false=沿用上一张',
 ] as const
 
-/** LLM 配图：写 prompt 用分析流程 */
+/** LLM 配图：写 prompt 用分析流程（解说视频：全文只理解关系，陈设跟本段） */
 export const NARRATION_LLM_ANALYSIS_STEPS_PROMPT = [
-  '1) 通读 full_narration（及 previous_episode_narration 若有），把握全文主线、人物关系、地点变迁、核心物件与情绪节奏；若有 weight_arc 须识别肥胖→减肥→逆袭的体重变化时间线',
-  '2) 读 prior_narration、characters 与 suggested_body_weight_tier，提取已出现地点、陈设载体、具体物件名、服装款式、人生阶段与体重档位；同一配图段内主人公服装款式+#hex 主色与躯干宽高须锁定一致',
-  '3) 读 narration_lines 确定本配图段叙事锚点；先锁定单帧（位置+姿态+动作+人数/空间关系），再按【景别选择】选本镜景别，最后按万能模板六维填空',
-  '4) 按 NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE 写出丰富 prompt，结合 full_narration 与 prior_narration；禁止全片统一同一景别，禁止只贴段内字面',
+  '1) 可扫一眼 full_narration（及 previous_episode_narration 若有），把握人物关系与地点；若有 weight_arc 须识别肥胖→减肥→逆袭的体重变化时间线；勿把全书物件当本镜清单',
+  '2) 读 characters 与 suggested_body_weight_tier；同一配图段内主人公服装款式+#hex 主色与躯干宽高须锁定一致',
+  '3) 精读 narration_lines 确定本配图段叙事锚点与可见物件；先锁定单帧（位置+姿态+动作+人数/空间关系），再按【景别选择】选本镜景别，最后按万能模板六维填空',
+  '4) 按 NARRATION_UNIVERSAL_SCENE_BODY_TEMPLATE 写 prompt：场景/陈设以本段为准，可略扩展同场氛围；禁止全片统一同一景别，禁止堆入未在本段出现的全书陈设',
 ] as const
 
-/** 动漫配图：写 prompt 用分析流程（复用万能模板分析 + 动漫定妆补充） */
+/** 日系2D漫画配图：写 prompt 用分析流程 */
 export const NARRATION_ANIME_LLM_ANALYSIS_STEPS_PROMPT = [
   ...NARRATION_LLM_ANALYSIS_STEPS_PROMPT,
-  '5) 动漫画风：【画面主体】须对照定妆标签；脸型发型不写（定妆固定），只细化表情；禁止素体份数计量'
+  '5) 日系2D：【画面主体】须对照定妆标签；脸型发型不写（定妆固定），只细化表情；禁止素体份数计量；【光影色调】按本段小说情绪写高对比电影光，勿无依据全片末日滤镜'
 ] as const
 
 /** @deprecated 使用 NARRATION_NATURAL_BODY_AESTHETIC_LLM_RULE */
@@ -806,12 +875,20 @@ export const NARRATION_LLM_ANALYSIS_STEPS = NARRATION_LLM_ANALYSIS_STEPS_PROMPT
 export const NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE =
   '本配图段以 narration_lines 为叙事锚点，须覆盖段内每一句要点；同时结合 full_narration 与 prior_narration 丰富场景、陈设、动作与氛围；可组织为一个代表性瞬间，但该瞬间须能体现段内全部要点并承接全文上下文，禁止只写段内首句字面而遗漏段内其它信息或全文已建立的环境细节'
 
+/** 解说视频/漫画解说：覆盖本段要点，场景不跟全书堆陈设 */
+export const NARRATION_PARAGRAPH_SEGMENT_COVERAGE_LLM_RULE =
+  '本配图段以 narration_lines 为叙事锚点，须覆盖段内每一句要点并画成一个代表性瞬间；场景与物件以本段为准，可略扩展同场氛围；禁止为「丰富」而堆入未在本段出现的全书陈设'
+
 /** @deprecated 使用 NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE */
 export const NARRATION_PARAGRAPH_KEY_MOMENT_LLM_RULE = NARRATION_PARAGRAPH_FULL_COVERAGE_LLM_RULE
 
 /** LLM 写配图 prompt：如何通读全文 */
 export const NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE =
   '写每条配图 prompt 前先读 full_narration_summary（整集压缩时间线）把握主线与地点物件，再以本段 narration_lines 为锚点；若有 scene_enrichment / prior_timeline_snip 用来补陈设与连贯，禁止抛开本段锚点另写无关剧情'
+
+/** 解说视频/漫画解说：全文只作理解，陈设跟本段 */
+export const NARRATION_SEGMENT_CONTEXT_ANALYSIS_LLM_RULE =
+  '写每条配图 prompt 前可扫一眼 full_narration_summary 理解人物关系与地点，但【年代场景】与物件必须以本段 narration_lines / 本段 scene_enrichment 为准；禁止把摘要里的全书物件清单搬进本镜'
 
 /** LLM 配图：以全文剧情丰富画面，不单贴当前段落 */
 export const NARRATION_FULL_PLOT_ENRICHMENT_LLM_RULE =
@@ -828,6 +905,70 @@ export const NARRATION_PARAGRAPH_OUTFIT_CONTINUITY_LLM_RULE =
 /** LLM 配图：就寝场景可换款式，主色可与日装同系，勿全片锁死一套定妆服 */
 export const NARRATION_SLEEP_OUTFIT_CONTINUITY_LLM_RULE =
   '【就寝换装】入睡、半夜醒来、盖被、床上侧卧/躺卧：须写睡衣/家居服（身穿#hex睡衣与#hex睡裤等），可与近日装同色系；禁止继续写日装毛衣/西装上班服；禁止无换装暗示却全片抄同一套定妆服'
+
+/** 从配图文案提取主人公服装指纹（#hex 组合），用于跨段抄装检测 */
+export function extractImagePromptOutfitFingerprint(prompt: string): string {
+  const t = String(prompt || '')
+  const wear = t.match(/身穿((?:#[0-9a-fA-F]{3,8}[^#，。；）\n]*){1,4})/)
+  const chunk = wear?.[1]
+    || t.match(/((?:#[0-9a-fA-F]{3,8}(?:灰蓝|针织|衬衫|外套|风衣|睡衣|婚纱|卫衣|西装|T恤|短袖|长裤|连衣裙)[^#，。；）\s]*){1,3})/)?.[1]
+    || ''
+  const hexes = [...chunk.matchAll(/#[0-9a-fA-F]{3,8}/gi)].map(m => m[0].toLowerCase())
+  return hexes.slice(0, 3).join('+')
+}
+
+/** 旁白场所粗分桶：换装校验用 */
+export function inferNarrationPlaceBucket(lines: string[] | string | null | undefined): string {
+  const t = Array.isArray(lines) ? lines.join('\n') : String(lines || '')
+  if (/婚纱|婚礼|结婚|礼堂|新郎|新娘/.test(t)) return 'wedding'
+  if (/睡衣|入睡|睡觉|床上|盖被|半夜醒来|侧卧|躺卧/.test(t)) return 'sleep'
+  if (/办公室|工位|绘图|设计院|上班|通勤/.test(t)) return 'office'
+  if (/包间|饭店|餐厅|酒席|聚餐|饭局/.test(t)) return 'dining'
+  if (/厨房|客厅|卧室|家中|家里|公寓/.test(t)) return 'home'
+  if (/街道|小区|保安|走廊|门口|户外|夜色|车站|月台/.test(t)) return 'outdoor'
+  if (/大学|校园|教室|舞蹈|学妹/.test(t)) return 'campus'
+  return 'generic'
+}
+
+/** 跨段禁止全片抄同一套定妆服；场所已变仍同 #hex 则拒 */
+export function validateImagePromptOutfitDiversity(
+  prompt: string,
+  narrLines: string[],
+  peerPrompts: Array<{ prompt: string; placeBucket?: string }>,
+): { ok: boolean; reason?: string; retry_hint?: string } {
+  const fp = extractImagePromptOutfitFingerprint(prompt)
+  if (!fp || peerPrompts.length < 2) return { ok: true }
+  const place = inferNarrationPlaceBucket(narrLines)
+  const same = peerPrompts.filter(p => extractImagePromptOutfitFingerprint(p.prompt) === fp)
+  if (same.length < 2) return { ok: true }
+
+  const conflicting = same.filter((p) => {
+    const pb = p.placeBucket || 'generic'
+    return place !== 'generic' && pb !== 'generic' && place !== pb
+  })
+  if (conflicting.length > 0) {
+    return {
+      ok: false,
+      reason: 'outfit_place_mismatch',
+      retry_hint: `【换装·重写】上一条服装与场所不符。本段场所倾向「${place}」，禁止继续抄同一套身穿（${fp}）；须按本段旁白换装写新 #hex 款式。`,
+    }
+  }
+  if (same.length >= 4 && place !== 'generic') {
+    return {
+      ok: false,
+      reason: 'outfit_overused',
+      retry_hint: '【换装·重写】同一套（身穿）已在多段复用。本段须按旁白+场所换装，禁止再写相同 #hex 组合。',
+    }
+  }
+  if (same.length >= 6) {
+    return {
+      ok: false,
+      reason: 'outfit_overused',
+      retry_hint: '【换装·重写】禁止全片抄同一套定妆服；本段换一套与场所匹配的（身穿#hex…）。',
+    }
+  }
+  return { ok: true }
+}
 
 /** @deprecated 使用 NARRATION_FIXTURES_LLM_RULE */
 export const NARRATION_FIXTURES_CONTINUITY_LLM_RULE = NARRATION_FIXTURES_LLM_RULE
@@ -882,6 +1023,18 @@ export const NARRATION_VIOLENCE_CONTENT_LLM_RULE =
 /** LLM 配图：禁止暴力词替换残留，六维全文须语义通顺的温和改写 */
 export const NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE =
   '【禁止替换残留】暴力血腥禁止出现在任一维度（【画面主体】【年代场景】【核心细节动作】【光影色调】【镜头视角】【质感要求】及画风前后缀）；严禁对暴力词做单词替换后拼凑（如「尸体」改「牢狱候审」却写「倒地的…牢狱候审」「旁边有…牢狱候审」）；必须整句重写为完整、通顺、无伤亡暗示的温和司法画面，不得残留倒地不动、刀刃近颈、地面血迹、刑架处决等可视化伤亡'
+
+/** 内容合规（暴力） */
+export function narrationContentComplianceLlmRules(): string {
+  return `${NARRATION_VIOLENCE_CONTENT_LLM_RULE}；${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`
+}
+
+/**
+ * 解说视频 / 漫画解说：陈设与物件以本段为准（可略扩展同场氛围），
+ * 勿把全书/全文摘要的陈设清单塞进每一镜（与旧「体验人生」全文丰富不同）。
+ */
+export const NARRATION_SEGMENT_LOCAL_SCENE_LLM_RULE =
+  '【本段场景·硬性】陈设与物件以本段 narration_lines（及本段 scene_enrichment）为准：只呈现本段正在发生的场景与可见物件，可略扩展同场氛围（光影、门窗、地面/墙材质等）；禁止把 full_narration_summary、prior_timeline_snip、prior_props 里未在本段出现的全书陈设/道具整表塞进本镜；full_narration_summary 仅作人物关系与地点理解，不得当物件清单'
 
 /** LLM 配图写法抽象示例（不含具体故事情节，模型须从输入旁白中提取内容） */
 export const NARRATION_LLM_PROMPT_PATTERN =
@@ -953,30 +1106,41 @@ export function buildNarrationStoryboardLLMSystem(): string {
 /** 组装「段落配图」LLM system prompt（素体 / 其他画风） */
 export function buildNarrationParagraphImagePromptLLMSystem(
   style?: string | null,
-  options?: { hasCharacters?: boolean; hasDiptych?: boolean; weightArc?: NarrationWeightArcContext | null },
+  options?: {
+    hasCharacters?: boolean
+    hasDiptych?: boolean
+    weightArc?: NarrationWeightArcContext | null
+    panelTextMode?: NovelComicPanelTextMode | null
+  },
 ): string {
   const minimal = isNarrationMinimalStyle(style)
   const anime = isNarrationAnimeStyle(style)
-  const motionComic = isMotionComicStyle(style)
-  if (motionComic) {
+  if (isNovelComicSketchStyle(style)) {
+    return buildNovelComicSketchParagraphImagePromptLLMSystem({
+      hasCharacters: options?.hasCharacters,
+      hasDiptych: options?.hasDiptych,
+      panelTextMode: options?.panelTextMode,
+    })
+  }
+  if (isMotionComicStyle(style)) {
     return buildMotionComicParagraphImagePromptLLMSystem({
       hasCharacters: options?.hasCharacters,
       hasDiptych: options?.hasDiptych,
     })
   }
-  const structured = minimal || anime
-  const violenceRule = `${NARRATION_VIOLENCE_CONTENT_LLM_RULE}；${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`
+  // 解说素体/日系动漫：LLM 按 Toonflow 规则创作（禁止本地模板秒转画面描述）
+  if (minimal || anime) {
+    return buildToonflowParagraphImagePromptLLMSystem({
+      styleAnchor: anime ? NARRATION_FLUX_COMPACT_ART_STYLE_CN : '16:9横屏2D扁平插画',
+      hasCharacters: options?.hasCharacters,
+    })
+  }
 
-  const analysisSteps = minimal
-    ? NARRATION_LLM_ANALYSIS_STEPS_PROMPT
-    : anime
-      ? NARRATION_ANIME_LLM_ANALYSIS_STEPS_PROMPT
-      : NARRATION_LLM_ANALYSIS_STEPS_PROMPT
-
+  const violenceRule = narrationContentComplianceLlmRules()
   const shared = [
-    `你是影视解说分镜美术指导。拆镜结构已由规则确定，根据整集旁白与全文剧情为每个配图段写${structured ? '中文' : ''} image_prompt，须丰富场景、陈设与动作，不单贴当前段落字面。`,
+    `你是影视解说分镜美术指导。拆镜结构已由规则确定，根据整集旁白与全文剧情为每个配图段写 image_prompt，须丰富场景、陈设与动作，不单贴当前段落字面。`,
     '分析流程：',
-    ...analysisSteps,
+    ...NARRATION_LLM_ANALYSIS_STEPS_PROMPT,
     NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
     NARRATION_FULL_PLOT_ENRICHMENT_LLM_RULE,
     NARRATION_PREVIOUS_EPISODE_LLM_RULE,
@@ -985,39 +1149,11 @@ export function buildNarrationParagraphImagePromptLLMSystem(
     NARRATION_PARAGRAPH_OUTFIT_CONTINUITY_LLM_RULE,
     NARRATION_SLEEP_OUTFIT_CONTINUITY_LLM_RULE,
     NARRATION_OUTFIT_HEX_COLOR_LLM_RULE,
-    minimal
-      ? NARRATION_UNIVERSAL_SIX_DIM_LLM_RULE
-      : anime
-        ? NARRATION_ANIME_SIX_DIM_LLM_RULE
-        : NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE,
-    options?.weightArc?.active && minimal
-      ? NARRATION_BODY_WEIGHT_ARC_LLM_RULE
-      : '',
+    NARRATION_IMAGE_PROMPT_SIX_PART_LLM_RULE,
     violenceRule,
     NARRATION_VEHICLE_LLM_RULE,
-    minimal ? NARRATION_LLM_PROMPT_GOOD_BAD_EXAMPLES : '',
     '片头/标题句作为普通配图段处理，与其它旁白同样写六维 prompt，禁止使用单独的【片头背景场景】【主题氛围】格式',
   ].filter(Boolean)
-
-  if (structured) {
-    const styleSpec = anime
-      ? formatNarrationAnimeStyleSpecBracketForLLM()
-      : formatNarrationStyleSpecBracket(undefined, style)
-    const suffix = minimal ? NARRATION_UNIVERSAL_SCENE_SUFFIX : NARRATION_ANIME_SCENE_SUFFIX
-    const example = minimal
-      ? NARRATION_UNIVERSAL_SCENE_BODY_EXAMPLE
-      : `中近景动作参考 ${NARRATION_ANIME_SCENE_BODY_EXAMPLE}；全身/进门参考 ${NARRATION_ANIME_SCENE_BODY_EXAMPLE_FULL_BODY}；${NARRATION_ANIME_SCENE_BODY_BAD_EXAMPLE_FACE_CLOSEUP}`
-    const hardRules = [
-      '硬性规则：',
-      `1) 结构：${styleSpec} + 场景六维 + ${suffix}`,
-      `2) 填空示例（景别须按本镜剧情选择，禁止全片统一同一景别）：${example}，${suffix}`,
-      '3) layout=single：单张完整场景，禁止 grid/collage/multi-panel/split/storyboard',
-      options?.hasDiptych ? `4) ${NARRATION_DIPPTYCH_SIX_PART_LLM_RULE}` : '',
-      options?.hasCharacters ? 'characters 提供 portrait_label、gender、has_portrait；有定妆时【画面主体】只写对照定妆标签+细化表情（禁止写脸型/发型），详见【定妆对照】规则' : '',
-      '每条 prompt 须以 narration_lines 为锚点、结合 full_narration 与 prior_narration 丰富场景/陈设/动作；不要输出负面提示词',
-    ].filter(Boolean)
-    return [...shared, ...hardRules, '只输出 JSON，不要解释。'].join('\n')
-  }
 
   const hardRules = [
     '硬性规则：',
@@ -1040,6 +1176,9 @@ export function buildNarrationImageDetectLLMSystem(
   style?: string | null,
   mode: 'paragraph' | 'conservative' | 'balanced' = 'paragraph',
 ): string {
+  if (isNovelComicSketchStyle(style)) {
+    return buildNovelComicSketchImageDetectLLMSystem(mode)
+  }
   if (isMotionComicStyle(style)) {
     return buildMotionComicImageDetectLLMSystem(mode)
   }
@@ -1125,7 +1264,7 @@ export function buildNarrationImageDetectLLMSystem(
 
 /** 组装「片头标题图」LLM system prompt */
 export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): string {
-  const violenceRule = `${NARRATION_VIOLENCE_CONTENT_LLM_RULE}；${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`
+  const violenceRule = narrationContentComplianceLlmRules()
   if (isNarrationMinimalStyle(style)) {
     return [
       '你是影视解说分镜美术指导，根据整集解说全文为片头标题图写 AI 文生图用的中文 image_prompt。',
@@ -1155,6 +1294,9 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
       '只输出 JSON，不要解释。',
     ].join('\n')
   }
+  if (isNovelComicSketchStyle(style)) {
+    return buildNovelComicSketchTitleImagePromptLLMSystem()
+  }
   if (isMotionComicStyle(style)) {
     return buildMotionComicTitleImagePromptLLMSystem()
   }
@@ -1172,42 +1314,47 @@ export function buildNarrationTitleImagePromptLLMSystem(style?: string | null): 
 
 /** 组装「场景段落」LLM system prompt（非拆镜段落流程） */
 export function buildNarrationSceneSegmentsImagePromptLLMSystem(style?: string | null): string {
-  const violenceRule = `${NARRATION_VIOLENCE_CONTENT_LLM_RULE}；${NARRATION_VIOLENCE_NO_FRAGMENT_LLM_RULE}`
+  const violenceRule = narrationContentComplianceLlmRules()
+  const structured = isNarrationMinimalStyle(style) || isNarrationAnimeStyle(style)
   return [
     '你是影视解说分镜美术指导，根据每段旁白场景写出用于 AI 文生图的「单场景画面描述」。',
-    NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
-    NARRATION_FULL_PLOT_ENRICHMENT_LLM_RULE,
-    NARRATION_PARAGRAPH_KEY_MOMENT_LLM_RULE,
-    NARRATION_PLOT_CONTINUITY_LLM_RULE,
+    structured ? NARRATION_SEGMENT_CONTEXT_ANALYSIS_LLM_RULE : NARRATION_FULL_CONTEXT_ANALYSIS_LLM_RULE,
+    structured ? NARRATION_SEGMENT_LOCAL_SCENE_LLM_RULE : NARRATION_FULL_PLOT_ENRICHMENT_LLM_RULE,
+    structured ? NARRATION_PARAGRAPH_SEGMENT_COVERAGE_LLM_RULE : NARRATION_PARAGRAPH_KEY_MOMENT_LLM_RULE,
+    structured ? NARRATION_SEGMENT_LOCAL_FIXTURES_LLM_RULE : NARRATION_PLOT_CONTINUITY_LLM_RULE,
     NARRATION_PARAGRAPH_OUTFIT_CONTINUITY_LLM_RULE,
     NARRATION_SLEEP_OUTFIT_CONTINUITY_LLM_RULE,
     NARRATION_OUTFIT_HEX_COLOR_LLM_RULE,
     NARRATION_SCENE_PLOT_QUALITY_LLM_RULE,
     NARRATION_ERA_CLOTHING_LLM_RULE,
     violenceRule,
-    NARRATION_FIXTURES_LLM_RULE,
+    structured ? '' : NARRATION_FIXTURES_LLM_RULE,
     '规则：',
-    '1) 先通读 full_narration，再写每段画面；以段内旁白为锚点，结合全文丰富环境、陈设与动作',
-    '2) 每条 prompt 描述一个完整场景的主画面，适合单张插画；物件/品类须与 full_narration 前文一致',
+    structured
+      ? '1) 以本段旁白为锚点写主画面；场景/陈设以本段为准，可略扩展同场氛围；禁止全书物件清单'
+      : '1) 先通读 full_narration，再写每段画面；以段内旁白为锚点，结合全文丰富环境、陈设与动作',
+    structured
+      ? '2) 每条 prompt 描述一个完整场景的主画面，适合单张插画；物件须来自本段或同场氛围扩展'
+      : '2) 每条 prompt 描述一个完整场景的主画面，适合单张插画；物件/品类须与 full_narration 前文一致',
     `3) ${artStylePrompt(style, 'scene')}，电影感构图，无文字无水印`,
     '4) 不要出现 grid、panel、宫格、分格、collage、split、strip 等词',
     '5) 用中文描述画面内容，可夹杂少量英文风格词',
     '只输出 JSON，不要解释。',
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 }
 
 /** 解说视频模式：负面提示词 */
 export const NARRATION_IMAGE_NEGATIVE_PROMPT =
   '厚涂肌理、3D 建模、渐变光影、复杂纹理、半写实、真人照片质感、写实布料褶皱、复杂印花、复古滤镜、像素风、杂乱背景、写实路人、不同画风角色、正常比例人体、头身比失调、长短腿、四肢粗细不一、身高参差不齐、同画面双主人公体型规格不一致、斩首、砍头、尸体、尸首、血腥、血迹、杀戮、凶杀、处决、残肢、血肉模糊、恐怖虐杀、gore、blood、bloody、corpse、decapitation'
 
-/** 解说视频模式：负面提示词（动漫） */
+/** 解说视频模式：负面提示词（日系2D漫画） */
 export const NARRATION_ANIME_IMAGE_NEGATIVE_PROMPT =
-  'Q版、三头身、chibi、bobblehead、像素风、3D建模、厚涂肌理、半写实、真人照片质感、条漫、杂乱背景、不同画风角色、斩首、砍头、尸体、血腥、gore、blood'
+  'Q版、三头身、chibi、bobblehead、像素风、3D建模、CGI写实、真人照片、粗劣条漫、杂乱背景、不同画风角色、画面内字幕水印、斩首、砍头、尸体、血腥、gore、blood'
 
-/** 从【画风规格】正文推断是否为动漫模板 */
+/** 从【画风规格】正文推断是否为日系2D/历史动漫模板 */
 function isNarrationAnimeStyleSpecText(text?: string | null): boolean {
   const t = String(text || '')
-  return /现代高质量\s*2D\s*动漫|赛璐璐平涂结合柔和渐变|正常青年头身比/.test(t)
+  return /日系2D|Anime Style|高对比电影|三维国漫|3D国漫|高清三维|卡通化建模|电影感日系动漫|现代高质量\s*2D\s*动漫|赛璐璐平涂结合柔和渐变|正常青年头身比/.test(t)
 }
 
 export const ART_STYLES = [
@@ -1223,13 +1370,18 @@ export const ART_STYLES = [
   },
   {
     value: NARRATION_ANIME_STYLE,
-    label: '解说动漫（正常比例）',
-    description: '现代 2D 动漫插画，清晰线稿、赛璐璐+柔和渐变，正常头身比，表情夸张',
+    label: '解说日系漫画',
+    description: '日系2D动漫漫画风，高对比电影光影；紧张可用冷蓝紫，日常随小说情节，勿硬套末日',
   },
   {
     value: MOTION_COMIC_STYLE,
     label: '漫画解说（条漫平涂）',
     description: '国漫条漫风，粗线平涂，静图快切+动效，适合逆袭/打斗短剧',
+  },
+  {
+    value: NOVEL_COMIC_SKETCH_STYLE,
+    label: '小说漫画（素笔彩画）',
+    description: '9:16 竖屏二/三列素笔彩画；全文画在图上；BGM+左右翻页（无配音）',
   },
   {
     value: 'webtoon',
@@ -1297,6 +1449,13 @@ const STYLE_PROMPTS: Record<string, Record<ArtStyleContext, string>> = {
     portrait: motionComicStylePrompt('portrait'),
     agent: motionComicStylePrompt('agent'),
   },
+  [NOVEL_COMIC_SKETCH_STYLE]: {
+    scene: novelComicSketchStylePrompt('scene'),
+    diptych: novelComicSketchStylePrompt('diptych'),
+    title: novelComicSketchStylePrompt('title'),
+    portrait: novelComicSketchStylePrompt('portrait'),
+    agent: novelComicSketchStylePrompt('agent'),
+  },
   webtoon: {
     scene: 'modern Chinese webtoon animation style, semi-chibi stylized characters, bold black outlines, cel-shaded flat colors, expressive exaggerated faces, vibrant saturated colors, manhua illustration, cinematic composition',
     diptych: 'modern Chinese webtoon animation style, semi-chibi stylized characters, bold black outlines, cel-shaded flat colors, expressive faces, manhua illustration, cinematic composition',
@@ -1352,6 +1511,7 @@ export function normalizeArtStyle(style?: string | null): string {
   const key = String(style || '').trim().toLowerCase().replace(/_/g, '-')
   if (key === NARRATION_MINIMAL_STYLE || key === NARRATION_ANIME_STYLE) return key
   if (key === MOTION_COMIC_STYLE) return MOTION_COMIC_STYLE
+  if (key === NOVEL_COMIC_SKETCH_STYLE) return NOVEL_COMIC_SKETCH_STYLE
   if (STYLE_PROMPTS[key]) return key
   return DEFAULT_ART_STYLE
 }
@@ -1385,14 +1545,14 @@ export function usesPortraitAppearanceSanitize(style?: string | null): boolean {
   return (
     isNarrationAnimeStyle(style) ||
     isNarrationMinimalStyle(style) ||
-    isMotionComicStyle(style) ||
+    usesComicIllustrationPipeline(style) ||
     isShortDramaStyle(style)
   )
 }
 
 
 export function isNarrationStructuredStyle(style?: string | null): boolean {
-  return isNarrationMinimalStyle(style) || isNarrationAnimeStyle(style) || isMotionComicStyle(style)
+  return isNarrationMinimalStyle(style) || isNarrationAnimeStyle(style) || usesComicIllustrationPipeline(style)
 }
 
 export const SCENE_STYLE_GUARD = [
@@ -2527,8 +2687,72 @@ export interface NarrationImageGenerationBundle {
 export function compileNarrationImageGenerationBundle(
   raw?: string | null,
   style?: string | null,
+  options?: { panelTextMode?: NovelComicPanelTextMode | null },
 ): { prompt: string; negativePrompt?: string } {
   const text = ensureNarrationStyleSpecDim(String(raw || '').trim(), style)
+  const sketch = isNovelComicSketchStyle(style)
+  const sketchNegative = mergeNarrationImageNegativePrompts(NOVEL_COMIC_SKETCH_NEGATIVE_PROMPT)
+  const panelTextMode = normalizeNovelComicPanelTextMode(
+    options?.panelTextMode
+    ?? novelComicPanelTextModeFromPrompt(text)
+    ?? NOVEL_COMIC_PANEL_TEXT_MODE_SHORT,
+  )
+  const sketchSuffix = novelComicSketchSceneSuffix(panelTextMode)
+  const sketchSpec = novelComicSketchStyleSpec(panelTextMode)
+  const modeMarker = novelComicPanelTextModeMarker(panelTextMode)
+
+  // 小说漫画：定妆单人半身 ≠ 四格配图页（勿挂格字模式/四格后缀）
+  if (sketch && text && !hasNarrationSixDimStructure(text) && isNovelComicPortraitPromptText(text)) {
+    const cleaned = text.replace(/【格字模式：短字叠字】|【格字模式：长文画字】/g, '').trim()
+    const hasPortraitSuffix = cleaned.includes('单人半身')
+      || cleaned.includes(NOVEL_COMIC_SKETCH_PORTRAIT_SUFFIX.slice(0, 10))
+    const prompt = hasPortraitSuffix
+      ? cleaned
+      : tidyAppearancePunctuation([cleaned, NOVEL_COMIC_SKETCH_PORTRAIT_SUFFIX].join('，'))
+    return {
+      prompt,
+      negativePrompt: mergeNarrationImageNegativePrompts(
+        `${NOVEL_COMIC_SKETCH_PORTRAIT_NEGATIVE_PROMPT}`,
+      ),
+    }
+  }
+
+  // 小说漫画：连续中文四格文案（非六维）也要挂上四格页后缀与负向词
+  if (sketch && text && !hasNarrationSixDimStructure(text)) {
+    let cleaned = text
+      .replace(/【格字模式：短字叠字】|【格字模式：长文画字】/g, '')
+      .trim()
+    if (panelTextMode === NOVEL_COMIC_PANEL_TEXT_MODE_SHORT) {
+      // 默认短字：把「模型画字」措辞改成空框+后期叠字
+      cleaned = cleaned
+        .replace(/格内中文清晰可读/g, '每格空旁白框框内留白勿绘制汉字，文字由后期叠字')
+        .replace(/旁白框内中文清晰可读/g, '空旁白框框内留白勿绘汉字')
+        .replace(/框内中文清晰可读/g, '框内留白勿绘制汉字')
+    } else {
+      // 长文：空框文案改回画字
+      cleaned = cleaned
+        .replace(/每格空旁白框框内留白勿绘制汉字，文字由后期叠字/g, '格内中文清晰可读')
+        .replace(/环境道具与景别拉开优先，每格角落小空旁白框框内留白勿绘汉字/g, '环境道具与景别拉开优先，格内中文清晰可读')
+        .replace(/环境场面优先，角落小空旁白框框内留白，文字后期叠字/g, '环境场面优先，格内中文清晰可读')
+        .replace(/角落小空旁白框/g, '旁白框')
+        .replace(/空旁白框（框内留白）/g, '旁白框')
+        .replace(/框内留白禁止手绘汉字|框内勿绘制汉字|禁止模型绘制汉字|框内留白勿绘制汉字|框内留白勿绘汉字/g, '格内中文清晰可读')
+        .replace(/文字由后期叠字/g, '格内中文清晰可读')
+    }
+    const hasSuffix = cleaned.includes('2×2') || cleaned.includes('四格')
+      || cleaned.includes(sketchSuffix.slice(0, 12))
+      || cleaned.includes('黑白简笔线稿')
+      || cleaned.includes('彩色国漫条漫平涂')
+      || cleaned.includes('彩漫四格')
+    const body = hasSuffix
+      ? cleaned
+      : tidyAppearancePunctuation([cleaned, sketchSuffix].join('，'))
+    const prompt = body.includes('【格字模式')
+      ? body
+      : tidyAppearancePunctuation([modeMarker, body].join(''))
+    return { prompt, negativePrompt: sketchNegative }
+  }
+
   if (!text || !hasNarrationSixDimStructure(text)) return { prompt: text }
   if (/【左格】/.test(text) && /【右格】/.test(text)) return { prompt: text }
 
@@ -2540,6 +2764,26 @@ export function compileNarrationImageGenerationBundle(
   const styleSpecRaw = resolveNarrationStyleSpecFromPrompt(text, style)
   const anime = isNarrationAnimeStyle(style) || isNarrationAnimeStyleSpecText(styleSpecRaw)
   const motionComic = isMotionComicStyle(style)
+
+  if (sketch) {
+    const visualCoreParts = [
+      styleSpecRaw || sketchSpec,
+      subject,
+      era,
+      action,
+      lighting,
+      camera,
+    ]
+    const prompt = tidyAppearancePunctuation([
+      modeMarker,
+      visualCoreParts.filter(Boolean).join('，'),
+      sketchSuffix,
+    ].join('，'))
+    return {
+      prompt,
+      negativePrompt: sketchNegative,
+    }
+  }
 
   if (motionComic) {
     const visualCoreParts = [
@@ -3355,6 +3599,8 @@ const APPEARANCE_STYLE_REPLACEMENTS: Array<[RegExp, string]> = [
 
 const CONFLICTING_STYLE_PATTERNS = [
   /comic画风/gi,
+  // 先整词清「条漫画风」，再清「漫画风」，避免留下孤立「条」
+  /条漫画风/gi,
   /漫画风/gi,
   /写实风(格)?/gi,
   /写实画风/gi,
@@ -3380,13 +3626,21 @@ const CONFLICTING_STYLE_PATTERNS = [
   /怀旧风(格)?/gi,
   /webtoon/gi,
   /semi-?chibi/gi,
-  /Q版/gi,
-  /条漫/gi,
+  // 勿删「非Q版」：小说/漫画定妆规格合法否定词（旧 /Q版/ 会把「非Q版」截成「非，」）
+  /(?<!非)Q版/gi,
   /romantic\s+poster/gi,
   /concept\s+art\s+poster/gi,
   /movie\s+poster/gi,
   /digital\s+painting\s+portrait/gi,
 ]
+
+/** 清洗后修补：历史脏数据「正常头身比（非，」——勿匹配完整「非Q版」 */
+function repairMangledPortraitProportionText(text: string): string {
+  return String(text || '')
+    .replace(/正常头身比（非[，,\s]+/g, '正常头身比（非Q版），')
+    .replace(/正常头身比\(非[,\s]+/gi, '正常头身比（非Q版），')
+    .replace(/正常头身比（非）/g, '正常头身比（非Q版）')
+}
 
 function tidyAppearancePunctuation(text: string): string {
   return text
@@ -3399,6 +3653,7 @@ function tidyAppearancePunctuation(text: string): string {
       .replace(/[。！？；]+\s*[，,、]+/g, '，')
       .replace(/^[,，;；、。\s]+|[,，;；、。\s]+$/g, '')
       .replace(/\(\s*\)/g, '')
+      .replace(/（\s*）/g, '')
       .trim(),
     )
     .filter(Boolean)
@@ -3410,6 +3665,27 @@ function tidyAppearancePunctuation(text: string): string {
 export function sanitizeCharacterAppearance(appearance?: string | null): string {
   let text = String(appearance || '').trim()
   if (!text) return ''
+  // 保护彩漫/国漫/黑白素笔合法短语，避免被 CONFLICTING 误伤
+  const shields: Array<[string, string]> = [
+    ['非Q版非三头身', '⟦PROT_FQBS⟧'],
+    ['非Q版', '⟦PROT_FQ⟧'],
+    ['三维国漫电影感', '⟦PROT_3D_GM_CINE⟧'],
+    ['高清三维国漫', '⟦PROT_3D_GM_HQ⟧'],
+    ['三维国漫', '⟦PROT_3D_GM⟧'],
+    ['3D国漫', '⟦PROT_3D_GM_EN⟧'],
+    ['日系2D动漫', '⟦PROT_JP2D_ANIME⟧'],
+    ['日系2D', '⟦PROT_JP2D⟧'],
+    ['彩色国漫条漫平涂', '⟦PROT_TM_FULL⟧'],
+    ['国漫条漫平涂', '⟦PROT_TM_CORE⟧'],
+    ['条漫平涂', '⟦PROT_TM_FLAT⟧'],
+    ['国漫条漫', '⟦PROT_TM_SHORT⟧'],
+    ['黑白素笔线稿定妆', '⟦PROT_BW_PORTRAIT_FULL⟧'],
+    ['黑白素笔细线稿', '⟦PROT_BW_LINE⟧'],
+    ['黑白素笔', '⟦PROT_BW_SHORT⟧'],
+    ['cross-hatching', '⟦PROT_XHATCH⟧'],
+    ['pencil sketch', '⟦PROT_PSKETCH⟧'],
+  ]
+  for (const [raw, token] of shields) text = text.split(raw).join(token)
   for (const [pattern, replacement] of APPEARANCE_STYLE_REPLACEMENTS) {
     text = text.replace(pattern, replacement)
   }
@@ -3417,7 +3693,8 @@ export function sanitizeCharacterAppearance(appearance?: string | null): string 
   for (const pattern of CONFLICTING_STYLE_PATTERNS) {
     text = text.replace(pattern, ' ')
   }
-  return tidyAppearancePunctuation(text)
+  for (const [raw, token] of shields) text = text.split(token).join(raw)
+  return repairMangledPortraitProportionText(tidyAppearancePunctuation(text))
 }
 
 /** @deprecated alias */
@@ -4502,10 +4779,10 @@ export function coerceAnimeLLMImagePrompt(
   style?: string | null,
   options?: { lockedProtagonistBody?: string | null },
 ): string {
-  const motionComic = isMotionComicStyle(style)
+  const motionComic = usesComicIllustrationPipeline(style)
   let text = String(prompt || '').trim()
   if (!text) return ''
-  // 漫画解说：整段连贯文案原样保留（仅做轻量冲突修复），不注入【画风规格】等标签
+  // 漫画解说 / 小说彩漫四格：整段连贯文案原样保留（仅做轻量冲突修复），不注入【画风规格】等标签
   if (motionComic && !/【(?:画风规格|画面主体|年代场景)[：:]/.test(text)) {
     text = normalizeAnimeProtagonistBodyInPrompt(text, options?.lockedProtagonistBody)
     text = repairNarrationFaceCloseupVsActionPrompt(text)
@@ -4541,8 +4818,9 @@ export function normalizeAnimeTextureBracket(body?: string | null): string {
     trimmed.length > 55
     || /现代高质量\s*2D\s*动漫/.test(trimmed)
     || /赛璐璐平涂结合柔和渐变/.test(trimmed)
+    || /细线稿/.test(trimmed)
   if (isLongBlob) return NARRATION_ANIME_TEXTURE_LLM_HINT
-  const hasEssentials = /无文字/.test(trimmed) && (/线稿|赛璐璐|渐变/.test(trimmed))
+  const hasEssentials = /无文字/.test(trimmed) && (/电影光影|动漫插画|高对比/.test(trimmed))
   if (trimmed.length <= 48 && hasEssentials) return trimmed
   return NARRATION_ANIME_TEXTURE_LLM_HINT
 }
@@ -4661,6 +4939,8 @@ export function resolveLLMImagePrompt(
 ): string {
   const raw = String(prompt || '').trim()
   if (!raw) return ''
+  // Toonflow 规则文案（@图N +【画面】）：原样保留，勿强制改写成六维
+  if (/@图\d+\s*为/.test(raw) && /【画面】/.test(raw)) return raw
   if (isNarrationMinimalStyle(style)) return coerceMinimalLLMImagePrompt(raw)
   if (usesNarrationNaturalBodyLock(style)) {
     return coerceAnimeLLMImagePrompt(raw, style)

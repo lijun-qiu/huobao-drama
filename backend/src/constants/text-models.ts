@@ -1,9 +1,15 @@
-import { usesLocalModelPipeline } from './production-mode.js'
+  import { usesLocalModelPipeline } from './production-mode.js'
 
-/** OpenRouter 默认免费：NVIDIA Nemotron 3 Ultra */
+/** OpenRouter 默认免费：Poolside Laguna S 2.1 */
+export const OPENROUTER_LAGUNA_S_FREE = 'poolside/laguna-s-2.1:free'
+/** @deprecated Ling-3.0-flash 已下架（OpenRouter 返回 404: This model is unavailable for free），归一化到 Laguna */
+export const OPENROUTER_LING_FLASH_FREE = 'inclusionai/ling-3.0-flash:free'
+/** OpenRouter 免费备选：Nemotron 3 Super */
+export const OPENROUTER_NEMOTRON_SUPER_FREE = 'nvidia/nemotron-3-super-120b-a12b:free'
+/** OpenRouter 免费备选：Nemotron 3 Ultra（高质量） */
 export const OPENROUTER_NEMOTRON_ULTRA_FREE = 'nvidia/nemotron-3-ultra-550b-a55b:free'
-/** @deprecated 旧免费 Flash 别名，归一到 Nemotron Ultra */
-export const OPENROUTER_DEEPSEEK_V4_FLASH_FREE = OPENROUTER_NEMOTRON_ULTRA_FREE
+/** @deprecated 旧免费 Flash 别名，归一到 Laguna 默认 */
+export const OPENROUTER_DEEPSEEK_V4_FLASH_FREE = OPENROUTER_LAGUNA_S_FREE
 /** OpenRouter 付费 Flash */
 export const OPENROUTER_DEEPSEEK_V4_FLASH = 'openrouter/deepseek-v4-flash'
 /** OpenRouter 付费 Pro */
@@ -13,7 +19,7 @@ export const OFFICIAL_DEEPSEEK_V4_FLASH = 'deepseek-v4-flash'
 /** DeepSeek 官网 Pro */
 export const OFFICIAL_DEEPSEEK_V4_PRO = 'deepseek-v4-pro'
 
-export const DEFAULT_TEXT_MODEL = OPENROUTER_NEMOTRON_ULTRA_FREE
+export const DEFAULT_TEXT_MODEL = OFFICIAL_DEEPSEEK_V4_FLASH
 export const DEFAULT_TEXT_THINKING = true
 export const DEFAULT_LOCAL_TEXT_MODEL = DEFAULT_TEXT_MODEL
 export const DEFAULT_LOCAL_SCRIPT_TEXT_MODEL = DEFAULT_LOCAL_TEXT_MODEL
@@ -21,7 +27,8 @@ export const DEFAULT_LOCAL_AGENT_MODEL = DEFAULT_LOCAL_TEXT_MODEL
 export const DEFAULT_LOCAL_VISION_MODEL = 'qwen2.5vl:7b'
 export const DEFAULT_NARRATION_TEXT_MODEL = DEFAULT_TEXT_MODEL
 export const DEFAULT_NARRATION_SCRIPT_CHAT_MODEL = DEFAULT_NARRATION_TEXT_MODEL
-export const DEFAULT_NARRATION_IMAGE_TEXT_MODEL = DEFAULT_NARRATION_TEXT_MODEL
+/** 配图文案专用（统一妙飞 DeepSeek） */
+export const DEFAULT_NARRATION_IMAGE_TEXT_MODEL = OFFICIAL_DEEPSEEK_V4_FLASH
 export const DEFAULT_NARRATION_STORYBOARD_TEXT_MODEL = DEFAULT_NARRATION_TEXT_MODEL
 
 export const LOCAL_TEXT_MODEL_OPTIONS = [
@@ -36,17 +43,34 @@ export const LOCAL_VISION_MODEL_OPTIONS = [
 
 export type TextModelChannel = 'openrouter' | 'deepseek' | 'zhipu' | 'ollama' | 'default'
 
-/** 兼容旧 free / DeepSeek 免费别名 → Nemotron Ultra */
+/** 兼容旧 free / DeepSeek 免费别名 → Laguna；Ultra 短名归一到完整 Ultra id；过期模型映射到当前默认 */
 export function normalizeTextModelId(model?: string | null): string {
   const m = String(model || '').trim()
   if (!m) return m
+  // DeepSeek 免费旧别名 → Laguna
   if (
     m === 'deepseek-v4-flash:free'
     || m === 'openrouter/deepseek-v4-flash:free'
-    || m === 'nvidia/nemotron-3-ultra:free'
+  ) {
+    return OPENROUTER_LAGUNA_S_FREE
+  }
+  // Ling-3.0-flash 已下架（OpenRouter 404 unavailable for free）→ 妙飞 DeepSeek
+  if (
+    m === OPENROUTER_LING_FLASH_FREE
+    || m === 'inclusionai/ling-3.0-flash'
+  ) {
+    return OFFICIAL_DEEPSEEK_V4_FLASH
+  }
+  // Ultra 短名归一到完整 id
+  if (
+    m === 'nvidia/nemotron-3-ultra:free'
     || m === 'nvidia/nemotron-3-ultra-550b:free'
   ) {
     return OPENROUTER_NEMOTRON_ULTRA_FREE
+  }
+  // 所有过期的 legacy 默认模型（已下架或不再免费）统一映射到妙飞 DeepSeek
+  if ((LEGACY_DEFAULT_TEXT_MODELS as readonly string[]).includes(m)) {
+    return OFFICIAL_DEEPSEEK_V4_FLASH
   }
   return m
 }
@@ -58,8 +82,13 @@ export function resolveTextModelChannel(model?: string | null): TextModelChannel
   if (m.startsWith('glm-')) return 'zhipu'
   if (
     m.startsWith('openrouter/')
+    || m.startsWith('inclusionai/')
+    || m.startsWith('poolside/')
     || m.endsWith(':free')
     || m.startsWith('nvidia/')
+    || m === OPENROUTER_LAGUNA_S_FREE
+    || m === OPENROUTER_LING_FLASH_FREE
+    || m === OPENROUTER_NEMOTRON_SUPER_FREE
     || m === OPENROUTER_NEMOTRON_ULTRA_FREE
   ) {
     return 'openrouter'
@@ -79,7 +108,7 @@ export function textModelLabel(model?: string | null): string {
 /** 是否为 OpenRouter 付费 DeepSeek（应用短名） */
 export function isOpenRouterPaidDeepseekModel(model?: string | null): boolean {
   const m = normalizeTextModelId(model)
-  if (!m || m.includes(':free') || m.startsWith('nvidia/')) return false
+  if (!m || m.includes(':free') || m.startsWith('nvidia/') || m.startsWith('inclusionai/') || m.startsWith('poolside/')) return false
   return (
     m === OPENROUTER_DEEPSEEK_V4_FLASH
     || m === OPENROUTER_DEEPSEEK_V4_PRO
@@ -110,13 +139,21 @@ export function resolveProviderTextModel(provider?: string | null, model?: strin
   const p = String(provider || '').trim().toLowerCase()
 
   if (p === 'openrouter') {
-    if (m === OPENROUTER_NEMOTRON_ULTRA_FREE) {
-      return process.env.OPENROUTER_FREE_TEXT_MODEL?.trim()
-        || process.env.OPENROUTER_DEEPSEEK_V4_FLASH_FREE?.trim()
-        || OPENROUTER_NEMOTRON_ULTRA_FREE
-    }
-    if (m === OPENROUTER_DEEPSEEK_V4_FLASH) return 'deepseek/deepseek-v4-flash'
-    if (m === OPENROUTER_DEEPSEEK_V4_PRO) return 'deepseek/deepseek-v4-pro'
+    if (
+      m === OPENROUTER_LAGUNA_S_FREE
+      || m === OPENROUTER_NEMOTRON_SUPER_FREE
+      || m === OPENROUTER_NEMOTRON_ULTRA_FREE
+    ) return m
+    if (
+      m === OPENROUTER_DEEPSEEK_V4_FLASH
+      || m === OFFICIAL_DEEPSEEK_V4_FLASH
+      || m === 'deepseek/deepseek-v4-flash'
+    ) return 'deepseek/deepseek-v4-flash'
+    if (
+      m === OPENROUTER_DEEPSEEK_V4_PRO
+      || m === OFFICIAL_DEEPSEEK_V4_PRO
+      || m === 'deepseek/deepseek-v4-pro'
+    ) return 'deepseek/deepseek-v4-pro'
     if (m.startsWith('openrouter/')) {
       const rest = m.slice('openrouter/'.length)
       if (rest.includes('/')) return rest
@@ -127,13 +164,24 @@ export function resolveProviderTextModel(provider?: string | null, model?: strin
       if (rest.startsWith('deepseek-')) return `deepseek/${rest}`
       return rest
     }
+    // 禁止把已下架的 inclusionai/ling* 原样打给 OpenRouter
+    if (m.startsWith('inclusionai/ling')) return 'deepseek/deepseek-v4-flash'
     if (m.includes('/')) return m
     return m
   }
 
   // DeepSeek 官网 / 4022：API 使用短名
   if (p === 'openai' || p === 'chatfire' || p === 'deepseek') {
-    if (m === OPENROUTER_NEMOTRON_ULTRA_FREE || m.endsWith(':free') || m.startsWith('nvidia/')) {
+    if (
+      m === OPENROUTER_LAGUNA_S_FREE
+      || m === OPENROUTER_LING_FLASH_FREE
+      || m === OPENROUTER_NEMOTRON_SUPER_FREE
+      || m === OPENROUTER_NEMOTRON_ULTRA_FREE
+      || m.endsWith(':free')
+      || m.startsWith('nvidia/')
+      || m.startsWith('inclusionai/')
+      || m.startsWith('poolside/')
+    ) {
       return OFFICIAL_DEEPSEEK_V4_FLASH
     }
     if (m === OPENROUTER_DEEPSEEK_V4_FLASH || m === 'deepseek/deepseek-v4-flash') return OFFICIAL_DEEPSEEK_V4_FLASH
@@ -146,7 +194,17 @@ export function resolveProviderTextModel(provider?: string | null, model?: strin
     return m
   }
 
-  if (m === OPENROUTER_NEMOTRON_ULTRA_FREE || m.startsWith('nvidia/')) return OFFICIAL_DEEPSEEK_V4_FLASH
+  if (
+    m === OPENROUTER_LAGUNA_S_FREE
+    || m === OPENROUTER_LING_FLASH_FREE
+    || m === OPENROUTER_NEMOTRON_SUPER_FREE
+    || m === OPENROUTER_NEMOTRON_ULTRA_FREE
+    || m.startsWith('nvidia/')
+    || m.startsWith('inclusionai/')
+    || m.startsWith('poolside/')
+  ) {
+    return OFFICIAL_DEEPSEEK_V4_FLASH
+  }
   return m
 }
 
@@ -163,17 +221,22 @@ export function isLocalVisionOllamaModel(model?: string | null): boolean {
 }
 
 export const TEXT_MODEL_OPTIONS = [
-  { value: OPENROUTER_NEMOTRON_ULTRA_FREE, label: 'Nemotron 3 Ultra · OpenRouter 免费' },
+  { value: OFFICIAL_DEEPSEEK_V4_FLASH, label: 'DeepSeek V4 Flash · 妙飞（默认）' },
   { value: OPENROUTER_DEEPSEEK_V4_FLASH, label: 'DeepSeek V4 Flash · OpenRouter 付费' },
-  { value: OFFICIAL_DEEPSEEK_V4_FLASH, label: 'DeepSeek V4 Flash · 官网' },
   { value: OPENROUTER_DEEPSEEK_V4_PRO, label: 'DeepSeek V4 Pro · OpenRouter 付费' },
   { value: OFFICIAL_DEEPSEEK_V4_PRO, label: 'DeepSeek V4 Pro · 官网' },
+  { value: OPENROUTER_LAGUNA_S_FREE, label: 'Laguna S 2.1 · OpenRouter 免费' },
+  { value: OPENROUTER_NEMOTRON_ULTRA_FREE, label: 'Nemotron 3 Ultra · OpenRouter 免费（备选）' },
+  { value: OPENROUTER_NEMOTRON_SUPER_FREE, label: 'Nemotron 3 Super · OpenRouter 免费（备选）' },
   { value: 'qwen3.5-plus', label: 'Qwen 3.5 Plus · 4022' },
   { value: 'gpt-4o', label: 'GPT-4o · OpenAI 兼容' },
   ...LOCAL_TEXT_MODEL_OPTIONS,
 ] as const
 
 const CLOUD_TEXT_MODELS = new Set([
+  OPENROUTER_LAGUNA_S_FREE,
+  OPENROUTER_LING_FLASH_FREE,
+  OPENROUTER_NEMOTRON_SUPER_FREE,
   OPENROUTER_NEMOTRON_ULTRA_FREE,
   OPENROUTER_DEEPSEEK_V4_FLASH,
   OPENROUTER_DEEPSEEK_V4_PRO,
@@ -181,6 +244,7 @@ const CLOUD_TEXT_MODELS = new Set([
   OFFICIAL_DEEPSEEK_V4_PRO,
   'openrouter/deepseek-v4-flash:free',
   'deepseek-v4-flash:free',
+  'deepseek-v4-pro',
   'qwen3.5-plus',
   'gpt-4o',
   'gemini-3-pro-preview',
@@ -204,7 +268,13 @@ const LEGACY_OLLAMA_TEXT_MODEL_TAGS = [
 export function isLocalOllamaTextModel(model?: string | null): boolean {
   const m = String(model || '').trim()
   if (!m || CLOUD_TEXT_MODELS.has(m) || CLOUD_TEXT_MODELS.has(normalizeTextModelId(m))) return false
-  if (m.startsWith('glm-') || m.startsWith('openrouter/') || m.startsWith('nvidia/')) return false
+  if (
+    m.startsWith('glm-')
+    || m.startsWith('openrouter/')
+    || m.startsWith('nvidia/')
+    || m.startsWith('inclusionai/')
+    || m.startsWith('poolside/')
+  ) return false
   if (LEGACY_OLLAMA_TEXT_MODEL_TAGS.some(tag => tag === m)) return true
   return /^[\w.-]+:[\w.-]+$/i.test(m)
 }
@@ -256,6 +326,11 @@ export const LEGACY_DEFAULT_TEXT_MODELS = [
   'gpt-4.1-mini',
   'deepseek-v4-flash:free',
   'openrouter/deepseek-v4-flash:free',
+  'inclusionai/ling-3.0-flash:free',
+  'inclusionai/ling-3.0-flash',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'nvidia/nemotron-3-ultra:free',
+  'nvidia/nemotron-3-ultra-550b:free',
   'glm-4.7-flash',
   'glm-4-flash-250414',
 ] as const
@@ -296,12 +371,11 @@ export function resolveNarrationEpisodeTextModel(
 }
 
 export function resolveNarrationImageTextModel(
-  episode?: { textModel?: string | null } | null,
-  bodyModel?: string | null,
+  _episode?: { textModel?: string | null } | null,
+  _bodyModel?: string | null,
 ) {
-  const picked = normalizeTextModelId(String(bodyModel || '').trim())
-  if (picked) return picked
-  return resolveNarrationEpisodeTextModel(episode)
+  // 配图文案批写 paragraph_prompts JSON（统一妙飞 DeepSeek）
+  return DEFAULT_NARRATION_IMAGE_TEXT_MODEL
 }
 
 export function resolveNarrationScriptChatTextModel(

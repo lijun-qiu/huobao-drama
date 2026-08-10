@@ -5,12 +5,8 @@ import { success, created, badRequest, now } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
 import { resolveSceneImageModel } from '../constants/image-models.js'
 import { isDialoguePortraitMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
-import {
-  buildDialoguePortraitScenePrompt,
-  DIALOGUE_PORTRAIT_SCENE_ART_STYLE,
-  DIALOGUE_PORTRAIT_SCENE_NEGATIVE,
-} from '../constants/dialogue-portrait.js'
-import { artStylePrompt, resolveEpisodeVisualStyle } from '../constants/art-styles.js'
+import { buildDialoguePortraitScenePrompt } from '../constants/dialogue-portrait.js'
+import { resolveEpisodeVisualStyle } from '../constants/art-styles.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -41,6 +37,9 @@ app.put('/:id', async (c) => {
   if (body.location !== undefined) updates.location = body.location
   if (body.time !== undefined) updates.time = body.time
   if (body.prompt !== undefined) updates.prompt = body.prompt
+  if (body.image_url !== undefined || body.imageUrl !== undefined) {
+    updates.imageUrl = body.image_url ?? body.imageUrl
+  }
   db.update(schema.scenes).set(updates).where(eq(schema.scenes.id, id)).run()
   return success(c)
 })
@@ -60,11 +59,17 @@ app.post('/:id/generate-image', async (c) => {
     dramaStyle: drama?.style,
   })
   const sceneDesc = String(scene.prompt || `${scene.location}, ${scene.time || ''}`).trim()
+  if (!sceneDesc) return badRequest(c, '场景描述为空，请先填写描述词')
   const productionMode = resolveEpisodeProductionMode(ep.id)
-  // 对话立绘：禁用分镜七维空模板（含「双眸」），改用无人环境宽景文案 + kolors 文生图
-  const prompt = isDialoguePortraitMode(productionMode)
-    ? buildDialoguePortraitScenePrompt(sceneDesc, DIALOGUE_PORTRAIT_SCENE_ART_STYLE)
-    : `${artStylePrompt(style, 'scene')}, ${sceneDesc}, 16:9 landscape, high quality, no text, no watermark`
+  // 对话立绘：若描述尚未含无人约束，写入描述字段后再生图（之后只按原文）
+  let prompt = sceneDesc
+  if (isDialoguePortraitMode(productionMode) && !/绝对无人|empty of people/i.test(sceneDesc)) {
+    const baked = buildDialoguePortraitScenePrompt(sceneDesc)
+    if (baked !== sceneDesc) {
+      db.update(schema.scenes).set({ prompt: baked, updatedAt: now() }).where(eq(schema.scenes.id, id)).run()
+      prompt = baked
+    }
+  }
 
   try {
     const model = resolveSceneImageModel(ep, undefined, productionMode)
@@ -83,12 +88,11 @@ app.post('/:id/generate-image', async (c) => {
       sceneId: id,
       dramaId: scene.dramaId,
       prompt,
-      negativePrompt: isDialoguePortraitMode(productionMode)
-        ? DIALOGUE_PORTRAIT_SCENE_NEGATIVE
-        : undefined,
       model,
       style,
+      frameType: isDialoguePortraitMode(productionMode) ? undefined : 'scene-empty',
       configId: ep.imageConfigId ?? undefined,
+      usePortraitReference: false,
     })
     logTaskSuccess('SceneImage', 'generate', { sceneId: id, generationId: genId })
     return success(c, { image_generation_id: genId })

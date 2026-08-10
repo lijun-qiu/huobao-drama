@@ -169,6 +169,8 @@ export async function unloadOllamaModel(model = lastOllamaModel) {
 }
 
 const CLOUD_TEXT_MODELS = new Set([
+  'poolside/laguna-s-2.1:free',
+  'nvidia/nemotron-3-super-120b-a12b:free',
   'nvidia/nemotron-3-ultra-550b-a55b:free',
   'openrouter/deepseek-v4-flash:free',
   'openrouter/deepseek-v4-flash',

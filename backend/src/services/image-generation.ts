@@ -2,9 +2,18 @@ import { db, schema } from '../db/index.js'
 import { eq } from 'drizzle-orm'
 import { resolveImageGenerationConfig } from './ai.js'
 import { now } from '../utils/response.js'
-import { downloadFile, readImageAsCompressedDataUrl, saveBase64Image, upscaleImageToTargetSize } from '../utils/storage.js'
+import { downloadFile, getAbsolutePath, saveBase64Image, upscaleImageToTargetSize } from '../utils/storage.js'
 import { getImageAdapter } from './adapters/registry'
-import { isAgnesImageModel } from './adapters/agnes-image.js'
+import { isAgnesImageModel, isAgnesNovelComicQuadPagePrompt } from './adapters/agnes-image.js'
+import {
+  AGNES_SHEET_RETRY_MAX,
+  AGNES_STORYBOARD_MAX_REFS,
+  cropPortraitRefToFaceHair,
+  detectAgnesCharacterSheetLayout,
+  formatAgnesSheetRetryError,
+  parseAgnesSheetRetryCount,
+} from '../utils/portrait-ref-preprocess.js'
+import fs from 'fs'
 import type { AIConfig } from './adapters/types'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 import { generateComfyPortraitComposite, finalizePortraitWhiteBackground } from './comfy-portrait-composite.js'
@@ -14,9 +23,34 @@ import {
   resolveCharacterIdForPortraitRef,
   extractAllPortraitLabelsFromPrompt,
   resolveCharacterPortraitReferencePath,
+  collectCharacterReferenceImages,
+  collectCharacterReferenceImagesByPortraitLabels,
+  resolveStoryboardCharacterIdsForShot,
 } from './narration-characters.js'
+import {
+  buildStoryboardTypedReferenceImages,
+  serializeTypedReferenceImages,
+} from './narration-scene-assets.js'
+import { narrationHasStrongLimbAction } from './narration-beat-fidelity.js'
+import { DEFAULT_LOCAL_IMAGE_MODEL, imageModelMaxReferenceImages } from '../constants/image-models.js'
 import { isBrokenFluxEnglishPrompt, FLUX_PROMPT_EN_VERSION } from './flux-prompt-translate.js'
-import { normalizeArtStyle, resolveEpisodeVisualStyle, compileNarrationImageGenerationBundle, isNarrationStructuredStyle } from '../constants/art-styles.js'
+import {
+  normalizeArtStyle,
+  resolveEpisodeVisualStyle,
+  compileNarrationImageGenerationBundle,
+  isNarrationStructuredStyle,
+  NARRATION_USE_RAW_LLM_PROMPTS,
+} from '../constants/art-styles.js'
+import {
+  DEFAULT_NOVEL_COMIC_PANEL_TEXT_MODE,
+  isNovelComicSketchStyle,
+  normalizeNovelComicPanelTextMode,
+  novelComicPanelTextModeFromPrompt,
+  NOVEL_COMIC_IMAGE_SIZE,
+  NOVEL_COMIC_PANEL_TEXT_MODE_SHORT,
+} from '../constants/novel-comic.js'
+import { overlayNovelComicQuadPageText } from './novel-comic-quad-text-overlay.js'
+import { parseNarrationImageMeta } from './narration-image.js'
 import {
   PORTRAIT_EYE_COLOR_POSITIVE_CN,
   PORTRAIT_EYE_COLOR_NEGATIVE_CN,
@@ -26,7 +60,6 @@ import {
   sanitizePortraitEyeColorText,
   sanitizePortraitExpressionText,
 } from '../constants/portrait-reference.js'
-import { DEFAULT_LOCAL_IMAGE_MODEL } from '../constants/image-models.js'
 import {
   copyComfyImageOutput,
   injectSdxlWorkflow,
@@ -99,7 +132,6 @@ import { ensureLocalModelStage, ensureComfyWorkflowFamily, freeComfyUIMemory } f
 import { runComfyImageTask } from './comfy-image-queue.js'
 import { runAgnesImageTask } from './agnes-image-queue.js'
 import { LOCAL_COMIC_ENV } from '../constants/local-comic.js'
-import { parseNarrationImageMeta } from './narration-image.js'
 import {
   alignPortraitLabelsInImagePromptCn,
   buildPortraitAppearanceSpecFromCharacter,
@@ -107,22 +139,83 @@ import {
   enforceSingleCharacterFrameInImagePromptCn,
   injectPortraitSpecIntoFluxEnglish,
 } from '../constants/portrait-appearance-spec.js'
-import { isMotionComicCameraMetaDescription, isMotionComicStyle } from '../constants/motion-comic.js'
+import { isMotionComicCameraMetaDescription, isMotionComicStyle, MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS } from '../constants/motion-comic.js'
 import { deleteUniqueStaticFiles, imagePathsToDelete } from './storyboard-asset-replace.js'
+import {
+  isNarrationEmptySceneGeneration,
+  isNarrationPropStillLifeGeneration,
+} from './narration-env-image-prompts.js'
 
 interface GenerateImageParams {
   storyboardId?: number
   dramaId?: number
   sceneId?: number
   characterId?: number
+  propId?: number
   prompt: string
   negativePrompt?: string
   model?: string
   size?: string
   style?: string
-  referenceImages?: string[]
+  referenceImages?: string[] | Array<{ url: string; kind?: string }>
+  /** false = 不挂定妆参考，且禁止运行时自动补齐参考图 */
+  usePortraitReference?: boolean
+  /** 小说漫画格字：short=空框叠字（默认）| full=模型画字 */
+  panelTextMode?: 'short' | 'full'
   frameType?: string
   configId?: number
+}
+
+/** 小说漫画短字模式：生图完成后叠正确旁白 */
+async function maybeOverlayNovelComicQuadText(
+  record: { prompt?: string | null; storyboardId?: number | null; style?: string | null; frameType?: string | null },
+  localPath: string,
+): Promise<string> {
+  const src = String(localPath || '').trim()
+  if (!src || !record?.storyboardId) return src
+  // 定妆等非配图页不叠字
+  const ft = String(record.frameType || '')
+  if (ft && /portrait|first_frame|last_frame/i.test(ft)) return src
+
+  const prompt = String(record.prompt || '')
+  const isQuad = isAgnesNovelComicQuadPagePrompt(prompt)
+    || /2×2|四格|四宫格|9:16|素笔彩画竖页|二列|三列|上格\s*[：:]/.test(prompt)
+  if (!isQuad) return src
+
+  const visualStyle = record.style || resolveVisualStyleForComfyRecord(record as any)
+  if (!isNovelComicSketchStyle(visualStyle) && !isAgnesNovelComicQuadPagePrompt(prompt)) return src
+
+  const sb = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.id, record.storyboardId)).all()[0]
+  const meta = parseNarrationImageMeta(sb?.referenceImages)
+  const mode = normalizeNovelComicPanelTextMode(
+    (meta as { panel_text_mode?: string }).panel_text_mode
+    ?? novelComicPanelTextModeFromPrompt(prompt)
+    ?? DEFAULT_NOVEL_COMIC_PANEL_TEXT_MODE,
+  )
+  if (mode !== NOVEL_COMIC_PANEL_TEXT_MODE_SHORT) return src
+  try {
+    const next = await overlayNovelComicQuadPageText({
+      localPath: src,
+      prompt,
+      referenceImages: sb?.referenceImages,
+      narrationLines: meta.image_narration_lines || meta.narration_lines,
+    })
+    if (next && next !== src) {
+      logTaskProgress('ImageTask', 'novel-comic-quad-overlay', {
+        storyboardId: record.storyboardId,
+        from: src,
+        to: next,
+      })
+      return next
+    }
+  } catch (err: any) {
+    logTaskWarn('ImageTask', 'novel-comic-quad-overlay-failed', {
+      storyboardId: record.storyboardId,
+      error: err?.message || String(err),
+    })
+  }
+  return src
 }
 
 function replaceCharacterPortraitImage(characterId: number, localPath: string) {
@@ -203,22 +296,24 @@ function resolveFluxStoryboardReferencePath(
 
 /**
  * 分镜定妆参考：文案「对照定妆」优先；可跨出本镜绑定从本集定妆取图。
- * 多人镜按文案标签顺序取齐全部可解析定妆；双人第二遍换脸仍可用 [1]。
- * 注意：许多多人镜只绑定一人，绝不能因 link_cnt=1 提前 return。
+ * 配图策略：每镜仅挂 1 张定妆参考（说话人/首个标签）；双人戏由检测拆镜。
  */
 function resolveStoryboardPortraitReferencePaths(
   record: typeof schema.imageGenerations.$inferSelect,
 ): Array<{ name: string; path: string }> {
+  // 明确写入 []：用户关闭定妆参考，禁止再从文案/绑定补齐
+  if (String(record.referenceImages || '').trim() === '[]') return []
   const prompt = resolveStoryboardChinesePromptForRecord(record)
   const fromRecord = parseComfyReferenceImagePaths(record.referenceImages)
-  // 对齐后若被压成单人，回退用分镜原文标签（防止多定妆丢失）
   let labels = extractAllPortraitLabelsFromPrompt(prompt)
-  if (labels.length < 2 && record.storyboardId) {
+  if (labels.length < 1 && record.storyboardId) {
     const sb = db.select().from(schema.storyboards)
       .where(eq(schema.storyboards.id, record.storyboardId)).all()[0]
     const rawLabels = extractAllPortraitLabelsFromPrompt(String(sb?.imagePrompt || ''))
     if (rawLabels.length > labels.length) labels = rawLabels
   }
+  // 配图只取首个对照定妆
+  if (labels.length > 1) labels = labels.slice(0, 1)
 
   type Linked = { id: number; name: string; path: string | null }
   const linkedChars: Linked[] = []
@@ -254,6 +349,7 @@ function resolveStoryboardPortraitReferencePaths(
   const push = (name: string, path: string, id?: number) => {
     if (!path || usedPaths.has(path)) return
     if (id != null && usedIds.has(id)) return
+    if (out.length >= 1) return
     usedPaths.add(path)
     if (id != null) usedIds.add(id)
     out.push({ name: name || '角色', path })
@@ -275,35 +371,12 @@ function resolveStoryboardPortraitReferencePaths(
     return { id: charId, name: label.label || label.name, path }
   }
 
-  const targetCount = Math.max(labels.length, 1)
-
-  // 文案有 ≥2 个对照定妆：必须按标签取齐（可超出本镜绑定）
-  if (labels.length >= 2) {
-    for (const label of labels) {
-      const hit = resolveLabelPath(label)
-      if (hit) push(hit.name, hit.path, hit.id)
-    }
-    // 标签解析失败时再用绑定补齐
-    for (const c of linkedWithPortrait) {
-      if (out.length >= targetCount) break
-      push(c.name, c.path, c.id)
-    }
-    if (out.length >= 2) return out
-  }
-
-  // 单标签 / 无标签：单人绑定可直接用；否则标签 → 绑定 → record.ref
-  if (labels.length <= 1 && linkedWithPortrait.length === 1) {
-    push(linkedWithPortrait[0].name, linkedWithPortrait[0].path, linkedWithPortrait[0].id)
-    return out
-  }
-
   for (const label of labels) {
     const hit = resolveLabelPath(label)
     if (hit) push(hit.name, hit.path, hit.id)
   }
-  for (const c of linkedWithPortrait) {
-    if (out.length >= Math.max(targetCount, 2)) break
-    push(c.name, c.path, c.id)
+  if (!out.length && linkedWithPortrait.length) {
+    push(linkedWithPortrait[0].name, linkedWithPortrait[0].path, linkedWithPortrait[0].id)
   }
   if (!out.length && fromRecord[0]) {
     push('参考', fromRecord[0])
@@ -337,7 +410,8 @@ function resolveStoryboardChinesePromptForRecord(
 
   const desc = String(sb.description || '').trim()
   const narrationLines = desc && !isMotionComicCameraMetaDescription(desc) ? [desc] : []
-  const allowDual = isMotionComicStyle(ep.style)
+  // 配图最多双定妆：按文案对齐，超出上限再压
+  const allowDual = MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS >= 2
 
   const aligned = alignPortraitLabelsInImagePromptCn(raw, characters, {
     dialogue: sb.dialogue,
@@ -346,7 +420,7 @@ function resolveStoryboardChinesePromptForRecord(
     allowDualPortrait: allowDual,
   })
   const labels = extractAllPortraitLabelsFromPrompt(aligned)
-  if (allowDual && labels.length >= 2) return aligned
+  if (labels.length <= MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS) return aligned
   const keep = labels[0]?.name
     || linkedNames[0]
     || extractAllPortraitLabelsFromPrompt(raw)[0]?.name
@@ -505,19 +579,37 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     model: params.model,
   })
 
+  const usePortraitReference = params.usePortraitReference !== false
+  // null=未指定可自动补齐；[]=明确不挂任何参考；有场景/道具 kind 时即使关定妆也保留
+  const referenceImagesJson = Array.isArray(params.referenceImages)
+    ? JSON.stringify(params.referenceImages)
+    : (!usePortraitReference ? '[]' : null)
+  let storePrompt = String(params.prompt || '')
+  // 入库即终稿：不在此叠四格页/画风壳（须在配图文案或定妆 resolve 阶段写好）
   const res = db.insert(schema.imageGenerations).values({
     storyboardId: params.storyboardId,
     dramaId: params.dramaId,
     sceneId: params.sceneId,
     characterId: params.characterId,
-    prompt: params.prompt,
+    propId: params.propId,
+    prompt: storePrompt,
     negativePrompt: params.negativePrompt ?? null,
     model: params.model || config.model,
     style: params.style ? normalizeArtStyle(params.style) : null,
     provider: config.provider,
-    size: params.size || '1920x1080',
+    size: params.size || (
+      isNovelComicSketchStyle(params.style)
+        && !/portrait|first_frame|last_frame/i.test(String(params.frameType || ''))
+        && isAgnesNovelComicQuadPagePrompt(String(params.prompt || ''))
+        ? NOVEL_COMIC_IMAGE_SIZE
+        : (isNovelComicSketchStyle(params.style)
+          && !/portrait|first_frame|last_frame/i.test(String(params.frameType || ''))
+          && /9:16|素笔彩画竖页|二列|三列|layout\s*=\s*quad|【格字模式/i.test(String(params.prompt || ''))
+          ? NOVEL_COMIC_IMAGE_SIZE
+          : '1920x1080')
+    ),
     frameType: params.frameType,
-    referenceImages: params.referenceImages ? JSON.stringify(params.referenceImages) : null,
+    referenceImages: referenceImagesJson,
     status: 'processing',
     createdAt: ts,
     updatedAt: ts,
@@ -531,6 +623,7 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     storyboardId: params.storyboardId,
     sceneId: params.sceneId,
     characterId: params.characterId,
+    propId: params.propId,
     frameType: params.frameType,
     model: params.model || config.model,
   })
@@ -625,13 +718,113 @@ async function processCloudImageGeneration(id: number, config: AIConfig) {
     })
 
     const useAgnesDarkRefs = config.provider === 'agnes' || isAgnesImageModel(record.model || config.model)
-    const resolvedReferenceImages = await normalizeReferenceImages(record.referenceImages, {
+    const isAgnesStoryboard = useAgnesDarkRefs && !!record.storyboardId && !record.characterId
+    const sheetRetry = parseAgnesSheetRetryCount(record.errorMsg)
+    // 分镜若入库时没带定妆参考：生图前按文案标签补齐（设定表重试 / 明确 [] 不挂参考 除外）
+    let referenceImagesJson = record.referenceImages
+    const skipPortraitRefs = String(referenceImagesJson || '').trim() === '[]'
+    if (isAgnesStoryboard && sheetRetry === 0 && !skipPortraitRefs) {
+      const existing = parseComfyReferenceImagePaths(referenceImagesJson)
+      if (!existing.length) {
+        const sb = record.storyboardId
+          ? db.select().from(schema.storyboards).where(eq(schema.storyboards.id, record.storyboardId)).all()[0]
+          : null
+        const ep = sb
+          ? db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()[0]
+          : null
+        if (sb && ep) {
+          const allChars = getEpisodeVisualCharacters(sb.episodeId, ep.dramaId)
+          const resolved = resolveStoryboardCharacterIdsForShot(sb.id, { sync: false })
+          const promptBase = resolveStoryboardChinesePromptForRecord(record) || String(sb.imagePrompt || record.prompt || '')
+          const maxTotal = Math.max(1, imageModelMaxReferenceImages(record.model || config.model))
+          const built = buildStoryboardTypedReferenceImages({
+            prompt: promptBase,
+            storyboard: sb,
+            characters: allChars,
+            maxPortrait: MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS,
+            maxTotal: Math.max(maxTotal, AGNES_STORYBOARD_MAX_REFS + 2, 8),
+            fallbackCharacterIds: resolved.characterIds,
+            collectPortraitRefs: (prompt, maxPortrait) => {
+              const by = collectCharacterReferenceImagesByPortraitLabels(prompt, allChars, maxPortrait)
+              return { refs: by.refs, names: by.names, allLabels: by.allLabels }
+            },
+            collectPortraitRefsByIds: (ids, maxPortrait) =>
+              collectCharacterReferenceImages(allChars, ids, maxPortrait),
+          })
+          if (built.refs.length) {
+            referenceImagesJson = serializeTypedReferenceImages(built.refs)
+            logTaskProgress('ImageTask', 'agnes-storyboard-refs-filled', {
+              id,
+              filledCount: built.refs.length,
+              kinds: built.refs.map(r => r.kind),
+              sceneLabels: built.sceneLabels,
+              portraitLabels: built.portraitLabels,
+              propLabels: built.propLabels,
+            })
+          }
+        } else {
+          const filled = resolveStoryboardPortraitReferencePaths(record)
+            .slice(0, AGNES_STORYBOARD_MAX_REFS)
+            .map(r => r.path)
+            .filter(Boolean)
+          if (filled.length) {
+            referenceImagesJson = JSON.stringify(filled)
+            logTaskProgress('ImageTask', 'agnes-storyboard-refs-filled', {
+              id,
+              filledCount: filled.length,
+              paths: filled,
+              fallback: 'portrait-only',
+            })
+          }
+        }
+      }
+    } else if (skipPortraitRefs) {
+      logTaskProgress('ImageTask', 'agnes-storyboard-refs-skipped', { id, reason: 'use_portrait_reference=false' })
+    }
+    // 对照定妆性别须在配图文案阶段写好；生图不再补「男性/女性」/六维壳
+    const requestPrompt = String(record.prompt || '')
+    const isNovelComicQuad = isAgnesNovelComicQuadPagePrompt(String(record.prompt || ''))
+    const hasEnvRef = /"kind"\s*:\s*"(?:scene|prop)"/.test(String(referenceImagesJson || ''))
+      || /【场景参考：|【道具参考顺序：/.test(String(record.prompt || ''))
+    // 有环境参考：按已挂载张数走，不再卡 4；纯定妆仍限 AGNES_STORYBOARD_MAX_REFS
+    const attachedCount = (() => {
+      try {
+        const arr = JSON.parse(String(referenceImagesJson || '[]'))
+        return Array.isArray(arr) ? arr.length : 0
+      } catch {
+        return 0
+      }
+    })()
+    const agnesMaxRefs = hasEnvRef
+      ? Math.max(attachedCount, AGNES_STORYBOARD_MAX_REFS + 2, 8)
+      : AGNES_STORYBOARD_MAX_REFS
+    // 强肢体动作镜：跳过 face-crop，保留半身/全身姿势信息
+    const skipFaceCropForAction = isAgnesStoryboard && narrationHasStrongLimbAction(
+      resolveStoryboardChinesePromptForRecord(record) || requestPrompt,
+    )
+    // 小说漫画四格：软参考（约八成像）——更小更糊，减轻定妆板过拟合挤场面
+    const resolvedReferenceImages = await normalizeReferenceImages(referenceImagesJson, {
       agnesDarkBg: useAgnesDarkRefs,
+      agnesStoryboardFaceCrop: isAgnesStoryboard && !skipFaceCropForAction,
+      agnesSoftFaceRef: isAgnesStoryboard && isNovelComicQuad,
+      maxRefs: isAgnesStoryboard ? agnesMaxRefs : 6,
     })
+    if (isAgnesStoryboard) {
+      logTaskProgress('ImageTask', 'agnes-storyboard-refs', {
+        id,
+        faceCrop: isAgnesStoryboard && !skipFaceCropForAction,
+        skipFaceCropForAction,
+        softFaceRef: isNovelComicQuad,
+        maxRefs: agnesMaxRefs,
+        hasEnvRef,
+        resolvedCount: resolvedReferenceImages.length,
+        sheetRetry,
+      })
+    }
     const { url, method, headers, body } = adapter.buildGenerateRequest(config, {
       id: record.id,
       model: record.model,
-      prompt: record.prompt,
+      prompt: requestPrompt,
       size: record.size,
       frameType: record.frameType,
       referenceImages: resolvedReferenceImages ? JSON.stringify(resolvedReferenceImages) : null,
@@ -714,10 +907,18 @@ async function processComfyUIImageGeneration(id: number, config: AIConfig) {
     let width = parsed.width
     let height = parsed.height
     const isPortrait = !!record.characterId
-      || (!record.sceneId && !record.storyboardId && /定妆|turnaround|三视图|character design sheet/i.test(String(record.prompt || '')))
-    const isScene = !!record.sceneId && !record.storyboardId
+      || (
+        !record.propId
+        && !record.sceneId
+        && !record.storyboardId
+        && !isNarrationPropStillLifeGeneration(record)
+        && !isNarrationEmptySceneGeneration(record)
+        && /定妆|turnaround|三视图|character design sheet/i.test(String(record.prompt || ''))
+      )
+    const isScene = (!!record.sceneId && !record.storyboardId) || isNarrationEmptySceneGeneration(record)
+    const isPropStill = isNarrationPropStillLifeGeneration(record)
     const isGrid = String(record.frameType || '').startsWith('grid_')
-    const isStoryboard = !!record.storyboardId && !isGrid && !isPortrait
+    const isStoryboard = !!record.storyboardId && !isGrid && !isPortrait && !isScene && !isPropStill
 
     const workflowName = String(record.model || config.model || DEFAULT_LOCAL_IMAGE_MODEL).split(',')[0].trim() || DEFAULT_LOCAL_IMAGE_MODEL
     const useKolors = isKolorsImageModel(workflowName)
@@ -730,10 +931,16 @@ async function processComfyUIImageGeneration(id: number, config: AIConfig) {
       useQwen ? 'qwen' : useKolors ? 'kolors' : useFlux ? 'flux' : 'sdxl',
     )
 
-    // 本地 Comfy：使用入库 prompt；解说分镜 SDXL 走完整场景编译 + 负向词（Flux/Kolors/Qwen/InstantID 保留六维结构）
+    // 本地 Comfy：入库 prompt 原样；尺寸/工作流仍按类型调整（不叠画风壳）
     let positive = String(record.prompt || '').trim()
     let negative: string | undefined = String(record.negativePrompt || '').trim() || COMFY_MINIMAL_NEGATIVE
-    if (!useFlux && !useKolors && !useQwen && !useInstantId && (isStoryboard || isScene) && isNarrationStructuredStyle(visualStyle)) {
+    if (
+      !NARRATION_USE_RAW_LLM_PROMPTS
+      && !isPropStill
+      && !useFlux && !useKolors && !useQwen && !useInstantId
+      && isStoryboard
+      && isNarrationStructuredStyle(visualStyle)
+    ) {
       const compiled = compileNarrationImageGenerationBundle(positive, visualStyle)
       if (compiled.prompt) positive = compiled.prompt
       if (compiled.negativePrompt) negative = compiled.negativePrompt
@@ -749,7 +956,9 @@ async function processComfyUIImageGeneration(id: number, config: AIConfig) {
     const kind = isGrid ? 'grid' : isPortrait ? 'portrait-front' : isStoryboard ? 'storyboard' : isScene ? 'scene' : 'generic'
 
     if (isGrid) {
-      positive = toComfyGridPrompt(positive, visualStyle)
+      if (!NARRATION_USE_RAW_LLM_PROMPTS) {
+        positive = toComfyGridPrompt(positive, visualStyle)
+      }
       const clamped = clampComfyGridSize(width, height)
       width = clamped.width
       height = clamped.height
@@ -761,7 +970,7 @@ async function processComfyUIImageGeneration(id: number, config: AIConfig) {
         characterRole: resolveCharacterRoleForPortrait(record.characterId),
         visualStyle,
       }
-      if (useFlux) {
+      if (!NARRATION_USE_RAW_LLM_PROMPTS && useFlux) {
         positive = toComfyFluxPortraitPrompt(
           positive,
           portraitCompositeInput.characterName,
@@ -770,7 +979,7 @@ async function processComfyUIImageGeneration(id: number, config: AIConfig) {
         )
         negative = ''
       }
-      // Qwen 定妆：竖幅 768×1344 原生满构图（人宽、左右窄白边）；收尾只清白底，禁止垫成 16:9
+      // Qwen 定妆：竖幅 768×1344 原生满构图；收尾只清白底，禁止垫成 16:9
       const portraitSize = useFlux
         ? resolveComfyFluxPortraitGenerationSize()
         : useQwen
@@ -790,47 +999,62 @@ async function processComfyUIImageGeneration(id: number, config: AIConfig) {
 
     if (useFlux) negative = ''
     if (useKolors) {
-      negative = '低质量，模糊，文字，水印，畸形，多余肢体，低分辨率'
+      negative = String(record.negativePrompt || '').trim()
+        || '低质量，模糊，文字，水印，畸形，多余肢体，低分辨率'
     }
-    if (useQwen) negative = ''
-    if (useFlux && (isStoryboard || isScene)) {
+    if (useQwen) negative = String(record.negativePrompt || '').trim() || ''
+    if (NARRATION_USE_RAW_LLM_PROMPTS) {
+      // 成稿即终稿：仅做模型必需的英文翻译读取（Flux/InstantID 用已存 flux_prompt_en），不叠壳
+      if (useFlux && isStoryboard) {
+        positive = await resolveFluxPositivePrompt(record, positive, visualStyle)
+        positive = finalizeFluxStoryboardPositivePrompt(positive, undefined)
+      } else if (useFlux && (isScene || isPropStill || isPortrait)) {
+        positive = String(positive).trim().slice(0, 2000)
+      } else if (useInstantId && (isStoryboard || isScene)) {
+        positive = await resolveFluxPositivePrompt(record, positive, visualStyle)
+        positive = finalizeFluxStoryboardPositivePrompt(positive, undefined)
+        negative = String(record.negativePrompt || '').trim()
+          || 'lowres, bad anatomy, bad hands, text, watermark, blurry, 3d, realistic, ugly, deformed face, white background'
+      } else if ((useKolors || useQwen) && (isStoryboard || isScene || isPropStill || isPortrait)) {
+        const chineseSource = resolveStoryboardChinesePromptForRecord(record) || positive
+        positive = String(chineseSource || positive).trim().slice(0, 1800)
+      }
+    } else if (useFlux && (isStoryboard || isScene || isPropStill)) {
       const chineseSource = resolveStoryboardChinesePromptForRecord(record) || positive
-      positive = await resolveFluxPositivePrompt(record, positive, visualStyle)
-      positive = finalizeFluxStoryboardPositivePrompt(positive, isStoryboard ? chineseSource : undefined)
-      if (isStoryboard) {
-        const gender = resolvePortraitGender(chineseSource)
-        const pulidLikely = LOCAL_COMIC_ENV.fluxStoryboardUsePulid
-          && !!resolveFluxStoryboardReferencePath(record)
-          && isFluxPulidReady()
-        if (!LOCAL_COMIC_ENV.fluxStoryboardUseRedux) {
-          positive = rebalanceFluxPromptForProtagonistGender(positive, gender, chineseSource)
-          positive = rebalanceFluxPromptForFemaleAge(positive, gender, chineseSource)
-        }
-        if (record.storyboardId) {
-          const sb = db.select().from(schema.storyboards)
-            .where(eq(schema.storyboards.id, record.storyboardId)).all()[0]
-          const ep = sb ? db.select().from(schema.episodes)
-            .where(eq(schema.episodes.id, sb.episodeId)).all()[0] : undefined
-          if (sb && ep) {
-            const characters = getEpisodeVisualCharacters(sb.episodeId, ep.dramaId)
-            const portraitCharId = resolveCharacterIdForPortraitLabel(chineseSource, characters)
-            if (portraitCharId) {
-              const ch = characters.find(c => c.id === portraitCharId)
-              // PuLID 锁脸仍保留 Subjects 身份锚点（脸型/发型），避免弱锁脸时角色跑偏
-              if (ch?.appearance?.trim()) {
-                const spec = buildPortraitAppearanceSpecFromCharacter(ch, visualStyle)
-                positive = injectPortraitSpecIntoFluxEnglish(positive, spec, gender)
+      if (isPropStill || isScene) {
+        positive = String(positive || chineseSource).trim().slice(0, 2000)
+      } else {
+        positive = await resolveFluxPositivePrompt(record, positive, visualStyle)
+        positive = finalizeFluxStoryboardPositivePrompt(positive, isStoryboard ? chineseSource : undefined)
+        if (isStoryboard) {
+          const gender = resolvePortraitGender(chineseSource)
+          if (!LOCAL_COMIC_ENV.fluxStoryboardUseRedux) {
+            positive = rebalanceFluxPromptForProtagonistGender(positive, gender, chineseSource)
+            positive = rebalanceFluxPromptForFemaleAge(positive, gender, chineseSource)
+          }
+          if (record.storyboardId) {
+            const sb = db.select().from(schema.storyboards)
+              .where(eq(schema.storyboards.id, record.storyboardId)).all()[0]
+            const ep = sb ? db.select().from(schema.episodes)
+              .where(eq(schema.episodes.id, sb.episodeId)).all()[0] : undefined
+            if (sb && ep) {
+              const characters = getEpisodeVisualCharacters(sb.episodeId, ep.dramaId)
+              const portraitCharId = resolveCharacterIdForPortraitLabel(chineseSource, characters)
+              if (portraitCharId) {
+                const ch = characters.find(c => c.id === portraitCharId)
+                if (ch?.appearance?.trim()) {
+                  const spec = buildPortraitAppearanceSpecFromCharacter(ch, visualStyle)
+                  positive = injectPortraitSpecIntoFluxEnglish(positive, spec, gender)
+                }
               }
             }
           }
         }
       }
       negative = ''
-    }
-    if (useKolors && (isStoryboard || isScene)) {
+    } else if (useKolors && (isStoryboard || isScene || isPropStill)) {
       const chineseSource = resolveStoryboardChinesePromptForRecord(record) || positive
-      // 场景底图：保留无人环境文案，勿走站立全身/手持等分镜增强（易把环境改成人物构图）
-      positive = isScene
+      positive = (isScene || isPropStill)
         ? String(chineseSource || positive).trim().slice(0, 1800)
         : resolveKolorsChinesePrompt(chineseSource)
       if (record.storyboardId) {
@@ -850,10 +1074,10 @@ async function processComfyUIImageGeneration(id: number, config: AIConfig) {
           }
         }
       }
-    }
-    if (useQwen && (isStoryboard || isScene || isPortrait)) {
+    } else if (useQwen && (isStoryboard || isScene || isPortrait)) {
       const chineseSource = resolveStoryboardChinesePromptForRecord(record) || positive
       positive = resolveKolorsChinesePrompt(chineseSource)
+      // 旧路径：定妆/分镜 Qwen 增强（NARRATION_USE_RAW_LLM_PROMPTS=false 时）
       if (isPortrait) {
         positive = sanitizePortraitExpressionText(sanitizePortraitEyeColorText(positive))
         if (!/虹膜|眼白|natural dark iris|white sclera/i.test(positive)) {
@@ -868,89 +1092,9 @@ async function processComfyUIImageGeneration(id: number, config: AIConfig) {
           PORTRAIT_EXPRESSION_NEGATIVE_CN,
           QWEN_PORTRAIT_QUALITY_NEGATIVE_CN,
         ].filter(Boolean).join('，')
-        // 定妆正向：竖幅半身占满（与男人/消防员一致），禁止垫成横屏大白边
-        positive = positive
-          .replace(/表情夸张/g, '面无表情')
-          .replace(/漫画速度线可用/g, '干净线稿')
-          .replace(/速度线|放射线|动作线/g, '')
-          .replace(/正面全身标准站立|从头顶到脚完整入镜|双脚完整入镜|双脚与鞋子清晰可见/g, '正面半身标准站姿，头到胸口完整入镜')
-          .replace(/16:9横屏纯白背景|16:9\s*横屏/g, '竖幅纯白背景')
-          .replace(/人物横向尽量占满画面|人物占满画面主体/g, '人物占满画面')
-          .replace(/人物宽度约占画面宽度55%～70%，高度约占75%～90%/g, '人物占满画面，左右只留窄白边')
-        if (!/干净线稿|清晰轮廓|无重影/.test(positive)) {
-          positive = `${positive}。干净清晰单线轮廓，无重影无叠影，五官左右对称，边缘干净无白边锯齿无抠图光晕`
-        }
-        if (!/竖幅|占满画面|窄白边/.test(positive)) {
-          positive = `${positive}。硬性构图：竖幅纯白背景，正面半身标准站姿，头到胸口完整入镜，人物占满画面，左右只留窄白边；禁止横屏左右大片留白、中间竖条小人、全身小全身、仅面部大头照，禁止速度线与放射背景`
-        } else if (!/禁止横屏|禁止两侧大片|窄白边/.test(positive)) {
-          positive = `${positive}。左右只留窄白边，禁止横屏大片留白与中间竖条小人，禁止速度线`
-        }
-        // 压万能男模脸：避免同集定妆全员棱角方正+细长眼+深灰外套
-        if (!/禁止万能男模|禁止与同集/.test(positive)) {
-          positive = `${positive}。硬性辨识：严格按本角色独有脸型与发型绘制，禁止生成万能棱角方正脸细长眼深灰外套男模`
-        }
-        negative = [
-          negative,
-          '万能男模脸',
-          '与同集角色撞脸',
-          '棱角分明方正下颌万能脸',
-          '细长眼深灰外套模板',
-        ].filter(Boolean).join('，')
-      }
-      // 分镜有定妆参考时：防「无镜双人」+ 强制按本镜身穿换装（勿锁死定妆毛衣）
-      if ((isStoryboard || isScene) && /对照定妆|定妆/.test(chineseSource + positive)) {
-        positive = enrichQwenPortraitRefStoryboardChinese(positive)
-          .replace(/表情夸张/g, '表情自然')
-          // 速度线/气流线在 Edit 低步数下易糊边、融手，改为干净线稿
-          .replace(/放射状速度线|漫画式气流线|速度线|动作线|气流扰动线/g, '')
-          .replace(/周围环绕[^，。]{0,12}/g, '周围干净无特效线')
-        if (!/干净线稿|清晰轮廓/.test(positive)) {
-          positive = `${positive}。干净清晰单线轮廓，双手五指分明无融手`
-        }
-        negative = [
-          negative,
-          QWEN_REF_DUPLICATE_NEGATIVE_CN,
-          '两人同框',
-          '双人对话',
-          '第二个人物',
-          '对面另一人',
-          '畸形手指',
-          '融手',
-          '糊手',
-          '残缺手指',
-          '多指',
-          '少指',
-          '重影轮廓',
-          '速度线',
-          '放射线',
-          '身体扭曲',
-          '肢体变形',
-        ].filter(Boolean).join('，')
-      }
-      if (
-        (isStoryboard || isScene)
-        && /站立|站着|站在|站姿|行走|走进|走出|进门/.test(positive)
-        && !/坐姿|坐在|侧卧|躺|趴/.test(positive)
-      ) {
-        negative = [negative, QWEN_STANDING_CROP_NEGATIVE_CN].filter(Boolean).join('，')
-      }
-      if (isMirrorSceneChinese(chineseSource) || isMirrorSceneChinese(positive)) {
-        negative = [negative, QWEN_MIRROR_NEGATIVE_CN].filter(Boolean).join('，')
-      }
-      if (
-        (isStoryboard || isScene)
-        && /手机|电脑|笔记本|平板|显示器|屏幕|键盘|工位/i.test(chineseSource + positive)
-      ) {
-        negative = [negative, QWEN_SCREEN_DEVICE_NEGATIVE_CN].filter(Boolean).join('，')
-      }
-      if (
-        (isStoryboard || isScene)
-        && (isHandheldSceneChinese(chineseSource) || isHandheldSceneChinese(positive))
-      ) {
-        negative = [negative, QWEN_HANDHELD_NEGATIVE_CN].filter(Boolean).join('，')
       }
     }
-    if (useInstantId && (isStoryboard || isScene)) {
+    if (!NARRATION_USE_RAW_LLM_PROMPTS && useInstantId && (isStoryboard || isScene)) {
       const chineseSource = resolveStoryboardChinesePromptForRecord(record) || positive
       const english = await resolveFluxPositivePrompt(record, positive, visualStyle)
       positive = toSdxlInstantIdStoryboardPrompt(
@@ -1725,6 +1869,8 @@ async function handleImageCompleteLocal(id: number, localPath: string) {
     logTaskWarn('ImageTask', 'recover-wrong-cancel', { id, errorMsg: err.slice(0, 80) })
   }
 
+  localPath = await maybeOverlayNovelComicQuadText(record, localPath)
+
   // 先写分镜/角色/场景图路径，再标 generation completed，避免前端轮询看到 completed 时 refresh 仍无图
   if (record.storyboardId) {
     const sb = db.select().from(schema.storyboards)
@@ -1750,6 +1896,9 @@ async function handleImageCompleteLocal(id: number, localPath: string) {
   if (record.sceneId) {
     db.update(schema.scenes).set({ imageUrl: localPath, status: 'completed', updatedAt: now() }).where(eq(schema.scenes.id, record.sceneId)).run()
   }
+  if (record.propId) {
+    db.update(schema.props).set({ imageUrl: localPath, updatedAt: now() }).where(eq(schema.props.id, record.propId)).run()
+  }
 
   db.update(schema.imageGenerations)
     .set({
@@ -1766,56 +1915,237 @@ async function handleImageCompleteLocal(id: number, localPath: string) {
 
 async function normalizeReferenceImages(
   raw: string | null | undefined,
-  options?: { agnesDarkBg?: boolean },
+  options?: {
+    agnesDarkBg?: boolean
+    /** Agnes 分镜：裁成脸+头发再压缩上传 */
+    agnesStoryboardFaceCrop?: boolean
+    /** 小说漫画四格：软参考（更小/更糊，约八成像，场面优先） */
+    agnesSoftFaceRef?: boolean
+    maxRefs?: number
+  },
 ): Promise<string[]> {
   if (!raw) return []
-  let refs: string[] = []
+  let parsed: unknown = []
   try {
-    refs = JSON.parse(raw)
+    parsed = JSON.parse(raw)
   } catch {
-    refs = []
+    parsed = []
+  }
+  if (!Array.isArray(parsed)) return []
+
+  type TypedRef = { url: string; kind: 'portrait' | 'scene' | 'prop' }
+  const typed: TypedRef[] = []
+  const seenUrls = new Set<string>()
+  for (const item of parsed) {
+    let url = ''
+    let kind: TypedRef['kind'] = 'portrait'
+    if (typeof item === 'string') {
+      url = item.trim()
+    } else if (item && typeof item === 'object') {
+      url = String((item as any).url || (item as any).path || '').trim()
+      const k = String((item as any).kind || 'portrait')
+      kind = k === 'scene' || k === 'prop' ? k : 'portrait'
+    }
+    if (!url || seenUrls.has(url)) continue
+    seenUrls.add(url)
+    typed.push({ url, kind })
   }
 
-  const deduped = Array.from(
-    new Set(
-      refs
-        .map((item) => String(item || '').trim())
-        .filter(Boolean),
-    ),
-  )
-
   const agnesDarkBg = !!options?.agnesDarkBg
-  const normalized = await Promise.all(deduped.map(async (value) => {
-    if (value.startsWith('data:image/')) {
-      if (!agnesDarkBg) return value
-      try {
-        const { convertPortraitRefWhiteBgToAgnesDark } = await import('../utils/portrait-ref-preprocess.js')
-        const converted = await convertPortraitRefWhiteBgToAgnesDark(value)
-        return `data:image/png;base64,${converted.toString('base64')}`
-      } catch (err) {
-        logTaskWarn('ImageTask', 'reference-agnes-dark-failed', { error: (err as Error).message })
+  const faceCrop = !!options?.agnesStoryboardFaceCrop
+  const softFaceRef = !!options?.agnesSoftFaceRef
+  const maxRefs = Math.max(1, options?.maxRefs ?? 6)
+  const capped = typed.slice(0, maxRefs)
+
+  const normalized = await Promise.all(capped.map(async (entry) => {
+    const value = entry.url
+    const isEnvRef = entry.kind === 'scene' || entry.kind === 'prop'
+    try {
+      let buf: Buffer | null = null
+
+      if (value.startsWith('data:image/')) {
+        buf = Buffer.from(value.replace(/^data:image\/\w+;base64,/, ''), 'base64')
+      } else if (value.startsWith('static/') || value.startsWith('/static/')) {
+        const localPath = value.startsWith('/static/') ? value.slice(1) : value
+        const abs = getAbsolutePath(localPath)
+        if (!fs.existsSync(abs)) {
+          logTaskWarn('ImageTask', 'reference-missing', { path: localPath })
+          return null
+        }
+        buf = fs.readFileSync(abs)
+      } else if (/^https?:\/\//i.test(value)) {
+        if (!faceCrop && !agnesDarkBg && !isEnvRef) return value
+        const resp = await fetch(value, { signal: AbortSignal.timeout(60_000) })
+        if (!resp.ok) {
+          logTaskWarn('ImageTask', 'reference-fetch-failed', { status: resp.status })
+          return null
+        }
+        buf = Buffer.from(await resp.arrayBuffer())
+      } else {
         return value
       }
-    }
-    if (value.startsWith('static/') || value.startsWith('/static/')) {
-      const localPath = value.startsWith('/static/') ? value.slice(1) : value
-      try {
-        return await readImageAsCompressedDataUrl(localPath, {
-          maxWidth: 768,
-          maxHeight: 768,
-          quality: 68,
-          flattenBackground: agnesDarkBg ? '#0f172a' : '#ffffff',
-          replaceNearWhiteBg: agnesDarkBg,
-        })
-      } catch (err) {
-        logTaskWarn('ImageTask', 'reference-read-failed', { path: localPath, error: (err as Error).message })
-        return null
+
+      if (!buf) return null
+
+      if (faceCrop && !isEnvRef) {
+        try {
+          buf = await cropPortraitRefToFaceHair(buf)
+        } catch (err) {
+          logTaskWarn('ImageTask', 'reference-face-crop-failed', { error: (err as Error).message })
+        }
       }
+      if (agnesDarkBg && !isEnvRef) {
+        try {
+          const { convertPortraitRefWhiteBgToAgnesDark } = await import('../utils/portrait-ref-preprocess.js')
+          buf = await convertPortraitRefWhiteBgToAgnesDark(buf)
+        } catch (err) {
+          logTaskWarn('ImageTask', 'reference-agnes-dark-failed', { error: (err as Error).message })
+        }
+      }
+
+      const sharp = (await import('sharp')).default
+      // 场景/道具保留全图；定妆脸参考可软化
+      const edge = isEnvRef ? 768 : (softFaceRef ? 128 : (faceCrop ? 512 : 768))
+      const quality = isEnvRef ? 72 : (softFaceRef ? 28 : (faceCrop ? 78 : 68))
+      let pipeline = sharp(buf).rotate()
+      if (softFaceRef && !isEnvRef) pipeline = pipeline.blur(1.8)
+      const out = await pipeline
+        .resize({
+          width: edge,
+          height: edge,
+          fit: 'inside',
+          withoutEnlargement: true,
+        })
+        .jpeg({ quality, mozjpeg: true })
+        .toBuffer()
+      return `data:image/jpeg;base64,${out.toString('base64')}`
+    } catch (err) {
+      logTaskWarn('ImageTask', 'reference-normalize-failed', { error: (err as Error).message })
+      return null
     }
-    return value
   }))
 
-  return normalized.filter((item): item is string => !!item).slice(0, 6)
+  return normalized.filter((item): item is string => !!item)
+}
+
+function isAgnesStoryboardRecord(record: {
+  storyboardId?: number | null
+  characterId?: number | null
+  model?: string | null
+  provider?: string | null
+  prompt?: string | null
+}): boolean {
+  if (!record.storyboardId || record.characterId) return false
+  const provider = String(record.provider || '').toLowerCase()
+  if (provider === 'agnes' || isAgnesImageModel(record.model)) return true
+  return /对照定妆「|对照场景「|对照道具「|16:9横屏短剧解说|单帧剧情场景|【定妆参考顺序：|【场景参考：|【道具参考顺序：/.test(String(record.prompt || ''))
+    && isAgnesImageModel(record.model)
+}
+
+/**
+ * Agnes 分镜成图若检出「右栏设定表」，自动减参考图并重试（最多 AGNES_SHEET_RETRY_MAX 次）。
+ * @returns true = 已排队重试，调用方勿落库 completed
+ */
+async function maybeRetryAgnesCharacterSheet(
+  id: number,
+  localPath: string,
+  config: AIConfig,
+): Promise<boolean> {
+  const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
+  const record = rows[0]
+  if (!record || !isAgnesStoryboardRecord(record)) return false
+
+  // 小说漫画整页 2×2 四格本身就是宫格；设定表检测会误判并丢掉定妆参考
+  if (isAgnesNovelComicQuadPagePrompt(String(record.prompt || ''))) {
+    logTaskProgress('ImageTask', 'agnes-sheet-skip-quad-page', { id })
+    return false
+  }
+
+  let abs: string
+  try {
+    abs = getAbsolutePath(localPath)
+  } catch {
+    return false
+  }
+  if (!fs.existsSync(abs)) return false
+
+  let verdict
+  try {
+    verdict = await detectAgnesCharacterSheetLayout(fs.readFileSync(abs))
+  } catch (err) {
+    logTaskWarn('ImageTask', 'agnes-sheet-detect-failed', { id, error: (err as Error).message })
+    return false
+  }
+
+  if (!verdict.isSheet) {
+    logTaskProgress('ImageTask', 'agnes-sheet-ok', {
+      id,
+      score: verdict.score,
+      reason: verdict.reason,
+    })
+    return false
+  }
+
+  const prevRetry = parseAgnesSheetRetryCount(record.errorMsg)
+  if (prevRetry >= AGNES_SHEET_RETRY_MAX) {
+    logTaskWarn('ImageTask', 'agnes-sheet-retry-exhausted', {
+      id,
+      prevRetry,
+      score: verdict.score,
+      reason: verdict.reason,
+      hint: '仍像设定表，保留成图交人工处理',
+    })
+    return false
+  }
+
+  const nextRetry = prevRetry + 1
+
+  // face-crop 仍易出贴纸：一检出设定表/白底宫格就直接去掉参考图纯文生
+  const nextRefs: string[] = []
+
+  logTaskWarn('ImageTask', 'agnes-sheet-retry', {
+    id,
+    nextRetry,
+    score: verdict.score,
+    reason: verdict.reason,
+    nextRefCount: nextRefs.length,
+    hint: 'drop all refs → text-only storyboard',
+  })
+
+  try {
+    deleteUniqueStaticFiles(imagePathsToDelete(localPath))
+  } catch { /* ignore */ }
+
+  db.update(schema.imageGenerations)
+    .set({
+      status: 'processing',
+      imageUrl: null,
+      localPath: null,
+      taskId: null,
+      referenceImages: nextRefs.length ? JSON.stringify(nextRefs) : null,
+      errorMsg: formatAgnesSheetRetryError(nextRetry, verdict.reason),
+      updatedAt: now(),
+    })
+    .where(eq(schema.imageGenerations.id, id))
+    .run()
+
+  // 勿在当前 Agnes 队列槽内 await 重试（concurrency=1 会死锁）；等本任务释放槽位后再入队
+  const useQueue = config.provider.toLowerCase() === 'agnes'
+    || isAgnesImageModel(record.model || config.model)
+  setImmediate(() => {
+    const run = () => processCloudImageGeneration(id, config)
+    const p = useQueue
+      ? runAgnesImageTask(`image-${id}-sheet-retry-${nextRetry}`, run)
+      : run()
+    p.catch((err: any) => {
+      logTaskError('ImageTask', 'agnes-sheet-retry-failed', { id, error: err?.message || String(err) })
+      db.update(schema.imageGenerations)
+        .set({ status: 'failed', errorMsg: err?.message || String(err), updatedAt: now() })
+        .where(eq(schema.imageGenerations.id, id))
+        .run()
+    })
+  })
+  return true
 }
 
 async function pollImageTask(id: number, config: AIConfig, taskId: string) {
@@ -1894,12 +2224,26 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
 }
 
 async function handleImageComplete(id: number, provider: string, imageUrl: string) {
-  const localPath = await downloadFile(imageUrl, 'images')
+  let localPath = await downloadFile(imageUrl, 'images')
   const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
   const record = rows[0]
 
+  if (record && isAgnesStoryboardRecord(record)) {
+    const config = resolveImageGenerationConfig({ model: record.model || undefined })
+    const retried = await maybeRetryAgnesCharacterSheet(id, localPath, config)
+    if (retried) return
+  }
+
+  if (record) localPath = await maybeOverlayNovelComicQuadText(record, localPath)
+
   db.update(schema.imageGenerations)
-    .set({ imageUrl, localPath, status: 'completed', updatedAt: now() })
+    .set({
+      imageUrl,
+      localPath,
+      status: 'completed',
+      errorMsg: null,
+      updatedAt: now(),
+    })
     .where(eq(schema.imageGenerations.id, id))
     .run()
   logTaskSuccess('ImageTask', 'downloaded', { id, provider, localPath })
@@ -1917,15 +2261,31 @@ async function handleImageComplete(id: number, provider: string, imageUrl: strin
   if (record?.sceneId) {
     db.update(schema.scenes).set({ imageUrl: localPath, status: 'completed', updatedAt: now() }).where(eq(schema.scenes.id, record.sceneId)).run()
   }
+  if (record?.propId) {
+    db.update(schema.props).set({ imageUrl: localPath, updatedAt: now() }).where(eq(schema.props.id, record.propId)).run()
+  }
 }
 
 async function handleImageCompleteBase64(id: number, provider: string, base64Data: string, mimeType: string) {
-  const localPath = await saveBase64Image(base64Data, mimeType, 'images')
+  let localPath = await saveBase64Image(base64Data, mimeType, 'images')
   const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
   const record = rows[0]
 
+  if (record && isAgnesStoryboardRecord(record)) {
+    const config = resolveImageGenerationConfig({ model: record.model || undefined })
+    const retried = await maybeRetryAgnesCharacterSheet(id, localPath, config)
+    if (retried) return
+  }
+
+  if (record) localPath = await maybeOverlayNovelComicQuadText(record, localPath)
+
   db.update(schema.imageGenerations)
-    .set({ localPath, status: 'completed', updatedAt: now() })
+    .set({
+      localPath,
+      status: 'completed',
+      errorMsg: null,
+      updatedAt: now(),
+    })
     .where(eq(schema.imageGenerations.id, id))
     .run()
   logTaskSuccess('ImageTask', 'saved-base64', { id, provider, mimeType, localPath })
@@ -1942,5 +2302,8 @@ async function handleImageCompleteBase64(id: number, provider: string, base64Dat
   }
   if (record?.sceneId) {
     db.update(schema.scenes).set({ imageUrl: localPath, status: 'completed', updatedAt: now() }).where(eq(schema.scenes.id, record.sceneId)).run()
+  }
+  if (record?.propId) {
+    db.update(schema.props).set({ imageUrl: localPath, updatedAt: now() }).where(eq(schema.props.id, record.propId)).run()
   }
 }

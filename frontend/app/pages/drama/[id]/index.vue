@@ -33,7 +33,12 @@
           </div>
         </div>
       </div>
-      <button class="btn btn-primary" @click="openAddEpisode">
+      <button
+        class="btn btn-primary"
+        :disabled="isNovelComic && novelComicAtEpisodeLimit"
+        :title="isNovelComic && novelComicAtEpisodeLimit ? `最多 ${NOVEL_COMIC_MAX_EPISODES} 集` : undefined"
+        @click="openAddEpisode"
+      >
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
           <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
         </svg>
@@ -41,68 +46,26 @@
       </button>
     </div>
 
-    <!-- 小说漫画讲解：原文 + 章节大纲 -->
+    <!-- 剧级小说设定：大纲 / 主要角色，各集原文与定妆参考 -->
+    <EpisodeNovelBiblePanel
+      :drama-id="dramaId"
+      :drama="drama"
+      force-visible
+      @synced="load"
+    />
+
+    <!-- 小说漫画讲解：手动分集提示 -->
     <div v-if="isNovelComic" class="novel-comic-panel card">
       <div class="nc-head">
         <div>
           <div class="nc-kicker">小说漫画讲解</div>
-          <h2 class="nc-title">粘贴小说 → 章节大纲 → 一章一集</h2>
-          <p class="nc-sub">确认大纲后按章创建各集；每集旁白朗读该章、出漫画配图。</p>
+          <h2 class="nc-title">手动分集 · 每章一集</h2>
+          <p class="nc-sub">
+            用右上角「添加集」（最多 {{ NOVEL_COMIC_MAX_EPISODES }} 集）；进集后在「文案输入」粘贴本章原文，直接「旁白分镜」按原文拆镜（不再生成讲解稿）。
+            定妆角色全项目共享。成片：彩漫整页 2×2 四格（默认短字叠字）+ 轻运镜。
+          </p>
         </div>
-        <span v-if="outlineConfirmedAt" class="nc-badge">已确认 {{ outlineConfirmedAt.slice(0, 16).replace('T', ' ') }}</span>
-      </div>
-
-      <label class="field nc-field">
-        <span class="field-label">小说原文</span>
-        <textarea
-          v-model="sourceNovel"
-          class="input nc-textarea"
-          rows="8"
-          placeholder="粘贴完整小说原文…"
-        />
-        <span class="field-hint">约 {{ sourceNovel.length }} 字</span>
-      </label>
-      <div class="nc-actions">
-        <button class="btn" :disabled="savingSource || !sourceNovel.trim()" @click="saveSourceNovel">
-          {{ savingSource ? '保存中…' : '保存原文' }}
-        </button>
-        <label class="nc-chapters">
-          目标章数
-          <input v-model.number="targetChapters" class="input nc-num" type="number" min="2" max="12" />
-        </label>
-        <button class="btn btn-primary" :disabled="generatingOutline || !sourceNovel.trim()" @click="generateOutline">
-          {{ generatingOutline ? '生成中…' : '生成章节大纲' }}
-        </button>
-      </div>
-
-      <div v-if="chapterOutline.length" class="nc-outline">
-        <div class="nc-outline-head">
-          <span class="section-label-inline">章节大纲（可编辑）</span>
-          <button class="btn" :disabled="savingOutline" @click="saveOutline">
-            {{ savingOutline ? '保存中…' : '保存大纲' }}
-          </button>
-        </div>
-        <div v-for="(ch, idx) in chapterOutline" :key="idx" class="nc-chapter card">
-          <div class="nc-chapter-row">
-            <span class="nc-ch-num">第 {{ idx + 1 }} 章</span>
-            <input v-model="ch.title" class="input" placeholder="章标题" />
-            <button class="btn btn-ghost" type="button" @click="removeChapter(idx)" :disabled="chapterOutline.length <= 2">删</button>
-          </div>
-          <textarea v-model="ch.summary" class="input nc-summary" rows="2" placeholder="本章摘要" />
-          <input
-            class="input"
-            :value="(ch.key_beats || []).join('；')"
-            placeholder="情节点（用；分隔）"
-            @change="e => setChapterBeats(idx, e.target.value)"
-          />
-        </div>
-        <button class="btn" type="button" @click="addChapter">+ 加一章</button>
-        <div class="nc-apply">
-          <button class="btn btn-primary" :disabled="applyingOutline || !chapterOutline.length" @click="applyOutline">
-            {{ applyingOutline ? '建集中（按章写朗读稿）…' : '确认并创建各集' }}
-          </button>
-          <span class="field-hint">空集将按大纲重建；已有分镜的集不会被删除，仅追加缺失章。</span>
-        </div>
+        <span class="nc-badge">{{ drama.episodes?.length || 0 }} / {{ NOVEL_COMIC_MAX_EPISODES }} 集</span>
       </div>
     </div>
 
@@ -232,6 +195,7 @@ import { aiConfigAPI, dramaAPI, episodeAPI } from '~/composables/useApi'
 import { DEFAULT_IMAGE_MODEL, DEFAULT_LOCAL_IMAGE_MODEL, DEFAULT_LOCAL_TEXT_MODEL, imageModelOptionsForMode, parseProductionMode, usesLocalModelPipeline } from '~/composables/useEpisodeWorkflow'
 import { artStyleLabel, artStyleSelectOptions, normalizeArtStyle } from '~/composables/useArtStyles'
 import BaseSelect from '~/components/BaseSelect.vue'
+import EpisodeNovelBiblePanel from '~/components/episode/EpisodeNovelBiblePanel.vue'
 
 const route = useRoute()
 const drama = ref(null)
@@ -249,121 +213,13 @@ const newEpisodeVideoConfigId = ref(null)
 const newEpisodeAudioConfigId = ref(null)
 
 const isNovelComic = computed(() => parseProductionMode(drama.value) === 'novel_comic')
-const sourceNovel = ref('')
-const chapterOutline = ref([])
-const outlineConfirmedAt = ref(null)
-const targetChapters = ref(4)
-const savingSource = ref(false)
-const generatingOutline = ref(false)
-const savingOutline = ref(false)
-const applyingOutline = ref(false)
+/** 与后端 NOVEL_COMIC_MAX_EPISODES 一致 */
+const NOVEL_COMIC_MAX_EPISODES = 1000
+const novelComicAtEpisodeLimit = computed(() =>
+  isNovelComic.value && (drama.value?.episodes?.length || 0) >= NOVEL_COMIC_MAX_EPISODES,
+)
 
 function hasScript(ep) { return !!(ep.script_content || ep.scriptContent || ep.content) }
-
-async function loadNovelComic() {
-  if (!isNovelComic.value) return
-  try {
-    const state = await dramaAPI.novelComic.get(dramaId)
-    sourceNovel.value = state.source_novel || ''
-    chapterOutline.value = (state.chapter_outline || []).map((c, i) => ({
-      number: c.number || i + 1,
-      title: c.title || '',
-      summary: c.summary || '',
-      key_beats: Array.isArray(c.key_beats) ? [...c.key_beats] : [],
-      approx_chars: c.approx_chars,
-    }))
-    outlineConfirmedAt.value = state.outline_confirmed_at || null
-  } catch (e) {
-    toast.error(e.message)
-  }
-}
-
-async function saveSourceNovel() {
-  savingSource.value = true
-  try {
-    await dramaAPI.novelComic.saveSource(dramaId, { source_novel: sourceNovel.value })
-    outlineConfirmedAt.value = null
-    toast.success('小说原文已保存')
-  } catch (e) {
-    toast.error(e.message)
-  } finally {
-    savingSource.value = false
-  }
-}
-
-async function generateOutline() {
-  generatingOutline.value = true
-  try {
-    if (sourceNovel.value.trim()) {
-      await dramaAPI.novelComic.saveSource(dramaId, { source_novel: sourceNovel.value })
-    }
-    const res = await dramaAPI.novelComic.generateOutline(dramaId, {
-      target_chapters: targetChapters.value,
-    })
-    chapterOutline.value = (res.chapter_outline || []).map((c, i) => ({
-      number: c.number || i + 1,
-      title: c.title || '',
-      summary: c.summary || '',
-      key_beats: Array.isArray(c.key_beats) ? [...c.key_beats] : [],
-      approx_chars: c.approx_chars,
-    }))
-    outlineConfirmedAt.value = null
-    toast.success(`已生成 ${chapterOutline.value.length} 章大纲`)
-  } catch (e) {
-    toast.error(e.message)
-  } finally {
-    generatingOutline.value = false
-  }
-}
-
-async function saveOutline() {
-  savingOutline.value = true
-  try {
-    const payload = chapterOutline.value.map((c, i) => ({
-      number: i + 1,
-      title: c.title,
-      summary: c.summary,
-      key_beats: c.key_beats || [],
-      approx_chars: c.approx_chars,
-    }))
-    await dramaAPI.novelComic.saveOutline(dramaId, { chapter_outline: payload })
-    outlineConfirmedAt.value = null
-    toast.success('大纲已保存')
-  } catch (e) {
-    toast.error(e.message)
-  } finally {
-    savingOutline.value = false
-  }
-}
-
-async function applyOutline() {
-  applyingOutline.value = true
-  try {
-    await saveOutline()
-    const res = await dramaAPI.novelComic.applyOutline(dramaId)
-    outlineConfirmedAt.value = res.outline_confirmed_at || new Date().toISOString()
-    toast.success(`已落地 ${res.results?.length || 0} 章（一章一集）`)
-    await load()
-  } catch (e) {
-    toast.error(e.message)
-  } finally {
-    applyingOutline.value = false
-  }
-}
-
-function addChapter() {
-  const n = chapterOutline.value.length + 1
-  chapterOutline.value.push({ number: n, title: '', summary: '', key_beats: [] })
-}
-
-function removeChapter(idx) {
-  chapterOutline.value.splice(idx, 1)
-}
-
-function setChapterBeats(idx, raw) {
-  const beats = String(raw || '').split(/[；;]/).map(s => s.trim()).filter(Boolean)
-  if (chapterOutline.value[idx]) chapterOutline.value[idx].key_beats = beats
-}
 
 function configLabel(config) {
   if (!config) return ''
@@ -388,7 +244,6 @@ async function load() {
   try {
     drama.value = await dramaAPI.get(dramaId)
     dramaStyle.value = normalizeArtStyle(drama.value?.style)
-    await loadNovelComic()
   } catch (e) {
     toast.error(e.message)
   }
@@ -434,6 +289,10 @@ async function loadConfigs() {
 }
 
 function openAddEpisode() {
+  if (novelComicAtEpisodeLimit.value) {
+    toast.error(`小说漫画最多 ${NOVEL_COMIC_MAX_EPISODES} 集`)
+    return
+  }
   newEpisodeTitle.value = ''
   const mode = parseProductionMode(drama.value)
   newEpisodeImageModel.value = usesLocalModelPipeline(mode) ? DEFAULT_LOCAL_IMAGE_MODEL : DEFAULT_IMAGE_MODEL
@@ -518,36 +377,16 @@ onMounted(() => { load(); loadConfigs() })
   max-width: 760px;
   margin-bottom: 28px;
   padding: 20px 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
 }
 .nc-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .nc-kicker { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; color: var(--text-3); text-transform: uppercase; }
 .nc-title { font-size: 18px; font-weight: 700; margin: 4px 0; }
-.nc-sub { font-size: 13px; color: var(--text-2); margin: 0; }
+.nc-sub { font-size: 13px; color: var(--text-2); margin: 0; line-height: 1.55; }
 .nc-badge {
+  flex-shrink: 0;
   font-size: 11px; padding: 4px 10px; border-radius: 99px;
   background: var(--accent-bg); color: var(--accent-text); white-space: nowrap;
 }
-.nc-field { display: flex; flex-direction: column; gap: 6px; }
-.nc-textarea { min-height: 160px; resize: vertical; font-family: inherit; line-height: 1.55; }
-.nc-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-.nc-chapters { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); }
-.nc-num { width: 64px; }
-.nc-outline { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
-.nc-outline-head { display: flex; justify-content: space-between; align-items: center; }
-.section-label-inline { font-size: 12px; font-weight: 600; color: var(--text-2); }
-.nc-chapter { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-.nc-chapter-row { display: flex; gap: 8px; align-items: center; }
-.nc-ch-num { font-size: 12px; font-weight: 600; color: var(--text-3); white-space: nowrap; }
-.nc-summary { resize: vertical; }
-.nc-apply { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; margin-top: 4px; }
-.btn-ghost {
-  background: transparent; border: 1px solid var(--border); color: var(--text-2);
-  padding: 6px 10px; border-radius: var(--radius); cursor: pointer;
-}
-.btn-ghost:hover { background: var(--bg-hover); }
 
 /* Section label */
 .section-label {

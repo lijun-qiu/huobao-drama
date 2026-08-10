@@ -48,6 +48,20 @@ export function isNovelComicMode(mode?: ProductionMode | string | null): boolean
   return mode === PRODUCTION_MODE_NOVEL_COMIC
 }
 
+/** 纯解说视频（不含漫画解说 / 小说漫画 / 对话立绘） */
+export function isNarrationVideoMode(mode?: ProductionMode | string | null): boolean {
+  return mode === 'narration'
+}
+
+/**
+ * 文案输入 → 讲解/解说脚本 → 分镜：
+ * 仅解说视频（content=原文/素材，script_content=解说脚本）。
+ * 小说漫画讲解已改为直接用原文（content）拆镜，不再经讲解稿。
+ */
+export function usesExplainScriptFlow(mode?: ProductionMode | string | null): boolean {
+  return mode === 'narration'
+}
+
 export function isDialoguePortraitMode(mode?: ProductionMode | string | null): boolean {
   return mode === PRODUCTION_MODE_DIALOGUE_PORTRAIT
 }

@@ -15,6 +15,7 @@ import { AliVideoAdapter } from './ali-video'
 import { ZhipuImageAdapter } from './zhipu-image'
 import { ZhipuVideoAdapter } from './zhipu-video'
 import { AgnesImageAdapter } from './agnes-image'
+import { AgnesVideoAdapter } from './agnes-video'
 import type { ImageProviderAdapter, VideoProviderAdapter, TTSProviderAdapter } from './types'
 
 // 图片 Adapter 注册表
@@ -39,6 +40,7 @@ export const videoAdapters: Record<string, VideoProviderAdapter> = {
   ali: new AliVideoAdapter(),
   zhipu: new ZhipuVideoAdapter(),
   bigmodel: new ZhipuVideoAdapter(),
+  agnes: new AgnesVideoAdapter(),
 }
 
 // TTS Adapter 注册表

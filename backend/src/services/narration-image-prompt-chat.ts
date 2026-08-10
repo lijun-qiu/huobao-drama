@@ -23,19 +23,19 @@ import {
   type NarrationImageChatTurn,
 } from './narration-image-chat-context.js'
 import { createWorkflowChatStatusReporter } from './workflow-chat-status.js'
-import { usesMotionComicVisuals, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { usesMotionComicVisuals, resolveEpisodeProductionMode, isNovelComicMode } from '../constants/production-mode.js'
 
 const NARRATION_PROMPT_CHAT_SYSTEM = [
-  '你是火宝解说流水线的「配图文案」助手，帮助创作者生成与调整六维配图提示词。',
+  '你是火宝解说流水线的「配图文案」助手，帮助创作者生成与调整 Toonflow 规则配图提示词。',
   '',
-  '【六维文案结构】',
-  '每条配图 prompt 含：主体、场景、动作、光影、镜头、画风；与 TTS 旁白句对应，静态画面、无血腥暴力。',
+  '【Toonflow 文案结构】',
+  '每条配图 prompt 由 LLM 按规则创作（非本地模板）：@图N 槽位声明 → 对照场景/定妆/道具 →【画面】→【风格】；持物须在人手上；静态画面、无血腥暴力。',
   '',
   '【职责】',
-  '- 解读当前各段配图文案就绪情况，解释六维要素是否完整。',
+  '- 解读当前各段配图文案就绪情况，解释 @图/对照/【画面】是否完整。',
   '- 用户说「开始生成」「补全文案」「重新生成」等时，由系统后台执行 LLM 批量生成；你解读进度与结果。',
-  '- 用户要求改某段文案（如「#05 改成夜市全景」），先给出修改建议或完整六维示例，建议重新生成该段或全量生成。',
-  '- 【画面主体】有定妆的角色须写「对照定妆「name·阶段」」；手持物/槟榔等写在【核心细节动作】或【年代场景·陈设】；陈设须写具体物件名勿泛称。',
+  '- 用户要求改某段文案（如「#05 改成夜市全景」），先给出修改建议或完整 Toonflow 示例，建议重新生成该段或全量生成。',
+  '- 有定妆须写对照定妆「name·阶段」；手持物写在【画面】动作里，禁止无人归属桌面陈设。',
   '- 不要输出 markdown 代码块包裹的 JSON；用自然语言 + #镜号 说明。',
   '',
   '回复简洁；用 #01 段号 指代配图锚点镜头。',
@@ -57,8 +57,26 @@ const MOTION_COMIC_PROMPT_CHAT_SYSTEM = [
   '回复简洁；用 #01 段号 指代配图锚点镜头。',
 ].join('\n')
 
+const NOVEL_COMIC_PROMPT_CHAT_SYSTEM = [
+  '你是火宝「小说漫画讲解」流水线的「素笔彩画竖页配图文案」助手，帮助创作者生成与调整配图 prompt。',
+  '',
+  '【整段文案】',
+  '每条 prompt 写成一整段连贯中文（不用【】六维标签）：9:16 竖屏二列或三列分格（上→下），素笔细线稿+淡彩，场面环境道具与色调优先。',
+  '默认长文画字：每格旁白框内写完整讲解文字，模型须把汉字清晰画进框内；可选短字叠字时才空框后期叠字。',
+  '须淡彩上色，禁止纯黑白去色线稿页、赛璐璐厚平涂、无框单图、2×2 四宫格、六格/九格、横屏 16:9、平台水印；主要角色可写定妆对照；成片为静图翻页无配音。',
+  '',
+  '【职责】',
+  '- 解读各段配图文案就绪情况。',
+  '- 用户说「开始生成」「补全文案」「重新生成」等时，由系统后台执行；你解读进度与结果。',
+  '- 用户要求改某段文案，先给出修改建议或完整整段示例（含上格/下格旁白框「」完整讲解）。',
+  '',
+  '回复简洁；用 #01 段号 指代配图锚点镜头。',
+].join('\n')
+
 function resolvePromptChatSystem(episodeId: number): string {
-  return usesMotionComicVisuals(resolveEpisodeProductionMode(episodeId))
+  const mode = resolveEpisodeProductionMode(episodeId)
+  if (isNovelComicMode(mode)) return NOVEL_COMIC_PROMPT_CHAT_SYSTEM
+  return usesMotionComicVisuals(mode)
     ? MOTION_COMIC_PROMPT_CHAT_SYSTEM
     : NARRATION_PROMPT_CHAT_SYSTEM
 }
@@ -71,6 +89,8 @@ export type NarrationImagePromptChatParams = {
   action?: 'run' | 'retry_missing' | null
   style?: string
   promptBatchSize?: number
+  /** 小说漫画格字：short（默认）| full */
+  panelTextMode?: 'short' | 'full' | null
 }
 
 function buildPromptChatMessages(params: NarrationImagePromptChatParams) {
@@ -167,6 +187,7 @@ export async function streamNarrationImagePromptChat(
         // 批量写六维文案强制不思考；对话闲聊仍可用上方 textThinking
         textThinking: false,
         onProgress,
+        ...(params.panelTextMode ? { panelTextMode: params.panelTextMode } : {}),
       }
 
       const result = params.action === 'retry_missing'

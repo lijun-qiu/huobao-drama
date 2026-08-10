@@ -3,9 +3,10 @@ import { usesLocalModelPipeline } from './production-mode.js'
 
 export const GPT_IMAGE_DEFAULT_MODEL = 'gpt-image-2'
 export const DEFAULT_IMAGE_MODEL = GPT_IMAGE_DEFAULT_MODEL
-/** 管线默认：Agnes Image（定妆参考图 / 图生图） */
-export const DEFAULT_LOCAL_IMAGE_MODEL = 'agnes-image-2.0-flash'
+/** 管线默认：Agnes Image 2.1（复杂构图/定妆参考图） */
+export const DEFAULT_LOCAL_IMAGE_MODEL = 'agnes-image-2.1-flash'
 export const LOCAL_IMAGE_MODEL_OPTIONS = [
+  'agnes-image-2.1-flash',
   'agnes-image-2.0-flash',
   'agnes-image-2.0',
   'cogview-3-flash',
@@ -86,7 +87,11 @@ export function resolveLocalEpisodeImageModel(
   }
   if (picked && LOCAL_IMAGE_MODEL_OPTIONS.includes(picked as typeof LOCAL_IMAGE_MODEL_OPTIONS[number])) return picked
   if (picked && picked.startsWith('cogview')) return picked
-  if (picked && picked.startsWith('agnes-image')) return picked === 'agnes-image-2.0' ? 'agnes-image-2.0-flash' : picked
+  if (picked && picked.startsWith('agnes-image')) {
+    if (picked === 'agnes-image-2.0') return 'agnes-image-2.0-flash'
+    if (picked === 'agnes-image-2.1') return 'agnes-image-2.1-flash'
+    return picked
+  }
   if (picked && !isCloudImageModel(picked)) return picked
   return DEFAULT_LOCAL_IMAGE_MODEL
 }
@@ -158,7 +163,8 @@ export function imageModelMaxReferenceImages(model?: string | null): number {
   if (m === 'flux_dev_fp8' || (m.startsWith('flux') && !m.includes('redux'))) return 1
   if (m === 'sdxl_instantid') return 1
   if (m === 'qwen_image_edit' || m.startsWith('qwen_image')) return 3
-  if (m.startsWith('agnes-image')) return 4
+  // Agnes：按文案内容挂场景+定妆+道具，给够软上限；不再卡死在 4
+  if (m.startsWith('agnes-image')) return 8
   if (isGptImageModel(m)) return 4
   if (m.startsWith('kling-')) return 1
   if (m.startsWith('qwen-image')) return 3

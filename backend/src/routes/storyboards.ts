@@ -26,6 +26,7 @@ import { resolveVoiceboxInstruct } from '../utils/voicebox-instruct.js'
 import { resolveVoiceboxModelSize } from '../utils/voicebox-model-size.js'
 import { scanNarrationStoryboardImage } from '../services/narration-image-scan.js'
 import { translateStoryboardFluxPrompt, mergeStoryboardFluxPromptMeta, clearStoryboardFluxPromptMeta } from '../services/flux-storyboard-translate.js'
+import { regenerateStoryboardVideoPrompt } from '../services/narration-video-prompt.js'
 
 const app = new Hono()
 
@@ -202,17 +203,29 @@ app.put('/:id', async (c) => {
   }
 
   if ('image_prompt' in body) {
-    updates.imagePrompt = normalizeStoryboardImagePrompt(body.image_prompt)
-    const nextPrompt = updates.imagePrompt
+    updates.imagePrompt = normalizeStoryboardImagePrompt(body.image_prompt) || null
+    const nextPrompt = String(updates.imagePrompt || '').trim()
     const prevPrompt = String(storyboard.imagePrompt || '').trim()
     if (nextPrompt !== prevPrompt) {
       const meta = parseNarrationImageMeta(storyboard.referenceImages)
-      const { flux_prompt_en: _fp, flux_prompt_en_at: _fpa, ...restMeta } = meta
-      const extra: Record<string, unknown> = { ...restMeta }
-      if (nextPrompt && meta.narration_image_mode === 'new') {
-        extra.image_prompt_source = 'manual'
+      if (!nextPrompt) {
+        const {
+          flux_prompt_en: _fp,
+          flux_prompt_en_at: _fpa,
+          flux_prompt_en_version: _fpv,
+          image_prompt_source: _src,
+          image_prompt_llm_raw: _raw,
+          ...restMeta
+        } = meta
+        updates.referenceImages = buildNarrationImageMeta(meta.narration_image_mode, restMeta)
+      } else {
+        const { flux_prompt_en: _fp, flux_prompt_en_at: _fpa, flux_prompt_en_version: _fpv, ...restMeta } = meta
+        const extra: Record<string, unknown> = { ...restMeta }
+        if (meta.narration_image_mode === 'new') {
+          extra.image_prompt_source = 'manual'
+        }
+        updates.referenceImages = buildNarrationImageMeta(meta.narration_image_mode, extra)
       }
-      updates.referenceImages = buildNarrationImageMeta(meta.narration_image_mode, extra)
     }
   }
 
@@ -221,6 +234,22 @@ app.put('/:id', async (c) => {
     updates.referenceImages = en
       ? mergeStoryboardFluxPromptMeta(storyboard.referenceImages, en)
       : (clearStoryboardFluxPromptMeta(storyboard.referenceImages) ?? storyboard.referenceImages)
+  }
+
+  if ('highlight_motion' in body || 'highlight_reason' in body) {
+    const baseRef = String(updates.referenceImages ?? storyboard.referenceImages ?? '')
+    const meta = parseNarrationImageMeta(baseRef)
+    const { flux_prompt_en: _fp, flux_prompt_en_at: _fpa, ...restMeta } = meta
+    const extra: Record<string, unknown> = { ...restMeta }
+    if ('highlight_motion' in body) {
+      extra.highlight_motion = !!body.highlight_motion
+      if (!body.highlight_motion) extra.highlight_reason = undefined
+    }
+    if ('highlight_reason' in body) {
+      const reason = String(body.highlight_reason ?? '').trim()
+      extra.highlight_reason = reason || undefined
+    }
+    updates.referenceImages = buildNarrationImageMeta(meta.narration_image_mode, extra)
   }
 
   validateStoryboardBindings(
@@ -583,6 +612,26 @@ app.post('/:id/upload-tts', async (c) => {
     return success(c, result)
   } catch (err: any) {
     return badRequest(c, err.message)
+  }
+})
+
+// POST /storyboards/:id/generate-video-prompt — LLM 按【画面】+旁白生成视频运动描述
+app.post('/:id/generate-video-prompt', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const force = body.force !== false
+  try {
+    const result = await regenerateStoryboardVideoPrompt(id, {
+      force,
+      textModel: body.text_model ?? body.textModel,
+      textThinking: body.text_thinking ?? body.textThinking,
+      allowRuleFallback: body.allow_rule_fallback !== false && body.allowRuleFallback !== false,
+    })
+    if (!result) return badRequest(c, '镜头不存在')
+    return success(c, result)
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'generate-video-prompt', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message || '生成视频描述失败')
   }
 })
 

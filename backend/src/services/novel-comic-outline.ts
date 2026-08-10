@@ -10,7 +10,6 @@ import {
   DEFAULT_NARRATION_TEXT_MODEL,
 } from '../constants/text-models.js'
 import {
-  NOVEL_COMIC_CHAPTER_SCRIPT_SYSTEM,
   NOVEL_COMIC_OUTLINE_DEFAULT_CHAPTERS,
   NOVEL_COMIC_OUTLINE_MAX_CHAPTERS,
   NOVEL_COMIC_OUTLINE_MIN_CHAPTERS,
@@ -21,10 +20,10 @@ import {
   type NovelComicChapterOutline,
 } from '../constants/novel-comic.js'
 import { isNovelComicMode, parseProductionMode } from '../constants/production-mode.js'
+import { linkDramaCastToEpisode } from './narration-characters.js'
 
 const SOURCE_NOVEL_MAX_CHARS = 120_000
 const OUTLINE_SOURCE_SNIPPET = 80_000
-const CHAPTER_SOURCE_SNIPPET = 60_000
 
 function requireNovelComicDrama(dramaId: number) {
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
@@ -81,7 +80,7 @@ export function getNovelComicState(dramaId: number) {
     id: ep.id,
     episode_number: ep.episodeNumber,
     title: ep.title,
-    has_content: !!String(ep.content || ep.scriptContent || '').trim(),
+    has_content: !!String(ep.content || '').trim(),
     empty: episodeIsEmpty(ep.id),
   }))
   return {
@@ -117,6 +116,9 @@ export function saveNovelComicOutline(dramaId: number, chapters: NovelComicChapt
       summary: String(c.summary || '').trim() || String(c.title || '').trim(),
       key_beats: Array.isArray(c.key_beats)
         ? c.key_beats.map(b => String(b || '').trim()).filter(Boolean).slice(0, 8)
+        : undefined,
+      panel_beats: Array.isArray(c.panel_beats)
+        ? c.panel_beats.map(b => String(b || '').trim()).filter(Boolean).slice(0, 12)
         : undefined,
       approx_chars: typeof c.approx_chars === 'number' ? c.approx_chars : undefined,
     }))
@@ -191,46 +193,21 @@ export async function generateNovelComicOutline(params: {
   }
 }
 
-async function generateChapterScript(params: {
-  sourceNovel: string
+/** 建集时写入「文案输入」：优先保留已有原文；单章直接灌入全书；多章留粘贴提示 */
+function buildEpisodeSourceContent(opts: {
   chapter: NovelComicChapterOutline
-  model?: string | null
-  thinkingEnabled?: boolean
-}): Promise<string> {
-  const source = params.sourceNovel.length > CHAPTER_SOURCE_SNIPPET
-    ? params.sourceNovel.slice(0, CHAPTER_SOURCE_SNIPPET)
-    : params.sourceNovel
-  const beats = (params.chapter.key_beats || []).join('；')
-  const user = [
-    `请写出第 ${params.chapter.number} 章朗读正文。`,
-    `章标题：${params.chapter.title}`,
-    `章摘要：${params.chapter.summary}`,
-    beats ? `关键情节点：${beats}` : '',
-    params.chapter.approx_chars ? `目标约 ${params.chapter.approx_chars} 字` : '',
-    '',
-    '【小说原文】',
-    source,
-  ].filter(Boolean).join('\n')
-
-  const reply = await callTextChatMessages(
-    [
-      { role: 'system', content: NOVEL_COMIC_CHAPTER_SCRIPT_SYSTEM },
-      { role: 'user', content: user },
-    ],
-    resolveTextModel(params.model),
-    params.thinkingEnabled !== false,
-    300_000,
-    0.55,
-    12_288,
-  )
-  const text = String(reply || '').trim()
-    .replace(/^```(?:text|markdown)?\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim()
-  if (text.length < 80) {
-    throw new Error(`第${params.chapter.number}章朗读稿过短，请重试`)
-  }
-  return text
+  chapterCount: number
+  sourceNovel: string
+  existingContent?: string | null
+}): string {
+  const keep = String(opts.existingContent || '').trim()
+  if (keep && !/^（请粘贴第\d+章小说原文/.test(keep)) return keep
+  if (opts.chapterCount <= 1) return opts.sourceNovel
+  const parts = [
+    `（请粘贴第${opts.chapter.number}章小说原文到「文案输入」；本模式直接按原文拆镜，不再生成讲解稿）`,
+    opts.chapter.summary ? `\n\n【本章摘要】${opts.chapter.summary}` : '',
+  ]
+  return parts.join('')
 }
 
 export async function applyNovelComicOutline(params: {
@@ -264,7 +241,7 @@ export async function applyNovelComicOutline(params: {
   }> = []
 
   if (allEmpty) {
-    // 重建：按章更新/创建，多余集软删
+    // 重建：按章更新/创建，多余集软删（不再生成讲解稿）
     for (let i = 0; i < chapters.length; i++) {
       const ch = { ...chapters[i], number: i + 1 }
       if (onlyNums && !onlyNums.has(ch.number)) {
@@ -280,28 +257,28 @@ export async function applyNovelComicOutline(params: {
         }
         continue
       }
-      const script = await generateChapterScript({
-        sourceNovel: source,
-        chapter: ch,
-        model,
-        thinkingEnabled: params.thinkingEnabled,
-      })
       const title = chapterEpisodeTitle(ch)
       const ep = existing[i]
+      const content = buildEpisodeSourceContent({
+        chapter: ch,
+        chapterCount: chapters.length,
+        sourceNovel: source,
+        existingContent: ep?.content,
+      })
       if (ep) {
         db.update(schema.episodes).set({
           episodeNumber: ch.number,
           title,
           description: ch.summary,
-          content: script,
-          scriptContent: script,
+          content,
+          scriptContent: '',
           updatedAt: ts,
         }).where(eq(schema.episodes.id, ep.id)).run()
         results.push({
           chapter: ch.number,
           episode_id: ep.id,
           title,
-          chars: script.length,
+          chars: content.length,
           action: 'updated',
         })
       } else {
@@ -310,8 +287,8 @@ export async function applyNovelComicOutline(params: {
           episodeNumber: ch.number,
           title,
           description: ch.summary,
-          content: script,
-          scriptContent: script,
+          content,
+          scriptContent: '',
           status: 'draft',
           imageConfigId: existing[0]?.imageConfigId ?? null,
           imageModel: existing[0]?.imageModel ?? null,
@@ -322,11 +299,13 @@ export async function applyNovelComicOutline(params: {
           createdAt: ts,
           updatedAt: ts,
         }).run()
+        const newId = Number(res.lastInsertRowid)
+        linkDramaCastToEpisode(newId, params.dramaId)
         results.push({
           chapter: ch.number,
-          episode_id: Number(res.lastInsertRowid),
+          episode_id: newId,
           title,
-          chars: script.length,
+          chars: content.length,
           action: 'created',
         })
       }
@@ -339,41 +318,41 @@ export async function applyNovelComicOutline(params: {
       }
     }
   } else {
-    // 已有制作资产：不删旧集；为缺失章追加；空内容旧集可补稿
+    // 已有制作资产：不删旧集；为缺失章追加；空内容旧集只补原文占位
     for (let i = 0; i < chapters.length; i++) {
       const ch = { ...chapters[i], number: i + 1 }
       if (onlyNums && !onlyNums.has(ch.number)) continue
       const ep = existing[i]
-      if (ep && !episodeIsEmpty(ep.id) && String(ep.content || ep.scriptContent || '').trim()) {
+      if (ep && !episodeIsEmpty(ep.id) && String(ep.content || '').trim()) {
         results.push({
           chapter: ch.number,
           episode_id: ep.id,
           title: ep.title,
-          chars: String(ep.content || ep.scriptContent || '').length,
+          chars: String(ep.content || '').length,
           action: 'skipped',
         })
         continue
       }
-      const script = await generateChapterScript({
-        sourceNovel: source,
-        chapter: ch,
-        model,
-        thinkingEnabled: params.thinkingEnabled,
-      })
       const title = chapterEpisodeTitle(ch)
+      const content = buildEpisodeSourceContent({
+        chapter: ch,
+        chapterCount: chapters.length,
+        sourceNovel: source,
+        existingContent: ep?.content,
+      })
       if (ep) {
         db.update(schema.episodes).set({
           title: String(ep.title || '').trim() || title,
           description: ch.summary,
-          content: script,
-          scriptContent: script,
+          content,
+          scriptContent: '',
           updatedAt: ts,
         }).where(eq(schema.episodes.id, ep.id)).run()
         results.push({
           chapter: ch.number,
           episode_id: ep.id,
           title: title,
-          chars: script.length,
+          chars: content.length,
           action: 'updated',
         })
       } else {
@@ -386,8 +365,8 @@ export async function applyNovelComicOutline(params: {
           ),
           title,
           description: ch.summary,
-          content: script,
-          scriptContent: script,
+          content,
+          scriptContent: '',
           status: 'draft',
           imageConfigId: last?.imageConfigId ?? null,
           imageModel: last?.imageModel ?? null,
@@ -398,11 +377,13 @@ export async function applyNovelComicOutline(params: {
           createdAt: ts,
           updatedAt: ts,
         }).run()
+        const newId = Number(res.lastInsertRowid)
+        linkDramaCastToEpisode(newId, params.dramaId)
         results.push({
           chapter: ch.number,
-          episode_id: Number(res.lastInsertRowid),
+          episode_id: newId,
           title,
-          chars: script.length,
+          chars: content.length,
           action: 'created',
         })
       }

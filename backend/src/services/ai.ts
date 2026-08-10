@@ -79,7 +79,7 @@ function listActiveTextRows() {
 function rowToTextConfig(row: typeof schema.aiServiceConfigs.$inferSelect, appModel?: string): AIConfig {
   const models = parseModelField(row.model)
   const provider = String(row.provider || '').toLowerCase()
-  const chosenApp = normalizeTextModelId(appModel) || models[0] || ''
+  const chosenApp = normalizeTextModelId(appModel) || normalizeTextModelId(models[0]) || ''
   const apiModel = resolveProviderTextModel(provider, chosenApp)
   let apiKey = row.apiKey || ''
   if (provider === 'openrouter') {
@@ -110,7 +110,12 @@ function pickTextRowForChannel(
       const p = String(r.provider || '').toLowerCase()
       const url = String(r.baseUrl || '').toLowerCase()
       if (p === 'deepseek') return true
-      if ((p === 'openai' || p === 'chatfire') && (url.includes('deepseek.com') || url.includes('4022543') || url.includes('chatfire'))) {
+      if ((p === 'openai' || p === 'chatfire') && (
+        url.includes('deepseek.com')
+        || url.includes('4022543')
+        || url.includes('chatfire')
+        || url.includes('miaofei.vip')
+      )) {
         return true
       }
       return false
@@ -146,18 +151,19 @@ export function getActiveConfig(serviceType: ServiceType): AIConfig | null {
   }
 
   const models = parseModelField(active.model)
+  const normalizedModel = normalizeTextModelId(models[0]) || models[0] || ''
   logTaskProgress('AIConfig', 'active-config-selected', {
     serviceType,
     configId: active.id,
     provider: active.provider,
-    model: models[0] || '',
+    model: normalizedModel,
     priority: active.priority,
   })
   return {
     provider: active.provider || '',
     baseUrl: active.baseUrl,
     apiKey: active.apiKey,
-    model: models[0] || '',
+    model: normalizedModel,
   }
 }
 
@@ -471,7 +477,7 @@ export function ensureAgnesImageConfig(modelOverride?: string | null): AIConfig 
     name: '定妆 Agnes Image 服务',
     baseUrl: LOCAL_COMIC_ENV.agnesBaseUrl,
     apiKey: LOCAL_COMIC_ENV.agnesApiKey || '',
-    model: JSON.stringify([LOCAL_COMIC_ENV.agnesPortraitModel, 'agnes-image-2.0-flash', 'agnes-image-2.0']),
+    model: JSON.stringify([LOCAL_COMIC_ENV.agnesPortraitModel, 'agnes-image-2.1-flash', 'agnes-image-2.0-flash', 'agnes-image-2.0']),
     priority: 125,
     isActive: true,
     updatedAt: ts,
@@ -479,9 +485,19 @@ export function ensureAgnesImageConfig(modelOverride?: string | null): AIConfig 
   db.insert(schema.aiServiceConfigs).values({ ...values, createdAt: ts }).run()
   logTaskProgress('AIConfig', 'agnes-image-auto-provisioned', { model })
 
-  const created = getAgnesImageConfig()
-  if (!created) throw new Error('Agnes 图片配置创建失败')
-  return { ...created, model }
+  return ensureAgnesImageConfig(model)
+}
+
+/** 视频复用 Agnes 图配置的 baseUrl/apiKey，模型改为 agnes-video-* */
+export function ensureAgnesVideoConfig(modelOverride?: string | null): AIConfig {
+  const model = String(modelOverride || '').trim() || 'agnes-video-v2.0'
+  const imageCfg = ensureAgnesImageConfig()
+  return {
+    provider: 'agnes',
+    baseUrl: imageCfg.baseUrl || LOCAL_COMIC_ENV.agnesBaseUrl,
+    apiKey: imageCfg.apiKey || LOCAL_COMIC_ENV.agnesApiKey || '',
+    model,
+  }
 }
 
 /** 生图任务选配置：本地 Comfy 模型走 ComfyUI；CogView 走智谱 */
@@ -561,16 +577,17 @@ export function getConfigById(id: number): AIConfig | null {
     return null
   }
   const models = parseModelField(row.model)
+  const normalizedModel = normalizeTextModelId(models[0]) || models[0] || ''
   logTaskProgress('AIConfig', 'config-by-id-selected', {
     configId: id,
     provider: row.provider,
-    model: models[0] || '',
+    model: normalizedModel,
     serviceType: row.serviceType,
   })
   return {
     provider: row.provider || '',
     baseUrl: row.baseUrl,
     apiKey: row.apiKey,
-    model: models[0] || '',
+    model: normalizedModel,
   }
 }

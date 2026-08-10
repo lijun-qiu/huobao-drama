@@ -175,18 +175,22 @@ function samePlaceFamily(a?: string, b?: string): boolean {
 }
 
 /**
- * 从本段旁白 + prior 抽取场景 enrichment。
- * prior 只取最近窗口，避免与全文膨胀。
+ * 从本段旁白抽取场景 enrichment。
+ * segmentLocal（解说视频/漫画解说）：只抽本段+换镜场景描述，不继承 prior 全书物件。
+ * 非 segmentLocal：可从 recent prior 同场延续物件（旧体验人生式丰富）。
  */
 export function buildNarrationSceneEnrichment(options: {
   narrationLines: string[]
   priorLines?: string[]
   detectSceneDescription?: string | null
   priorWindowLines?: number
+  /** true=只跟本段；false/缺省=可同场继承 prior 物件 */
+  segmentLocal?: boolean
 }): NarrationSceneEnrichment | null {
+  const segmentLocal = options.segmentLocal === true
   const current = (options.narrationLines || []).map(s => String(s || '').trim()).filter(Boolean)
   const priorAll = (options.priorLines || []).map(s => String(s || '').trim()).filter(Boolean)
-  const priorWin = priorAll.slice(-(options.priorWindowLines ?? 20))
+  const priorWin = segmentLocal ? [] : priorAll.slice(-(options.priorWindowLines ?? 20))
   const detect = String(options.detectSceneDescription || '').trim()
 
   const currentText = current.join('，')
@@ -194,9 +198,9 @@ export function buildNarrationSceneEnrichment(options: {
   const blob = [currentText, priorText, detect].filter(Boolean).join('，')
   if (!blob.trim()) return null
 
-  const place = firstPlace(currentText) || firstPlace(detect) || firstPlace(priorText)
+  const place = firstPlace(currentText) || firstPlace(detect) || (segmentLocal ? undefined : firstPlace(priorText))
   const carriers = matchLex(`${currentText}，${detect}`, CARRIER_LEX, 4)
-  if (!carriers.length) {
+  if (!segmentLocal && !carriers.length) {
     for (const c of matchLex(priorText, CARRIER_LEX, 3)) pushUnique(carriers, c, 4)
   }
 
@@ -207,39 +211,49 @@ export function buildNarrationSceneEnrichment(options: {
   for (const p of matchLex(detect, PROP_LEX, 4)) pushUnique(props, p, 8)
 
   const priorProps: string[] = []
-  const priorPlace = firstPlace(priorText)
-  const priorCarriers = matchLex(priorText, CARRIER_LEX, 4)
-  const carrierOverlap = carriers.some(c => priorCarriers.includes(c))
-  // 同场才延续 prior 物件：地点一致，或载体重合；换房间不串道具
-  const inherit = samePlaceFamily(place, priorPlace)
-    || carrierOverlap
-    || (!place && !priorPlace && !carriers.length)
+  if (!segmentLocal) {
+    const priorPlace = firstPlace(priorText)
+    const priorCarriers = matchLex(priorText, CARRIER_LEX, 4)
+    const carrierOverlap = carriers.some(c => priorCarriers.includes(c))
+    // 同场才延续 prior 物件：地点一致，或载体重合；换房间不串道具
+    const inherit = samePlaceFamily(place, priorPlace)
+      || carrierOverlap
+      || (!place && !priorPlace && !carriers.length)
 
-  if (inherit || carrierOverlap) {
-    for (const p of extractRelationProps(priorText, 6)) pushUnique(priorProps, p, 6)
-    for (const p of matchLex(priorText, PROP_LEX, 6)) pushUnique(priorProps, p, 6)
-    if (props.length < 2) {
-      for (const p of priorProps) pushUnique(props, p, 8)
+    if (inherit || carrierOverlap) {
+      for (const p of extractRelationProps(priorText, 6)) pushUnique(priorProps, p, 6)
+      for (const p of matchLex(priorText, PROP_LEX, 6)) pushUnique(priorProps, p, 6)
+      if (props.length < 2) {
+        for (const p of priorProps) pushUnique(props, p, 8)
+      }
     }
   }
 
   const actions = matchLex(currentText, ACTION_LEX, 5)
   const atmosphere = matchLex(`${currentText}，${detect}`, ATMOSPHERE_LEX, 3)
-  const timelineSnip = compressTimelineNarrationLines(
-    [...priorWin.slice(-8), ...current],
-  ) || undefined
+  const timelineSnip = segmentLocal
+    ? (compressTimelineNarrationLines(current) || undefined)
+    : (compressTimelineNarrationLines([...priorWin.slice(-8), ...current]) || undefined)
 
   if (!place && !carriers.length && !props.length && !actions.length && !detect) {
     return null
   }
 
-  const mustParts = [
-    place ? `地点写「${place}」` : '',
-    carriers.length ? `载体优先写：${carriers.join('、')}` : '',
-    props.length ? `物件清单须入【年代场景】：${props.join('、')}` : '',
-    priorProps.length && inherit ? `同场可延续：${priorProps.slice(0, 4).join('、')}` : '',
-    actions.length ? `动作写入【核心细节动作】：${actions.join('、')}` : '',
-  ].filter(Boolean)
+  const mustParts = segmentLocal
+    ? [
+      place ? `地点写「${place}」` : '',
+      carriers.length ? `本段载体：${carriers.join('、')}` : '',
+      props.length ? `本段物件（可入画）：${props.join('、')}` : '',
+      actions.length ? `本段动作：${actions.join('、')}` : '',
+      '以本段旁白为准，可略扩展同场氛围；禁止搬入未在本段出现的全书陈设',
+    ].filter(Boolean)
+    : [
+      place ? `地点写「${place}」` : '',
+      carriers.length ? `载体优先写：${carriers.join('、')}` : '',
+      props.length ? `物件清单须入【年代场景】：${props.join('、')}` : '',
+      priorProps.length ? `同场可延续：${priorProps.slice(0, 4).join('、')}` : '',
+      actions.length ? `动作写入【核心细节动作】：${actions.join('、')}` : '',
+    ].filter(Boolean)
 
   return {
     place,
@@ -250,6 +264,9 @@ export function buildNarrationSceneEnrichment(options: {
     atmosphere,
     timeline_snip: timelineSnip,
     detect_scene: detect || undefined,
-    must_use: mustParts.join('；') || '须写具体地点+至少2个可辨认物件，禁止空泛场所',
+    must_use: mustParts.join('；')
+      || (segmentLocal
+        ? '以本段旁白为准写地点与可见物件，可略扩展同场氛围'
+        : '须写具体地点+至少2个可辨认物件，禁止空泛场所'),
   }
 }

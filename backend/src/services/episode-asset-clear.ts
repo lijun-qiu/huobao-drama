@@ -191,17 +191,25 @@ export async function clearEpisodeNarrationImagePrompts(episodeId: number) {
 
   for (const sb of storyboards) {
     const meta = parseNarrationImageMeta(sb.referenceImages)
-    if (meta.narration_image_mode !== 'new') continue
     const hasPrompt = String(sb.imagePrompt || '').trim()
       || meta.image_prompt_source
       || meta.image_prompt_llm_raw
+      || meta.flux_prompt_en
+    // 与前端计数对齐：凡有 image_prompt / 文案 meta 的镜头都清，不限 mode=new
     if (!hasPrompt) continue
 
-    const { image_prompt_source, image_prompt_llm_raw, ...rest } = meta
+    const {
+      image_prompt_source: _src,
+      image_prompt_llm_raw: _raw,
+      flux_prompt_en: _flux,
+      flux_prompt_en_at: _fluxAt,
+      flux_prompt_en_version: _fluxVer,
+      ...rest
+    } = meta
     db.update(schema.storyboards)
       .set({
         imagePrompt: null,
-        referenceImages: buildNarrationImageMeta('new', rest),
+        referenceImages: buildNarrationImageMeta(meta.narration_image_mode, rest),
         updatedAt: ts,
       })
       .where(eq(schema.storyboards.id, sb.id))

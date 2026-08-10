@@ -10,6 +10,7 @@ import {
 } from './art-styles.js'
 import { sanitizePortraitAppearanceForGeneration, extractPortraitDistinctCueCn } from './portrait-reference.js'
 import { resolveCharacterGenderLabelCn, type PortraitGender } from '../services/comfyui-client.js'
+import { MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS } from './motion-comic.js'
 
 export interface PortraitAppearanceSpec {
   genderLabel: '男性' | '女性' | null
@@ -134,8 +135,8 @@ export function resolveExpectedPortraitNamesForPrompt(options: {
 }
 
 /**
- * 漫画解说：按本段旁白/对白推断应在场定妆（不限人数）。
- * 不依赖「递/塞/对峙」等互动词——本段点名/说话人有几人就要求同框几人。
+ * 漫画解说：按本段旁白/对白推断应在场定妆；最多 MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS 人（与 Agnes 参考图上限对齐）。
+ * 超过上限时：只保留名单首项（说话人/先点名）；其余由文案用路人泛称。
  */
 export function resolveMotionComicOnScreenPortraitNames(options: {
   characters: Array<{ name?: string | null; role?: string | null; variantLabel?: string | null }>
@@ -143,7 +144,30 @@ export function resolveMotionComicOnScreenPortraitNames(options: {
   narrationLines?: string[] | null
   fallbackNames?: string[] | null
 }): string[] {
-  return resolveExpectedPortraitNamesForPrompt(options)
+  const ordered = resolveExpectedPortraitNamesForPrompt(options)
+  const max = MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS
+  if (ordered.length <= max) return ordered
+
+  const charHints: PortraitNameHint[] = (options.characters || [])
+    .map(c => ({
+      name: String(c.name || '').trim(),
+      role: String(c.role || '').trim(),
+      variantLabel: c.variantLabel,
+    }))
+    .filter(c => c.name)
+
+  const keep: string[] = []
+  const push = (n?: string) => {
+    const name = String(n || '').trim()
+    if (!name || keep.includes(name) || keep.length >= max) return
+    keep.push(name)
+  }
+
+  push(ordered[0])
+  const protag = ordered.find(n => isProtagonistPortraitName(n, charHints))
+  if (protag) push(protag)
+  for (const n of ordered) push(n)
+  return keep
 }
 
 /**
@@ -156,7 +180,7 @@ export function alignPortraitLabelsInImagePromptCn(
     dialogue?: string | null
     narrationLines?: string[] | null
     fallbackNames?: string[] | null
-    /** 漫画解说：允许多个对照定妆同框（人数跟文案，不封顶） */
+    /** 漫画解说：对照定妆同框上限见 MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS（按文案可多人） */
     allowDualPortrait?: boolean
   },
 ): string {
@@ -169,12 +193,19 @@ export function alignPortraitLabelsInImagePromptCn(
     variantLabel: c.variantLabel,
   }))
 
-  const expected = resolveExpectedPortraitNamesForPrompt({
-    characters,
-    dialogue: context?.dialogue,
-    narrationLines: context?.narrationLines,
-    fallbackNames: context?.fallbackNames,
-  })
+  const expected = context?.allowDualPortrait
+    ? resolveMotionComicOnScreenPortraitNames({
+      characters,
+      dialogue: context?.dialogue,
+      narrationLines: context?.narrationLines,
+      fallbackNames: context?.fallbackNames,
+    })
+    : resolveExpectedPortraitNamesForPrompt({
+      characters,
+      dialogue: context?.dialogue,
+      narrationLines: context?.narrationLines,
+      fallbackNames: context?.fallbackNames,
+    })
   if (!expected.length) return text
 
   const labelOf = (name: string) => {
@@ -204,7 +235,9 @@ export function alignPortraitLabelsInImagePromptCn(
   const uniqueCurrent = [...new Set(currentNames)]
   const allCurrentValid = uniqueCurrent.every(n => nameSet.has(n))
   const allowMulti = !!context?.allowDualPortrait
-  const maxLabels = allowMulti ? Math.max(expected.length, 1) : 1
+  const maxLabels = allowMulti
+    ? Math.min(MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS, Math.max(expected.length, 1))
+    : 1
 
   // 超过本段期望人数：压到期望名单
   if (allCurrentValid && uniqueCurrent.length > maxLabels) {
@@ -256,7 +289,136 @@ export function alignPortraitLabelsInImagePromptCn(
 }
 
 /**
- * 配图文案强制单定妆：保留 keepName 的第一处对照定妆，删除其余对照定妆标签。
+ * 对照定妆括号补上角色 appearance 中的「男性/女性」，避免清秀鹅蛋脸被文生图理解成女性。
+ */
+export function ensurePortraitGenderInImagePromptCn(
+  prompt: string,
+  characters: PortraitCharacterLike[],
+): string {
+  const text = String(prompt || '')
+  if (!text || !characters.length) return text
+  return text.replace(/对照定妆「([^」]+)」(（([^）]*)）)?/g, (full, rawLabel: string, _paren?: string, inner?: string) => {
+    const name = String(rawLabel || '').split('·')[0].trim()
+    const ch = characters.find(c => String(c.name || '').trim() === name)
+      || (FIRST_PERSON_PORTRAIT_NAMES.has(name)
+        ? characters.find(c => /主角|主人公|男主|女主/.test(String(c.role || '')))
+        : undefined)
+    const gender = String(ch?.appearance || '').match(/女性|男性/)?.[0]
+    if (!gender) return full
+    const traits = String(inner || '').trim()
+    if (traits.includes('女性') || traits.includes('男性')) return full
+    const next = traits ? `${gender}·${traits}` : gender
+    return `对照定妆「${rawLabel}」（${next}）`
+  })
+}
+
+function escapeRegExpLiteral(s: string): string {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * 缺「对照定妆」标签时补齐：把「陈默（男性）」等直写改成对照定妆「label」，
+ * 或在上格/文首插入。落库前调用，避免 force-accept 放过无标签文案。
+ */
+export function ensureMissingPortraitLabelsInImagePromptCn(
+  prompt: string,
+  characters: PortraitCharacterLike[],
+  context?: {
+    dialogue?: string | null
+    narrationLines?: string[] | null
+    fallbackNames?: string[] | null
+    allowDualPortrait?: boolean
+  },
+): string {
+  let text = String(prompt || '').trim()
+  if (!text || !characters.length) return text
+
+  const allowMulti = !!context?.allowDualPortrait
+  const expected = allowMulti
+    ? resolveMotionComicOnScreenPortraitNames({
+      characters,
+      dialogue: context?.dialogue,
+      narrationLines: context?.narrationLines,
+      fallbackNames: context?.fallbackNames,
+    })
+    : resolveExpectedPortraitNamesForPrompt({
+      characters,
+      dialogue: context?.dialogue,
+      narrationLines: context?.narrationLines,
+      fallbackNames: context?.fallbackNames,
+    }).slice(0, MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS)
+  if (!expected.length) return text
+
+  if (/对照定妆「/.test(text)) {
+    return ensurePortraitGenderInImagePromptCn(
+      alignPortraitLabelsInImagePromptCn(text, characters, context),
+      characters,
+    )
+  }
+
+  const labelOf = (name: string) => {
+    const ch = characters.find(c => String(c.name || '').trim() === name)
+    return formatCharacterPortraitLabel(name, ch?.variantLabel)
+  }
+  const genderOf = (name: string) => {
+    const ch = characters.find(c => String(c.name || '').trim() === name)
+    return String(ch?.appearance || '').match(/女性|男性/)?.[0]
+      || resolveCharacterGenderLabelCn(name, ch?.role, ch?.appearance)
+      || ''
+  }
+
+  for (const name of expected) {
+    const label = labelOf(name)
+    const gender = genderOf(name)
+    const tag = gender ? `对照定妆「${label}」（${gender}）` : `对照定妆「${label}」`
+    const nameEsc = escapeRegExpLiteral(name)
+    const withParen = new RegExp(`${nameEsc}（(?:男性|女性)[^）]*）`)
+    if (withParen.test(text)) {
+      text = text.replace(withParen, tag)
+      continue
+    }
+    const bare = new RegExp(
+      `(^|[，、；：\\s]|上格：|中格：|下格：)${nameEsc}(?=（|身穿|，|。|；|$)`,
+    )
+    if (bare.test(text)) {
+      text = text.replace(bare, `$1${tag}`)
+    }
+  }
+
+  if (!/对照定妆「/.test(text) && expected[0]) {
+    const label = labelOf(expected[0])
+    const gender = genderOf(expected[0])
+    const tag = gender ? `对照定妆「${label}」（${gender}）` : `对照定妆「${label}」`
+    if (/上格：/.test(text)) {
+      text = text.replace(/上格：/, `上格：${tag}，`)
+    } else if (/【画面主体[：:]/.test(text)) {
+      text = text.replace(/【画面主体[：:]\s*/, (m) => `${m}${tag}，`)
+    } else {
+      text = `${tag}，${text}`
+    }
+  }
+
+  return ensurePortraitGenderInImagePromptCn(
+    alignPortraitLabelsInImagePromptCn(text, characters, context),
+    characters,
+  )
+}
+
+/** 有 required_scene_label 时补「对照场景」标签 */
+export function ensureSceneLabelInImagePromptCn(prompt: string, sceneLabel?: string | null): string {
+  const label = String(sceneLabel || '').trim()
+  const text = String(prompt || '').trim()
+  if (!label || !text) return text
+  if (text.includes(`对照场景「${label}」`) || /对照场景「/.test(text)) return text
+  if (/上格：/.test(text)) return text.replace(/上格：/, `上格：对照场景「${label}」，`)
+  if (/【年代场景[：:]/.test(text)) {
+    return text.replace(/【年代场景[：:]\s*/, (m) => `${m}对照场景「${label}」，`)
+  }
+  return `对照场景「${label}」，${text}`
+}
+
+/**
+ * 配图文案强制单定妆：保留 keepName 的第一处对照定妆整句，删除其余对照定妆及后续身穿描述。
  */
 export function collapseToSinglePortraitLabelInImagePromptCn(
   prompt: string,
@@ -268,14 +430,21 @@ export function collapseToSinglePortraitLabelInImagePromptCn(
   const ch = (characters || []).find(c => String(c.name || '').trim() === keep)
   const label = formatCharacterPortraitLabel(keep, ch?.variantLabel)
   let kept = false
-  let text = String(prompt || '').replace(/对照定妆「[^」]+」/g, () => {
-    if (kept) return ''
-    kept = true
-    return `对照定妆「${label}」`
-  })
+  let text = String(prompt || '').replace(
+    /([，、；]\s*)?对照定妆「[^」]+」(（[^）]*）)?([^，；【]{0,80}?)(（身穿[^）]*）)?/g,
+    (_full, lead?: string, paren?: string, mid?: string, outfit?: string) => {
+      if (kept) return ''
+      kept = true
+      return `${lead || ''}对照定妆「${label}」${paren || ''}${mid || ''}${outfit || ''}`
+    },
+  )
   if (!kept && /【画面主体[：:]/.test(text)) {
     text = text.replace(/【画面主体[：:]/, `【画面主体：对照定妆「${label}」，`)
   }
+  // 去掉第二人标签被删后残留的「同框」碎片与孤立外貌括号句
+  text = text
+    .replace(/，?\s*同框对照定妆/g, '')
+    .replace(/[，、；]\s*（[^）]{2,48}）[^，；]{0,48}（身穿[^）]*）/g, '')
   return text
     .replace(/[；，、]\s*位于画面(?:左侧|右侧|中间|左|右)[^，；】]{0,40}/g, '')
     .replace(/([，；、]){2,}/g, '$1')
@@ -403,8 +572,8 @@ export type PortraitLabelValidation = {
  * - 期望角色仅由本集 characters + 本段对白/旁白推断
  * - 有明确应出镜角色时必须有对照定妆，且主标签须为期望主角色
  * - 禁止用主角/第一人称标签顶替本段点名的其他角色
- * - 默认禁止同一文案出现 ≥2 个不同对照定妆；allowDualPortrait 时按文案人数同框（不封顶）
- * - allowDualPortrait 且本段期望 ≥2 人时，须写齐全部期望对照定妆
+ * - 默认禁止同一文案出现 ≥2 个不同对照定妆
+ * - allowDualPortrait 时仍受 MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS 上限（按文案可多人）
  */
 export function validateImagePromptPortraitLabels(
   prompt: string,
@@ -421,14 +590,24 @@ export function validateImagePromptPortraitLabels(
     role: String(c.role || '').trim(),
     variantLabel: c.variantLabel,
   }))
-  const expectedAll = resolveExpectedPortraitNamesForPrompt({
-    characters,
-    dialogue: context?.dialogue,
-    narrationLines: context?.narrationLines,
-    fallbackNames: context?.fallbackNames,
-  })
   const allowMulti = !!context?.allowDualPortrait
-  const expected = allowMulti ? expectedAll : expectedAll.slice(0, 1)
+  const expectedAll = allowMulti
+    ? resolveMotionComicOnScreenPortraitNames({
+      characters,
+      dialogue: context?.dialogue,
+      narrationLines: context?.narrationLines,
+      fallbackNames: context?.fallbackNames,
+    })
+    : resolveExpectedPortraitNamesForPrompt({
+      characters,
+      dialogue: context?.dialogue,
+      narrationLines: context?.narrationLines,
+      fallbackNames: context?.fallbackNames,
+    })
+  const maxLabels = allowMulti
+    ? Math.max(1, Math.min(MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS, expectedAll.length || 1))
+    : 1
+  const expected = expectedAll.slice(0, maxLabels)
   const actual = [...String(prompt || '').matchAll(/对照定妆「([^」]+)」/g)]
     .map(m => m[1].split('·')[0].trim())
     .filter(Boolean)
@@ -438,7 +617,6 @@ export function validateImagePromptPortraitLabels(
   }
 
   const uniqueActual = [...new Set(actual)]
-  const maxLabels = allowMulti ? Math.max(expected.length, 1) : 1
   if (uniqueActual.length > maxLabels) {
     return { ok: false, expected, actual, reason: 'multi_portrait_same_frame' }
   }
@@ -457,8 +635,8 @@ export function validateImagePromptPortraitLabels(
     return { ok: false, expected, actual, reason: 'primary_label_mismatch' }
   }
 
-  // 本段旁白已点名/对白多人：须同框写齐全部期望对照定妆
-  if (allowMulti && expected.length >= 2) {
+  // 上限 ≥2 时才要求写齐；当前漫画解说上限为 1，不会要求第二人
+  if (allowMulti && expected.length >= 2 && maxLabels >= 2) {
     const nameSet = new Set(charHints.map(c => c.name).filter(Boolean))
     if (uniqueActual.some(n => !nameSet.has(n))) {
       return { ok: false, expected, actual, reason: 'multi_portrait_same_frame' }
@@ -1038,7 +1216,8 @@ export function ensureMultiPortraitDistinctCuesInPrompt(
     const name = rawLabel.split(/[·•]/)[0]?.trim()
     if (!name) continue
     const ch = resolvePortraitCharForDistinctCue(name, characters)
-    const baseCue = extractPortraitDistinctCueCn(ch?.appearance)
+    const genderOverride = resolveCharacterGenderLabelCn(ch?.name, ch?.role, ch?.appearance)
+    const baseCue = extractPortraitDistinctCueCn(ch?.appearance, 32, genderOverride)
     if (!baseCue) continue
     // 两名角色抽到相同/近同辨识差时，强制拉开文案（避免同框克隆）
     const collided = usedBaseCues.some(
@@ -1078,21 +1257,31 @@ export function injectPortraitSpecIntoImagePromptCn(
   },
 ): string {
   const allowMulti = !!context?.allowDualPortrait
-  const expected = resolveExpectedPortraitNamesForPrompt({
-    characters,
-    dialogue: context?.dialogue,
-    narrationLines: context?.narrationLines,
-    fallbackNames: context?.fallbackNames,
-  })
+  const expected = allowMulti
+    ? resolveMotionComicOnScreenPortraitNames({
+      characters,
+      dialogue: context?.dialogue,
+      narrationLines: context?.narrationLines,
+      fallbackNames: context?.fallbackNames,
+    })
+    : resolveExpectedPortraitNamesForPrompt({
+      characters,
+      dialogue: context?.dialogue,
+      narrationLines: context?.narrationLines,
+      fallbackNames: context?.fallbackNames,
+    }).slice(0, MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS)
   let aligned = alignPortraitLabelsInImagePromptCn(prompt, characters, context)
   const labels = [...aligned.matchAll(/对照定妆「([^」]+)」/g)]
     .map(m => m[1].split('·')[0].trim())
     .filter(Boolean)
   const uniqueLabels = [...new Set(labels)]
-  const wantMulti = allowMulti && expected.length >= 2
+  // 同框上限 ≥2 且期望多人时补齐缺失对照定妆
+  const wantMulti = allowMulti
+    && expected.length >= 2
+    && MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS >= 2
   const keep = expected[0] || uniqueLabels[0]
 
-  // 本段旁白已要求多人：禁止单人硬清理；缺标签时补写同框对照定妆
+  // 本段旁白已要求多人且上限允许：缺标签时补写同框对照定妆
   if (wantMulti) {
     const present = new Set(
       [...aligned.matchAll(/对照定妆「([^」]+)」/g)]

@@ -25,10 +25,13 @@ import {
   NARRATION_PROTAGONIST_BODY,
   NARRATION_PROTAGONIST_FACE,
   NARRATION_USE_RAW_LLM_PROMPTS,
+  usesComicIllustrationPipeline,
 } from '../constants/art-styles.js'
 import {
   buildMotionComicCharacterAppearanceSystem,
   buildMotionComicCharacterExtractSystem,
+  ensureMotionComicPortraitStyleInAppearance,
+  isComicExtraCharacter,
   isMajorSupportingCharacter,
   isMotionComicStyle,
   MOTION_COMIC_PORTRAIT_FRAMING,
@@ -38,6 +41,19 @@ import {
   MOTION_COMIC_SCENE_SUFFIX,
   MOTION_COMIC_STYLE,
 } from '../constants/motion-comic.js'
+import {
+  buildNovelComicSketchCharacterAppearanceSystem,
+  buildNovelComicSketchCharacterExtractSystem,
+  acceptNovelComicPortraitAppearanceRaw,
+  ensureNovelComicSketchPortraitStyleInAppearance,
+  isNovelComicSketchStyle,
+  NOVEL_COMIC_SKETCH_PORTRAIT_FRAMING_EN,
+  NOVEL_COMIC_SKETCH_PORTRAIT_PLOT_CN,
+  NOVEL_COMIC_SKETCH_PORTRAIT_SCENE_CN,
+  NOVEL_COMIC_SKETCH_PORTRAIT_STYLE_GUARD,
+  NOVEL_COMIC_SKETCH_PORTRAIT_STYLE_SPEC,
+  NOVEL_COMIC_SKETCH_PORTRAIT_SUFFIX,
+} from '../constants/novel-comic.js'
 import { LOCAL_COMIC_CHARACTER_APPEARANCE_SYSTEM, LOCAL_COMIC_ENV } from '../constants/local-comic.js'
 import {
   buildNarrationAnimeCharacterAppearanceSystem,
@@ -61,16 +77,25 @@ import {
   appearanceCollidesWithPeers,
   resolvePortraitSilhouetteSlot,
   PORTRAIT_SILHOUETTE_SLOTS,
+  enforceAppearanceGenderCn,
+  inferPortraitAgeHint,
+  formatPortraitAgeHintForLlm,
 } from '../constants/portrait-reference.js'
 import { normalizePortraitAppearanceStructured } from '../constants/portrait-appearance-spec.js'
 import { DEFAULT_IMAGE_MODEL } from '../constants/image-models.js'
 import { assertTextConfigReady, getTextConfig } from './ai.js'
-import { fallbackEnglishTagsFromAppearance, reconcileEnglishTagsWithChineseAppearance } from './comfyui-client.js'
+import {
+  fallbackEnglishTagsFromAppearance,
+  reconcileEnglishTagsWithChineseAppearance,
+  resolveIdentityPortraitGender,
+  inferPortraitGenderFromScript,
+} from './comfyui-client.js'
 import { isLocalTextProvider } from './local-model-manager.js'
 import { callTextChat } from './text-chat.js'
 import { parseNarrationImageMeta } from './narration-image.js'
 import { parseDialogueForTTS } from './narration-tts.js'
-import { isLocalComicMode, isMotionComicMode, parseProductionMode, type ProductionMode } from '../constants/production-mode.js'
+import { parseMotionComicSpeakerLines } from '../utils/motion-comic-script.js'
+import { isLocalComicMode, isMotionComicMode, isNovelComicMode, parseProductionMode, type ProductionMode } from '../constants/production-mode.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 
 const NARRATION_ONLY_SPEAKERS = new Set(['旁白', '剧中', 'OS', '画外音', '画外'])
@@ -88,7 +113,93 @@ export type NarrationCharacterRow = {
 export function normalizeVariantLabel(label?: string | null): string {
   const raw = String(label || '').trim()
   if (!raw || raw === '常态' || raw === '默认') return ''
+  // 漫画/小说「觉醒前/后通用」等伪阶段：不当作独立定妆形态
+  if (/觉醒前\s*\/\s*后\s*通用|觉醒前后通用|^通用$|前\/后通用/.test(raw)) return ''
   return raw
+}
+
+/** 从脏 name（如「陆沉舟·主角·觉醒前/后通用」）拆出纯姓名，并把 role/阶段归位 */
+export function normalizeExtractedCharacterIdentity(input: {
+  name?: string | null
+  role?: string | null
+  variantLabel?: string | null
+  variant_label?: string | null
+}): { name: string; role: string; variantLabel: string } {
+  let name = String(input.name || '').trim()
+  let role = String(input.role || '').trim()
+  let variantLabel = normalizeVariantLabel(input.variantLabel ?? input.variant_label)
+
+  const parts = name.split(/[·•･・]/).map(s => s.trim()).filter(Boolean)
+  if (parts.length >= 2) {
+    name = parts[0]
+    for (const part of parts.slice(1)) {
+      if (/^(男主|女主|主角|主人公)$/.test(part)) {
+        if (!role || role === '角色') role = part
+        continue
+      }
+      if (/配角|反派|宿敌|师父|师尊|恋人|闺蜜|朋友|同学/.test(part)) {
+        if (!role || role === '角色' || /^(男主|女主|主角|主人公)$/.test(role)) {
+          role = /^主要配角|^重要配角/.test(part) ? part : `主要配角·${part}`
+        }
+        continue
+      }
+      if (/觉醒前\s*\/\s*后\s*通用|觉醒前后通用|^通用$|前\/后通用/.test(part)) continue
+      if (!variantLabel) variantLabel = normalizeVariantLabel(part)
+    }
+  }
+
+  // 括号脏后缀：陆沉舟（主角）
+  const paren = name.match(/^(.+?)[（(]([^）)]+)[）)]$/)
+  if (paren) {
+    name = paren[1].trim()
+    const inner = paren[2].trim()
+    if (/^(男主|女主|主角|主人公)$/.test(inner) && (!role || role === '角色')) role = inner
+    else if (/配角|反派/.test(inner) && (!role || /^(男主|女主|主角|主人公|角色)$/.test(role))) {
+      role = /^主要配角|^重要配角/.test(inner) ? inner : `主要配角·${inner}`
+    } else if (!variantLabel) variantLabel = normalizeVariantLabel(inner)
+  }
+
+  role = normalizeExtractedCharacterRole(name, role)
+  variantLabel = normalizeVariantLabel(variantLabel)
+  return { name, role, variantLabel }
+}
+
+/** 同名去重：漫画/小说一人一条；优先保留有外貌描述的 */
+export function dedupeExtractedCharactersByName<T extends {
+  name: string
+  role?: string
+  variantLabel?: string
+  appearance?: string
+  personality?: string
+}>(rows: T[], options?: { collapseVariants?: boolean }): T[] {
+  const collapse = options?.collapseVariants !== false
+  const map = new Map<string, T>()
+  for (const row of rows) {
+    const name = String(row.name || '').trim()
+    if (!name) continue
+    const key = collapse
+      ? name
+      : `${name}::${normalizeVariantLabel(row.variantLabel)}`
+    const prev = map.get(key)
+    if (!prev) {
+      map.set(key, collapse ? { ...row, name, variantLabel: '' } : { ...row, name })
+      continue
+    }
+    const prevApp = String(prev.appearance || '').trim()
+    const nextApp = String(row.appearance || '').trim()
+    const preferNext = nextApp.length > prevApp.length
+    const base = preferNext ? row : prev
+    const other = preferNext ? prev : row
+    map.set(key, {
+      ...base,
+      name,
+      role: String(base.role || '').trim() || String(other.role || '').trim(),
+      appearance: String(base.appearance || '').trim() || String(other.appearance || '').trim(),
+      personality: String(base.personality || '').trim() || String(other.personality || '').trim(),
+      variantLabel: collapse ? '' : (normalizeVariantLabel(base.variantLabel) || normalizeVariantLabel(other.variantLabel)),
+    } as T)
+  }
+  return [...map.values()]
 }
 
 /** 提取/落库前规范化 role：解说主人公只保留 男主/女主，禁止职业或跨集情节标签 */
@@ -96,7 +207,16 @@ export function normalizeExtractedCharacterRole(name?: string | null, role?: str
   const n = String(name || '').trim()
   const raw = String(role || '').trim()
   if (/^旁白$/.test(n)) return '旁白'
-  if (/^主要配角/.test(raw)) return raw
+  // 漫画/小说彩漫配角标签原样保留（含「主要配角·…」「重要配角」等）
+  if (/主要配角|重要配角|核心配角|(^|[·・\-])配角|^配角/.test(raw)) {
+    if (/^配角$/.test(raw)) return '主要配角'
+    if (/^配角[·・]/.test(raw)) return raw.replace(/^配角/, '主要配角')
+    return raw
+  }
+  if (/反派|宿敌|师父|师尊|师叔|师兄|师姐|师妹|师弟|挚友|恋人|闺蜜|朋友|同学|妻子|丈夫|女友|男友/.test(raw)
+    && !/男主|女主|主角|主人公/.test(raw)) {
+    return /^主要配角/.test(raw) ? raw : `主要配角·${raw}`
+  }
   if (/^女主$|^女主人?$/.test(n) || /^女主$|女性主角|女主角/.test(raw)) return '女主'
   if (/^(男主|主角|我)$/.test(n) || /^(男主|主人公|主角)$/.test(raw)) return '男主'
   if (/女主|女性主角|女主角/.test(raw)) return '女主'
@@ -105,10 +225,15 @@ export function normalizeExtractedCharacterRole(name?: string | null, role?: str
   }
   if (n === '男主' || n === '主角' || n === '我') return '男主'
   if (n === '女主') return '女主'
-  if (!raw || raw === '角色') return n.includes('女') ? '女主' : '男主'
-  // 职业/情节标签（含顿号、斜杠）一律归并为固定身份
-  if (/[、，,/]|个体户|万元户|老板|店员|职员|患者|店主|工人|学徒|个体|万元|铺主|装修|赌球|沪漂|丈夫|妻子/.test(raw)) {
-    return /女/.test(n + raw) ? '女主' : '男主'
+  if (!raw || raw === '角色') {
+    if (/女/.test(n) || /[姐婶婆妹姨娘奶]|小姐|女士|姑娘|阿姨/.test(n)) return '女主'
+    if (/[爷伯叔哥弟汉]|先生|大叔/.test(n)) return '男主'
+    // 无名性别线索时勿默认男主（避免女角色被写成男性定妆）
+    return '角色'
+  }
+  // 职业/情节标签（含顿号、斜杠）一律归并为固定身份（解说主人公定妆用；已是配角标签的上面已 return）
+  if (/[、，,/]|个体户|万元户|老板|店员|职员|患者|店主|工人|学徒|个体|万元|铺主|装修|赌球|沪漂/.test(raw)) {
+    return /女|妻子|老婆|母亲|妈妈|女儿|姐|妹|婶|阿姨/.test(n + raw) ? '女主' : '男主'
   }
   return raw
 }
@@ -403,7 +528,15 @@ function isFirstPersonNarrative(script: string): boolean {
   return /(?:^|[\s，,。！？；:：])我(?:的|在|把|被|会|要|也|都|还|就|则|便|曾|已|将|想|说|看|走|来|去|得|给|让|用|做|吃|喝|买|卖|开|关|拿|带|找|等|站|坐|躺|睡|醒|爱|恨|觉得|认为|知道|发现|想起|决定|开始|继续|完成|辞|推|摆)/.test(script)
 }
 
-/** 解说定妆只保留主人公；第一人称文案优先保留同名多阶段记录 */
+/** 解说定妆：保留主人公 + 主要配角（可含同人多阶段）；路人丢弃 */
+export function filterNarrationExtractedCharacters<T extends { name: string; role?: string | null }>(
+  rows: T[],
+  script: string,
+): T[] {
+  return filterMotionComicExtractedCharacters(rows, script)
+}
+
+/** @deprecated 旧「只留主人公」；请用 filterNarrationExtractedCharacters */
 export function filterNarrationProtagonistOnly<T extends { name: string; role?: string | null }>(
   rows: T[],
   script: string,
@@ -429,22 +562,55 @@ export function filterNarrationProtagonistOnly<T extends { name: string; role?: 
   return rows.slice(0, 1)
 }
 
-/** 动态漫：保留主人公 + 主要配角 */
+/** 漫画/小说彩漫：LLM 已按「主角+重要配角、勿提路人」输出；只丢龙套，避免 role 未标「主要配角」被滤成 1 人 */
 export function filterMotionComicExtractedCharacters<T extends { name: string; role?: string | null }>(
   rows: T[],
   script: string,
 ): T[] {
-  const kept = rows.filter(row => isProtagonistCharacter(row) || isMajorSupportingCharacter(row))
-  if (kept.length) return kept
+  const nonExtras = rows.filter(row => !isComicExtraCharacter(row) && !!String(row.name || '').trim())
+  if (nonExtras.length) return nonExtras
+  const tagged = rows.filter(row => isProtagonistCharacter(row) || isMajorSupportingCharacter(row))
+  if (tagged.length) return tagged
   return filterNarrationProtagonistOnly(rows, script)
 }
 
 function archiveNonProtagonistCharacters(dramaId: number, keepNames: Set<string>): number {
   const ts = now()
   let archived = 0
-  for (const ch of db.select().from(schema.characters).all()) {
-    if (ch.dramaId !== dramaId || ch.deletedAt || !isVisualCharacter(ch)) continue
-    if (keepNames.has(ch.name.trim())) continue
+  const all = db.select().from(schema.characters).all()
+    .filter(ch => ch.dramaId === dramaId && !ch.deletedAt && isVisualCharacter(ch))
+
+  for (const ch of all) {
+    const fullName = ch.name.trim()
+    if (keepNames.has(fullName)) continue
+
+    const baseName = normalizeExtractedCharacterIdentity({ name: fullName }).name
+    // 脏名重复：把外貌/定妆图迁到纯姓名条目后再归档
+    if (baseName && keepNames.has(baseName) && baseName !== fullName) {
+      const keeper = all.find(row => row.id !== ch.id && !row.deletedAt && row.name.trim() === baseName)
+        || db.select().from(schema.characters).all()
+          .find(row => row.dramaId === dramaId && !row.deletedAt && row.name.trim() === baseName)
+      if (keeper) {
+        const migrate: Record<string, any> = { updatedAt: ts }
+        if (!String(keeper.appearance || '').trim() && String(ch.appearance || '').trim()) {
+          migrate.appearance = ch.appearance
+        }
+        if (!String(keeper.imageUrl || '').trim() && String(ch.imageUrl || '').trim()) {
+          migrate.imageUrl = ch.imageUrl
+        }
+        if (!String(keeper.personality || '').trim() && String(ch.personality || '').trim()) {
+          migrate.personality = ch.personality
+        }
+        if ((!keeper.role || keeper.role === '角色') && ch.role) migrate.role = ch.role
+        if (Object.keys(migrate).length > 1) {
+          db.update(schema.characters).set(migrate).where(eq(schema.characters.id, keeper.id)).run()
+        }
+      }
+      db.update(schema.characters).set({ deletedAt: ts, updatedAt: ts }).where(eq(schema.characters.id, ch.id)).run()
+      archived++
+      continue
+    }
+
     db.update(schema.characters).set({ deletedAt: ts, updatedAt: ts }).where(eq(schema.characters.id, ch.id)).run()
     archived++
   }
@@ -458,6 +624,16 @@ function linkCharacterToEpisode(episodeId: number, characterId: number) {
   if (!existing) {
     db.insert(schema.episodeCharacters).values({ episodeId, characterId, createdAt: now() }).run()
   }
+}
+
+/** 小说漫画：新建集时把项目全部角色挂到本集（定妆共享双保险） */
+export function linkDramaCastToEpisode(episodeId: number, dramaId: number): number {
+  const rows = db.select().from(schema.characters).all()
+    .filter(ch => ch.dramaId === dramaId && !ch.deletedAt)
+  for (const ch of rows) {
+    linkCharacterToEpisode(episodeId, ch.id)
+  }
+  return rows.length
 }
 
 export function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
@@ -597,6 +773,24 @@ export function syncMotionComicCharactersFromSpeakers(episodeId: number, dramaId
 }
 
 export function getEpisodeVisualCharacters(episodeId: number, dramaId: number): NarrationCharacterRow[] {
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
+  const novelComic = isNovelComicMode(parseProductionMode(drama?.metadata))
+
+  // 小说漫画：定妆/角色按项目全集共享，不按 episode_characters 过滤
+  if (novelComic) {
+    return db.select().from(schema.characters).all()
+      .filter(ch => ch.dramaId === dramaId && !ch.deletedAt && isVisualCharacter(ch))
+      .map(ch => ({
+        id: ch.id,
+        name: ch.name,
+        role: ch.role,
+        appearance: ch.appearance,
+        variantLabel: ch.variantLabel,
+        personality: ch.personality,
+        imageUrl: ch.imageUrl,
+      }))
+  }
+
   const links = db.select().from(schema.episodeCharacters)
     .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
   const linkedIds = new Set(links.map(link => link.characterId))
@@ -923,12 +1117,105 @@ function extractJsonPayload(text: string): unknown | null {
   return null
 }
 
+/**
+ * 免费模型常截断 JSON：从半截 {"characters":[{...},{... 中捞出已完整的角色对象。
+ */
+function salvageCharacterRowsFromTruncatedJson(text: string): unknown[] | null {
+  const cleaned = stripLlmNoiseForJson(text)
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const candidate = (fenced?.[1] || cleaned).trim()
+  if (!candidate) return null
+
+  const arrayMatch = candidate.match(/"characters"\s*:\s*\[([\s\S]*)/i)
+  const body = arrayMatch?.[1] ?? (candidate.includes('"name"') ? candidate : '')
+  if (!body) return null
+
+  const objects: unknown[] = []
+  let depth = 0
+  let start = -1
+  let inStr = false
+  let esc = false
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (ch === '\\') esc = true
+      else if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') {
+      inStr = true
+      continue
+    }
+    if (ch === '{') {
+      if (depth === 0) start = i
+      depth++
+    } else if (ch === '}') {
+      if (depth <= 0) continue
+      depth--
+      if (depth === 0 && start >= 0) {
+        const slice = body.slice(start, i + 1)
+        try {
+          const obj = JSON.parse(slice) as Record<string, unknown>
+          if (obj && typeof obj === 'object' && String(obj.name || '').trim()) {
+            objects.push(obj)
+          }
+        } catch {
+          // 半截对象，跳过
+        }
+        start = -1
+      }
+    }
+  }
+  return objects.length ? objects : null
+}
+
 function normalizeExtractedCharacterRows(parsed: unknown): unknown[] | null {
   if (Array.isArray(parsed)) return parsed
   if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { characters?: unknown }).characters)) {
     return (parsed as { characters: unknown[] }).characters
   }
   return null
+}
+
+function parseExtractedCharacterRowsFromLlm(text: string): unknown[] | null {
+  const rows = normalizeExtractedCharacterRows(extractJsonPayload(text))
+  if (rows?.length) return rows
+  const salvaged = salvageCharacterRowsFromTruncatedJson(text)
+  if (salvaged?.length) {
+    logTaskWarn('NarrationChars', 'extract-json-salvaged', { count: salvaged.length })
+    return salvaged
+  }
+  return null
+}
+
+/** LLM 失败时：从「说话人：台词」行捞主要角色名，避免定妆只剩 1 人 */
+function extractCharactersFromSpeakerLines(script: string): Array<{
+  name: string
+  variantLabel: string
+  role: string
+  appearance: string
+  personality: string
+}> {
+  const counts = new Map<string, number>()
+  for (const line of parseMotionComicSpeakerLines(script)) {
+    const name = String(line.speaker || '').trim()
+    if (!name || NARRATION_ONLY_SPEAKERS.has(name) || isNarratorCharacter({ name })) continue
+    if (name.length > 12) continue
+    counts.set(name, (counts.get(name) || 0) + 1)
+  }
+  const ranked = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'))
+    .map(([name]) => name)
+    .slice(0, 8)
+  if (!ranked.length) return []
+  return ranked.map((name, index) => ({
+    name,
+    variantLabel: '',
+    role: index === 0 ? '男主' : `主要配角·${name}`,
+    appearance: '',
+    personality: '',
+  }))
 }
 
 async function callNarrationCharacterExtractLlm(
@@ -944,9 +1231,11 @@ async function callNarrationCharacterExtractLlm(
 
   let lastRaw = ''
   for (const attempt of attempts) {
-    const raw = await callTextChat(system, user, textModel, attempt.thinking, 300_000, true)
+    // 禁止 json_object：部分 OpenRouter 免费模型（如 ling-3.0-flash）会 INVALID_REQUEST_BODY
+    // maxTokens 给足，降低 characters 数组被截断概率
+    const raw = await callTextChat(system, user, textModel, attempt.thinking, 300_000, false, 4096)
     lastRaw = raw
-    const rows = normalizeExtractedCharacterRows(extractJsonPayload(raw))
+    const rows = parseExtractedCharacterRowsFromLlm(raw)
     if (rows?.length) {
       if (attempt.thinking) {
         logTaskWarn('NarrationChars', 'extract-fallback-thinking', { model: textModel })
@@ -967,6 +1256,9 @@ export { callTextChat } from './text-chat.js'
 function resolvePortraitFraming(style: string, _appearance: string): string {
   if (isNarrationMinimalStyle(style)) {
     return THREE_VIEW_PORTRAIT_FRAMING_MINIMAL
+  }
+  if (isNovelComicSketchStyle(style)) {
+    return NOVEL_COMIC_SKETCH_PORTRAIT_FRAMING_EN
   }
   if (isMotionComicStyle(style)) {
     return MOTION_COMIC_PORTRAIT_FRAMING
@@ -993,6 +1285,7 @@ const MOTION_COMIC_PORTRAIT_STYLE_GUARD = THREE_VIEW_PORTRAIT_STYLE_GUARD_MOTION
 
 function resolvePortraitStyleGuard(style: string): string {
   const key = normalizeArtStyle(style)
+  if (isNovelComicSketchStyle(key)) return NOVEL_COMIC_SKETCH_PORTRAIT_STYLE_GUARD
   if (isMotionComicStyle(key)) return MOTION_COMIC_PORTRAIT_STYLE_GUARD
   if (isNarrationAnimeStyle(key)) return THREE_VIEW_PORTRAIT_STYLE_GUARD_ANIME
   if (isNarrationMinimalStyle(key)) return THREE_VIEW_PORTRAIT_STYLE_GUARD_MINIMAL
@@ -1002,7 +1295,7 @@ function resolvePortraitStyleGuard(style: string): string {
 
 export function resolvePortraitImageSize(style: string): string | undefined {
   if (
-    isMotionComicStyle(style) ||
+    usesComicIllustrationPipeline(style) ||
     isNarrationAnimeStyle(style) ||
     isNarrationMinimalStyle(style) ||
     isShortDramaStyle(style)
@@ -1017,7 +1310,7 @@ function extractEnglishAppearanceTags(appearance: string): { body: string; tags:
   if (!match) return { body: appearance.trim(), tags: '' }
   return {
     body: appearance.replace(/\s*\bEnglish tags:\s*.+$/im, '').trim(),
-    tags: match[1].trim(),
+    tags: parseEnglishTagsFromLlmRaw(match[1].trim()),
   }
 }
 
@@ -1097,7 +1390,7 @@ export async function generateEnglishAppearanceTags(
     '1) 中文每一段可视特征都须在英文中有对应短语，不得遗漏：年龄性别、脸型下颌、眉形、眼型、发型发色刘海、头身比肩宽四肢、#hex服装、非手持配饰、正面半身站姿（头到胸口、空手）；背景按中文：深色定妆写 deep navy dark background，白底定妆才写 pure white background；',
     '2) 忠实直译，禁止用 young woman / mature expression 等笼统词替代具体描述；28岁及以上女性须写 1woman/mature woman/具体年龄，禁止 1girl/young girl/loli；保留 #hex 色值；中文写「无眼镜」时英文须写 no glasses，禁止 glasses；',
     '3) 禁止 retro style, vintage look, pixel, webtoon, chibi, anime style 等画风词；',
-    '4) 只输出一行：English tags: …（逗号分隔，12–20 项）。',
+    '4) 只输出一行纯文本：English tags: …（逗号分隔，12–20 项）。禁止 JSON、禁止 markdown、禁止代码块。',
     '示例：',
     '中文：28岁男性，俊朗棱角动漫脸型，剑眉，细长眼带瞳孔高光，黑色略凌乱碎发刘海微遮额，正常头身比肩宽适中四肢修长匀称，穿#2563eb蓝色工厂工装，左耳简约耳钉，正面半身标准站姿，头到胸口完整入镜，双手自然垂于身侧',
     'English tags: 28-year-old male, handsome sharp jawline anime face, thick straight eyebrows, narrow expressive eyes with catchlights, messy black short hair with bangs, normal anime body proportions balanced shoulders slim athletic build, #2563eb blue factory uniform, small ear stud on left ear, front chest-up upper-body pose, head to chest in frame, arms at sides, empty hands no props, deep navy dark background',
@@ -1108,9 +1401,9 @@ export async function generateEnglishAppearanceTags(
     `外貌描述：\n${appearanceBody}`,
   ].filter(Boolean).join('\n\n')
   try {
-    const raw = (await callTextChat(system, user, context?.textModel || undefined, false, 180_000, true)).trim()
-    const matched = raw.match(/English tags:\s*(.+)/i)?.[1] || raw.split('\n')[0]?.trim() || ''
-    const tags = sanitizeCharacterAppearance(matched.replace(/^English tags:\s*/i, ''))
+    // 禁止 jsonObject：否则模型吐 {"english_tags":"..."}，解析会留下 JSON 碎屑
+    const raw = (await callTextChat(system, user, context?.textModel || undefined, false, 180_000, false)).trim()
+    const tags = sanitizeCharacterAppearance(parseEnglishTagsFromLlmRaw(raw))
     if (tags) return tags
   } catch (err: any) {
     logTaskWarn('CharacterAppearance', 'english-tags-fallback', {
@@ -1121,8 +1414,45 @@ export async function generateEnglishAppearanceTags(
   return sanitizeCharacterAppearance(fallbackEnglishTagsFromAppearance(appearanceBody, context?.name))
 }
 
-function finalizePortraitAppearanceOutput(text: string): string {
-  return sanitizePortraitAppearanceForGeneration(sanitizeCharacterAppearance(text)).slice(0, 800)
+/** 从 LLM 原文解析 English tags（兼容误开 JSON 模式的残留） */
+function parseEnglishTagsFromLlmRaw(raw: string): string {
+  let text = String(raw || '').trim()
+  if (!text) return ''
+  text = text.replace(/^```(?:json|text)?\s*|\s*```$/gim, '').trim()
+  // {"english_tags":"..."} / {"English tags":"..."} / {"tags":"..."}
+  if (text.startsWith('{')) {
+    try {
+      const obj = JSON.parse(text) as Record<string, unknown>
+      const hit = obj.english_tags ?? obj.englishTags ?? obj['English tags'] ?? obj.tags ?? obj.appearance_tags
+      if (typeof hit === 'string' && hit.trim()) text = hit.trim()
+      else if (Array.isArray(hit)) text = hit.map(String).join(', ')
+    } catch {
+      const m = text.match(/"(?:english_tags|English tags|tags)"\s*:\s*"((?:\\.|[^"\\])*)"/i)
+      if (m?.[1]) text = m[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').trim()
+    }
+  }
+  const line = text.match(/English tags:\s*(.+)/i)?.[1] || text
+  return line
+    .replace(/^English tags:\s*/i, '')
+    .replace(/^["'`{]+|["'`},]+$/g, '')
+    .trim()
+}
+
+function finalizePortraitAppearanceOutput(text: string, options?: { maxLen?: number }): string {
+  const cleaned = sanitizePortraitAppearanceForGeneration(sanitizeCharacterAppearance(text))
+  const maxLen = options?.maxLen ?? 1200
+  if (cleaned.length <= maxLen) return cleaned
+  // 优先保中文主体 + 完整 English tags，避免从中间截断 tags
+  const tagMatch = cleaned.match(/\nEnglish tags:\s*([\s\S]+)$/i)
+  if (!tagMatch || tagMatch.index == null) return cleaned.slice(0, maxLen)
+  const body = cleaned.slice(0, tagMatch.index).trim()
+  const tags = tagMatch[1].trim()
+  const tagBlock = `\nEnglish tags: ${tags}`
+  if (tagBlock.length >= maxLen - 80) {
+    return `${body.slice(0, 80)}${tagBlock}`.slice(0, maxLen)
+  }
+  const bodyBudget = Math.max(120, maxLen - tagBlock.length)
+  return `${body.slice(0, bodyBudget).replace(/[，,\s]+$/u, '')}${tagBlock}`
 }
 
 /** 清洗 + 补全 English tags；缺项时默认可用 LLM，生图路径请传 allowLlmEnrichment:false 避免抢占 Comfy 显存 */
@@ -1139,6 +1469,8 @@ export async function finalizeCharacterAppearance(
     allowLlmEnrichment?: boolean
     /** 漫画解说：入库时强制深色画风规格、去掉白棚残留 */
     motionComic?: boolean
+    /** 小说漫画彩漫四格：入库时强制彩漫画风规格 */
+    novelComicSketch?: boolean
   },
 ): Promise<string> {
   if (context?.minimal) {
@@ -1146,17 +1478,22 @@ export async function finalizeCharacterAppearance(
   }
   let text = sanitizeCharacterAppearance(appearance)
   if (!text) return ''
-  if (context?.motionComic) {
+  if (context?.novelComicSketch) {
+    text = ensureNovelComicSketchPortraitStyleInAppearance(text)
+  } else if (context?.motionComic) {
     const { ensureMotionComicPortraitStyleInAppearance } = await import('../constants/motion-comic.js')
     text = ensureMotionComicPortraitStyleInAppearance(text)
   }
   if (context?.skipEnglishTags) {
-    return text.replace(/\s*\bEnglish tags:\s*.+$/im, '').trim().slice(0, 800)
+    return text.replace(/\s*\bEnglish tags:\s*.+$/im, '').trim().slice(0, 1200)
   }
   const allowLlm = context?.allowLlmEnrichment !== false
+  const outMax = context?.novelComicSketch || context?.motionComic ? 1400 : 1200
 
   const resolveTags = async (body: string, existingTags?: string): Promise<string> => {
-    const cleanedExisting = existingTags ? sanitizeCharacterAppearance(existingTags) : ''
+    const cleanedExisting = existingTags
+      ? sanitizeCharacterAppearance(parseEnglishTagsFromLlmRaw(existingTags))
+      : ''
     if (cleanedExisting && !isIncompletePortraitEnglishTags(body, cleanedExisting)) {
       return reconcileEnglishTagsWithChineseAppearance(body, cleanedExisting, context)
     }
@@ -1184,7 +1521,13 @@ export async function finalizeCharacterAppearance(
       variantLabel: context?.variantLabel,
       minimal: context?.minimal,
     })
-    return finalizePortraitAppearanceOutput(normalized)
+    let out = finalizePortraitAppearanceOutput(normalized, { maxLen: outMax })
+    if (context?.novelComicSketch) out = ensureNovelComicSketchPortraitStyleInAppearance(out)
+    else if (context?.motionComic) {
+      const { ensureMotionComicPortraitStyleInAppearance } = await import('../constants/motion-comic.js')
+      out = ensureMotionComicPortraitStyleInAppearance(out)
+    }
+    return out
   }
 
   const { body } = extractEnglishAppearanceTags(text)
@@ -1194,11 +1537,25 @@ export async function finalizeCharacterAppearance(
   )
   if (fallbackTags.split(',').filter(Boolean).length >= 4 && !isIncompletePortraitEnglishTags(sourceBody, fallbackTags)) {
     const merged = `${sourceBody}\nEnglish tags: ${fallbackTags}`
-    return finalizePortraitAppearanceOutput(merged)
+    let out = finalizePortraitAppearanceOutput(merged, { maxLen: outMax })
+    if (context?.novelComicSketch) out = ensureNovelComicSketchPortraitStyleInAppearance(out)
+    else if (context?.motionComic) {
+      const { ensureMotionComicPortraitStyleInAppearance } = await import('../constants/motion-comic.js')
+      out = ensureMotionComicPortraitStyleInAppearance(out)
+    }
+    return out
   }
 
   const tags = await resolveTags(sourceBody)
-  if (!tags) return finalizePortraitAppearanceOutput(text)
+  if (!tags) {
+    let out = finalizePortraitAppearanceOutput(text, { maxLen: outMax })
+    if (context?.novelComicSketch) out = ensureNovelComicSketchPortraitStyleInAppearance(out)
+    else if (context?.motionComic) {
+      const { ensureMotionComicPortraitStyleInAppearance } = await import('../constants/motion-comic.js')
+      out = ensureMotionComicPortraitStyleInAppearance(out)
+    }
+    return out
+  }
   const merged = `${sourceBody}\nEnglish tags: ${tags}`
   const normalized = normalizePortraitAppearanceStructured(merged, {
     name: context?.name,
@@ -1206,7 +1563,13 @@ export async function finalizeCharacterAppearance(
     variantLabel: context?.variantLabel,
     minimal: context?.minimal,
   })
-  return finalizePortraitAppearanceOutput(normalized)
+  let out = finalizePortraitAppearanceOutput(normalized, { maxLen: outMax })
+  if (context?.novelComicSketch) out = ensureNovelComicSketchPortraitStyleInAppearance(out)
+  else if (context?.motionComic) {
+    const { ensureMotionComicPortraitStyleInAppearance } = await import('../constants/motion-comic.js')
+    out = ensureMotionComicPortraitStyleInAppearance(out)
+  }
+  return out
 }
 
 /** 定妆剧情维：去掉 markdown / 对比示例，避免脏 prompt 诱发重影与多人对照 */
@@ -1261,7 +1624,11 @@ export function buildCharacterPortraitPrompt(
     ? buildPortraitReferenceHint(ageGroup, getVariantAgeGroup(options.referenceVariantLabel))
     : ''
   const styleAnchorHint = options?.styleAnchorReference
-    ? 'match reference image art style, line weight, flat cel shading, and color technique ONLY, generate a completely different character per appearance description, do NOT copy face identity or outfit from reference'
+    ? (isNovelComicSketchStyle(normalizedStyle)
+      ? 'match reference image art style, thin black ink line weight, pencil cross-hatching technique ONLY, generate a completely different character per appearance description, do NOT copy face identity or outfit from reference'
+      : isNarrationAnimeStyle(normalizedStyle)
+        ? 'match reference image Japanese 2D anime illustration style and color technique ONLY, generate a completely different character per appearance description, do NOT copy face identity or outfit from reference'
+        : 'match reference image art style, line weight, flat cel shading, and color technique ONLY, generate a completely different character per appearance description, do NOT copy face identity or outfit from reference')
     : ''
   if (isNarrationAnimeStyle(normalizedStyle)) {
     const plot = sanitizePortraitPlotForThreeView([
@@ -1275,6 +1642,21 @@ export function buildCharacterPortraitPrompt(
       `【场景：${THREE_VIEW_PORTRAIT_SCENE_CN}】`,
       `【剧情：${plot}】`,
       NARRATION_ANIME_SCENE_SUFFIX,
+    ].join('，')
+  }
+  if (isNovelComicSketchStyle(normalizedStyle)) {
+    const plot = sanitizePortraitPlotForThreeView([
+      char.name,
+      stage ? `${stage}阶段` : '',
+      appearance || NOVEL_COMIC_SKETCH_PORTRAIT_PLOT_CN,
+      cleanTags,
+    ].filter(Boolean).join('，'))
+    return [
+      formatNarrationStyleSpecBracket(NOVEL_COMIC_SKETCH_PORTRAIT_STYLE_SPEC),
+      `【场景：${NOVEL_COMIC_SKETCH_PORTRAIT_SCENE_CN}】`,
+      `【剧情：${plot}】`,
+      NOVEL_COMIC_SKETCH_PORTRAIT_SUFFIX,
+      NOVEL_COMIC_SKETCH_PORTRAIT_FRAMING_EN,
     ].join('，')
   }
   if (isMotionComicStyle(normalizedStyle)) {
@@ -1380,10 +1762,12 @@ export function resolvePortraitImageModel(episodeModel?: string | null, _variant
     return model
   }
   if (model.startsWith('agnes-image')) {
-    return model === 'agnes-image-2.0' ? 'agnes-image-2.0-flash' : model
+    if (model === 'agnes-image-2.0') return 'agnes-image-2.0-flash'
+    if (model === 'agnes-image-2.1') return 'agnes-image-2.1-flash'
+    return model
   }
   // 分集默认 cogview / 空 / 其它云端：定妆统一走 Agnes（可参考图锁脸）
-  return LOCAL_COMIC_ENV.agnesPortraitModel || 'agnes-image-2.0-flash'
+  return LOCAL_COMIC_ENV.agnesPortraitModel || 'agnes-image-2.1-flash'
 }
 
 export function enrichImagePromptWithCharacters(
@@ -1459,6 +1843,8 @@ export async function generateCharacterAppearance(params: {
     mentionExcerpt?: string
     storyboardSnippets?: string[]
     otherCharacters?: string[]
+    novelBibleBlock?: string
+    novelBibleCharacterBrief?: string
     portraitYouthReference?: {
       variantLabel?: string | null
       displayName?: string
@@ -1470,6 +1856,7 @@ export async function generateCharacterAppearance(params: {
   const { character, script, style = 'comic', textModel, textThinking = true, contentContext, productionMode } = params
   const localComic = isLocalComicMode(productionMode)
   const minimal = isNarrationMinimalStyle(style)
+  const novelComicSketch = isNovelComicSketchStyle(style)
   const motionComic = isMotionComicStyle(style)
   const anime = isNarrationAnimeStyle(style) && !localComic
   const scriptText = [
@@ -1483,6 +1870,8 @@ export async function generateCharacterAppearance(params: {
     ? LOCAL_COMIC_CHARACTER_APPEARANCE_SYSTEM
     : minimal
     ? buildNarrationMinimalCharacterAppearanceSystem({ weightArc: weightArc ?? undefined })
+    : novelComicSketch
+    ? buildNovelComicSketchCharacterAppearanceSystem()
     : motionComic
     ? buildMotionComicCharacterAppearanceSystem()
     : anime
@@ -1508,7 +1897,17 @@ export async function generateCharacterAppearance(params: {
   const peerNames = (contentContext?.otherCharacters || [])
     .map(line => String(line || '').split(/[：:]/)[0]?.trim())
     .filter(Boolean)
-  const silhouette = resolvePortraitSilhouetteSlot(character.name, peerNames)
+  let genderResolved = resolveIdentityPortraitGender(character.name, character.role)
+  if (genderResolved === 'unknown') {
+    genderResolved = inferPortraitGenderFromScript(character.name, scriptText)
+  }
+  const genderLabelCn: '男性' | '女性' | null =
+    genderResolved === 'female' ? '女性' : genderResolved === 'male' ? '男性' : null
+  const silhouette = resolvePortraitSilhouetteSlot(
+    character.name,
+    peerNames,
+    genderResolved === 'unknown' ? null : genderResolved,
+  )
   const existingApp = character.appearance?.trim() || ''
   const existingCollides = !!(
     existingApp
@@ -1516,20 +1915,42 @@ export async function generateCharacterAppearance(params: {
     && appearanceCollidesWithPeers(existingApp, contentContext.otherCharacters)
   )
   const forceRewriteDistinct = !!(contentContext?.otherCharacters?.length && (existingCollides || existingApp))
+  // 漫画/小说彩漫：信任模型成稿，不把旧脏描述当「可优化」喂回去
+  const comicDirect = novelComicSketch || motionComic
+  const ageHint = inferPortraitAgeHint({
+    name: character.name,
+    role: character.role,
+    personality: character.personality,
+    variantLabel: character.variantLabel,
+    script: scriptText,
+  })
+  const genderLockLine = genderLabelCn === '女性'
+    ? '【性别·硬性】本角色是女性。appearance 必须以「N岁女性」或「青年女性/中年女性」开头；禁止写男性、男模、寸头、平头、光头、胡茬、国字方正脸、宽颌厚实脸；禁止照抄「28岁男性」示例。'
+    : genderLabelCn === '男性'
+      ? '【性别·硬性】本角色是男性。appearance 必须以「N岁男性」或「青年男性/中年男性」开头；禁止写成女性、长裙娇柔女模模板。'
+      : '【性别·硬性】须根据定位与旁白中的她/他、妻子/丈夫等线索明确写出「女性」或「男性」；不得默认写成男性。'
 
   const buildUser = (retryDistinct: boolean) => [
     `角色名：${character.name}`,
     normalizeVariantLabel(character.variantLabel) ? `定妆时期：${normalizeVariantLabel(character.variantLabel)}` : '定妆时期：常态（全篇单一形态）',
     character.role ? `定位：${character.role}` : '',
     character.personality ? `性格：${String(character.personality).slice(0, 80)}` : '',
-    forceRewriteDistinct || retryDistinct
-      ? (existingApp
-        ? `旧描述（禁止沿用其脸型/发型/深灰外套模板，必须整段重写拉开差距）：${existingApp.slice(0, 180)}`
-        : '')
-      : (existingApp
-        ? `已有描述（可优化但勿偏离剧情）：${existingApp.slice(0, 220)}`
-        : ''),
+    ageHint ? formatPortraitAgeHintForLlm(ageHint) : '',
+    genderLockLine,
+    comicDirect
+      ? (retryDistinct
+        ? '【重写】上一稿与同集角色撞脸，请整段重写：换脸型+发型+服装主色，不要沿用旧描述。'
+        : '请按规则直接输出最终定妆文案（不要参考任何旧描述）。')
+      : (forceRewriteDistinct || retryDistinct
+        ? (existingApp
+          ? `旧描述（禁止沿用其脸型/发型/深灰外套模板，必须整段重写拉开差距）：${existingApp.slice(0, 180)}`
+          : '')
+        : (existingApp
+          ? `已有描述（可优化但勿偏离剧情）：${existingApp.slice(0, 220)}`
+          : '')),
     character.description?.trim() ? `简介：${character.description.trim().slice(0, 120)}` : '',
+    contentContext?.novelBibleBlock?.trim() || '',
+    contentContext?.novelBibleCharacterBrief?.trim() || '',
     contentContext?.dramaTitle ? `作品：${contentContext.dramaTitle}` : '',
     contentContext?.dramaGenre ? `题材：${contentContext.dramaGenre}` : '',
     contentContext?.episodeTitle ? `本集：${contentContext.episodeTitle}` : '',
@@ -1540,8 +1961,8 @@ export async function generateCharacterAppearance(params: {
         `为本角色指定视觉槽位${silhouette.index + 1}/${PORTRAIT_SILHOUETTE_SLOTS.length}：${silhouette.hint}`,
         PORTRAIT_CHARACTER_DISTINCTIVENESS_RULE,
       ].join('\n')
-      : `无同集对照时仍须写出具体脸型发型，勿写万能俊朗棱角男模。建议槽位：${silhouette.hint}`,
-    retryDistinct
+      : `无同集对照时仍须写出具体脸型发型，勿写万能俊朗棱角模板。建议槽位：${silhouette.hint}`,
+    retryDistinct && !comicDirect
       ? '【重写·硬性】上一稿与同集角色撞脸，必须换脸型族+发型族+服装主色，禁止再写棱角分明方正下颌+细长眼+深灰外套。'
       : '',
     contentContext?.portraitYouthReference
@@ -1555,11 +1976,15 @@ export async function generateCharacterAppearance(params: {
       : '',
     contentContext?.mentionExcerpt?.trim()
       ? `剧本中该角色相关段落：\n${contentContext.mentionExcerpt.trim().slice(0, 1000)}`
-      : script?.trim() ? `${localComic ? '剧本' : motionComic ? '漫剧旁白稿' : '剧本/解说稿'}摘录：\n${script.trim().slice(0, 1600)}` : '',
+      : script?.trim()
+        ? `${localComic ? '剧本' : (motionComic || novelComicSketch) ? '讲解/旁白稿' : '剧本/解说稿'}摘录：\n${script.trim().slice(0, 1600)}`
+        : '',
     contentContext?.storyboardSnippets?.length
       ? `该角色出现的镜头：\n${contentContext.storyboardSnippets.slice(0, 5).map((s, i) => `${i + 1}. ${String(s).slice(0, 160)}`).join('\n')}`
       : '',
   ].filter(Boolean).join('\n\n')
+
+  const applyGenderGuard = (text: string) => enforceAppearanceGenderCn(text, genderLabelCn)
 
   const runOnce = async (retryDistinct: boolean) => {
     const raw = (await callTextChat(
@@ -1571,17 +1996,47 @@ export async function generateCharacterAppearance(params: {
     )).trim()
     const cleaned = raw.replace(/^["'`]+|["'`]+$/g, '').replace(/^外貌描述[:：]\s*/i, '').trim()
     if (!cleaned) throw new Error('AI 未返回有效外貌描述')
-    if (minimal) return coerceMinimalCharacterAppearance(character.variantLabel, cleaned)
-    const finalized = await finalizeCharacterAppearance(cleaned.slice(0, 800), {
+    if (minimal) return applyGenderGuard(coerceMinimalCharacterAppearance(character.variantLabel, cleaned))
+
+    // 小说彩漫 / 漫画解说：规则已写死在 system，直接信模型，不再 finalize/sanitize/二次翻 tags
+    if (novelComicSketch) {
+      const accepted = acceptNovelComicPortraitAppearanceRaw(cleaned)
+      if (!accepted.trim()) throw new Error('AI 未返回有效外貌描述')
+      return applyGenderGuard(accepted)
+    }
+    if (motionComic) {
+      const light = cleaned
+        .replace(/^```(?:text|markdown)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .replace(/\n?English tags:\s*[\s\S]*$/i, '')
+        .trim()
+      return applyGenderGuard(ensureMotionComicPortraitStyleInAppearance(light))
+    }
+    // 解说日系2D：纯中文定妆，不补 English tags
+    if (anime) {
+      const light = cleaned
+        .replace(/^```(?:text|markdown)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .replace(/\n?English tags:\s*[\s\S]*$/i, '')
+        .replace(/\bEnglish tags:\s*/gi, '')
+        .trim()
+      if (!light) throw new Error('AI 未返回有效外貌描述')
+      return applyGenderGuard(sanitizePortraitAppearanceForGeneration(
+        stripBodyMeasureSpecsFromAppearance(light),
+      ))
+    }
+
+    const finalized = await finalizeCharacterAppearance(cleaned, {
       name: character.name,
       role: character.role,
       variantLabel: character.variantLabel,
       textModel,
       motionComic,
+      novelComicSketch,
+      skipEnglishTags: true,
     })
     let result = finalized
-    if (localComic) result = stripBodyMeasureSpecsFromAppearance(finalized).slice(0, 800)
-    else if (motionComic || anime) result = stripBodyMeasureSpecsFromAppearance(finalized).slice(0, 800)
+    if (localComic) result = stripBodyMeasureSpecsFromAppearance(finalized)
     else result = finalized
     if (contentContext?.portraitYouthReference) {
       result = enforceSiblingAppearanceContinuity(
@@ -1590,12 +2045,7 @@ export async function generateCharacterAppearance(params: {
         character.variantLabel,
       )
     }
-    // motion comic：sanitize 后再确保深色画风（sanitize 可能注入竖幅纯白）
-    if (motionComic) {
-      const { ensureMotionComicPortraitStyleInAppearance } = await import('../constants/motion-comic.js')
-      return ensureMotionComicPortraitStyleInAppearance(sanitizePortraitAppearanceForGeneration(result))
-    }
-    return sanitizePortraitAppearanceForGeneration(result)
+    return applyGenderGuard(sanitizePortraitAppearanceForGeneration(result))
   }
 
   let result = await runOnce(false)
@@ -1742,11 +2192,13 @@ export function prependMultiPortraitReferenceHint(
   const hint = [
     `【同一配图禁撞脸·硬性】${mapping || '按文案对照定妆标签锁脸'}。`,
     `画面人数恰好 ${totalCount} 人且仅此 ${totalCount} 张不同脸；禁止同一人脸左右对称复制、双胞胎、分身、克隆；禁止多出第 ${totalCount + 1} 人。`,
+    '禁止白底定妆并排、角色设定表、多头拼贴、公告板/软木板贴脸照片、办公室货架定妆墙。',
     sameGenderWarn,
     missingWarn,
     similarOutfitWarn,
     '服装主色即使接近，脸也必须各自可辨识，不得因夹克/围裙同色而画成同一人。',
-    'distinct faces only, no duplicate identity, no cloned face, no twin extras.',
+    '中年/老年角色须保留文案年龄感，禁止统一画成二十岁青年脸。',
+    'distinct faces only, no duplicate identity, no cloned face, no twin extras, no character sheet lineup.',
   ].filter(Boolean).join('')
   const body = String(prompt || '').trim()
   if (!body) return hint
@@ -1778,12 +2230,22 @@ export async function extractNarrationCharacters(
     const config = getTextConfig(textModel)
     assertTextConfigReady(config)
 
-    logTaskProgress('NarrationChars', 'llm-extract-start', { episodeId, model: config.model, motionComic: isMotionComicStyle(style) })
+    logTaskProgress('NarrationChars', 'llm-extract-start', {
+      episodeId,
+      model: config.model,
+      motionComic: isMotionComicStyle(style),
+      novelComicSketch: isNovelComicSketchStyle(style),
+    })
 
-      const extractWeightArc = !isMotionComicStyle(style) && isNarrationMinimalStyle(style)
+      const extractWeightArc = !usesComicIllustrationPipeline(style) && isNarrationMinimalStyle(style)
         ? detectNarrationWeightArcTheme(script.slice(0, 12000))
         : null
-      const system = isMotionComicStyle(style)
+      const namesOnlyExtract = usesComicIllustrationPipeline(style)
+        || isNarrationAnimeStyle(style)
+        || isNovelComicSketchStyle(style)
+      const system = isNovelComicSketchStyle(style)
+        ? buildNovelComicSketchCharacterExtractSystem()
+        : isMotionComicStyle(style)
         ? buildMotionComicCharacterExtractSystem()
         : isNarrationAnimeStyle(style)
         ? buildNarrationAnimeCharacterExtractSystem()
@@ -1798,29 +2260,42 @@ export async function extractNarrationCharacters(
           variant_label: ch.variantLabel || '',
         })),
         output_format: {
-          characters: '[{ name, variant_label, role, appearance, personality }]',
+          // 提取只拿名单；定妆文案另步并发生成，禁止在此写配图描述
+          characters: namesOnlyExtract
+            ? '[{ name, variant_label, role, personality }]'
+            : '[{ name, variant_label, role, appearance, personality }]',
         },
       })
 
       const text = await callNarrationCharacterExtractLlm(system, user, textModel, textThinking)
-      const parsed = extractJsonPayload(text)
-      const characterRows = normalizeExtractedCharacterRows(parsed)
+      const characterRows = parseExtractedCharacterRowsFromLlm(text)
       if (characterRows?.length) {
+        const comicPipeline = usesComicIllustrationPipeline(style)
         extracted = characterRows
-          .map((row: any) => ({
-            name: String(row?.name || '').trim(),
-            variantLabel: normalizeVariantLabel(row?.variant_label ?? row?.variantLabel),
-            role: normalizeExtractedCharacterRole(
-              String(row?.name || '').trim(),
-              String(row?.role || '').trim(),
-            ),
-            appearance: sanitizeCharacterAppearance(String(row?.appearance || '').trim()),
-            personality: String(row?.personality || '').trim(),
-          }))
+          .map((row: any) => {
+            const identity = normalizeExtractedCharacterIdentity({
+              name: String(row?.name || '').trim(),
+              role: String(row?.role || '').trim(),
+              variantLabel: row?.variant_label ?? row?.variantLabel,
+            })
+            return {
+              name: identity.name,
+              variantLabel: comicPipeline ? '' : identity.variantLabel,
+              role: identity.role,
+              // 名单提取：不写入 appearance（定妆描述另步并发）
+              appearance: namesOnlyExtract
+                ? ''
+                : sanitizeCharacterAppearance(String(row?.appearance || '').trim()),
+              personality: String(row?.personality || '').trim(),
+            }
+          })
           .filter((row: { name: string }) => row.name && !isNarratorCharacter(row))
-        extracted = isMotionComicStyle(style)
-          ? filterMotionComicExtractedCharacters(extracted, script)
-          : filterNarrationProtagonistOnly(extracted, script)
+        extracted = comicPipeline
+          ? dedupeExtractedCharactersByName(
+            filterMotionComicExtractedCharacters(extracted, script),
+            { collapseVariants: true },
+          )
+          : filterNarrationExtractedCharacters(extracted, script)
       } else {
         logTaskWarn('NarrationChars', 'llm-extract-invalid-json', { preview: text.slice(0, 200) })
       }
@@ -1829,25 +2304,44 @@ export async function extractNarrationCharacters(
     throw err
   }
 
+  if (!extracted.length) {
+    const speakerFallback = extractCharactersFromSpeakerLines(script)
+    if (speakerFallback.length) {
+      logTaskWarn('NarrationChars', 'extract-speaker-fallback', {
+        episodeId,
+        count: speakerFallback.length,
+        names: speakerFallback.map(r => r.name),
+      })
+      extracted = filterNarrationExtractedCharacters(speakerFallback, script)
+    }
+  }
+
   if (extracted.length) {
     const portraitStructured = usesPortraitAppearanceSanitize(style)
-    extracted = await Promise.all(extracted.map(async row => {
-      let appearance = row.appearance
-        ? (portraitStructured
-          ? sanitizePortraitAppearanceForGeneration(sanitizeCharacterAppearance(row.appearance))
-          : sanitizeCharacterAppearance(row.appearance)
-        ).slice(0, 800)
-        : ''
-      if (appearance && portraitStructured && !isNarrationMinimalStyle(style)) {
-        appearance = await finalizeCharacterAppearance(appearance, {
-          name: row.name,
-          role: row.role,
-          variantLabel: row.variantLabel,
-          textModel,
-        })
-      }
-      return { ...row, appearance }
-    }))
+    const namesOnly = usesComicIllustrationPipeline(style)
+      || isNarrationAnimeStyle(style)
+      || isNovelComicSketchStyle(style)
+    // 名单提取：跳过定妆文案 finalize（含 English tags）；定妆描述另步并发生成
+    if (!namesOnly) {
+      extracted = await Promise.all(extracted.map(async row => {
+        let appearance = row.appearance
+          ? (portraitStructured
+            ? sanitizePortraitAppearanceForGeneration(sanitizeCharacterAppearance(row.appearance))
+            : sanitizeCharacterAppearance(row.appearance)
+          ).slice(0, 800)
+          : ''
+        if (appearance && portraitStructured && !isNarrationMinimalStyle(style)) {
+          appearance = await finalizeCharacterAppearance(appearance, {
+            name: row.name,
+            role: row.role,
+            variantLabel: row.variantLabel,
+            textModel,
+            skipEnglishTags: true,
+          })
+        }
+        return { ...row, appearance }
+      }))
+    }
   }
 
   if (!extracted.length) {
@@ -1865,33 +2359,62 @@ export async function extractNarrationCharacters(
   let created = 0
   let updated = 0
   const keepNames = new Set(extracted.map(row => row.name.trim()).filter(Boolean))
-  const archived = archiveNonProtagonistCharacters(dramaId, keepNames)
-  if (archived) {
-    logTaskProgress('NarrationChars', 'archived-non-protagonist', { dramaId, archived, keepNames: [...keepNames] })
-  }
 
+  // 先归并同名脏条目并更新，再归档多余角色（避免先删掉有外貌的脏名）
   for (const row of extracted) {
     const variantLabel = normalizeVariantLabel(row.variantLabel) || null
-    const match = existing.find(ch =>
-      ch.name === row.name
-      && !ch.deletedAt
+    const siblings = existing.filter(ch =>
+      !ch.deletedAt
+      && normalizeExtractedCharacterIdentity({ name: ch.name }).name === row.name
       && normalizeVariantLabel(ch.variantLabel) === normalizeVariantLabel(variantLabel),
-    )
+    ).sort((a, b) => {
+      const exact = (b.name === row.name ? 1 : 0) - (a.name === row.name ? 1 : 0)
+      if (exact) return exact
+      const app = String(b.appearance || '').trim().length - String(a.appearance || '').trim().length
+      if (app) return app
+      return (b.imageUrl ? 1 : 0) - (a.imageUrl ? 1 : 0)
+    })
+    const match = siblings[0]
     if (match) {
       const updates: Record<string, any> = { updatedAt: ts }
+      if (match.name !== row.name) updates.name = row.name
       if (row.role) updates.role = row.role
       if (variantLabel && match.variantLabel !== variantLabel) updates.variantLabel = variantLabel
-      const nextAppearance = row.appearance ? sanitizeCharacterAppearance(row.appearance) : ''
+      if (!variantLabel && match.variantLabel) updates.variantLabel = null
+      const siblingAppearance = siblings
+        .map(s => String(s.appearance || '').trim())
+        .sort((a, b) => b.length - a.length)[0] || ''
+      const nextAppearance = row.appearance
+        ? sanitizeCharacterAppearance(row.appearance)
+        : siblingAppearance
       if (nextAppearance && nextAppearance !== String(match.appearance || '').trim()) {
         updates.appearance = nextAppearance
-        if (match.imageUrl) updates.imageUrl = null
+        if (match.imageUrl && row.appearance && nextAppearance !== siblingAppearance) {
+          updates.imageUrl = null
+        }
+      }
+      if (!match.imageUrl) {
+        const sibImg = siblings.find(s => s.id !== match.id && s.imageUrl)?.imageUrl
+        if (sibImg) updates.imageUrl = sibImg
       }
       if (row.personality && !match.personality) updates.personality = row.personality
+      else if (!match.personality) {
+        const sibPers = siblings.find(s => s.id !== match.id && s.personality)?.personality
+        if (sibPers) updates.personality = sibPers
+      }
       if (Object.keys(updates).length > 1) {
         db.update(schema.characters).set(updates).where(eq(schema.characters.id, match.id)).run()
         updated++
       }
       linkCharacterToEpisode(episodeId, match.id)
+      // 同批其余脏名/重复 id 标删除，避免后续 archive 漏迁
+      for (const sib of siblings) {
+        if (sib.id === match.id) continue
+        db.update(schema.characters).set({ deletedAt: ts, updatedAt: ts }).where(eq(schema.characters.id, sib.id)).run()
+        sib.deletedAt = ts
+      }
+      match.name = row.name
+      match.deletedAt = null
     } else {
       const res = db.insert(schema.characters).values({
         dramaId,
@@ -1906,6 +2429,11 @@ export async function extractNarrationCharacters(
       linkCharacterToEpisode(episodeId, Number(res.lastInsertRowid))
       created++
     }
+  }
+
+  const archived = archiveNonProtagonistCharacters(dramaId, keepNames)
+  if (archived) {
+    logTaskProgress('NarrationChars', 'archived-non-protagonist', { dramaId, archived, keepNames: [...keepNames] })
   }
 
   const linked = linkAllNarrationStoryboardCharacters(episodeId, dramaId)

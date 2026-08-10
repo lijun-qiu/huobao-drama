@@ -10,6 +10,6 @@ import { applyEnvHttpProxy } from './utils/apply-env-http-proxy.js'
 try { dns.setDefaultResultOrder('ipv4first') } catch { /* Node < 17 */ }
 
 loadEnvLocal()
-applyEnvHttpProxy()
+await applyEnvHttpProxy()
 
 await import('./index.js')

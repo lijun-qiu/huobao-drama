@@ -31,11 +31,11 @@ export function buildDramaMetadata(productionMode: string) {
         chapter_outline: [],
         outline_confirmed_at: null,
       },
-      // 配图/运镜复用漫画解说预设
+      // 小说漫画：静图翻页，关闭运镜
       motion_comic: {
-        motion_preset: 'standard',
-        camera: { zoom_step: 0.035, enable_pan: true, pan_alternate: true },
-        motion_budget: { max_action_shots: 8 },
+        motion_preset: 'static',
+        camera: { zoom_step: 0, enable_pan: false, pan_alternate: false },
+        motion_budget: { max_action_shots: 0 },
       },
     })
   }

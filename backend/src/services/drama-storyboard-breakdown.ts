@@ -86,10 +86,18 @@ function normalizeStoryboards(
 ): DramaStoryboardInput[] {
   if (!Array.isArray(raw)) return []
 
-  const charById = new Map(ctx.characters.map(c => [c.id, c]))
-  const charByName = new Map(ctx.characters.map(c => [c.name, c.id]))
-  const sceneById = new Map(ctx.scenes.map(s => [s.id, s]))
-  const sceneByKey = new Map(ctx.scenes.map(s => [`${s.location}::${s.time || ''}`, s.id]))
+  const charById = new Map<number, unknown>(
+    ctx.characters.map(c => [Number(c.id), c] as [number, unknown]),
+  )
+  const charByName = new Map<string, number>(
+    ctx.characters.map(c => [String(c.name), Number(c.id)] as [string, number]),
+  )
+  const sceneById = new Map<number, unknown>(
+    ctx.scenes.map(s => [Number(s.id), s] as [number, unknown]),
+  )
+  const sceneByKey = new Map<string, number>(
+    ctx.scenes.map(s => [`${s.location}::${s.time || ''}`, Number(s.id)] as [string, number]),
+  )
 
   const resolveSceneId = (row: any): number | null => {
     const direct = Number(row?.scene_id)
@@ -104,19 +112,25 @@ function normalizeStoryboards(
   }
 
   const resolveCharacterIds = (row: any): number[] => {
-    const direct = Array.isArray(row?.character_ids)
-      ? row.character_ids.map((id: unknown) => Number(id)).filter((id: number) => charById.has(id))
-      : []
+    const rawIds: unknown[] = Array.isArray(row?.character_ids) ? (row.character_ids as unknown[]) : []
+    const direct = rawIds
+      .map((id: unknown) => Number(id))
+      .filter((id): id is number => Number.isFinite(id) && charById.has(id))
     if (direct.length) return [...new Set(direct)]
 
-    const names = Array.isArray(row?.character_names)
-      ? row.character_names.map((name: unknown) => String(name || '').trim()).filter(Boolean)
-      : []
-    return [...new Set(names.map(name => charByName.get(name)).filter((id): id is number => typeof id === 'number'))]
+    const rawNames: unknown[] = Array.isArray(row?.character_names) ? (row.character_names as unknown[]) : []
+    const names: string[] = rawNames
+      .map((name: unknown) => String(name || '').trim())
+      .filter((s): s is string => Boolean(s))
+    return [...new Set(
+      names
+        .map(name => charByName.get(name))
+        .filter((id): id is number => id != null),
+    )]
   }
 
   return raw
-    .map((row: any, index: number) => {
+    .map((row: any, index: number): DramaStoryboardInput | null => {
       const shotNumber = Number(row?.shot_number ?? row?.shotNumber ?? index + 1)
       if (!Number.isFinite(shotNumber) || shotNumber <= 0) return null
       return {
@@ -139,9 +153,9 @@ function normalizeStoryboards(
         duration: Number.isFinite(Number(row?.duration)) ? Math.max(3, Math.round(Number(row.duration))) : 10,
         scene_id: resolveSceneId(row),
         character_ids: resolveCharacterIds(row),
-      } satisfies DramaStoryboardInput
+      }
     })
-    .filter((row): row is DramaStoryboardInput => !!row)
+    .filter((row): row is DramaStoryboardInput => row != null)
     .sort((a, b) => a.shot_number - b.shot_number)
 }
 

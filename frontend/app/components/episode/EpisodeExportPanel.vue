@@ -307,7 +307,7 @@
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
                 <div class="empty-title">生成片头视频</div>
-                <div v-if="!titleShots.length" class="empty-desc">本集暂无片头镜，请先完成{{ isMotionComicMode ? '漫画分镜' : '旁白分镜' }}</div>
+                <div v-if="!titleShots.length" class="empty-desc">本集暂无片头镜，请先完成{{ isMotionComicMode ? '漫画分镜' : (isNarrationVideoMode ? '分镜脚本' : '旁白分镜') }}</div>
                 <div v-else-if="titleVideoError" class="empty-desc" style="color:var(--danger)">{{ titleVideoError }}</div>
                 <div v-else-if="!titleShotsReady" class="empty-desc">请为全部 {{ titleShots.length }} 个片头镜完成配图与配音</div>
                 <div v-else class="empty-desc">就绪：{{ titleShots.length }} 个片头镜可导出</div>
@@ -323,7 +323,10 @@
             </template>
           </div>
         </div>
-        <div v-else class="export-split">
+        <div v-else-if="exportTab === 'timeline'" class="export-timeline-page" style="flex:1;min-height:0;display:flex;flex-direction:column">
+          <EpisodeTimelineEditor />
+        </div>
+        <div v-else-if="exportTab === 'merge'" class="export-split">
           <div class="export-main">
             <template v-if="mergeProcessing">
               <div class="step-empty">
@@ -609,8 +612,10 @@
 <script lang="ts">
 import { defineComponent } from 'vue'
 import { useEpisodeStudioInject } from '~/composables/useEpisodeStudio'
+import EpisodeTimelineEditor from '~/components/episode/EpisodeTimelineEditor.vue'
 
 export default defineComponent({
+  components: { EpisodeTimelineEditor },
   setup() {
     return useEpisodeStudioInject()
   },

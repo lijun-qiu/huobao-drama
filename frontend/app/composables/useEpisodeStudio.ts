@@ -1,10 +1,11 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick, inject, type InjectionKey } from 'vue'
 import { toast } from 'vue-sonner'
 import {
-  Users, MapPin, Video, ImageIcon, Layers, Mic2, Music, FileText, FolderKanban, Clapperboard, Download, Film, Sparkles, Loader2,
+  Users, MapPin, Video, ImageIcon, Layers, Mic2, Music, FileText, FolderKanban, Clapperboard, Download, Film, Sparkles, Loader2, Scissors,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, musicAPI, uploadAPI, localModelAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, propAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, musicAPI, uploadAPI, localModelAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
+import { hasTimelineProject } from '~/composables/useTimelineProject'
 import {
   parseProductionMode,
   buildSidebarSections,
@@ -46,6 +47,7 @@ import {
   needsLocalVideoHardware,
   resolveEpisodeTextModel,
   resolveNarrationEpisodeTextModel,
+  resolveNarrationImageTextModel,
   resolveEpisodeTextThinking,
   textModelSupportsThinking,
   textModelSupportsVision,
@@ -126,6 +128,8 @@ import {
   narrationScriptChatStep,
   narrationRawContentStep,
   narrationStoryboardStep,
+  usesExplainScriptFlow as usesExplainScriptFlowForMode,
+  isNarrationVideoMode as isNarrationVideoModeForMode,
   usesMotionComicStoryboardRules,
   usesLocalModelPipeline as usesLocalModelPipelineForMode,
   isNarrationLikeMode as isNarrationLikeModeForMode,
@@ -142,12 +146,14 @@ import {
   localModelStageLabel,
   LOCAL_VIDEO_MODEL_OPTIONS,
   DEFAULT_LOCAL_VIDEO_MODEL,
+  DEFAULT_NARRATION_HIGHLIGHT_VIDEO_MODEL,
   FLUX_PROMPT_EN_VERSION,
   repairFluxEnglishForPendingCheck,
   isFluxEnglishPromptInaccurate,
   type LocalModelStage,
 } from '~/composables/useEpisodeWorkflow'
-import { artStyleLabel, ART_STYLES, NARRATION_MINIMAL_STYLE, MOTION_COMIC_STYLE, MOTION_COMIC_DEFAULT_STYLE, NARRATION_IMAGE_STYLE_OPTIONS, resolveNarrationImageStyle, normalizeArtStyle } from '~/composables/useArtStyles'
+import { artStyleLabel, ART_STYLES, NARRATION_MINIMAL_STYLE, NARRATION_ANIME_STYLE, MOTION_COMIC_STYLE, MOTION_COMIC_DEFAULT_STYLE, NOVEL_COMIC_SKETCH_STYLE, NARRATION_IMAGE_STYLE_OPTIONS, resolveNarrationImageStyle, normalizeArtStyle, isNarrationAnimeStyle } from '~/composables/useArtStyles'
+import { canChainVideoContinuityByPrompts } from '~/composables/video-continuity-guard'
 import { buildFolderUploadSlots, isImageUploadFile, parseShotImageFilename } from '~/utils/shotImageFilename'
 import { hasEmphasisMarkers, stripEmphasisMarkers } from '~/utils/subtitle-emphasis'
 import { stampChatAssistantGeneratedAt, stampChatAssistantFailed, pickLlmGeneratedAt, resolveLlmTimestamp, isLlmCancelled, llmErrorMessage } from '~/utils/llm-timestamp'
@@ -178,6 +184,9 @@ function findNarratorChar(list = chars.value) {
 const productionMode = computed(() => parseProductionMode(drama.value))
 const isMotionComicMode = computed(() => productionMode.value === 'motion_comic')
 const isNovelComicMode = computed(() => productionMode.value === 'novel_comic')
+const isNarrationVideoMode = computed(() => isNarrationVideoModeForMode(productionMode.value))
+/** 文案输入 → 解说脚本 → 分镜（仅解说视频）；小说漫画讲解直接用原文 */
+const usesExplainScriptFlow = computed(() => usesExplainScriptFlowForMode(productionMode.value))
 const isLocalComicMode = computed(() => productionMode.value === 'local_comic')
 const isDialoguePortraitMode = computed(() => isDialoguePortraitModeForMode(productionMode.value))
 const usesLocalModelPipeline = computed(() => usesLocalModelPipelineForMode(productionMode.value))
@@ -191,6 +200,8 @@ const isComicStoryboardMode = computed(() => isNarrationLikeMode.value)
 const isComicCharPortraitMode = computed(() => isNarrationLikeMode.value)
 
 const dramaRawStep = computed(() => dramaRawStepForMode(productionMode.value))
+/** 旁白类「文案输入」步号（novel_comic=0；解说视频=0；其它旁白=1） */
+const narrationRawStep = computed(() => narrationRawContentStep(productionMode.value))
 const dramaRewriteStep = computed(() => dramaRewriteStepForMode(productionMode.value))
 const dramaExtractStep = computed(() => dramaExtractStepForMode(productionMode.value))
 const dramaVoiceStep = computed(() => dramaVoiceStepForMode(productionMode.value))
@@ -274,10 +285,10 @@ function readLocalModelBarStage(): LocalModelStage {
 
 const localModelBarStage = ref<LocalModelStage>(readLocalModelBarStage())
 const localModelBarVideoModel = ref((() => {
-  if (typeof window === 'undefined') return DEFAULT_LOCAL_VIDEO_MODEL
+  if (typeof window === 'undefined') return DEFAULT_NARRATION_HIGHLIGHT_VIDEO_MODEL
   const saved = String(window.localStorage.getItem(LOCAL_MODEL_BAR_VIDEO_KEY) || '').trim()
   if (LOCAL_VIDEO_MODEL_OPTIONS.some(item => item.value === saved)) return saved
-  return DEFAULT_LOCAL_VIDEO_MODEL
+  return DEFAULT_NARRATION_HIGHLIGHT_VIDEO_MODEL
 })())
 let localModelBarPollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -795,7 +806,7 @@ const motionComicCharsVoiced = computed(() =>
 )
 
 const storyboardStep = computed(() => {
-  if (isNarrationLikeMode.value) return narrationStoryboardStep()
+  if (isNarrationLikeMode.value) return narrationStoryboardStep(productionMode.value)
   return dramaStoryboardStepForMode(productionMode.value)
 })
 const narratorChar = computed(() => findNarratorChar(chars.value))
@@ -1009,12 +1020,15 @@ const imageDetectBatchThreshold = ref(80)
 const imageDetectBatchSize = ref(30)
 const narrationImageStyle = ref(NARRATION_ANIME_STYLE)
 const narrationImageStyleOptions = computed(() => {
-  if (isMotionComicMode.value || isNovelComicMode.value) {
-    return [{ value: MOTION_COMIC_STYLE, label: isNovelComicMode.value ? '小说漫画' : '漫画解说' }]
+  if (isNovelComicMode.value) {
+    return [{ value: NOVEL_COMIC_SKETCH_STYLE, label: '素笔彩画' }]
+  }
+  if (isMotionComicMode.value) {
+    return [{ value: MOTION_COMIC_STYLE, label: '漫画解说' }]
   }
   if (isDramaLikeMode.value) {
     return ART_STYLES
-      .filter(item => item.value !== MOTION_COMIC_STYLE)
+      .filter(item => item.value !== MOTION_COMIC_STYLE && item.value !== NOVEL_COMIC_SKETCH_STYLE)
       .map(item => ({ value: item.value, label: item.label }))
   }
   return NARRATION_IMAGE_STYLE_OPTIONS.map(item => ({
@@ -1041,7 +1055,11 @@ function readSavedNarrationImageStyle() {
 
 function syncNarrationImageStyleFromDrama() {
   if (!drama.value) return
-  if (isMotionComicMode.value || isNovelComicMode.value) {
+  if (isNovelComicMode.value) {
+    narrationImageStyle.value = NOVEL_COMIC_SKETCH_STYLE
+    return
+  }
+  if (isMotionComicMode.value) {
     narrationImageStyle.value = MOTION_COMIC_STYLE
     return
   }
@@ -1066,6 +1084,8 @@ function syncNarrationImageStyleFromDrama() {
 }
 
 function getNarrationImageStyle() {
+  if (isNovelComicMode.value) return NOVEL_COMIC_SKETCH_STYLE
+  if (isMotionComicMode.value) return MOTION_COMIC_STYLE
   if (isDramaLikeMode.value) return normalizeArtStyle(narrationImageStyle.value)
   return resolveNarrationImageStyle(narrationImageStyle.value)
 }
@@ -1079,7 +1099,11 @@ function onNarrationImageStyleChange(value) {
 
 function restoreNarrationImageStylePref() {
   if (typeof window === 'undefined') return
-  if (isMotionComicMode.value || isNovelComicMode.value) {
+  if (isNovelComicMode.value) {
+    narrationImageStyle.value = NOVEL_COMIC_SKETCH_STYLE
+    return
+  }
+  if (isMotionComicMode.value) {
     narrationImageStyle.value = MOTION_COMIC_STYLE
     return
   }
@@ -1110,7 +1134,10 @@ const SCRIPT_CHAT_WELCOME = computed(() => {
     return '我是对话立绘编剧（视觉小说式：背景不动，立绘说话/微动作）。请写 1～2 个角色对白，每行「角色名：台词」；可写（点头）（挥手）等短动作；段间空行或「【场景】」换景。写完后填入文案，再进入「对话分镜」。'
   }
   if (isNovelComicMode.value) {
-    return '我是小说漫画讲解助手。请先在剧集页粘贴小说并确认章节大纲（一章一集）。本页改的是「本章旁白朗读稿」：叙述为主，可少量讲解衔接；写完后进旁白分镜 → 漫画配图 → TTS。'
+    return '我是小说漫画讲解助手。本模式直接使用小说原文拆镜与配图（无讲解稿、无配音）；成片为全文画在图上 + BGM + 左右翻页。'
+  }
+  if (isNarrationVideoMode.value) {
+    return '我是小说解说助手。点「改成解说脚本」会整篇重写（不扩写旧稿）：先出整章节拍，再写旁白（>20%）+人物对白。约 2～3 分钟成片，上限 1800 字；旁白只讲剧情不写动作表情。'
   }
   if (isMotionComicMode.value) {
     return '我是漫画解说编剧。每行须「说话人：台词」（旁白/角色名/我/剧中）；一句一行；目标约旁白 30% / 对白 70%。篇幅以你指定为准（如写1000字），未指定时默认 3000～8000 字。支持多轮改稿：写完可说「补说话人」「压旁白」「去片尾关注句」等。「直接输入」里已保存的文案会自动带入上下文。'
@@ -1184,6 +1211,12 @@ function syncScriptChatThinking(ep) {
 const scriptChatThinking = ref(DEFAULT_TEXT_THINKING)
 const scriptChatScrollRef = ref(null)
 const scriptChatAbortController = ref(null)
+/** 与 backend NOVEL_COMIC_OPTIMIZE_NARRATION_USER_HINT 保持一致 */
+const NOVEL_COMIC_OPTIMIZE_NARRATION_USER_HINT =
+  '把本章小说/当前台本改成白话讲解稿：精简概括、狠砍感官堆砌；节奏快慢有序（铺垫略慢、高燃短句连击、余波半拍收束）；指代人物一律重复写角色名，禁止任何「他」「她」；可加减承上启下、突出高燃；若有上集前情则先用 2～4 句概括再写本集；禁止旧说书腔与照抄小说长段；字数跟故事走；只输出完整讲解稿。'
+/** 解说视频：与 backend NARRATION_OPTIMIZE_FROM_SOURCE_USER_HINT 保持一致 */
+const NARRATION_OPTIMIZE_FROM_SOURCE_USER_HINT =
+  '把「文案输入」改成解说脚本：整篇重写；涵括整章主线；每行「旁白：」或「角色名：」；旁白行数>20%且只解说剧情、不写动作表情；人物对话承担冲突；约两三分钟成片、上限1800字；禁止旧说书腔与照抄原文；只输出完整解说脚本。'
 const scriptChatQuickHints = computed(() => {
   if (isLocalComicMode.value) {
     return [
@@ -1195,10 +1228,17 @@ const scriptChatQuickHints = computed(() => {
   }
   if (isNovelComicMode.value) {
     return [
-      '把本章稿压缩到约 1200 字，保留关键情节点，口语化便于旁白',
-      '补两三句短讲解衔接，不要改成角色对白台本',
-      '按场景换段，一句别太长，方便拆镜配音',
-      '去掉说教与引流句，只保留小说叙述与必要讲解',
+      '本模式直接用原文，无需改成讲解稿',
+      '在「文案输入」粘贴本章小说原文后进入旁白分镜',
+      '按句拆镜，保留原文关键场面与人名',
+    ]
+  }
+  if (isNarrationVideoMode.value) {
+    return [
+      NARRATION_OPTIMIZE_FROM_SOURCE_USER_HINT,
+      '提高旁白占比到 20% 以上，旁白只讲剧情，动作表情留给对白与画面',
+      '检查每行都有「说话人：」前缀；人物用全名，禁止「他」「她」',
+      '按约 600～700 字/分钟压缩或扩写到合适篇幅',
     ]
   }
   if (isMotionComicMode.value) {
@@ -1217,12 +1257,26 @@ const scriptChatQuickHints = computed(() => {
   ]
 })
 const showScriptChatPanel = computed(() => {
-  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep()) return true
+  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep(productionMode.value)) return true
   if (isLocalComicMode.value && scriptStep.value === LOCAL_DRAMA_SCRIPT_CHAT_STEP) return true
   return false
 })
 const extractRunning = computed(() => isBatchRunning('extract') || (rn.value && rt.value === 'extractor'))
-const scriptChatStepTitle = computed(() => (isNovelComicMode.value ? '本章朗读稿' : '剧本生成'))
+const scriptChatStepTitle = computed(() => {
+  if (!usesExplainScriptFlow.value) return '剧本生成'
+  return isNarrationVideoMode.value ? '解说脚本' : '讲解稿'
+})
+const optimizeExplainScriptButtonLabel = computed(() => (
+  isNarrationVideoMode.value ? '改成解说脚本' : '改成讲解稿'
+))
+const explainScriptStepLabel = computed(() => (
+  isNarrationVideoMode.value ? '解说脚本' : '讲解稿'
+))
+const storyboardScriptStepLabel = computed(() => {
+  if (isDialoguePortraitMode.value) return '对话分镜'
+  if (isNarrationVideoMode.value) return '分镜脚本'
+  return '旁白分镜'
+})
 const scriptChatGenModeHint = computed(() => {
   if (isLocalComicMode.value) {
     return scriptGenMode.value === 'chat' ? 'AI 对话 · 本地 Ollama 写剧本' : '直接输入 · 粘贴小说/大纲/剧本'
@@ -1231,7 +1285,10 @@ const scriptChatGenModeHint = computed(() => {
     return scriptGenMode.value === 'chat' ? 'AI 对话 · 写双人对话稿' : '直接输入 · 粘贴「角色名：台词」'
   }
   if (isNovelComicMode.value) {
-    return scriptGenMode.value === 'chat' ? 'AI 对话 · 改本章旁白朗读稿' : '直接输入 · 编辑本章朗读正文'
+    return '直接输入 · 编辑本章小说原文'
+  }
+  if (isNarrationVideoMode.value) {
+    return scriptGenMode.value === 'chat' ? 'AI 对话 · 旁白+对白解说脚本' : '直接输入 · 编辑解说脚本'
   }
   if (isMotionComicMode.value) {
     return scriptGenMode.value === 'chat' ? 'AI 对话 · 漫画解说写稿' : '直接输入 · 粘贴或编写解说稿'
@@ -1241,6 +1298,7 @@ const scriptChatGenModeHint = computed(() => {
 const scriptChatAssistantLabel = computed(() => {
   if (isDialoguePortraitMode.value) return '对话编剧'
   if (isNovelComicMode.value) return '小说讲解'
+  if (isNarrationVideoMode.value) return '小说解说'
   if (isMotionComicMode.value) return '解说大师'
   if (isLocalComicMode.value) return '编剧'
   return 'AI'
@@ -1253,7 +1311,13 @@ const scriptChatManualPlaceholder = computed(() => {
     return '粘贴对话脚本，每行「角色名：台词」；本集 1～2 人；段间空行换场景'
   }
   if (isNovelComicMode.value) {
-    return '本章旁白朗读正文（叙述为主）…\n可从剧集页「确认大纲」自动填入，再在此微调'
+    return '粘贴或编辑本章小说原文…\n保存后进入「旁白分镜」按原文拆镜'
+  }
+  if (isNarrationVideoMode.value) {
+    return '编辑解说脚本…\n每行「旁白：」或「角色名：」；可点「改成解说脚本」由「文案输入」生成'
+  }
+  if (usesExplainScriptFlow.value) {
+    return '编辑小说解说讲解稿…\n可点「改成讲解稿」由「文案输入」生成，再在此微调'
   }
   if (isMotionComicMode.value) {
     return '粘贴或编写快切解说稿…\n首行：本期故事：…\n一句一行，段间空行换场景'
@@ -1268,7 +1332,10 @@ const scriptChatManualHint = computed(() => {
     return '对话立绘须用「角色名：台词」；本集 1～2 人。保存后进「对话分镜」。'
   }
   if (isNovelComicMode.value) {
-    return '小说漫画讲解：旁白念本章小说。请先在剧集页完成「粘贴小说 → 章节大纲 → 确认建集」。保存后进旁白分镜。'
+    return '小说漫画讲解：文案输入（小说原文）→ 旁白分镜（按原文拆镜）→ 9:16 素笔彩画二/三列配图（全文画在图上）→ BGM + 左右翻页（3 秒一切，无配音）。不再生成讲解稿。'
+  }
+  if (isNarrationVideoMode.value) {
+    return '解说视频：文案输入（小说/大纲）→ 解说脚本（旁白>20%+人物对白）→ 分镜脚本（约10s一镜+画面描述）→ 一镜一图/一视频。分镜起都以解说脚本为准。'
   }
   if (isMotionComicMode.value) {
     return '漫画解说须用快切解说稿（每行说话人：台词；约旁白 30% / 对白 70%）；保存后进分镜。在 AI 对话里说「补说话人」「压旁白」可改已保存文案。'
@@ -1283,7 +1350,13 @@ const scriptChatInputPlaceholder = computed(() => {
     return '写一段双人对话（角色名：台词），或多轮改稿…'
   }
   if (isNovelComicMode.value) {
-    return '改本章朗读稿：压缩、口语化、补短讲解句…（直接输入里的文案会自动带入）'
+    return '本模式直接使用原文，请到「文案输入」粘贴小说…'
+  }
+  if (isNarrationVideoMode.value) {
+    return '改成解说脚本…（「文案输入」与当前解说脚本会自动带入）'
+  }
+  if (usesExplainScriptFlow.value) {
+    return '改成讲解稿…（「文案输入」与当前讲解稿会自动带入）'
   }
   if (isMotionComicMode.value) {
     return '写完整稿，或多轮改稿：补说话人、压旁白、去片尾…（直接输入里的文案会自动带入）'
@@ -1294,19 +1367,37 @@ const scriptChatInputPlaceholder = computed(() => {
 const scriptChatResolvedMinChars = ref<number | null>(null)
 const scriptChatMinChars = computed(() => (
   scriptChatResolvedMinChars.value
-  ?? (isLocalComicMode.value ? 2000 : (isDialoguePortraitMode.value ? 800 : (isNovelComicMode.value ? 400 : 3000)))
+  ?? (isLocalComicMode.value ? 2000 : (isDialoguePortraitMode.value ? 800 : (isNovelComicMode.value ? 80 : 3000)))
 ))
 const scriptChatModelOptionsForPicker = computed(() => (
   usesLocalModelPipeline.value ? localLlmModelOptions.value : textModelOptions.value
 ))
 const scriptChatModelSupportsThinking = computed(() => textModelSupportsThinking(scriptChatModel.value))
 
-const IMAGE_DETECT_CHAT_WELCOME = computed(() => usesComicVisuals.value
-  ? '我是漫画配图换镜检测助手。可讨论哪些镜头需要单独配图（约 2～4 镜一图、按场景/动作换图、换人不强制换图、整段一种运镜）；说「开始检测」或点快捷按钮，我会流式展示检测过程。'
-  : '我是配图换镜检测助手。可讨论哪些镜头需要单独配图；说「开始检测」或点下方快捷按钮，我会流式展示检测过程。检测完成后可继续多轮调整策略并重新检测。')
-const IMAGE_PROMPT_CHAT_WELCOME = computed(() => usesComicVisuals.value
-  ? '我是漫画配图文案助手。须先完成换镜检测；说「开始生成文案」或点快捷按钮，我会流式展示整段国漫配图文案生成过程。主要配角须写定妆外貌。'
-  : '我是配图文案助手。需先完成换镜检测；说「开始生成文案」或点快捷按钮，我会流式展示六维文案生成过程。生成后可逐段讨论修改，或补全缺失文案。')
+const IMAGE_DETECT_CHAT_WELCOME = computed(() => {
+  if (isNovelComicMode.value) {
+    return '我是小说漫画竖页换页检测助手。一张配图=一整页 9:16 二列或三列分格（≈二～三个场面）；按剧情内容换页，无硬性张数比例。说「开始检测」或点快捷按钮执行。'
+  }
+  if (isNarrationVideoMode.value) {
+    return '我是解说视频配图同步助手。分镜已按约 10 秒拆好，配图一镜一图、不再合并分段。说「开始同步分镜配图」或点快捷按钮确认每镜独立锚点。'
+  }
+  if (usesComicVisuals.value) {
+    return '我是漫画配图换镜检测助手。可讨论哪些镜头需要单独配图（约 2～4 镜一图、按场景/动作换图、换人不强制换图、整段一种运镜）；说「开始检测」或点快捷按钮，我会流式展示检测过程。'
+  }
+  return '我是配图换镜检测助手。可讨论哪些镜头需要单独配图；说「开始检测」或点下方快捷按钮，我会流式展示检测过程。检测完成后可继续多轮调整策略并重新检测。'
+})
+const IMAGE_PROMPT_CHAT_WELCOME = computed(() => {
+  if (isNovelComicMode.value) {
+    return '我是小说漫画竖页配图文案助手。须先完成换页检测；说「开始生成文案」：为每页 9:16 二/三列写素笔彩画文案（按该页原文组织分格，全文画在图上）。'
+  }
+  if (isNarrationVideoMode.value) {
+    return '我是解说视频配图文案助手。须先同步分镜配图（一镜一图）；说「开始生成文案」：按每镜画面描述写生图文案。'
+  }
+  if (usesComicVisuals.value) {
+    return '我是漫画配图文案助手。须先完成换镜检测；说「开始生成文案」或点快捷按钮，我会流式展示整段国漫配图文案生成过程。主要配角须写定妆外貌。'
+  }
+  return '我是配图文案助手。需先完成换镜检测；说「开始生成文案」或点快捷按钮，我会按 Toonflow 规则用 LLM 流式生成配图文案（非本地秒转）。生成后可逐段讨论修改，或补全缺失文案。'
+})
 const IMAGE_DETECT_CHAT_STORAGE_PREFIX = 'huobao:narration-image-detect-chat:'
 const IMAGE_PROMPT_CHAT_STORAGE_PREFIX = 'huobao:narration-image-prompt-chat:'
 
@@ -1375,12 +1466,21 @@ const imageDetectChatInput = ref('')
 const imageDetectChatGenerating = ref(false)
 const imageDetectChatScrollRef = ref(null)
 const imageDetectChatAbortController = ref(null)
-const imageDetectChatQuickHints = [
-  '开始检测配图',
-  '更保守一些，减少配图张数',
-  '片头和第一个场景切换处务必单独配图',
-  '重新检测，合并同一场景的连续镜头',
-]
+const imageDetectChatQuickHints = computed(() => {
+  if (isNarrationVideoMode.value) {
+    return [
+      '开始同步分镜配图',
+      '按分镜一镜一图，不要合并',
+      '确认每镜都有独立配图锚点',
+    ]
+  }
+  return [
+    '开始检测配图',
+    '更保守一些，减少配图张数',
+    '片头和第一个场景切换处务必单独配图',
+    '重新检测，合并同一场景的连续镜头',
+  ]
+})
 
 const imagePromptChatMessages = ref(defaultImagePromptChatMessages())
 const imagePromptChatInput = ref('')
@@ -1394,9 +1494,18 @@ const imagePromptChatQuickHints = [
   '第5段改成夜市全景，突出霓虹灯牌',
 ]
 
-const STORYBOARD_CHAT_WELCOME = computed(() => usesComicStoryboardRules.value
-  ? '我是旁白分镜助手。整稿按句拆镜、自动标注 ** 强调、片头单独处理；配图约 2～4 镜一图、按场景/动作换图（换人不强制换图），同图整段一种运镜。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程。'
-  : '我是旁白分镜助手。整稿拆镜：按句分镜、自动标注 ** 强调、片头单独处理。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程；完成后可继续多轮讨论并重新分镜。')
+const STORYBOARD_CHAT_WELCOME = computed(() => {
+  if (isNovelComicMode.value) {
+    return '我是旁白分镜助手。按「文案输入」中的小说原文整稿拆镜，自动标注 ** 强调；后续竖屏二/三列配图按剧情内容换页。说「开始分镜」或点「执行拆镜」。'
+  }
+  if (isNarrationVideoMode.value) {
+    return '我是分镜脚本助手。用 LLM 按「解说脚本」拆镜（约 10 秒≈108 字/镜，650 字/分钟；不同说话人可合并），同时写画面描述与秒数；失败不会改规则分镜。说「开始分镜」或点「执行拆镜」。'
+  }
+  if (usesComicStoryboardRules.value) {
+    return '我是旁白分镜助手。整稿按句拆镜、自动标注 ** 强调、片头单独处理；配图约 2～4 镜一图、按场景/动作换图（换人不强制换图），同图整段一种运镜。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程。'
+  }
+  return '我是旁白分镜助手。整稿拆镜：按句分镜、自动标注 ** 强调、片头单独处理。说「开始分镜」或点「执行拆镜」，可流式看到拆镜过程；完成后可继续多轮讨论并重新分镜。'
+})
 const STORYBOARD_CHAT_STORAGE_PREFIX = 'huobao:narration-storyboard-chat:'
 
 function defaultStoryboardChatMessages() {
@@ -1426,21 +1535,58 @@ const rawContent = computed(() => episode.value?.content || '')
 const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
 
 function resolveEpisodeScriptDraft() {
+  // 讲解稿流程：分镜/制作只认 script_content
+  if (usesExplainScriptFlow.value) {
+    return (localScript.value || scriptContent.value || '').trim()
+  }
+  // 小说漫画：只用原文 content，不回落到旧讲解稿 script_content
+  if (isNovelComicMode.value) {
+    return (localRaw.value || rawContent.value || '').trim()
+  }
   return (localScript.value || localRaw.value || scriptContent.value || rawContent.value || '').trim()
 }
 
 async function ensureEpisodeScriptPersisted() {
+  if (usesExplainScriptFlow.value) {
+    const script = resolveEpisodeScriptDraft()
+    const stepName = explainScriptStepLabel.value
+    if (!script) throw new Error(`请先在「${stepName}」步骤生成或填写${stepName}`)
+    if (!epId.value) throw new Error('集信息加载中，请稍后重试')
+    localScript.value = script
+    await episodeAPI.update(epId.value, { script_content: script })
+    episode.value.script_content = script
+    return script
+  }
   const script = resolveEpisodeScriptDraft()
   if (!script) {
-    throw new Error('请先在「原始内容」或「AI 改写」步骤填写剧本')
+    throw new Error(
+      isNovelComicMode.value
+        ? '请先在「文案输入」粘贴本章小说原文'
+        : '请先在「原始内容」或「AI 改写」步骤填写剧本',
+    )
   }
   if (!epId.value) throw new Error('集信息加载中，请稍后重试')
-  localScript.value = script
   localRaw.value = script
+  if (isNovelComicMode.value) {
+    // 清空旧讲解稿，避免下游误读
+    localScript.value = ''
+    await episodeAPI.update(epId.value, { content: script, script_content: '' })
+    episode.value.content = script
+    episode.value.script_content = ''
+    return script
+  }
+  localScript.value = script
   await episodeAPI.update(epId.value, { content: script, script_content: script })
   episode.value.content = script
   episode.value.script_content = script
   return script
+}
+
+function saveNovelComicNarrationScript() {
+  const script = (localScript.value || '').trim()
+  if (!epId.value) return
+  episodeAPI.update(epId.value, { script_content: script })
+  episode.value.script_content = script
 }
 
 const epId = computed(() => episode.value?.id || 0)
@@ -1940,15 +2086,43 @@ const scriptVoiceProfiles = computed(() => {
 })
 const narratorVoiceSelectOptions = computed(() => {
   const api = voiceSelectOptions.value
+  const gptsovits = localCastVoiceProfiles.value.filter(v => v.source === 'gptsovits')
   const cloned = localCastVoiceProfiles.value.filter(v => v.source === 'cloned')
+  const gsvLabel = localTtsEngine.value === 'indextts'
+    ? 'IndexTTS2 克隆'
+    : (localTtsEngine.value === 'gptsovits' ? 'GPT-SoVITS 克隆' : 'IndexTTS2 / GPT-SoVITS 克隆')
+  const gsvGroup = localTtsEngine.value === 'indextts'
+    ? '── IndexTTS2 克隆（GPT-SoVITS 库）──'
+    : '── GPT-SoVITS / IndexTTS2 克隆 ──'
+  const currentId = String(narratorVoiceId.value || '').trim()
+  const knownIds = new Set([
+    ...api.map(v => v.value),
+    ...gptsovits.map(v => v.id),
+    ...cloned.map(v => v.id),
+  ])
+  // 音色库暂时为空时，仍保留角色已绑定的 gsv: 音色，避免下拉空白
+  const orphanGsv = /^gsv:/i.test(currentId) && !knownIds.has(currentId)
+    ? [{
+        label: `[已绑定] ${stripGsvId(currentId)} · ${gsvLabel}`,
+        value: currentId,
+      }]
+    : []
   return [
-    ...(api.length ? [{ label: '── API 音色 ──', value: '', disabled: true }] : []),
-    ...api,
-    ...(cloned.length ? [{ label: '── Voicebox 克隆 ──', value: '', disabled: true }] : []),
-    ...cloned.map(v => ({
-      label: `${v.gender ? `[${v.gender}] ` : ''}${v.label} · 克隆`,
+    ...(gptsovits.length || orphanGsv.length
+      ? [{ label: gsvGroup, value: '', disabled: true }]
+      : []),
+    ...gptsovits.map(v => ({
+      label: `${v.gender ? `[${v.gender}] ` : ''}${v.label} · ${gsvLabel}`,
       value: v.id,
     })),
+    ...orphanGsv,
+    ...(cloned.length ? [{ label: '── Voicebox 克隆 ──', value: '', disabled: true }] : []),
+    ...cloned.map(v => ({
+      label: `${v.gender ? `[${v.gender}] ` : ''}${v.label} · Voicebox 克隆`,
+      value: v.id,
+    })),
+    ...(api.length ? [{ label: '── API 音色 ──', value: '', disabled: true }] : []),
+    ...api,
   ]
 })
 const charVoicePreviewingId = ref(null)
@@ -2175,7 +2349,12 @@ async function ensureLocalTtsEngineForBatch() {
       }
     }
     if (localTtsEngine.value === 'gptsovits' && !gptsovitsAvailable.value) {
-      if (voiceboxAvailable.value) {
+      if (indexttsAvailable.value) {
+        localTtsEngine.value = 'indextts'
+        persistLocalTtsPrefs()
+        await refreshLocalVoices()
+        toast.warning('GPT-SoVITS 未运行，已自动改用 IndexTTS2（共用克隆音色库）')
+      } else if (voiceboxAvailable.value) {
         localTtsEngine.value = 'voicebox'
         persistLocalTtsPrefs()
         toast.warning('GPT-SoVITS 未运行，已自动改用 Voicebox')
@@ -2483,11 +2662,25 @@ const videoConfigs = ref([])
 const audioConfigs = ref([])
 const pendingCharImageIds = ref([])
 const charPortraitUseReferenceById = ref({})
+/** 分镜配图是否挂定妆参考（默认开，可关；按剧集记 localStorage） */
+const narrationShotUsePortraitReference = ref(true)
+/** 分镜配图是否挂场景定妆参考（默认开） */
+const narrationShotUseSceneReference = ref(true)
+/** 分镜配图是否挂道具定妆参考（默认开） */
+const narrationShotUsePropReference = ref(true)
+/** 小说漫画格字：short=空框叠字（默认）| full=模型画长文 */
+const narrationShotPanelTextMode = ref('full')
 const pendingCharRecognizeIds = ref([])
 const pendingCharStyleValidateIds = ref([])
 const charStyleValidateResult = ref({})
 const pendingCharAppearanceIds = ref([])
 const pendingSceneImageIds = ref([])
+const pendingPropImageIds = ref([])
+const props = ref([])
+const narrationEnvExtracting = ref(false)
+const narrationEnvExtractError = ref('')
+const narrationEnvExtractGeneratedAt = ref('')
+const narrationEnvExtractFailedAt = ref('')
 const pendingShotFrameKeys = ref([])
 const pendingNarrationShotIds = ref([])
 const narrationShotImageJobs = ref({})
@@ -2498,6 +2691,7 @@ const pendingShotScanIds = ref([])
 const shotScanResult = ref({})
 const shotImageValidatePanel = ref(null)
 const pendingVideoIds = ref([])
+const pendingVideoPromptIds = ref([])
 const pendingComposeIds = ref([])
 const PROD_SHOT_PAGE_SIZE = 24
 const NARRATION_SHOT_PAGE_SIZE = 6
@@ -2622,8 +2816,9 @@ function splitNarrationLines(text) {
 
 function estimateNarrationDurationLocal(sentence, isTitle = false) {
   const chars = sentence.replace(/\s/g, '').length
-  if (isTitle) return Math.max(6, Math.min(12, Math.ceil(chars / 3.5)))
-  return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
+  if (isTitle) return Math.max(6, Math.min(12, Math.round(chars / 3.5) || 6))
+  // 与后端一致：解说脚本约 650 字/分钟 → 10s≈108 字
+  return Math.max(7, Math.min(13, Math.round(chars / (650 / 60)) || 7))
 }
 
 function buildNarrationMetaForShot(options) {
@@ -2648,7 +2843,11 @@ function buildNarrationMetaForShot(options) {
     narration_tts_mode: 'new',
   }
   if (baseMeta.paragraph_index != null) meta.paragraph_index = baseMeta.paragraph_index
-  meta.paragraph_layout = baseMeta.paragraph_layout === 'diptych' ? 'diptych' : 'single'
+  meta.paragraph_layout = baseMeta.paragraph_layout === 'quad'
+    ? 'quad'
+    : baseMeta.paragraph_layout === 'diptych'
+      ? 'diptych'
+      : 'single'
   if (baseMeta.scene_content) meta.scene_content = baseMeta.scene_content
   return JSON.stringify(meta)
 }
@@ -2863,7 +3062,7 @@ async function insertShotAfter(sb) {
       title: isTitle ? '片头标题' : `镜头${num}`,
       description: '',
       dialogue: isTitle ? '剧中：' : (isMotionComicMode.value && extractDialogueSpeaker(sb.dialogue) ? `${extractDialogueSpeaker(sb.dialogue)}：` : '旁白：'),
-      duration: 6,
+      duration: 10,
       shot_type: isTitle ? '标题' : '中景',
       angle: '平视',
       movement: '固定',
@@ -3056,6 +3255,88 @@ function toggleCharPortraitUseReference(id) {
   }
 }
 
+function narrationShotPortraitRefStorageKey() {
+  return dramaId ? `huobao-narration-shot-portrait-ref-${dramaId}` : 'huobao-narration-shot-portrait-ref'
+}
+
+function narrationShotSceneRefStorageKey() {
+  return dramaId ? `huobao-narration-shot-scene-ref-${dramaId}` : 'huobao-narration-shot-scene-ref'
+}
+
+function narrationShotPropRefStorageKey() {
+  return dramaId ? `huobao-narration-shot-prop-ref-${dramaId}` : 'huobao-narration-shot-prop-ref'
+}
+
+function restoreNarrationShotUsePortraitReference() {
+  if (typeof window === 'undefined') return
+  const saved = window.localStorage.getItem(narrationShotPortraitRefStorageKey())
+  // 缺省 / 非 false → 开
+  narrationShotUsePortraitReference.value = saved !== 'false'
+  const sceneSaved = window.localStorage.getItem(narrationShotSceneRefStorageKey())
+  narrationShotUseSceneReference.value = sceneSaved !== 'false'
+  const propSaved = window.localStorage.getItem(narrationShotPropRefStorageKey())
+  narrationShotUsePropReference.value = propSaved !== 'false'
+}
+
+function persistNarrationShotUsePortraitReference() {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(
+    narrationShotPortraitRefStorageKey(),
+    narrationShotUsePortraitReference.value ? 'true' : 'false',
+  )
+}
+
+function persistNarrationShotUseSceneReference() {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(
+    narrationShotSceneRefStorageKey(),
+    narrationShotUseSceneReference.value ? 'true' : 'false',
+  )
+}
+
+function persistNarrationShotUsePropReference() {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(
+    narrationShotPropRefStorageKey(),
+    narrationShotUsePropReference.value ? 'true' : 'false',
+  )
+}
+
+function toggleNarrationShotUsePortraitReference() {
+  narrationShotUsePortraitReference.value = !narrationShotUsePortraitReference.value
+  persistNarrationShotUsePortraitReference()
+}
+
+function toggleNarrationShotUseSceneReference() {
+  narrationShotUseSceneReference.value = !narrationShotUseSceneReference.value
+  persistNarrationShotUseSceneReference()
+}
+
+function toggleNarrationShotUsePropReference() {
+  narrationShotUsePropReference.value = !narrationShotUsePropReference.value
+  persistNarrationShotUsePropReference()
+}
+
+function narrationShotPanelTextModeStorageKey() {
+  return dramaId ? `huobao-narration-panel-text-mode-${dramaId}` : 'huobao-narration-panel-text-mode'
+}
+
+function restoreNarrationShotPanelTextMode() {
+  if (typeof window === 'undefined') return
+  const saved = window.localStorage.getItem(narrationShotPanelTextModeStorageKey())
+  narrationShotPanelTextMode.value = saved === 'short' ? 'short' : 'full'
+}
+
+function persistNarrationShotPanelTextMode() {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(narrationShotPanelTextModeStorageKey(), narrationShotPanelTextMode.value)
+}
+
+function toggleNarrationShotPanelTextMode() {
+  narrationShotPanelTextMode.value = narrationShotPanelTextMode.value === 'full' ? 'short' : 'full'
+  persistNarrationShotPanelTextMode()
+}
+
 function openImageViewer(src, title = '') {
   if (!src) return
   imageViewer.value = { open: true, src, title }
@@ -3119,6 +3400,10 @@ function isPendingSceneImage(id) {
   return pendingSceneImageIds.value.includes(id)
 }
 
+function isPendingPropImage(id) {
+  return pendingPropImageIds.value.includes(id)
+}
+
 function framePendingKey(id, frameType) {
   return `${id}:${frameType}`
 }
@@ -3129,6 +3414,10 @@ function isPendingShotFrame(id, frameType) {
 
 function isPendingVideo(id) {
   return pendingVideoIds.value.includes(id)
+}
+
+function isPendingVideoPrompt(id) {
+  return pendingVideoPromptIds.value.includes(id)
 }
 
 function videoFailMessage(id) {
@@ -3348,6 +3637,14 @@ function narrationTextModelParams() {
   return {
     text_model: episodeTextModel.value,
     text_thinking: episodeTextThinking.value,
+  }
+}
+
+/** 配图文案：固定 Ultra（不跟工作台全局 Laguna） */
+function narrationImagePromptTextModelParams() {
+  return {
+    text_model: resolveNarrationImageTextModel(),
+    text_thinking: false,
   }
 }
 
@@ -3640,7 +3937,14 @@ const gridBlankStyle = computed(() => {
 function prodStepDone(id) {
   if (id === 'voice') return narratorReady.value
   if (id === 'chars') return !visualCharTotal.value || charImgCount.value === visualCharTotal.value
-  if (id === 'scenes') return !!scenes.value.length && sceneImgCount.value === scenes.value.length
+  if (id === 'scenes') {
+    if (isNarrationMode.value) {
+      const total = scenes.value.length + props.value.length
+      if (!total) return false
+      return sceneImgCount.value + propImgCount.value >= total
+    }
+    return !!scenes.value.length && sceneImgCount.value === scenes.value.length
+  }
   if (id === 'dubbing') {
     const ready = isNarrationMode.value ? narrationTtsReady.value : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
     return !!sbs.value.length && ready
@@ -3669,7 +3973,12 @@ function goNextProd() {
 // Script step navigation
 const stepLabels = computed(() => {
   if (isDialoguePortraitMode.value) return ['剧本生成', '文案输入', '对话分镜']
-  if (isNovelComicMode.value) return ['本章朗读稿', '文案输入', '旁白分镜']
+  if (isNovelComicMode.value) return ['文案输入', '旁白分镜']
+  if (usesExplainScriptFlow.value) {
+    return isNarrationVideoMode.value
+      ? ['文案输入', '解说脚本', '分镜脚本']
+      : ['文案输入', '讲解稿', '旁白分镜']
+  }
   if (isMotionComicMode.value) return ['剧本生成', '文案输入', '旁白分镜']
   if (isNarrationMode.value) return ['剧本生成', '文案输入', '旁白分镜']
   if (isLocalComicMode.value) return ['剧本生成', '原始内容', 'AI 改写', '提取', '音色', '分镜']
@@ -3684,11 +3993,18 @@ const canGoNext = computed(() => {
   if (isLocalComicMode.value && scriptStep.value === LOCAL_DRAMA_SCRIPT_CHAT_STEP) {
     return !!localRaw.value.trim() || !!lastScriptChatDraft.value || scriptGenMode.value === 'chat'
   }
-  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep()) {
+  if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep(productionMode.value)) {
+    if (usesExplainScriptFlow.value) {
+      return !!localScript.value.trim() || !!lastScriptChatDraft.value || scriptGenMode.value === 'chat'
+    }
     return !!localRaw.value.trim() || !!lastScriptChatDraft.value || scriptGenMode.value === 'chat'
   }
-  if (isNarrationMode.value && scriptStep.value === narrationRawContentStep()) return !!localRaw.value.trim()
-  if (isNarrationMode.value && scriptStep.value === narrationStoryboardStep()) return sbs.value.length > 0
+  if (isNarrationMode.value && scriptStep.value === narrationRawContentStep(productionMode.value)) {
+    return !!localRaw.value.trim()
+  }
+  if (isNarrationMode.value && scriptStep.value === narrationStoryboardStep(productionMode.value)) {
+    return sbs.value.length > 0
+  }
   if (scriptStep.value === dramaRawStep.value) return !!localRaw.value.trim()
   if (scriptStep.value === dramaRewriteStep.value) return !!localScript.value.trim() || !!scriptContent.value
   if (scriptStep.value === dramaExtractStep.value) return chars.value.length > 0
@@ -3710,11 +4026,34 @@ function goNextStep() {
         return
       }
     }
-    if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep() && localRaw.value.trim()) {
-      await ensureEpisodeScriptPersisted()
+    if (isNarrationMode.value && scriptStep.value === narrationScriptChatStep(productionMode.value)) {
+      if (usesExplainScriptFlow.value) {
+        if (localScript.value.trim() || lastScriptChatDraft.value) {
+          try {
+            if (lastScriptChatDraft.value && !localScript.value.trim()) {
+              applyScriptChatToEditor('replace', false)
+            } else {
+              await ensureEpisodeScriptPersisted()
+            }
+          } catch (e) {
+            toast.error(e.message)
+            return
+          }
+        }
+      } else if (localRaw.value.trim()) {
+        await ensureEpisodeScriptPersisted()
+      }
     }
-    if (isNarrationMode.value && scriptStep.value === narrationRawContentStep() && localRaw.value.trim()) {
-      await ensureEpisodeScriptPersisted()
+    if (
+      isNarrationMode.value
+      && scriptStep.value === narrationRawContentStep(productionMode.value)
+      && localRaw.value.trim()
+    ) {
+      if (usesExplainScriptFlow.value) {
+        saveRaw()
+      } else {
+        await ensureEpisodeScriptPersisted()
+      }
     }
     if (!isNarrationMode.value && !isLocalComicMode.value && scriptStep.value === dramaRawStep.value && localRaw.value.trim()) {
       try {
@@ -4450,18 +4789,32 @@ const charAppearancesPendingCount = computed(() =>
 const sceneImagesPendingCount = computed(() =>
   scenes.value.filter(s => !(s.image_url || s.imageUrl)).length,
 )
-/** 解说模式按合成单元生成；剧场模式按镜头 */
+const propImgCount = computed(() => props.value.filter(p => p.image_url || p.imageUrl).length)
+const propImagesPendingCount = computed(() =>
+  props.value.filter(p => !(p.image_url || p.imageUrl)).length,
+)
+/** 解说视频按分镜一镜一视频；其他模式按镜头 */
 const videoGenTargets = computed(() => {
-  if (isNarrationMode.value) return composeUnitShots.value.filter(sb => !isNarrationTitleShot(sb))
+  if (isNarrationMode.value) return sbs.value.filter(sb => !isNarrationTitleShot(sb))
   return sbs.value
 })
+
+function isHighlightMotionShot(sb) {
+  const anchor = resolveNarrationImageAnchorShot(sbs.value, sb) || sb
+  return !!parseNarrationImageMeta(anchor).highlight_motion
+}
+
+/** 解说：正文镜均可图生视频（与 videoGenTargets 一致） */
+const highlightMotionTargets = computed(() => videoGenTargets.value)
+
+const highlightVideosPendingCount = computed(() =>
+  highlightMotionTargets.value.filter(s => hasImg(s) && !hasVid(s)).length,
+)
 
 const videosPendingCount = computed(() =>
   videoGenTargets.value.filter(s => hasImg(s) && !hasVid(s)).length,
 )
-const videosDoneCount = computed(() =>
-  videoGenTargets.value.filter(s => hasVid(s)).length,
-)
+const videosDoneCount = computed(() => videoGenTargets.value.filter(s => hasVid(s)).length)
 const videosProcessingCount = computed(() =>
   videoGenTargets.value.filter(s => isPendingVideo(s.id)).length,
 )
@@ -4500,6 +4853,11 @@ function getVideoUnitMergedText(sb) {
 }
 
 function estimateVideoDurationSec(sb) {
+  // 解说视频一镜一视频：优先用分镜标注的秒数（约 10s）
+  const fromField = Number(sb?.duration)
+  if (isNarrationMode.value && Number.isFinite(fromField) && fromField > 0) {
+    return Math.max(2, Math.min(13, fromField))
+  }
   // 与镜头合成同一套：同配图段多句累加（有 TTS duration 用实测，否则按字数估）
   if (isNarrationMode.value || isLocalComicMode.value) {
     const unitSec = getComposeUnitTotalDurationSec(sb, sbs.value, composeUnitGroups.value)
@@ -4507,19 +4865,53 @@ function estimateVideoDurationSec(sb) {
       return Math.max(2, Math.round(unitSec * 10) / 10)
     }
   }
-  const fromField = Number(sb?.duration)
   if (Number.isFinite(fromField) && fromField > 0) return fromField
   const text = getVideoUnitMergedText(sb)
   if (text) {
     const chars = text.replace(/\s/g, '').length
-    return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
+    return Math.max(7, Math.min(13, Math.round(chars / 4.5) || 7))
   }
-  return 3
+  return 10
 }
 
-function buildLocalVideoPrompt(sb) {
-  const existing = String(sb?.video_prompt || sb?.videoPrompt || '').trim()
-  if (existing) return existing
+function getStoryboardVideoPrompt(sb): string {
+  return String(sb?.video_prompt || sb?.videoPrompt || '').trim()
+}
+
+function hasVideoPrompt(sb): boolean {
+  return getStoryboardVideoPrompt(sb).length >= 8
+}
+
+function updateStoryboardVideoPrompt(sb, value) {
+  if (!sb?.id) return
+  const trimmed = String(value || '').trim()
+  updateField(sb, 'video_prompt', trimmed)
+}
+
+async function copyStoryboardVideoPrompt(sb) {
+  const prompt = getStoryboardVideoPrompt(sb)
+  if (!prompt) {
+    toast.warning('暂无视频描述')
+    return
+  }
+  const label = getComposeUnitShotRangeLabel(sb, sbs.value) || `#${sb.id}`
+  const copied = await copyTextToClipboard(prompt)
+  if (copied) toast.success(`已复制镜头 ${label} 视频描述`)
+}
+
+const videoPromptsPendingCount = computed(() =>
+  videoGenTargets.value.filter(s => !hasVideoPrompt(s)).length,
+)
+const videoPromptsDoneCount = computed(() =>
+  videoGenTargets.value.filter(s => hasVideoPrompt(s)).length,
+)
+const videoPromptsTotalCount = computed(() => videoGenTargets.value.length)
+
+function buildLocalVideoPrompt(sb, opts?: { force?: boolean }) {
+  if (!opts?.force) {
+    const existing = getStoryboardVideoPrompt(sb)
+    if (existing) return existing
+  }
   const anchor = resolveNarrationImageAnchorShot(sbs.value, sb) || sb
   const meta = parseNarrationImageMeta(anchor)
   const paragraph = getVideoUnitMergedText(sb)
@@ -4532,7 +4924,88 @@ function buildLocalVideoPrompt(sb) {
     || anchor?.description
     || '',
   ).trim()
-  return buildVideoPromptFromParagraphAndImage(imageScene, paragraph)
+  return buildVideoPromptFromParagraphAndImage(imageScene, paragraph, {
+    highlight: !!meta.highlight_motion,
+    highlightReason: meta.highlight_reason,
+  })
+}
+
+async function generateVideoPromptForShot(sb, opts?: { force?: boolean; silent?: boolean }) {
+  if (!sb?.id) return null
+  if (isPendingVideoPrompt(sb.id)) {
+    if (!opts?.silent) toast.info('该镜视频描述正在生成中…')
+    return null
+  }
+  pendingVideoPromptIds.value = [...new Set([...pendingVideoPromptIds.value, sb.id])]
+  if (!opts?.silent) toast.info('AI 正在生成视频描述…（约 10～30 秒）')
+  try {
+    const res = await storyboardAPI.generateVideoPrompt(sb.id, {
+      force: opts?.force !== false,
+      text_model: episodeTextModel.value,
+      text_thinking: false,
+    })
+    const prompt = String(res?.videoPrompt || res?.video_prompt || '').trim()
+    if (prompt) {
+      sb.video_prompt = prompt
+      sb.videoPrompt = prompt
+      const live = sbs.value.find(item => item.id === sb.id)
+      if (live && live !== sb) {
+        live.video_prompt = prompt
+        live.videoPrompt = prompt
+      }
+    }
+    if (!opts?.silent) {
+      const source = String(res?.source || '')
+      toast.success(source === 'rule' ? '视频描述已生成（规则兜底）' : '视频描述已由 AI 生成')
+    }
+    return prompt
+  } catch (e: any) {
+    if (!opts?.silent) toast.error(e?.message || '生成视频描述失败')
+    throw e
+  } finally {
+    pendingVideoPromptIds.value = pendingVideoPromptIds.value.filter(id => id !== sb.id)
+  }
+}
+
+async function batchVideoPrompts(opts?: { force?: boolean }) {
+  if (!epId.value) return
+  // 默认「一键所有」= 全部分镜都生成/重写；only_missing 时才只补缺
+  const force = opts?.force !== false
+  const targets = force
+    ? [...videoGenTargets.value]
+    : videoGenTargets.value.filter(s => !hasVideoPrompt(s))
+  if (!targets.length) {
+    toast.info(force ? '没有可生成的分镜' : '视频描述已全部生成')
+    return
+  }
+  if (!tryBeginBatch('videoPrompts', force
+    ? `AI 正在生成全部 ${targets.length} 条视频描述…`
+    : `AI 正在补全 ${targets.length} 条视频描述…`)) return
+  let updated = 0
+  let failed = 0
+  try {
+    // 前端串行单镜调用，便于每卡显示「生成中」，并避免整集长请求超时
+    for (let i = 0; i < targets.length; i++) {
+      const sb = targets[i]
+      try {
+        toast.info(`视频描述 ${i + 1}/${targets.length}…`)
+        const prompt = await generateVideoPromptForShot(sb, { force: true, silent: true })
+        if (prompt) updated++
+      } catch (e: any) {
+        failed++
+        console.warn('[VideoPrompt]', sb.id, e?.message || e)
+      }
+    }
+    await refresh()
+    toast.success(
+      `视频描述：更新 ${updated}/${targets.length}`
+      + (failed ? `，失败 ${failed}` : ''),
+    )
+  } catch (e: any) {
+    toast.error(e?.message || '批量生成视频描述失败')
+  } finally {
+    endBatch('videoPrompts')
+  }
 }
 
 function resolveVideoReferenceImage(sb) {
@@ -4550,10 +5023,142 @@ function resolveVideoReferenceImage(sb) {
     || null
 }
 
+/** 下一镜首帧静帧（作本镜视频尾帧）；仅同定妆+服装相近时才串 */
+function resolveNextShotVideoEndFrame(sb) {
+  const targets = videoGenTargets.value
+  const idx = targets.findIndex(s => s.id === sb.id)
+  if (idx < 0) return null
+  const current = resolveVideoReferenceImage(sb)
+  const currentPrompt = getNarrationImagePromptText(sb)
+  for (let i = idx + 1; i < targets.length; i++) {
+    const next = targets[i]
+    const cover = resolveVideoReferenceImage(next)
+    if (!cover) continue
+    if (current && cover === current) continue
+    const check = canChainVideoContinuityByPrompts(currentPrompt, getNarrationImagePromptText(next))
+    if (!check.ok) {
+      console.info(`[VideoGen] continuity-skip sb=${sb.id}→${next.id}: ${check.reason}`)
+      return null
+    }
+    return cover
+  }
+  return null
+}
+
+function isLightMotionVideoModel(model?: string | null) {
+  return /^(glide|kenburns)$/i.test(String(model || '').trim())
+}
+
+/** 解说强制图生视频：顶栏若仍是 Glide/KenBurns，改回 Agnes */
+function resolveActiveVideoModel() {
+  const raw = String(localModelBarVideoModel.value || '').trim()
+  if (isNarrationMode.value) {
+    if (!raw || isLightMotionVideoModel(raw)) {
+      const next = DEFAULT_NARRATION_HIGHLIGHT_VIDEO_MODEL
+      if (raw !== next) {
+        localModelBarVideoModel.value = next
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem(LOCAL_MODEL_BAR_VIDEO_KEY, next)
+        }
+      }
+      return next
+    }
+    return raw
+  }
+  return raw || DEFAULT_LOCAL_VIDEO_MODEL
+}
+
 function getNarrationImagePromptText(sb, style = getNarrationImageStyle()) {
   const stored = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
   if (stored) return stored
   return buildNarrationImagePrompt(sb, style, sbs.value)
+}
+
+/** 从配图文案解析「对照定妆「…」」标签（去重保序） */
+function listNarrationPromptPortraitLabels(prompt?: string | null): string[] {
+  const labels = [...String(prompt || '').matchAll(/对照定妆「([^」]+)」/g)]
+    .map(m => String(m[1] || '').trim())
+    .filter(Boolean)
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const label of labels) {
+    if (seen.has(label)) continue
+    seen.add(label)
+    out.push(label)
+  }
+  return out
+}
+
+function listNarrationPromptSceneLabels(prompt?: string | null): string[] {
+  const labels = [...String(prompt || '').matchAll(/对照场景「([^」]+)」/g)]
+    .map(m => String(m[1] || '').trim())
+    .filter(Boolean)
+  return [...new Set(labels)]
+}
+
+function listNarrationPromptPropLabels(prompt?: string | null): string[] {
+  const labels = [...String(prompt || '').matchAll(/对照道具「([^」]+)」/g)]
+    .map(m => String(m[1] || '').trim())
+    .filter(Boolean)
+  return [...new Set(labels)]
+}
+
+function getNarrationShotPromptPortraitLabels(sb): string[] {
+  return listNarrationPromptPortraitLabels(getNarrationImagePromptText(sb))
+}
+
+function getNarrationShotPromptPortraitCount(sb): number {
+  return getNarrationShotPromptPortraitLabels(sb).length
+}
+
+/** 配图文案下方展示：定妆 / 场景 / 道具标签摘要 */
+function formatNarrationShotPromptPortraitHint(sb): string {
+  const text = getNarrationImagePromptText(sb)
+  const portraits = listNarrationPromptPortraitLabels(text)
+  const scenes = listNarrationPromptSceneLabels(text)
+  const propsHit = listNarrationPromptPropLabels(text)
+  const parts: string[] = []
+  parts.push(portraits.length ? `定妆×${portraits.length}：${portraits.join('、')}` : '定妆×0')
+  if (scenes.length) parts.push(`场景：${scenes.join('、')}`)
+  if (propsHit.length) parts.push(`道具：${propsHit.join('、')}`)
+  return parts.join(' · ')
+}
+
+function escapeHtmlText(s: string): string {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/** 配图文案展示：转义 HTML + 换行（对照标签与正文同字重） */
+function formatNarrationImagePromptHtml(prompt?: string | null): string {
+  const raw = String(prompt || '')
+  if (!raw.trim()) return ''
+  return escapeHtmlText(raw).replace(/\n/g, '<br>')
+}
+
+const narrationPromptEditingIds = ref<number[]>([])
+
+function isNarrationPromptEditing(sb): boolean {
+  const id = Number(sb?.id)
+  return Number.isFinite(id) && narrationPromptEditingIds.value.includes(id)
+}
+
+function startNarrationPromptEdit(sb) {
+  const id = Number(sb?.id)
+  if (!Number.isFinite(id)) return
+  if (!narrationPromptEditingIds.value.includes(id)) {
+    narrationPromptEditingIds.value = [...narrationPromptEditingIds.value, id]
+  }
+}
+
+function finishNarrationPromptEdit(sb, value?: string) {
+  if (value != null) updateNarrationImagePrompt(sb, value)
+  const id = Number(sb?.id)
+  if (!Number.isFinite(id)) return
+  narrationPromptEditingIds.value = narrationPromptEditingIds.value.filter(x => x !== id)
 }
 
 function getNarrationImagePromptForCopy(sb, style = getNarrationImageStyle()) {
@@ -4565,10 +5170,16 @@ function getNarrationImagePromptForCopy(sb, style = getNarrationImageStyle()) {
 
 function updateNarrationImagePrompt(sb, value) {
   const trimmed = String(value || '').trim()
-  if (!trimmed) return
   const prev = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
+  if (prev === trimmed) return
+  if (!trimmed) {
+    // 允许清空单条文案（此前 trim 为空直接 return，界面像清不掉）
+    updateField(sb, 'image_prompt', '')
+    clearShotFluxPromptMetaLocal(sb)
+    return
+  }
   updateField(sb, 'image_prompt', trimmed)
-  if (prev !== trimmed) clearShotFluxPromptMetaLocal(sb)
+  clearShotFluxPromptMetaLocal(sb)
 }
 
 async function updateNarrationFluxPromptEn(sb, value) {
@@ -4939,23 +5550,29 @@ const prodTabDefs = computed(() => {
   }
   if (isNarrationMode.value) {
     const tabs = [
-      { id: 'voice', label: '旁白音色', icon: Mic2, badge: narratorReady.value ? '✓' : '' },
+      { id: 'voice', label: usesDialogueSpeakers.value ? '角色音色' : '旁白音色', icon: Mic2, badge: narratorReady.value ? '✓' : '' },
       { id: 'chars', label: '定妆参考', icon: Users, badge: visualCharTotal.value ? `${charImgCount.value}/${visualCharTotal.value}` : '' },
-      { id: 'shots', label: '生成配图', icon: ImageIcon, badge: narrationNeedImageCount.value ? `${shotImgCount.value}/${narrationNeedImageCount.value}` : '' },
-    ]
-    tabs.push(
-      { id: 'dubbing', label: '生成配音', icon: Mic2, badge: ttsEligibleCount.value ? `${ttsGeneratedCount.value}/${ttsEligibleCount.value}` : '' },
-      { id: 'bgm', label: 'BGM 配乐', icon: Music, badge: sbs.value.length ? `${bgmAppliedCount.value}/${sbs.value.length}` : '' },
       {
-        id: 'videos',
-        label: '本地视频（可选）',
-        icon: Video,
-        badge: composeUnitShots.value.length
-          ? `${composeUnitShots.value.filter(hasVid).length}/${composeUnitShots.value.length}`
+        id: 'scenes',
+        label: '场景/道具',
+        icon: MapPin,
+        badge: (scenes.value.length || props.value.length)
+          ? `${sceneImgCount.value + propImgCount.value}/${scenes.value.length + props.value.length}`
           : '',
       },
+      { id: 'dubbing', label: '生成配音', icon: Mic2, badge: ttsEligibleCount.value ? `${ttsGeneratedCount.value}/${ttsEligibleCount.value}` : '' },
+      { id: 'shots', label: '生成配图', icon: ImageIcon, badge: narrationNeedImageCount.value ? `${shotImgCount.value}/${narrationNeedImageCount.value}` : '' },
+      {
+        id: 'videos',
+        label: '镜头视频',
+        icon: Video,
+        badge: videoGenTargets.value.length
+          ? `${videoGenTargets.value.filter(hasVid).length}/${videoGenTargets.value.length}`
+          : '',
+      },
+      { id: 'bgm', label: 'BGM 配乐', icon: Music, badge: sbs.value.length ? `${bgmAppliedCount.value}/${sbs.value.length}` : '' },
       { id: 'compose', label: '镜头合成', icon: Layers, badge: composableCount.value ? `${composedCount.value}/${composableCount.value}` : '' },
-    )
+    ]
     return tabs
   }
   return [
@@ -4994,10 +5611,14 @@ const workflowState = computed(() => ({
   mergeUrl: !!mergeUrl.value,
   openingVideoUrl: !!openingVideoUrl.value,
   titleVideoUrl: !!titleVideoUrl.value,
+  timelineReady: hasTimelineProject(episode.value?.id),
   bgmAppliedCount: bgmAppliedCount.value,
-  scenesCount: scenes.value.length,
-  sceneImgCount: sceneImgCount.value,
-  scenesReady: scenes.value.length > 0 && sceneImgCount.value === scenes.value.length,
+  scenesCount: scenes.value.length + (isNarrationMode.value ? props.value.length : 0),
+  sceneImgCount: sceneImgCount.value + (isNarrationMode.value ? propImgCount.value : 0),
+  scenesReady: isNarrationMode.value
+    ? ((scenes.value.length + props.value.length) > 0
+      && sceneImgCount.value + propImgCount.value >= scenes.value.length + props.value.length)
+    : (scenes.value.length > 0 && sceneImgCount.value === scenes.value.length),
   expressionPackReadyCount: dialoguePortraitExpressionReadyCount.value,
 }))
 
@@ -5016,6 +5637,7 @@ const narrationIconMap = {
   'export:opening': Film,
   'export:title': Clapperboard,
   'export:merge': Download,
+  'export:timeline': Scissors,
 }
 
 const sidebarSections = computed(() => {
@@ -5064,6 +5686,7 @@ const sidebarSections = computed(() => {
         { key: 'export:opening', label: '开幕视频', desc: '', icon: Film, done: !!openingVideoUrl.value },
         { key: 'export:title', label: '片头视频', desc: '', icon: Clapperboard, done: !!titleVideoUrl.value },
         { key: 'export:merge', label: '拼接导出', desc: '', icon: Download, done: !!mergeUrl.value },
+        { key: 'export:timeline', label: '剪辑台', desc: '', icon: Scissors, done: hasTimelineProject(episode.value?.id) },
       ],
     },
   ]
@@ -5139,6 +5762,19 @@ function goMainStage(stageId) {
 const activeSubSteps = computed(() => {
   if (isNarrationMode.value) {
     if (panel.value === 'script') {
+      if (isNovelComicMode.value) {
+        return [
+          { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
+          { key: 'script:storyboard', label: '旁白分镜', done: !!sbs.value.length },
+        ]
+      }
+      if (usesExplainScriptFlow.value) {
+        return [
+          { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
+          { key: 'script:chat', label: explainScriptStepLabel.value, done: !!scriptContent.value },
+          { key: 'script:storyboard', label: storyboardScriptStepLabel.value, done: !!sbs.value.length },
+        ]
+      }
       return [
         { key: 'script:chat', label: '剧本生成', done: !!rawContent.value },
         { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
@@ -5147,8 +5783,9 @@ const activeSubSteps = computed(() => {
     }
     if (panel.value === 'production') {
       return [
-        { key: 'prod:voice', label: '旁白音色', done: narratorReady.value },
+        { key: 'prod:voice', label: usesDialogueSpeakers.value ? '角色音色' : '旁白音色', done: narratorReady.value },
         { key: 'prod:chars', label: '定妆参考', done: !visualCharTotal.value || charImgCount.value === visualCharTotal.value },
+        { key: 'prod:scenes', label: '场景/道具', done: prodStepDone('scenes') },
         { key: 'prod:shots', label: '生成配图', done: !!sbs.value.length && narrationImageReady.value },
         { key: 'prod:dubbing', label: '生成配音', done: isNarrationMode.value ? narrationTtsReady.value : (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value) },
         { key: 'prod:bgm', label: 'BGM 配乐', done: bgmAppliedCount.value > 0 },
@@ -5160,6 +5797,7 @@ const activeSubSteps = computed(() => {
       { key: 'export:opening', label: '开幕视频', done: !!openingVideoUrl.value },
       { key: 'export:title', label: '片头视频', done: !!titleVideoUrl.value },
       { key: 'export:merge', label: '拼接导出', done: !!mergeUrl.value },
+      { key: 'export:timeline', label: '剪辑台', done: hasTimelineProject(episode.value?.id) },
     ]
   }
   if (activeMainStage.value === 'script') {
@@ -5190,6 +5828,7 @@ const activeSubSteps = computed(() => {
     { key: 'export:opening', label: '开幕视频', done: !!openingVideoUrl.value },
     { key: 'export:title', label: '片头视频', done: !!titleVideoUrl.value },
     { key: 'export:merge', label: '拼接导出', done: !!mergeUrl.value },
+    { key: 'export:timeline', label: '剪辑台', done: hasTimelineProject(episode.value?.id) },
   ]
 })
 
@@ -5203,6 +5842,19 @@ const sidebarJumpSteps = computed(() => {
 const bubbleSteps = computed(() => {
   if (panel.value === 'script') {
     if (isNarrationMode.value) {
+      if (isNovelComicMode.value) {
+        return [
+          { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
+          { key: 'script:storyboard', label: '旁白分镜', done: !!sbs.value.length },
+        ]
+      }
+      if (usesExplainScriptFlow.value) {
+        return [
+          { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
+          { key: 'script:chat', label: explainScriptStepLabel.value, done: !!scriptContent.value },
+          { key: 'script:storyboard', label: storyboardScriptStepLabel.value, done: !!sbs.value.length },
+        ]
+      }
       return [
         { key: 'script:chat', label: '剧本生成', done: !!rawContent.value },
         { key: 'script:raw', label: '文案输入', done: !!rawContent.value },
@@ -5266,15 +5918,22 @@ const currentStageLabel = computed(() => {
     if (isLocalComicMode.value) return `本地短剧 · ${stepLabels.value[scriptStep.value] || ''}`
     if (isDialoguePortraitMode.value) return `对话立绘 · ${stepLabels.value[scriptStep.value] || ''}`
     if (isNovelComicMode.value) return `小说漫画讲解 · ${stepLabels.value[scriptStep.value] || ''}`
+    if (isNarrationVideoMode.value) return `解说视频 · ${stepLabels.value[scriptStep.value] || ''}`
     if (isMotionComicMode.value) return `漫画解说 · ${stepLabels.value[scriptStep.value] || ''}`
     return `${isNarrationLikeMode.value ? '解说' : '剧本'}阶段 · ${stepLabels.value[scriptStep.value] || ''}`
   }
-  if (panel.value === 'production') return `制作阶段 · ${prodTabDefs.value[prodTabIdx.value]?.label || '制作'}`
+  if (panel.value === 'production') {
+    const prodLabel = isNarrationVideoMode.value ? '出图·配音·剪辑' : '制作阶段'
+    return `${prodLabel} · ${prodTabDefs.value[prodTabIdx.value]?.label || '制作'}`
+  }
   if (exportTab.value === 'opening') {
     return openingVideoUrl.value ? '导出阶段 · 开幕视频已生成' : '导出阶段 · 开幕视频'
   }
   if (exportTab.value === 'title') {
     return titleVideoUrl.value ? '导出阶段 · 片头视频已生成' : '导出阶段 · 片头视频'
+  }
+  if (exportTab.value === 'timeline') {
+    return '导出阶段 · 剪辑台'
   }
   return mergeUrl.value ? '导出阶段 · 成片已生成' : '导出阶段 · 等待拼接'
 })
@@ -5686,7 +6345,12 @@ function applyEpisodeDataAfterLoad(ep) {
   const epHasSbs = sbs.value.length > 0
 
   if (isNarrationMode.value) {
-    scriptStep.value = inferNarrationScriptStep(episode.value, sbs.value.length, visualChars.value.length)
+    scriptStep.value = inferNarrationScriptStep(
+      episode.value,
+      sbs.value.length,
+      visualChars.value.length,
+      productionMode.value,
+    )
     restoreScriptChatForEpisode(ep.id)
     restoreImageDetectChatForEpisode(ep.id)
     restoreImagePromptChatForEpisode(ep.id)
@@ -5836,13 +6500,15 @@ async function refresh(options?: { deferSecondary?: boolean; skipDramaRefetch?: 
       return
     }
 
-    const [charsRes, scenesRes, sbsRes] = await Promise.all([
+    const [charsRes, scenesRes, sbsRes, propsRes] = await Promise.all([
       episodeAPI.characters(ep.id).catch(() => []),
       episodeAPI.scenes(ep.id).catch(() => []),
       episodeAPI.storyboards(ep.id),
+      episodeAPI.listProps(ep.id).catch(() => []),
     ])
     chars.value = charsRes || []
     scenes.value = scenesRes || []
+    props.value = propsRes || []
     sbs.value = sortStoryboards(sbsRes || [])
     syncCharImageTimestampsFromChars()
     syncSelectedStoryboardFromList()
@@ -5867,7 +6533,19 @@ async function refresh(options?: { deferSecondary?: boolean; skipDramaRefetch?: 
   }
 }
 
-function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
+function saveRaw() {
+  if (!epId.value) return
+  if (isNovelComicMode.value) {
+    // 小说漫画只用原文；保存时清空旧讲解稿，避免下游误读
+    localScript.value = ''
+    episodeAPI.update(epId.value, { content: localRaw.value, script_content: '' })
+    episode.value.content = localRaw.value
+    episode.value.script_content = ''
+    return
+  }
+  episodeAPI.update(epId.value, { content: localRaw.value })
+  episode.value.content = localRaw.value
+}
 
 const lastScriptChatDraft = computed(() => {
   for (let i = scriptChatMessages.value.length - 1; i >= 0; i--) {
@@ -5968,11 +6646,28 @@ function clearScriptChat() {
 function applyScriptChatToEditor(mode = 'replace', navigateToRaw = false) {
   const draft = lastScriptChatDraftExtracted.value
   if (!draft) {
-    toast.warning(isLocalComicMode.value ? '暂无可填入的剧本' : (isMotionComicMode.value ? '暂无可填入的漫剧稿' : '暂无可填入的解说稿'))
+    toast.warning(
+      isLocalComicMode.value
+        ? '暂无可填入的剧本'
+        : (usesExplainScriptFlow.value
+          ? `暂无可填入的${explainScriptStepLabel.value}`
+          : (isMotionComicMode.value ? '暂无可填入的漫剧稿' : '暂无可填入的解说稿')),
+    )
     return
   }
   const chars = countScriptChars(draft)
   const minChars = scriptChatMinChars.value
+  if (usesExplainScriptFlow.value) {
+    if (mode === 'append' && localScript.value.trim()) {
+      localScript.value = `${localScript.value.trim()}\n\n${draft}`
+    } else {
+      localScript.value = draft
+    }
+    saveNovelComicNarrationScript()
+    toast.success(mode === 'append' ? `已追加到${explainScriptStepLabel.value}（约 ${chars} 字）` : `已填入${explainScriptStepLabel.value}（约 ${chars} 字）`)
+    if (navigateToRaw) scriptGenMode.value = 'manual'
+    return
+  }
   if (mode === 'append' && localRaw.value.trim()) {
     localRaw.value = `${localRaw.value.trim()}\n\n${draft}`
   } else {
@@ -6019,15 +6714,19 @@ function stripRawEmphasis() {
   toast.success('已去掉 ** 标记')
 }
 
-async function sendScriptChat() {
-  const text = scriptChatInput.value.trim()
+async function sendScriptChat(presetText?: string) {
+  const text = (typeof presetText === 'string' ? presetText : scriptChatInput.value).trim()
   if (!text || scriptChatGenerating.value || !epId.value) return
+  if (isNovelComicMode.value) {
+    toast.info('小说漫画讲解直接使用原文，无需讲解稿；请在「文案输入」粘贴原文后进入旁白分镜')
+    return
+  }
 
   scriptChatMessages.value.push({ role: 'user', content: text })
   scriptChatInput.value = ''
   scriptChatGenerating.value = true
   scriptChatMessages.value.push({ role: 'assistant', content: '', thinking: '' })
-  const assistantIdx = scriptChatMessages.value.length - 1
+  let assistantIdx = scriptChatMessages.value.length - 1
 
   await nextTick()
   scrollScriptChatToBottom()
@@ -6035,11 +6734,16 @@ async function sendScriptChat() {
   const controller = new AbortController()
   scriptChatAbortController.value = controller
 
+  let waitTimer = null
+  let waitedSec = 0
   try {
     const scriptModel = usesLocalModelPipeline.value
       ? resolveLocalScriptChatTextModel(episode.value)
       : scriptChatModel.value
     scriptChatModel.value = scriptModel
+    const modelHint = textModelLabel(scriptModel) || scriptModel || '文本模型'
+    scriptChatMessages.value[assistantIdx].statusText = `正在连接模型：${modelHint}…`
+    scrollScriptChatToBottom()
 
     if (usesLocalModelPipeline.value) {
       await ensureLocalModelForTask('llm', {
@@ -6049,9 +6753,21 @@ async function sendScriptChat() {
           scrollScriptChatToBottom()
         },
       })
-      scriptChatMessages.value[assistantIdx].statusText = 'LLM 已就绪，正在连接模型…'
+      scriptChatMessages.value[assistantIdx].statusText = `本地 LLM 已就绪，正在请求：${modelHint}…`
       scrollScriptChatToBottom()
     }
+
+    waitTimer = setInterval(() => {
+      if (!scriptChatGenerating.value) return
+      const msg = scriptChatMessages.value[assistantIdx]
+      if (!msg || msg.content || msg.thinking) return
+      waitedSec += 15
+      const head = String(msg.statusText || `正在连接模型：${modelHint}`).split('\n')
+        .filter(line => !/^已等待\s+\d+s/.test(line))
+        .join('\n')
+      msg.statusText = `${head}\n已等待 ${waitedSec}s…`
+      scrollScriptChatToBottom()
+    }, 15_000)
 
     const payloadMessages = scriptChatMessages.value
       .filter(msg => !msg.local)
@@ -6064,7 +6780,12 @@ async function sendScriptChat() {
       messages: payloadMessages,
       text_model: scriptModel,
       text_thinking: scriptThinking,
-      script: (localRaw.value || localScript.value || '').trim() || undefined,
+      // 讲解稿流程：script=讲解稿；文案输入由后端从 episode.content 读取
+      script: (
+        usesExplainScriptFlow.value
+          ? (localScript.value || scriptContent.value || '')
+          : (localRaw.value || localScript.value || '')
+      ).trim() || undefined,
     }, {
       signal: controller.signal,
       onThinking: thinking => {
@@ -6075,6 +6796,24 @@ async function sendScriptChat() {
       onStatus: statusText => {
         scriptChatMessages.value[assistantIdx].statusText = statusText
         scrollScriptChatToBottom()
+      },
+      onPhase: (phase, content) => {
+        // 第1轮节拍完成：封存当前气泡，再开第2轮旁白气泡
+        if (phase === 'beats_done') {
+          scriptChatMessages.value[assistantIdx].statusText = ''
+          scriptChatMessages.value[assistantIdx].content = content
+          scriptChatMessages.value[assistantIdx].thinking = ''
+          scriptChatMessages.value.push({
+            role: 'assistant',
+            content: '',
+            thinking: '',
+            statusText: isNarrationVideoMode.value
+              ? '第2轮：正在按节拍写解说脚本…'
+              : '第2轮：正在按节拍写旁白讲解稿…',
+          })
+          assistantIdx = scriptChatMessages.value.length - 1
+          scrollScriptChatToBottom()
+        }
       },
       onDelta: content => {
         scriptChatMessages.value[assistantIdx].statusText = ''
@@ -6087,7 +6826,10 @@ async function sendScriptChat() {
     }
     scriptChatMessages.value[assistantIdx].statusText = ''
     stampChatAssistantGeneratedAt(scriptChatMessages.value, assistantIdx, result)
-    const extracted = extractScriptFromChat(scriptChatMessages.value[assistantIdx].content || result?.reply || '')
+    // 两轮时 reply 仅为旁白；入库只用旁白，不用节拍大纲
+    const extracted = usesExplainScriptFlow.value && result?.reply
+      ? String(result.reply).trim()
+      : extractScriptFromChat(scriptChatMessages.value[assistantIdx].content || result?.reply || '')
     const chars = result?.char_count ?? countScriptChars(extracted)
     if (typeof result?.min_chars === 'number') {
       scriptChatResolvedMinChars.value = result.min_chars
@@ -6095,12 +6837,26 @@ async function sendScriptChat() {
     const minChars = result?.min_chars ?? scriptChatMinChars.value
     const maxChars = result?.max_chars
     const targetChars = result?.target_chars
-    if (result?.auto_expanded && chars >= minChars) {
+    // 讲解稿流程：生成/改稿后自动写入 script_content（仅旁白）
+    if (usesExplainScriptFlow.value && extracted && chars >= 40) {
+      localScript.value = extracted
+      saveNovelComicNarrationScript()
+      const lengthHint = result?.auto_compressed
+        ? `约 ${chars} 字，已自动压到上限内`
+        : `约 ${chars} 字`
+      toast.success(
+        result?.beat_outline
+          ? `两轮完成：节拍已展示，${explainScriptStepLabel.value}已入库（${lengthHint}）`
+          : `${explainScriptStepLabel.value}已更新（${lengthHint}）`,
+      )
+    } else if (result?.auto_compressed && typeof maxChars === 'number') {
+      toast.success(`已自动精简至约 ${chars} 字（上限 ${maxChars}）`)
+    } else if (result?.auto_expanded && chars >= minChars) {
       toast.success(`已自动扩写至约 ${chars} 字`)
     } else if (chars > 0 && chars < minChars) {
       toast.warning(`生成完成约 ${chars} 字，未达 ${minChars} 字要求。可说「扩写到 ${minChars} 字以上」继续补全。`)
     } else if (
-      result?.user_length_specified
+      (result?.user_length_specified || result?.above_max)
       && typeof maxChars === 'number'
       && chars > maxChars
     ) {
@@ -6122,13 +6878,26 @@ async function sendScriptChat() {
         scriptChatMessages.value.splice(assistantIdx, 1)
       }
     }
-    if (!isLlmCancelled(e)) toast.error(e.message)
+    if (!isLlmCancelled(e)) {
+      const errMsg = String(e?.message || e || '生成失败')
+      toast.error(/模型|连不上|超时|鉴权|API Key/i.test(errMsg) ? errMsg : `模型请求失败：${errMsg}`)
+    }
   } finally {
+    if (waitTimer) clearInterval(waitTimer)
     scriptChatGenerating.value = false
     scriptChatAbortController.value = null
     await nextTick()
     scrollScriptChatToBottom()
   }
+}
+
+async function optimizeNovelComicNarration() {
+  if (!usesExplainScriptFlow.value || scriptChatGenerating.value || !epId.value) return
+  scriptGenMode.value = 'chat'
+  const hint = isNovelComicMode.value
+    ? NOVEL_COMIC_OPTIMIZE_NARRATION_USER_HINT
+    : NARRATION_OPTIMIZE_FROM_SOURCE_USER_HINT
+  await sendScriptChat(hint)
 }
 
 function scrollImageDetectChatToBottom() {
@@ -6163,7 +6932,8 @@ function clearImagePromptChat() {
 
 function resolveImageDetectChatAction(text: string, explicit?: 'run' | null) {
   if (explicit === 'run') return 'run' as const
-  if (/^(开始|执行|重新|再次).*(检测|换镜|配图)/.test(text)) return 'run' as const
+  if (/^(开始|执行|重新|再次).*(检测|换镜|配图|同步)/.test(text)) return 'run' as const
+  if (/同步.*(分镜|配图)/.test(text)) return 'run' as const
   return null
 }
 
@@ -6186,7 +6956,7 @@ async function sendImageDetectChat(explicitAction?: 'run') {
     return
   }
 
-  const userText = text || '开始检测配图'
+  const userText = text || (isNarrationVideoMode.value ? '开始同步分镜配图' : '开始检测配图')
   imageDetectChatMessages.value.push({ role: 'user', content: userText })
   imageDetectChatInput.value = ''
   imageDetectChatGenerating.value = true
@@ -6196,7 +6966,7 @@ async function sendImageDetectChat(explicitAction?: 'run') {
     narrationImageBreakdownProgress.value = {
       status: 'processing',
       phase: 'detecting',
-      message: '正在检测换镜配图…',
+      message: isNarrationVideoMode.value ? '正在按分镜同步一镜一图…' : '正在检测换镜配图…',
       percent: 1,
     }
     startNarrationImageBreakdownPoll()
@@ -6358,16 +7128,17 @@ async function sendImagePromptChat(explicitAction?: 'run' | 'retry_missing') {
       .slice(0, -1)
       .map(({ role, content }) => ({ role, content }))
 
-    const promptThinking = textModelSupportsThinking(episodeTextModel.value)
-      ? episodeTextThinking.value
-      : false
+    // 免费模型：配图文案强制关思考（批写 JSON 易被拒 / 更慢；与后端 textThinking:false 对齐）
+    const promptParams = narrationImagePromptTextModelParams()
+    const promptModel = String(promptParams.text_model || '')
     const result = await episodeAPI.narrationImagePromptChatStream(epId.value, {
       messages: payloadMessages,
-      text_model: episodeTextModel.value,
-      text_thinking: promptThinking,
+      text_model: promptParams.text_model,
+      text_thinking: promptParams.text_thinking,
       action: action ?? undefined,
       style: getNarrationImageStyle(),
       prompt_batch_size: imagePromptBatchSize.value,
+      ...(isNovelComicMode.value ? { panel_text_mode: narrationShotPanelTextMode.value } : {}),
     }, {
       signal: controller.signal,
       onThinking: thinking => {
@@ -6485,13 +7256,29 @@ async function sendStoryboardChat(explicitAction?: 'run') {
     thinking: '',
   })
   const assistantIdx = storyboardChatMessages.value.length - 1
+  const modelHint = textModelLabel(episodeTextModel.value) || episodeTextModel.value || '文本模型'
 
   const controller = new AbortController()
   storyboardChatAbortController.value = controller
   await nextTick()
   scrollStoryboardChatToBottom()
 
+  let waitTimer = null
+  let waitedSec = 0
+  const bumpWaitHint = (base) => {
+    const msg = storyboardChatMessages.value[assistantIdx]
+    if (!msg || msg.content || msg.thinking) return
+    const head = String(base || msg.statusText || `正在连接模型：${modelHint}`).split('\n')
+      .filter(line => !/^已等待\s+\d+s/.test(line))
+      .join('\n')
+    msg.statusText = waitedSec > 0 ? `${head}\n已等待 ${waitedSec}s…` : head
+    scrollStoryboardChatToBottom()
+  }
+
   try {
+    storyboardChatMessages.value[assistantIdx].statusText = `正在连接模型：${modelHint}…`
+    scrollStoryboardChatToBottom()
+
     if (usesLocalModelPipeline.value) {
       await ensureLocalModelForTask('llm', {
         onProgress: (hint) => {
@@ -6499,13 +7286,20 @@ async function sendStoryboardChat(explicitAction?: 'run') {
           scrollStoryboardChatToBottom()
         },
       })
-      storyboardChatMessages.value[assistantIdx].statusText = 'LLM 已就绪，正在连接模型…'
+      storyboardChatMessages.value[assistantIdx].statusText = `本地 LLM 已就绪，正在请求：${modelHint}…`
       scrollStoryboardChatToBottom()
     }
+
+    waitTimer = setInterval(() => {
+      if (!storyboardChatGenerating.value) return
+      waitedSec += 15
+      bumpWaitHint()
+    }, 15_000)
 
     let script: string | undefined
     if (action === 'run') {
       script = await saveNarrationScript()
+      bumpWaitHint(`${explainScriptStepLabel.value}已保存，正在请求模型：${modelHint}…`)
     }
 
     const payloadMessages = storyboardChatMessages.value
@@ -6559,8 +7353,12 @@ async function sendStoryboardChat(explicitAction?: 'run') {
         storyboardChatMessages.value.splice(assistantIdx, 1)
       }
     }
-    if (!isLlmCancelled(e)) toast.error(e.message)
+    if (!isLlmCancelled(e)) {
+      const errMsg = String(e?.message || e || '生成失败')
+      toast.error(/模型|连不上|超时|鉴权|API Key/i.test(errMsg) ? errMsg : `模型请求失败：${errMsg}`)
+    }
   } finally {
+    if (waitTimer) clearInterval(waitTimer)
     storyboardChatGenerating.value = false
     storyboardChatAbortController.value = null
     await nextTick()
@@ -6582,7 +7380,7 @@ watch(() => scriptStep.value, step => {
 })
 
 watch(() => scriptStep.value, step => {
-  if (isNarrationMode.value && step === narrationScriptChatStep()) {
+  if (isNarrationMode.value && step === narrationScriptChatStep(productionMode.value)) {
     nextTick(() => scrollScriptChatToBottom())
   }
   if (isLocalComicMode.value && step === LOCAL_DRAMA_SCRIPT_CHAT_STEP) {
@@ -6591,6 +7389,14 @@ watch(() => scriptStep.value, step => {
 })
 
 async function saveNarrationScript() {
+  if (usesExplainScriptFlow.value) {
+    const script = (localScript.value || '').trim()
+    if (!script) throw new Error(`请先填写${explainScriptStepLabel.value}`)
+    localScript.value = script
+    await episodeAPI.update(epId.value, { script_content: script })
+    episode.value.script_content = script
+    return script
+  }
   const script = (localRaw.value || localScript.value || '').trim()
   if (!script) {
     throw new Error(isLocalComicMode.value ? '请先填写剧本' : (usesComicStoryboardRules.value ? '请先填写漫剧旁白稿' : '请先填写解说文案'))
@@ -6812,7 +7618,7 @@ async function finalizeStoryboardBreakdown(res) {
     })
   }
   await refresh()
-  if (isMotionComicMode.value) {
+  if (usesDialogueSpeakers.value) {
     try {
       await syncMotionComicVoicesAfterScript({ silent: true })
     } catch (e) {
@@ -6841,7 +7647,7 @@ function doNarrationBreakdown() {
         : usesComicStoryboardRules.value
           ? '，未识别片头（首行请写「标题：」或「本期故事：…」）'
           : '，未识别片头标题（首行请写「标题：」或「今天体验的人生剧本是…」）'
-      const sbLabel = usesComicStoryboardRules.value ? '旁白分镜' : '旁白分镜'
+      const sbLabel = storyboardScriptStepLabel.value
       toast.success(`${sbLabel}：${sentenceCount} 句 → ${res?.count || 0} 镜${titleHint}`)
       await finalizeStoryboardBreakdown(res)
     } catch (e) {
@@ -6950,7 +7756,7 @@ function doNarrationImagePrompts() {
   runNarrationImageStep('prompts', () => episodeAPI.narrationImagePrompts(epId.value, {
     style: getNarrationImageStyle(),
     prompt_batch_size: imagePromptBatchSize.value,
-    ...narrationTextModelParams(),
+    ...narrationImagePromptTextModelParams(),
   }), {
     onSuccess: (progress) => {
       const count = narrationPromptDisplayCount.value
@@ -6988,7 +7794,7 @@ function doNarrationImagePromptsTest() {
     style: getNarrationImageStyle(),
     prompt_batch_size: imagePromptBatchSize.value,
     test_batch_index: narrationPromptTestBatchIndex.value,
-    ...narrationTextModelParams(),
+    ...narrationImagePromptTextModelParams(),
   }), {
     onSuccess: async (progress) => {
       await refresh()
@@ -7020,7 +7826,7 @@ function doRetryMissingNarrationImagePrompts() {
     style: getNarrationImageStyle(),
     retry_missing_prompts: true,
     prompt_batch_size: imagePromptBatchSize.value,
-    ...narrationTextModelParams(),
+    ...narrationImagePromptTextModelParams(),
   }), {
     onSuccess: async (progress) => {
       await refresh()
@@ -7252,20 +8058,20 @@ async function onStoryboardDescUploadSelected(event) {
           storyboard_breakdown_at: Date.now(),
         })
         await refresh()
-        if (isMotionComicMode.value) {
+        if (usesDialogueSpeakers.value) {
           try { await syncMotionComicVoicesAfterScript({ silent: true }) } catch {}
         } else {
           await ensureNarratorCharacter()
         }
       } else if (mode === 'create') {
-        toast.success(`已创建 ${res?.count || 0} 个旁白分镜`)
+        toast.success(`已创建 ${res?.count || 0} 个${storyboardScriptStepLabel.value}`)
         persistNarrationBreakdownSummary({
           count: res?.count,
           total_duration: res?.total_duration ?? res?.totalDuration,
           storyboard_breakdown_at: Date.now(),
         })
         await refresh()
-        if (isMotionComicMode.value) {
+        if (usesDialogueSpeakers.value) {
           try { await syncMotionComicVoicesAfterScript({ silent: true }) } catch {}
         } else {
           await ensureNarratorCharacter()
@@ -7426,8 +8232,8 @@ async function doExtractNarrationCharacters() {
       script,
       style,
       text_model: extractModel,
-      // 漫画解说提取只拿名单，不必开思考（定妆文案另点「一键生成 AI 配图描述」）
-      text_thinking: isMotionComicMode.value ? false : true,
+      // 提取只拿名单（定妆文案另点「一键生成定妆描述」）
+      text_thinking: (usesComicVisuals.value || isNarrationAnimeStyle(getNarrationImageStyle())) ? false : true,
     })
     narrationExtractGeneratedAt.value = pickLlmGeneratedAt(res) ?? resolveLlmTimestamp()
     narrationExtractFailedAt.value = null
@@ -7438,11 +8244,12 @@ async function doExtractNarrationCharacters() {
     if (created || updated) {
       const total = (res?.characters || []).length
       const archiveHint = archived ? `，已移除 ${archived} 个过期定妆` : ''
-      const roleLabel = isMotionComicMode.value ? '角色（含主要配角）' : '主角'
+      const roleLabel = usesComicVisuals.value ? '角色（含主要配角）' : '角色（主角+主要配角）'
+      const namesOnlyFlow = usesComicVisuals.value || isNarrationAnimeStyle(getNarrationImageStyle())
       toast.success(
-        isMotionComicMode.value
-          ? `已提取${roleLabel} ${total} 人：新增 ${created}，更新 ${updated}${archiveHint}。定妆文案请点「一键生成 AI 配图描述」`
-          : `已提取${roleLabel} ${total} 条定妆：新增 ${created}，更新 ${updated}${archiveHint}`,
+        namesOnlyFlow
+          ? `已提取${roleLabel} ${total} 人：新增 ${created}，更新 ${updated}${archiveHint}`
+          : `已提取${roleLabel} ${total} 条：新增 ${created}，更新 ${updated}${archiveHint}`,
       )
     } else if (archived) {
       toast.success(`已移除 ${archived} 个过期定妆，保留 ${(res?.characters || []).length} 条`)
@@ -7455,6 +8262,13 @@ async function doExtractNarrationCharacters() {
     if (sbs.value.length) {
       await episodeAPI.linkNarrationCharacters(epId.value)
       await refresh()
+    }
+    // 提取后自动并发生成缺失的定妆描述（纯中文，非配图文案）
+    if (usesComicVisuals.value || isNarrationAnimeStyle(getNarrationImageStyle())) {
+      const needAppearance = visualChars.value.filter(c => !(String(c.appearance || '').trim()))
+      if (needAppearance.length) {
+        await batchCharAppearances({ auto: true, onlyMissing: true })
+      }
     }
     if (isMotionComicMode.value && (res?.characters || []).length && (created || updated || archived)) {
       try {
@@ -7507,6 +8321,14 @@ function updateCharacterAppearance(charId, value) {
 function onNarratorVoiceChange(voiceId) {
   narratorVoiceId.value = voiceId
   narratorVoiceDirty.value = true
+  // 旁白选用 gsv: 克隆时，同步「生成配音」本地音色，确保走 IndexTTS2 / GPT-SoVITS
+  if (/^gsv:/i.test(String(voiceId || ''))) {
+    localEdgeVoiceId.value = voiceId
+    if (!usesGsvClonedVoices(localTtsEngine.value)) {
+      localTtsEngine.value = indexttsAvailable.value ? 'indextts' : 'gptsovits'
+    }
+    persistLocalTtsPrefs()
+  }
 }
 
 function syncNarratorVoiceFromChar(narrator) {
@@ -7569,6 +8391,13 @@ async function saveNarratorVoice() {
     if (dramaChar) Object.assign(dramaChar, patch)
     narratorVoiceId.value = updated?.voice_style || updated?.voiceStyle || selectedVoice
     narratorVoiceDirty.value = false
+    if (/^gsv:/i.test(selectedVoice)) {
+      localEdgeVoiceId.value = selectedVoice
+      if (!usesGsvClonedVoices(localTtsEngine.value)) {
+        localTtsEngine.value = indexttsAvailable.value ? 'indextts' : 'gptsovits'
+      }
+      persistLocalTtsPrefs()
+    }
     toast.success('旁白音色已保存')
   } catch (e) {
     toast.error(e.message || '旁白音色保存失败')
@@ -8155,6 +8984,278 @@ function triggerCharImageUpload(charId) {
   imageUploadInputRef.value?.click()
 }
 
+/** 从粘贴事件剪贴板取出图片 File */
+function extractClipboardImageFiles(clipboardData) {
+  if (!clipboardData) return []
+  const fromFiles = Array.from(clipboardData.files || []).filter(isImageUploadFile)
+  if (fromFiles.length) return fromFiles
+  const out = []
+  for (const item of Array.from(clipboardData.items || [])) {
+    if (item.kind !== 'file' || !String(item.type || '').startsWith('image/')) continue
+    const blob = item.getAsFile()
+    if (!blob) continue
+    const ext = String(blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg')
+    out.push(new File([blob], `paste-${Date.now()}-${out.length}.${ext}`, { type: blob.type || 'image/png' }))
+  }
+  return out
+}
+
+/** 点击「粘贴」时用 Clipboard API 读取（需用户手势；浏览器可能先弹权限） */
+async function readClipboardImageFilesViaApi() {
+  if (!navigator?.clipboard?.read) {
+    throw new Error('当前浏览器不支持读取剪贴板，请用 Ctrl+V，或先保存为文件再点「上传」')
+  }
+  let items
+  try {
+    items = await navigator.clipboard.read()
+  } catch (e) {
+    const msg = String(e?.message || e || '')
+    if (/denied|permission|NotAllowed/i.test(msg)) {
+      throw new Error('剪贴板权限被拒绝：请允许本站读取剪贴板，或改用 Ctrl+V / 上传文件')
+    }
+    throw new Error('读取剪贴板失败：请先复制一张图片，再点「粘贴」')
+  }
+  const out = []
+  for (const item of items || []) {
+    const type = (item.types || []).find(t => String(t).startsWith('image/'))
+    if (!type) continue
+    const blob = await item.getType(type)
+    if (!blob) continue
+    const ext = String(type.split('/')[1] || 'png').replace('jpeg', 'jpg')
+    out.push(new File([blob], `paste-${Date.now()}-${out.length}.${ext}`, { type: blob.type || type }))
+  }
+  return out
+}
+
+function isEditablePasteTarget(el) {
+  if (!el || typeof el !== 'object') return false
+  const node = el
+  const tag = String(node.tagName || '').toUpperCase()
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (node.isContentEditable) return true
+  return !!node.closest?.('input, textarea, select, [contenteditable="true"]')
+}
+
+function resolvePasteUploadTarget(files, { charId = null, shotId = null, sceneId = null, propId = null } = {}) {
+  if (charId != null) {
+    return { kind: 'character-batch', ids: [charId] }
+  }
+  if (shotId != null) {
+    return { kind: 'shot-batch', ids: [shotId] }
+  }
+  if (sceneId != null) {
+    return { kind: 'scene-batch', ids: [sceneId] }
+  }
+  if (propId != null) {
+    return { kind: 'prop-batch', ids: [propId] }
+  }
+  if (prodTab.value === 'chars') {
+    const sorted = sortCharactersForPortraitGeneration(visualChars.value)
+    const missing = sorted.filter(c => !(c.image_url || c.imageUrl))
+    const ids = (missing.length ? missing : sorted).slice(0, files.length).map(c => c.id)
+    if (!ids.length) throw new Error('暂无角色可粘贴定妆图')
+    return { kind: 'character-batch', ids }
+  }
+  if (prodTab.value === 'scenes' && isNarrationMode.value) {
+    const sceneMissing = scenes.value.filter(s => !(s.image_url || s.imageUrl))
+    const propMissing = props.value.filter(p => !(p.image_url || p.imageUrl))
+    // 优先填尚未有图的场景，再道具；若都有图则按场景→道具顺序覆盖式粘贴前 N 张
+    const sceneIds = (sceneMissing.length ? sceneMissing : scenes.value).map(s => s.id)
+    const propIds = (propMissing.length ? propMissing : props.value).map(p => p.id)
+    if (sceneMissing.length || (!propMissing.length && sceneIds.length)) {
+      const ids = sceneIds.slice(0, files.length)
+      if (ids.length) return { kind: 'scene-batch', ids }
+    }
+    if (propIds.length) {
+      return { kind: 'prop-batch', ids: propIds.slice(0, files.length) }
+    }
+    if (sceneIds.length) return { kind: 'scene-batch', ids: sceneIds.slice(0, files.length) }
+    throw new Error('暂无场景/道具可粘贴参考图，请先提取')
+  }
+  if (prodTab.value === 'shots' && isNarrationMode.value) {
+    const pending = narrationImagesPendingShotsFiltered.value
+    const ids = []
+    if (selectedSb.value && narrationShotNeedsOwnImage(selectedSb.value)) {
+      ids.push(selectedSb.value.id)
+    }
+    for (const sb of pending) {
+      if (ids.length >= files.length) break
+      if (!ids.includes(sb.id)) ids.push(sb.id)
+    }
+    if (!ids.length) {
+      throw new Error('暂无待配图镜头可粘贴（可先点选镜头，或等有待生成位）')
+    }
+    return { kind: 'shot-batch', ids: ids.slice(0, files.length) }
+  }
+  throw new Error('请先进入「定妆」「场景/道具」或「生成配图」页再粘贴')
+}
+
+async function uploadPastedImageFiles(files, opts = {}) {
+  if (!files?.length) throw new Error('剪贴板里没有图片，请先复制截图或图片文件')
+  const target = resolvePasteUploadTarget(files, opts)
+  const { pairs, unmatched } = resolveImageUploadPairs(files.slice(0, target.ids.length), target)
+  const { ok, failed } = await processImageUploadPairs(pairs, target)
+  if (unmatched.length) {
+    toast.warning(`已粘贴上传 ${ok} 张，${unmatched.length} 张无法匹配`)
+    return
+  }
+  if (failed.length) {
+    toast.warning(`粘贴上传 ${ok}/${pairs.length}，失败：${formatUploadFailures(failed)}`)
+    return
+  }
+  if (target.kind === 'character-batch') {
+    if (pairs.length === 1) {
+      const ch = chars.value.find(item => item.id === pairs[0].id)
+      toast.success(`已粘贴上传「${formatCharacterDisplayName(ch || { name: '角色' })}」定妆图`)
+    } else {
+      toast.success(`已粘贴上传 ${ok} 张定妆图`)
+    }
+  } else if (target.kind === 'scene-batch') {
+    const sc = scenes.value.find(item => item.id === pairs[0]?.id)
+    toast.success(pairs.length === 1
+      ? `已粘贴上传「${sc?.location || '场景'}」参考图`
+      : `已粘贴上传 ${ok} 张场景参考图`)
+  } else if (target.kind === 'prop-batch') {
+    const pr = props.value.find(item => item.id === pairs[0]?.id)
+    toast.success(pairs.length === 1
+      ? `已粘贴上传「${pr?.name || '道具'}」参考图`
+      : `已粘贴上传 ${ok} 张道具参考图`)
+  } else {
+    const sb = sbs.value.find(item => item.id === pairs[0]?.id)
+    toast.success(pairs.length === 1 && sb
+      ? `已粘贴配图到 #${getNarrationShotDisplayNo(sb)}`
+      : `已粘贴上传 ${ok} 张配图`)
+  }
+}
+
+/** Ctrl+V：定妆/场景道具/配图页粘贴；输入框内忽略 */
+async function onStudioImagePaste(event) {
+  if (panel.value !== 'production') return
+  if (isEditablePasteTarget(event?.target)) return
+  const allowScenes = prodTab.value === 'scenes' && isNarrationMode.value
+  if (prodTab.value !== 'chars' && !allowScenes && !(prodTab.value === 'shots' && isNarrationMode.value)) return
+  const files = extractClipboardImageFiles(event?.clipboardData)
+  if (!files.length) return
+  event.preventDefault()
+  try {
+    await uploadPastedImageFiles(files)
+  } catch (e) {
+    toast.error(e.message || '粘贴上传失败')
+  }
+}
+
+/** 点击「粘贴」：从系统剪贴板读图并上传到指定角色 */
+async function pasteCharImageFromClipboard(charId) {
+  try {
+    const files = await readClipboardImageFilesViaApi()
+    await uploadPastedImageFiles(files.slice(0, 1), { charId })
+  } catch (e) {
+    toast.error(e.message || '粘贴上传失败')
+  }
+}
+
+/** 将图片 Blob 转为 PNG（部分浏览器 ClipboardItem 只稳收 image/png） */
+async function blobToPngClipboardBlob(blob) {
+  if (!blob) throw new Error('空图片')
+  if (String(blob.type || '').toLowerCase() === 'image/png') return blob
+  const bmp = await createImageBitmap(blob)
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = bmp.width
+    canvas.height = bmp.height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('无法创建画布')
+    ctx.drawImage(bmp, 0, 0)
+    const png = await new Promise((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG 转换失败'))), 'image/png')
+    })
+    return png
+  } finally {
+    bmp.close?.()
+  }
+}
+
+async function copyImageUrlToClipboard(src, label) {
+  const url = String(src || '').trim()
+  if (!url) {
+    toast.info(`${label}暂无参考图`)
+    return
+  }
+  if (!navigator?.clipboard?.write || typeof ClipboardItem === 'undefined') {
+    toast.error('当前浏览器不支持复制图片到剪贴板')
+    return
+  }
+  try {
+    const res = await fetch(url.startsWith('/') || url.startsWith('http') ? url : `/${url}`, { credentials: 'same-origin' })
+    if (!res.ok) throw new Error(`读取图片失败 (${res.status})`)
+    const raw = await res.blob()
+    if (!raw || !String(raw.type || '').startsWith('image/')) {
+      throw new Error('文件不是图片')
+    }
+    let blob = raw
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })])
+    } catch {
+      blob = await blobToPngClipboardBlob(raw)
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+    }
+    toast.success(`已复制「${label}」参考图`)
+  } catch (e) {
+    const msg = String(e?.message || e || '')
+    if (/denied|permission|NotAllowed/i.test(msg)) {
+      toast.error('剪贴板权限被拒绝：请允许本站写入剪贴板后再试')
+      return
+    }
+    toast.error(e.message || '复制图片失败')
+  }
+}
+
+/** 点击「复制图片」：把定妆图写入系统剪贴板，便于粘贴到别处 */
+async function copyCharPortraitImageToClipboard(charId) {
+  const row = chars.value.find(ch => ch.id === charId)
+  await copyImageUrlToClipboard(charPortraitImageSrc(row || {}), formatCharacterDisplayName(row || { name: '角色' }))
+}
+
+async function pasteSceneImageFromClipboard(sceneId) {
+  try {
+    const files = await readClipboardImageFilesViaApi()
+    await uploadPastedImageFiles(files.slice(0, 1), { sceneId })
+  } catch (e) {
+    toast.error(e.message || '粘贴上传失败')
+  }
+}
+
+async function pastePropImageFromClipboard(propId) {
+  try {
+    const files = await readClipboardImageFilesViaApi()
+    await uploadPastedImageFiles(files.slice(0, 1), { propId })
+  } catch (e) {
+    toast.error(e.message || '粘贴上传失败')
+  }
+}
+
+async function copySceneImageToClipboard(sceneId) {
+  const row = scenes.value.find(s => s.id === sceneId)
+  const path = row?.image_url || row?.imageUrl
+  await copyImageUrlToClipboard(path ? `/${String(path).replace(/^\//, '')}` : '', row?.location || '场景')
+}
+
+async function copyPropImageToClipboard(propId) {
+  const row = props.value.find(p => p.id === propId)
+  const path = row?.image_url || row?.imageUrl
+  await copyImageUrlToClipboard(path ? `/${String(path).replace(/^\//, '')}` : '', row?.name || '道具')
+}
+
+/** 点击「粘贴」：从系统剪贴板读图并上传到指定镜头 */
+async function pasteShotImageFromClipboard(sbId) {
+  try {
+    const files = await readClipboardImageFilesViaApi()
+    await uploadPastedImageFiles(files.slice(0, 1), { shotId: sbId })
+  } catch (e) {
+    toast.error(e.message || '粘贴上传失败')
+  }
+}
+
 async function clearCharPortraitImage(charId) {
   const row = chars.value.find(ch => ch.id === charId)
   if (!row?.image_url && !row?.imageUrl) {
@@ -8231,6 +9332,70 @@ async function applyCharacterUploadedImage(charId, path) {
   if (row) {
     row.image_url = path
     row.imageUrl = path
+  }
+}
+
+async function applySceneUploadedImage(sceneId, path) {
+  await sceneAPI.update(sceneId, { image_url: path })
+  const row = scenes.value.find(s => s.id === sceneId)
+  if (row) {
+    row.image_url = path
+    row.imageUrl = path
+  }
+}
+
+async function applyPropUploadedImage(propId, path) {
+  await propAPI.update(propId, { image_url: path })
+  const row = props.value.find(p => p.id === propId)
+  if (row) {
+    row.image_url = path
+    row.imageUrl = path
+  }
+}
+
+function triggerSceneImageUpload(sceneId) {
+  imageUploadTarget.value = { kind: 'scene-batch', ids: [sceneId] }
+  imageUploadInputRef.value?.click()
+}
+
+function triggerPropImageUpload(propId) {
+  imageUploadTarget.value = { kind: 'prop-batch', ids: [propId] }
+  imageUploadInputRef.value?.click()
+}
+
+async function clearSceneImage(sceneId) {
+  const row = scenes.value.find(s => s.id === sceneId)
+  if (!row?.image_url && !row?.imageUrl) {
+    toast.info('该场景暂无参考图')
+    return
+  }
+  try {
+    await sceneAPI.update(sceneId, { image_url: null })
+    if (row) {
+      row.image_url = null
+      row.imageUrl = null
+    }
+    toast.success(`已清除「${row.location || '场景'}」参考图`)
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function clearPropImage(propId) {
+  const row = props.value.find(p => p.id === propId)
+  if (!row?.image_url && !row?.imageUrl) {
+    toast.info('该道具暂无参考图')
+    return
+  }
+  try {
+    await propAPI.update(propId, { image_url: null })
+    if (row) {
+      row.image_url = null
+      row.imageUrl = null
+    }
+    toast.success(`已清除「${row.name || '道具'}」参考图`)
+  } catch (e) {
+    toast.error(e.message)
   }
 }
 
@@ -8549,6 +9714,10 @@ async function clearAllNarrationImageDetect() {
 }
 
 async function clearAllNarrationImagePrompts() {
+  if (imagePromptChatGenerating.value || narrationImageBreaking.value) {
+    toast.warning('配图文案仍在生成中，请先等完成或停止后再清除')
+    return
+  }
   const count = narrationPromptLiveCount.value
   if (!count) {
     toast.info('暂无配图文案可清除')
@@ -8558,6 +9727,28 @@ async function clearAllNarrationImagePrompts() {
   narrationAssetClearing.value = true
   try {
     const res = await episodeAPI.clearNarrationImagePrompts(epId.value)
+    // 立刻清空本地展示，避免 refresh 慢/失败时界面仍像「清不掉」
+    for (const sb of sbs.value) {
+      const had = String(sb?.image_prompt || sb?.imagePrompt || '').trim()
+      if (!had && !narrationShotNeedsOwnImage(sb)) continue
+      sb.image_prompt = null
+      sb.imagePrompt = null
+      clearShotFluxPromptMetaLocal(sb)
+      const raw = sb?.reference_images || sb?.referenceImages
+      if (!raw) continue
+      try {
+        const parsed = typeof raw === 'object' ? { ...raw } : JSON.parse(String(raw))
+        if (!parsed || typeof parsed !== 'object') continue
+        delete parsed.image_prompt_source
+        delete parsed.image_prompt_llm_raw
+        delete parsed.flux_prompt_en
+        delete parsed.flux_prompt_en_at
+        delete parsed.flux_prompt_en_version
+        const next = JSON.stringify(parsed)
+        sb.reference_images = next
+        sb.referenceImages = next
+      } catch { /* ignore */ }
+    }
     narrationImageAuditPanel.value = null
     persistNarrationBreakdownSummary({
       ...narrationBreakdownSummary.value,
@@ -8826,6 +10017,10 @@ async function processImageUploadPairs(pairs, target) {
       const path = await uploadImageFile(file)
       if (target.kind === 'character-batch') {
         await applyCharacterUploadedImage(id, path)
+      } else if (target.kind === 'scene-batch') {
+        await applySceneUploadedImage(id, path)
+      } else if (target.kind === 'prop-batch') {
+        await applyPropUploadedImage(id, path)
       } else {
         await applyShotUploadedImage(id, path)
       }
@@ -8915,6 +10110,12 @@ async function onImageUploadSelected(event) {
         } else {
           toast.success(`已全部上传 ${ok} 张定妆图`)
         }
+      } else if (target.kind === 'scene-batch') {
+        const sc = scenes.value.find(item => item.id === pairs[0]?.id)
+        toast.success(pairs.length === 1 ? `已上传「${sc?.location || '场景'}」参考图` : `已上传 ${ok} 张场景参考图`)
+      } else if (target.kind === 'prop-batch') {
+        const pr = props.value.find(item => item.id === pairs[0]?.id)
+        toast.success(pairs.length === 1 ? `已上传「${pr?.name || '道具'}」参考图` : `已上传 ${ok} 张道具参考图`)
       } else {
       const shotMsg = target.kind === 'shot-batch' && pairs.length === 1
         ? `镜头 #${getNarrationShotDisplayNo(sbs.value.find(item => item.id === pairs[0].id) || { storyboard_number: pairs[0].id })}`
@@ -9440,11 +10641,13 @@ async function batchValidateCharPortraitStyles() {
   }
 }
 
-async function generateCharAppearance(id) {
+async function generateCharAppearance(id, options?: { silent?: boolean }) {
   const toastId = `char-appearance-${id}`
   try {
     if (usesLocalModelPipeline.value) {
-      toast.info('正在切换 LLM 并生成外貌描述，约需 1–2 分钟…', { id: toastId, duration: 8000 })
+      if (!options?.silent) {
+        toast.info('正在切换 LLM 并生成定妆描述，约需 1–2 分钟…', { id: toastId, duration: 8000 })
+      }
       await ensureLocalModelForTask('llm')
     }
     if (!isPendingCharAppearance(id)) pendingCharAppearanceIds.value.push(id)
@@ -9471,14 +10674,14 @@ async function generateCharAppearance(id) {
         if (idx >= 0) chars.value[idx] = result.character
       }
     }
-    toast.success(isLocalComicMode.value ? 'AI 配图描述已生成（含 English tags）' : 'AI 外貌描述已生成（含 English tags）')
+    if (!options?.silent) toast.success('定妆描述已生成')
     toast.dismiss(toastId)
   } catch (e) {
     if (!isLlmCancelled(e)) {
       charAppearanceGeneratedAt.value = { ...charAppearanceGeneratedAt.value, [id]: null }
       charAppearanceFailedAt.value = { ...charAppearanceFailedAt.value, [id]: resolveLlmTimestamp() }
       charAppearanceError.value = { ...charAppearanceError.value, [id]: llmErrorMessage(e) }
-      toast.error(e.message)
+      if (!options?.silent) toast.error(e.message)
       toast.dismiss(toastId)
     }
   } finally {
@@ -9486,26 +10689,37 @@ async function generateCharAppearance(id) {
   }
 }
 
-async function batchCharAppearances() {
+async function batchCharAppearances(options?: { auto?: boolean; onlyMissing?: boolean }) {
+  const onlyMissing = !!options?.onlyMissing || !!options?.auto
   const missing = visualChars.value.filter(c => !(String(c.appearance || '').trim()))
-  const forceAll = missing.length === 0
+  const forceAll = !onlyMissing && missing.length === 0
   const candidates = forceAll ? visualChars.value : missing
   const pending = sortCharactersForPortraitGeneration(candidates)
   const ids = pending.map(c => c.id)
   if (!ids.length) {
-    toast.info('暂无角色可生成 AI 配图描述')
+    if (!options?.auto) toast.info('暂无角色可生成定妆描述')
     return
   }
-  if (forceAll) {
-    if (!confirm(`将重新生成 ${ids.length} 个角色的 AI 配图描述（覆盖现有文案）。是否继续？`)) return
+  if (forceAll && !options?.auto) {
+    if (!confirm(`将重新生成 ${ids.length} 个角色的定妆描述（覆盖现有文案）。是否继续？`)) return
   }
-  if (!tryBeginBatch('charAppearances', forceAll ? '正在覆盖重写 AI 配图描述…' : '正在批量生成 AI 配图描述…')) return
+  const concurrency = usesLocalModelPipeline.value ? 1 : Math.min(3, Math.max(1, ids.length))
+  const batchMsg = options?.auto
+    ? `正在并发生成 ${ids.length} 条定妆描述…`
+    : (forceAll ? `正在覆盖重写定妆描述（${concurrency} 路）…` : `正在批量生成定妆描述（${concurrency} 路）…`)
+  if (!tryBeginBatch('charAppearances', batchMsg)) return
   try {
     if (usesLocalModelPipeline.value) await ensureLocalModelForTask('llm')
-    for (const char of pending) {
-      await generateCharAppearance(char.id)
+    const results = await mapWithConcurrency(pending, concurrency, async (char) => {
+      await generateCharAppearance(char.id, { silent: true })
+      return true
+    })
+    const ok = results.filter(r => r.status === 'fulfilled').length
+    if (!options?.auto) {
+      toast.success(forceAll ? `定妆描述已全部重写（${ok}）` : `定妆描述批量生成完成（${ok}）`)
+    } else if (ok) {
+      toast.success(`已并发生成 ${ok} 条定妆描述`)
     }
-    toast.success(forceAll ? 'AI 配图描述已全部重写' : 'AI 配图描述批量生成完成')
   } catch (e) {
     toast.error(e.message)
   } finally {
@@ -9650,6 +10864,158 @@ async function batchSceneImages() {
   } finally {
     endBatch('sceneImages')
   }
+}
+
+async function updateScenePrompt(id, value) {
+  const trimmed = String(value || '').trim()
+  try {
+    await sceneAPI.update(id, { prompt: trimmed })
+    const scene = scenes.value.find(s => s.id === id)
+    if (scene) scene.prompt = trimmed
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function copyScenePrompt(id) {
+  const scene = scenes.value.find(s => s.id === id)
+  const text = String(scene?.prompt || '').trim()
+  if (!text) {
+    toast.warning('暂无场景描述词')
+    return
+  }
+  const copied = await copyTextToClipboard(text)
+  if (copied) toast.success(`已复制「${scene?.location || '场景'}」描述词`)
+}
+
+async function updatePropDescription(id, value) {
+  const trimmed = String(value || '').trim()
+  try {
+    await propAPI.update(id, { description: trimmed, prompt: trimmed })
+    const prop = props.value.find(p => p.id === id)
+    if (prop) {
+      prop.description = trimmed
+      prop.prompt = trimmed
+    }
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function copyPropDescription(id) {
+  const prop = props.value.find(p => p.id === id)
+  const text = String(prop?.prompt || prop?.description || '').trim()
+  if (!text) {
+    toast.warning('暂无道具描述词')
+    return
+  }
+  const copied = await copyTextToClipboard(text)
+  if (copied) toast.success(`已复制「${prop?.name || '道具'}」描述词`)
+}
+
+async function doExtractNarrationEnv() {
+  if (!sbs.value.length) {
+    toast.warning('请先生成分镜，再提取场景/道具')
+    return
+  }
+  const extractModel = usesLocalModelPipeline.value
+    ? resolveLocalExtractModel(episodeTextModel.value)
+    : episodeTextModel.value
+  if (usesLocalModelPipeline.value) {
+    try {
+      await ensureLocalModelForTask('llm', { ollamaModel: extractModel })
+    } catch (e) {
+      toast.error(e?.message || '本地 LLM 未就绪，请确认 Ollama 已启动')
+      return
+    }
+  }
+  narrationEnvExtracting.value = true
+  narrationEnvExtractError.value = ''
+  try {
+    const res = await episodeAPI.extractNarrationEnv(epId.value, {
+      text_model: extractModel,
+      text_thinking: false,
+    })
+    narrationEnvExtractGeneratedAt.value = pickLlmGeneratedAt(res) ?? resolveLlmTimestamp()
+    narrationEnvExtractFailedAt.value = ''
+    const sceneCount = (res?.scenes || []).length
+    const propCount = (res?.props || []).length
+    const bound = res?.bound_storyboards ?? res?.boundStoryboards ?? 0
+    const synced = res?.prompts_synced ?? res?.promptsSynced ?? 0
+    toast.success(
+      `已提取场景 ${sceneCount}、道具 ${propCount}`
+      + `${bound ? `，绑定分镜 ${bound}` : ''}`
+      + `${synced ? `，已同步 ${synced} 条配图文案场景壳` : ''}`,
+    )
+    await refresh()
+  } catch (e) {
+    if (!isLlmCancelled(e)) {
+      narrationEnvExtractGeneratedAt.value = ''
+      narrationEnvExtractFailedAt.value = resolveLlmTimestamp()
+      narrationEnvExtractError.value = llmErrorMessage(e)
+      toast.error(e.message)
+    }
+  } finally {
+    narrationEnvExtracting.value = false
+  }
+}
+
+async function genPropImg(id) {
+  try {
+    await ensureLocalModelForTask('image')
+    if (!isPendingPropImage(id)) pendingPropImageIds.value.push(id)
+    await propAPI.generateImage(id, epId.value, portraitImageStyleOptions())
+    toast.success('道具图片生成中')
+    await refresh()
+    watchAsyncResult(() => {
+      const prop = props.value.find(p => p.id === id)
+      const done = !!(prop?.image_url || prop?.imageUrl)
+      if (done) pendingPropImageIds.value = pendingPropImageIds.value.filter(item => item !== id)
+      return done
+    })
+  } catch (e) {
+    pendingPropImageIds.value = pendingPropImageIds.value.filter(item => item !== id)
+    toast.error(e.message)
+  }
+}
+
+async function batchPropImages() {
+  const ids = props.value.filter(p => !(p.image_url || p.imageUrl)).map(p => p.id)
+  if (!ids.length) {
+    toast.info('所有道具图片已生成')
+    return
+  }
+  if (!tryBeginBatch('propImages', '道具图片批量生成中…')) return
+  pendingPropImageIds.value = [...new Set([...pendingPropImageIds.value, ...ids])]
+  try {
+    const results = await Promise.allSettled(ids.map(id => propAPI.generateImage(id, epId.value, portraitImageStyleOptions())))
+    const failCount = results.filter(r => r.status === 'rejected').length
+    if (failCount) toast.error(`${failCount} 个道具图片提交失败`)
+    await refresh()
+    await watchAsyncResult(() => ids.every(id => {
+      const prop = props.value.find(p => p.id === id)
+      const done = !!(prop?.image_url || prop?.imageUrl)
+      if (done) pendingPropImageIds.value = pendingPropImageIds.value.filter(item => item !== id)
+      return done
+    }), 36)
+    if (!failCount) toast.success('道具图片批量生成完成')
+  } catch (e) {
+    pendingPropImageIds.value = pendingPropImageIds.value.filter(item => !ids.includes(item))
+    toast.error(e.message)
+  } finally {
+    endBatch('propImages')
+  }
+}
+
+async function batchNarrationEnvImages() {
+  const sceneIds = scenes.value.filter(s => !(s.image_url || s.imageUrl)).map(s => s.id)
+  const propIds = props.value.filter(p => !(p.image_url || p.imageUrl)).map(p => p.id)
+  if (!sceneIds.length && !propIds.length) {
+    toast.info('场景与道具参考图均已生成')
+    return
+  }
+  if (sceneIds.length) await batchSceneImages()
+  if (propIds.length) await batchPropImages()
 }
 
 const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
@@ -9953,7 +11319,11 @@ function narrationShotImageLabel(s) {
   }
   if (meta.narration_image_mode === 'new') {
     const paraHint = meta.paragraph_index != null ? `段 ${meta.paragraph_index + 1}` : '段落'
-    const layoutHint = meta.paragraph_layout === 'diptych' ? ' · 两宫格' : ''
+    const layoutHint = meta.paragraph_layout === 'quad'
+      ? ' · 竖页'
+      : meta.paragraph_layout === 'diptych'
+        ? ' · 两宫格'
+        : ''
     const sceneHint = meta.scene_content ? ` · ${meta.scene_content.slice(0, 20)}${meta.scene_content.length > 20 ? '…' : ''}` : ''
     return hasNarrationShotImage(s)
       ? `${paraHint}${layoutHint} · 已生成配图${sceneHint}`
@@ -10480,7 +11850,12 @@ async function genNarrationShotImage(sb) {
       storyboard_id: sb.id,
       drama_id: dramaId,
       frame_type: 'illustration',
-    }, episodeImageModel.value, characterIds, sbs.value)
+    }, episodeImageModel.value, characterIds, sbs.value, {
+      usePortraitReference: narrationShotUsePortraitReference.value,
+      useSceneReference: narrationShotUseSceneReference.value,
+      usePropReference: narrationShotUsePropReference.value,
+      panelTextMode: narrationShotPanelTextMode.value,
+    })
     const generation = await imageAPI.generate(buildImagePayload(payload))
     const generationId = generation?.id ?? null
     patchNarrationShotImageJob(sb.id, {
@@ -10489,7 +11864,16 @@ async function genNarrationShotImage(sb) {
       message: 'ComfyUI 生图中…',
       generationId,
     })
-    toast.success('配图生成中')
+    const refParts = [
+      narrationShotUsePortraitReference.value ? '定妆' : null,
+      narrationShotUseSceneReference.value ? '场景' : null,
+      narrationShotUsePropReference.value ? '道具' : null,
+    ].filter(Boolean)
+    const refHint = refParts.length ? `含${refParts.join('+')}参考` : '不挂参考'
+    const textHint = isNovelComicMode.value
+      ? (narrationShotPanelTextMode.value === 'full' ? '长文画字' : '短字叠字')
+      : ''
+    toast.success(`配图生成中（${[refHint, textHint].filter(Boolean).join(' · ')}）`)
     scheduleNarrationShotImagePoll(sb.id, generationId)
   } catch (e) {
     patchNarrationShotImageJob(sb.id, {
@@ -10680,8 +12064,13 @@ async function batchNarrationShotImages(options) {
         storyboard_id: sb.id,
         drama_id: dramaId,
         frame_type: 'illustration',
-      }, episodeImageModel.value, characterIds, sbs.value)
-      if (agnesBatch) payload.model = 'agnes-image-2.0-flash'
+      }, episodeImageModel.value, characterIds, sbs.value, {
+        usePortraitReference: narrationShotUsePortraitReference.value,
+        useSceneReference: narrationShotUseSceneReference.value,
+        usePropReference: narrationShotUsePropReference.value,
+        panelTextMode: narrationShotPanelTextMode.value,
+      })
+      if (agnesBatch) payload.model = 'agnes-image-2.1-flash'
       const generation = await imageAPI.generate(buildImagePayload(payload))
       job.generationId = generation?.id ?? null
       if (!job.generationId) {
@@ -10859,22 +12248,41 @@ async function genVid(sb) {
     toast.error('请先生成配图再生成视频')
     return
   }
+  const prompt = getStoryboardVideoPrompt(sb)
+  if (!prompt) {
+    toast.error('请先「生成视频描述」')
+    return
+  }
   const anchor = resolveNarrationImageAnchorShot(sbs.value, sb) || sb
   const duration = estimateVideoDurationSec(sb)
-  const prompt = buildLocalVideoPrompt(sb)
-  const videoModel = String(localModelBarVideoModel.value || DEFAULT_LOCAL_VIDEO_MODEL)
+  const videoModel = resolveActiveVideoModel()
   const isWan = /wan/i.test(videoModel)
+  const isAgnes = /agnes-video/i.test(videoModel)
   const params = {
     storyboard_id: sb.id,
     drama_id: dramaId,
     prompt,
-    duration,
+    duration: isAgnes ? Math.min(13, Math.max(2, Math.round(duration) || 10)) : duration,
     model: videoModel,
   }
-  const first = getFirstFrame(anchor) || getFirstFrame(sb) || cover
-  const last = getLastFrame(sb) || getLastFrame(anchor)
+  // 首帧优先本镜配图；尾帧优先显式尾帧，否则下一镜配图（镜间连贯）
+  const first = resolveVideoReferenceImage(sb) || getFirstFrame(anchor) || getFirstFrame(sb) || cover
+  const explicitLast = getLastFrame(sb) || getLastFrame(anchor)
+  const nextEnd = resolveNextShotVideoEndFrame(sb)
+  const last = (explicitLast && explicitLast !== first ? explicitLast : null) || nextEnd
+  const canChain = !!(first && last && last !== first)
   const refs = getRefs(sb)
-  if (isWan && videoModel.includes('flf') && first && last) {
+  // 镜间连贯：本镜首帧 → 下一镜首帧（作尾帧）；Agnes keyframes / Wan FLF
+  if (canChain && (isAgnes || isWan)) {
+    Object.assign(params, {
+      reference_mode: 'first_last',
+      first_frame_url: first,
+      last_frame_url: last,
+      image_url: cover,
+    })
+  } else if (isAgnes) {
+    Object.assign(params, { reference_mode: 'single', image_url: cover, first_frame_url: first || cover })
+  } else if (isWan && videoModel.includes('flf') && first && last) {
     Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last })
   } else if (isWan && first && last && !videoModel.includes('i2v')) {
     Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last })
@@ -10885,18 +12293,28 @@ async function genVid(sb) {
   }
   try {
     if (isWan) {
-      await ensureLocalModelForTask('video', { comfyVideoModel: videoModel })
+      await ensureLocalModelForTask('video', {
+        comfyVideoModel: canChain && !videoModel.includes('flf') ? 'wan_flf2v' : videoModel,
+      })
     }
     delete failedVideoMessages.value[sb.id]
     delete videoProgressMessages.value[sb.id]
     if (!isPendingVideo(sb.id)) pendingVideoIds.value.push(sb.id)
     videoProgressMessages.value = {
       ...videoProgressMessages.value,
-      [sb.id]: isWan ? '已提交，等待 ComfyUI…' : '正在用 Glide/轻量运镜生成…',
+      [sb.id]: isAgnes
+        ? (canChain ? '已提交 Agnes 首尾帧连贯视频…' : '已提交 Agnes 图生视频…')
+        : isWan
+          ? (canChain ? '已提交 Wan 首尾帧连贯…' : '已提交，等待 ComfyUI…')
+          : '正在用 Glide/轻量运镜生成…',
     }
     const generation = await videoAPI.generate(params)
-    toast.success(isWan ? 'Wan 视频生成中（较慢）' : '运镜动态生成中')
-    console.info(`[VideoGen] 已提交 storyboard=${sb.id} gen=${generation?.id} model=${videoModel}`)
+    toast.success(
+      canChain && (isAgnes || isWan)
+        ? (isAgnes ? 'Agnes 镜间连贯视频生成中' : 'Wan 首尾帧视频生成中')
+        : isAgnes ? 'Agnes 图生视频生成中' : isWan ? 'Wan 视频生成中（较慢）' : '运镜动态生成中',
+    )
+    console.info(`[VideoGen] 已提交 storyboard=${sb.id} gen=${generation?.id} model=${videoModel} mode=${params.reference_mode}${canChain ? ' chain→next' : ''}`)
     await refresh()
     pollVideoGeneration(generation?.id, sb.id)
   } catch (e) {
@@ -11024,29 +12442,55 @@ async function doCompose(sb) {
   }
 }
 async function batchVideos() {
-  const targets = videoGenTargets.value.filter(s => hasImg(s) && !hasVid(s))
-  if (!targets.length) {
-    toast.info('没有可生成的镜头（需有配图且尚未生成视频）')
+  const withImage = videoGenTargets.value.filter(s => hasImg(s) && !hasVid(s))
+  const missingPrompt = withImage.filter(s => !hasVideoPrompt(s))
+  const targets = withImage.filter(s => hasVideoPrompt(s))
+  if (!withImage.length) {
+    toast.info(isNarrationMode.value
+      ? '没有可生成的镜头（需已有配图且尚未生成视频）'
+      : '没有可生成的镜头（需有配图且尚未生成视频）')
     return
   }
-  const videoModel = String(localModelBarVideoModel.value || DEFAULT_LOCAL_VIDEO_MODEL)
+  if (!targets.length) {
+    toast.error(`还有 ${missingPrompt.length} 个镜头缺视频描述，请先「一键生成所有视频描述」`)
+    return
+  }
+  if (missingPrompt.length) {
+    toast.info(`跳过 ${missingPrompt.length} 个缺描述镜头；将生成 ${targets.length} 个`)
+  }
+  const prevBarModel = String(localModelBarVideoModel.value || '').trim()
+  const videoModel = resolveActiveVideoModel()
   const isWan = /wan/i.test(videoModel)
-  if (!tryBeginBatch('videos', isWan
-    ? `批量 Wan 视频中（串行 ${targets.length}）…`
-    : `批量动图风中（${targets.length}）…`)) return
+  const isAgnes = /agnes-video/i.test(videoModel)
+  if (!tryBeginBatch('videos', isAgnes
+    ? `批量 Agnes 镜间连贯视频中（串行 ${targets.length}）…`
+    : isWan
+      ? `批量 Wan 首尾帧视频中（串行 ${targets.length}）…`
+      : `批量动图风中（${targets.length}）…`)) return
   try {
     if (isWan) {
-      await ensureLocalModelForTask('video', { comfyVideoModel: videoModel })
+      // 镜间连贯会走 FLF2V，预加载首尾帧工作流
+      await ensureLocalModelForTask('video', {
+        comfyVideoModel: videoModel.includes('flf') ? videoModel : 'wan_flf2v',
+      })
     }
-    for (const sb of targets) {
+    if (isNarrationMode.value && isLightMotionVideoModel(prevBarModel)) {
+      toast.info('解说已改用 Agnes 图生视频（不再走 Glide 运镜）')
+    }
+    for (let i = 0; i < targets.length; i++) {
+      const sb = targets[i]
       pendingVideoIds.value = [...new Set([...pendingVideoIds.value, sb.id])]
       try {
+        // Agnes 视频约 1 次/分钟；批量时镜间间隔避免 429
+        if (isAgnes && i > 0) {
+          toast.info(`Agnes 限流：等待 65s 后提交下一镜（${i + 1}/${targets.length}）…`)
+          await new Promise(r => setTimeout(r, 65_000))
+        }
         await genVid(sb)
-        // 串行：Wan 防爆显存；轻量动态也串行以免 FFmpeg 抢满磁盘
         await watchAsyncResult(() => {
           const target = sbs.value.find(s => s.id === sb.id)
           return !!(target?.video_url || target?.videoUrl) || !!failedVideoMessages.value[sb.id]
-        }, isWan ? 900 : 120, isWan ? 5000 : 1500)
+        }, isWan || isAgnes ? 900 : 120, isWan || isAgnes ? 5000 : 1500)
       } catch (e) {
         failedVideoMessages.value = {
           ...failedVideoMessages.value,
@@ -11056,6 +12500,58 @@ async function batchVideos() {
     }
   } finally {
     endBatch('videos')
+  }
+}
+
+async function autoMarkNarrationHighlights() {
+  if (!epId.value) return
+  try {
+    const res = await episodeAPI.autoMarkNarrationHighlights(epId.value)
+    await refresh()
+    toast.success(`已扫描 ${res.scanned || 0} 个单元：标记高燃 ${res.marked || 0}，清除 ${res.cleared || 0}`)
+  } catch (e) {
+    toast.error(e.message || '自动标记高燃失败')
+  }
+}
+
+async function toggleHighlightMotion(sb, on) {
+  const anchor = resolveNarrationImageAnchorShot(sbs.value, sb) || sb
+  try {
+    await storyboardAPI.update(anchor.id, {
+      highlight_motion: !!on,
+      highlight_reason: on ? (parseNarrationImageMeta(anchor).highlight_reason || '手动标记') : '',
+    })
+    await refresh()
+  } catch (e) {
+    toast.error(e.message || '更新高燃标记失败')
+  }
+}
+
+async function runNarrationRecommendedRemaining() {
+  if (!isNarrationMode.value) return
+  if (!tryBeginBatch('narrationPipeline', '按推荐流程跑剩余…')) return
+  try {
+    if (ttsEligibleCount.value && ttsGeneratedCount.value < ttsEligibleCount.value) {
+      toast.info('① 生成剩余配音…')
+      await batchShotTTS()
+    }
+    if (narrationImagesPendingCount.value > 0) {
+      toast.info('② 生成剩余配图…')
+      await batchNarrationShotImages()
+    }
+    if (videoPromptsPendingCount.value > 0) {
+      toast.info(`③ 生成视频描述（补全 ${videoPromptsPendingCount.value}/${videoPromptsTotalCount.value}）…`)
+      await batchVideoPrompts({ force: false })
+    }
+    if (videosPendingCount.value > 0) {
+      toast.info(`④ 生成剩余镜头视频（${videosPendingCount.value}）…`)
+      await batchVideos()
+    }
+    toast.success('推荐流程已完成剩余步骤（合成请手动「生成剩余」）')
+  } catch (e) {
+    toast.error(e?.message || '推荐流程中断')
+  } finally {
+    endBatch('narrationPipeline')
   }
 }
 async function batchCompose() {
@@ -11928,19 +13424,25 @@ async function deleteGsvVoice(v) {
 
 async function previewGsvVoice() {
   const voiceId = toGsvRef(gsvForm.voice_id)
-  if (!voiceId || !gptsovitsAvailable.value) return
+  const engine = (localTtsEngine.value === 'indextts' && indexttsAvailable.value)
+    ? 'indextts'
+    : (gptsovitsAvailable.value ? 'gptsovits' : (indexttsAvailable.value ? 'indextts' : ''))
+  if (!voiceId || !engine) {
+    toast.warning('IndexTTS2 / GPT-SoVITS 未就绪，无法试听')
+    return
+  }
   gsvPreviewing.value = true
   gsvPreviewUrl.value = ''
   try {
     const res = await voicesAPI.previewLocal({
-      local_tts_engine: 'gptsovits',
+      local_tts_engine: engine,
       local_voice: voiceId,
-      text: String(gsvForm.prompt_text || '').trim() || '这是一段 GPT-SoVITS 试听。',
+      text: String(gsvForm.prompt_text || '').trim() || '这是一段克隆音色试听。',
     })
     const path = res?.audio_url || res?.audioUrl
     if (!path) throw new Error('试听生成失败')
     gsvPreviewUrl.value = path.startsWith('/') ? path : `/${path.replace(/^\/+/, '')}`
-    toast.success('试听已生成')
+    toast.success(`试听已生成（${engine === 'indextts' ? 'IndexTTS2' : 'GPT-SoVITS'}）`)
   } catch (e) {
     toast.error(e.message)
   } finally {
@@ -12010,7 +13512,7 @@ watch(narratorChar, (c) => {
   const voice = c?.voice_style || c?.voiceStyle
   if (voice) customTtsVoiceId.value = voice
 }, { immediate: true })
-watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs(); restoreImageDetectBatchPrefs(); restoreNarrationImageStylePref(); restoreOpeningPickPrefs() }, { immediate: true })
+watch(epId, () => { restoreLocalTtsPrefs(); restoreExportBgmPrefs(); restoreNarrationBreakdownSummary(); restoreImageDetectModePrefs(); restoreImageDetectBatchPrefs(); restoreNarrationImageStylePref(); restoreNarrationShotUsePortraitReference(); restoreNarrationShotPanelTextMode(); restoreOpeningPickPrefs() }, { immediate: true })
 watch(openingPickCount, persistOpeningPickPrefs)
 watch([imageDetectBatchThreshold, imageDetectBatchSize, imagePromptBatchSize], () => { persistImageDetectBatchPrefs() })
 watch([epId, isNarrationLikeMode, isLocalComicMode], ([id, narrationLike, localComic]) => {
@@ -12024,6 +13526,7 @@ watch([prodTab, epId, () => isNarrationLikeMode.value], ([tab]) => {
   if (tab === 'bgm' && epId.value) loadBgmLibrary()
   if (tab === 'voice' && isNarrationLikeMode.value) {
     void loadLocalCastVoices()
+    void loadGsvVoiceCatalog()
     if (isMotionComicMode.value) void loadVoiceboxVoices()
   }
 })
@@ -12118,6 +13621,7 @@ watch(() => Number(route.params.episodeNumber), (next, prev) => {
     selectedSb.value = null
     chars.value = []
     scenes.value = []
+    props.value = []
     sbs.value = []
     void refresh({ skipDramaRefetch: true })
   }
@@ -12196,6 +13700,12 @@ watch(currentLocalModelStage, stage => {
     applyBgmToAllShots,
     applyBgmToShot,
     applyCharacterUploadedImage,
+    applySceneUploadedImage,
+    applyPropUploadedImage,
+    triggerSceneImageUpload,
+    triggerPropImageUpload,
+    clearSceneImage,
+    clearPropImage,
     applyComposeStatusPatch,
     applyExportBgmToAllShots,
     applyGridState,
@@ -12217,9 +13727,29 @@ watch(currentLocalModelStage, stage => {
     regenerateNarrationShotImagesForFilter,
     batchRunning,
     batchSceneImages,
+    batchPropImages,
+    batchNarrationEnvImages,
     batchShotTTS,
     batchShotTTSAll,
     batchVideos,
+    batchVideoPrompts,
+    generateVideoPromptForShot,
+    getStoryboardVideoPrompt,
+    hasVideoPrompt,
+    updateStoryboardVideoPrompt,
+    copyStoryboardVideoPrompt,
+    isPendingVideoPrompt,
+    videoPromptsPendingCount,
+    videoPromptsDoneCount,
+    videoPromptsTotalCount,
+    autoMarkNarrationHighlights,
+    toggleHighlightMotion,
+    runNarrationRecommendedRemaining,
+    highlightMotionTargets,
+    highlightVideosPendingCount,
+    isHighlightMotionShot,
+    resolveNextShotVideoEndFrame,
+    resolveVideoReferenceImage,
     bgmAppliedCount,
     bgmApplyingAllId,
     bgmCompletedCount,
@@ -12258,6 +13788,14 @@ watch(currentLocalModelStage, stage => {
     charImagesPendingCount,
     charImgCount,
     charPortraitUseReferenceById,
+    narrationShotUsePortraitReference,
+    toggleNarrationShotUsePortraitReference,
+    narrationShotUseSceneReference,
+    toggleNarrationShotUseSceneReference,
+    narrationShotUsePropReference,
+    toggleNarrationShotUsePropReference,
+    narrationShotPanelTextMode,
+    toggleNarrationShotPanelTextMode,
     charVoicePreviewingId,
     charVoicePreviewSrc,
     charVoicePreviewUrls,
@@ -12357,6 +13895,7 @@ watch(currentLocalModelStage, stage => {
     doCompose,
     doExtract,
     doExtractNarrationCharacters,
+    doExtractNarrationEnv,
     assignLocalCharacterVoices,
     formatLocalVoiceLabel,
     doGridSplit,
@@ -12455,6 +13994,7 @@ watch(currentLocalModelStage, stage => {
     getNarrationShotImageJob,
     genSample,
     genSceneImg,
+    genPropImg,
     genShotFrame,
     genShotTTS,
     genVid,
@@ -12481,6 +14021,14 @@ watch(currentLocalModelStage, stage => {
     getNarrationEditContext,
     getNarrationImagePromptForCopy,
     getNarrationImagePromptText,
+    getNarrationShotPromptPortraitCount,
+    getNarrationShotPromptPortraitLabels,
+    formatNarrationShotPromptPortraitHint,
+    formatNarrationImagePromptHtml,
+    isNarrationPromptEditing,
+    startNarrationPromptEdit,
+    finishNarrationPromptEdit,
+    listNarrationPromptPortraitLabels,
     getNarrationImageStyle,
     getNarrationShotDisplayNo,
     getNarrationShotImage,
@@ -12592,6 +14140,8 @@ watch(currentLocalModelStage, stage => {
     isNarrationMode,
     isMotionComicMode,
     isNovelComicMode,
+    isNarrationVideoMode,
+    usesExplainScriptFlow,
     isLocalComicMode,
     isDialoguePortraitMode,
     usesDialogueSpeakers,
@@ -12633,6 +14183,7 @@ watch(currentLocalModelStage, stage => {
     isPendingNarrationShot,
     isPendingTtsShot,
     isPendingSceneImage,
+    isPendingPropImage,
     isPendingShotFrame,
     isPendingVideo,
     isStoryboardCharacterSelected,
@@ -12722,6 +14273,10 @@ watch(currentLocalModelStage, stage => {
     narrationEditDialogue,
     narrationEditDuration,
     narrationExtracting,
+    narrationEnvExtracting,
+    narrationEnvExtractError,
+    narrationEnvExtractGeneratedAt,
+    narrationEnvExtractFailedAt,
     narrationExtractGeneratedAt,
     narrationExtractFailedAt,
     narrationExtractError,
@@ -12825,6 +14380,14 @@ watch(currentLocalModelStage, stage => {
     narratorVoiceId,
     navigateTo,
     nextPendingNarrationShot,
+    onStudioImagePaste,
+    pasteCharImageFromClipboard,
+    copyCharPortraitImageToClipboard,
+    pasteSceneImageFromClipboard,
+    copySceneImageToClipboard,
+    pastePropImageFromClipboard,
+    copyPropImageToClipboard,
+    pasteShotImageFromClipboard,
     nextStepLabel,
     normalizeBgmLibraryRows,
     normalizeNarrationDialogue,
@@ -12871,6 +14434,7 @@ watch(currentLocalModelStage, stage => {
     pendingNarrationShotIds,
     pendingTtsShotIds,
     pendingSceneImageIds,
+    pendingPropImageIds,
     pendingShotFrameKeys,
     pendingShotScanIds,
     pendingVideoIds,
@@ -12949,6 +14513,7 @@ watch(currentLocalModelStage, stage => {
     saveNarratorVoice,
     saveOpeningSubtitle,
     saveRaw,
+    saveNovelComicNarrationScript,
     saveScr,
     saveShotEditor,
     saveUploadedEpisodeAudio,
@@ -12963,6 +14528,9 @@ watch(currentLocalModelStage, stage => {
     sceneImagesPendingCount,
     sceneImgCount,
     scenes,
+    props,
+    propImgCount,
+    propImagesPendingCount,
     scheduleWatermarkSave,
     scriptChatAbortController,
     scriptChatDraftHasEmphasis,
@@ -12981,6 +14549,9 @@ watch(currentLocalModelStage, stage => {
     scriptChatQuickHints,
     scriptChatScrollRef,
     scriptChatStepTitle,
+    optimizeExplainScriptButtonLabel,
+    explainScriptStepLabel,
+    storyboardScriptStepLabel,
     scriptChatThinking,
     showScriptChatPanel,
     scriptContent,
@@ -13004,6 +14575,7 @@ watch(currentLocalModelStage, stage => {
     sendImageDetectChat,
     sendImagePromptChat,
     sendScriptChat,
+    optimizeNovelComicNarration,
     sendStoryboardChat,
     setEpisodeTextThinking,
     setNarrationShotLayout,
@@ -13067,6 +14639,7 @@ watch(currentLocalModelStage, stage => {
     storyboardChatScrollRef,
     storyboardStep,
     dramaRawStep,
+    narrationRawStep,
     dramaRewriteStep,
     dramaExtractStep,
     dramaVoiceStep,
@@ -13132,6 +14705,10 @@ watch(currentLocalModelStage, stage => {
     ttsPendingCount,
     updateCharVoice,
     updateCharacterAppearance,
+    updateScenePrompt,
+    copyScenePrompt,
+    updatePropDescription,
+    copyPropDescription,
     updateField,
     updateGridAssignment,
     updateNarrationImagePrompt,

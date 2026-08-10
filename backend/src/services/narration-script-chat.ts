@@ -1,5 +1,5 @@
-import { eq } from 'drizzle-orm'
-import { parseProductionMode, isMotionComicMode, isLocalComicMode, isDialoguePortraitMode, isNovelComicMode, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { and, eq, isNull } from 'drizzle-orm'
+import { parseProductionMode, isMotionComicMode, isLocalComicMode, isDialoguePortraitMode, isNovelComicMode, isNarrationVideoMode, resolveEpisodeProductionMode, usesExplainScriptFlow } from '../constants/production-mode.js'
 import { LOCAL_COMIC_SCRIPT_CHAT_SYSTEM, LOCAL_COMIC_SCRIPT_MIN_CHARS } from '../constants/local-comic.js'
 import { MOTION_COMIC_SCRIPT_CHAT_SYSTEM } from '../constants/motion-comic.js'
 import {
@@ -9,9 +9,15 @@ import {
 } from '../constants/dialogue-portrait.js'
 import {
   NOVEL_COMIC_SCRIPT_CHAT_SYSTEM,
-  NOVEL_COMIC_CHAPTER_SCRIPT_MIN_CHARS,
   NOVEL_COMIC_CHAPTER_SCRIPT_MAX_CHARS,
+  compressNovelComicPreviousScript,
+  formatNovelComicPreviousEpisodeBlock,
+  isNovelComicOptimizeNarrationIntent,
+  parseNovelComicMeta,
+  resolveNovelComicChapterForEpisode,
+  resolveNovelComicPanelBeatsForEpisode,
 } from '../constants/novel-comic.js'
+import { formatNovelBibleForLlm } from '../constants/novel-bible.js'
 import { db, schema } from '../db/index.js'
 import { resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel, resolveScriptChatTextThinking } from '../constants/text-models.js'
 import { ensureScriptEmphasisInBody } from '../utils/subtitle-emphasis.js'
@@ -45,52 +51,49 @@ export type NarrationScriptChatTurn = {
 }
 
 const NARRATION_SCRIPT_CHAT_SYSTEM = [
-  '你是「体验365个人生」类短视频解说编剧，为火宝解说流水线写可直接 TTS 与配图的解说稿。',
+  '你是「小说解说」短视频编剧：把小说原文/大纲改写成可直接配音与配图的「解说脚本」。',
+  '成片：旁白解说剧情 + 人物对白 + 配图；不是纯旁白散文，不是照搬小说，不是「体验人生」第二人称。',
   '',
-  '【语感与真实】',
-  '- 语言亲民：口语化、好懂，像跟朋友聊天，不用文绉绉、堆砌辞藻或生僻词。',
-  '- 内容真实：细节可信、合乎常理，写具体处境与小人物日常；不悬浮、不伪励志、不夸大其词。',
-  '- 代入感：带观众进入「你」当下的感受与选择，写看得见摸得着的动作、物件与场景，少用空泛形容。',
-  '- 内心活动：穿插「你」的犹豫、触动、后悔、期待、不安等心理与感受，与动作、对话式旁白交织；情感有起伏，但不写成意识流散文。',
+  '【最关键·形态】',
+  '- 提炼主线剧情，压缩成「旁白解说（行数占比 >20%）+ 人物对话」。',
+  '- 每行必须是「说话人：台词」（全角冒号）。叙述用「旁白：」，角色开口用角色全名（如「叶沉：」「林澜：」）。',
+  '- 禁止无说话人的裸句；禁止把对白嵌进旁白（不要「叶沉说道」后接台词在同一行）。',
+  '- 写完自检：正文「旁白：」行数须 >20%；冲突与高燃优先让角色开口。',
+  '',
+  '【旁白硬性】',
+  '- 旁白只解说剧情推进（谁遇到什么、冲突升到哪、结果是什么）。',
+  '- 禁止旁白描写动作、表情、感官细描、心理独白（如青筋、汗水、眼神、骨缝碎裂等一律删掉，交给画面与对白）。',
+  '- 旁白里指代人物写角色全名，禁止「他」「她」「他的」「她的」。',
+  '',
+  '【对白】',
+  '- 对白保留关键冲突与情绪，短句利落；可用「你/我」。',
+  '- 禁止旧说书腔（且说/话说/却说/看官）；禁止片尾引流、章标题、JSON、markdown。',
   '',
   '【篇幅】',
-  '- **用户指定字数时以用户为准（最高优先级）**：如「写1000字」「约800字」，须按该目标输出，误差控制在约 ±15%，禁止擅自写成默认长稿。',
-  '- 用户未指定时，完整稿不少于 3000 汉字、不超过 10000 汉字；不足须扩写，超出须精简，不得敷衍或注水。',
+  '- 成片约 1 分钟对应 600～700 字解说文案（含旁白与对白汉字）。',
+  '- 用户指定字数或「约X分钟」时以用户为准（误差约 ±15%）。',
+  '- 「改成解说脚本」且未指定时：做成约 2～3 分钟成片，目标约 1500 字，上限 1800 字（3 分钟封顶）；禁止压成空洞短摘要，也禁止写成精修小说。',
+  '- 「改成解说脚本」每次都是整篇重写：以【文案输入】为准重新成稿，禁止在旧解说脚本上扩写续写；只有用户明确说「扩写」才扩写。',
+  '- 必须涵括【文案输入】整章主线：开端→冲突升级→高燃→余波/钩子，不得只写前半段或高潮切片；次要支线可压缩，关键角色与关键转折不得漏。',
   '',
-  '【时间与人生阶段】',
-  '- 时间跨度须贴合本期人生主题，不必写满一生，也不必套「童年→青年→中年→老年」模板。',
-  '- 可只写一段：某个夏天、大学几年、进城第一年、一段婚姻、一场病、一次创业、网瘾少年那几年等；阶段由故事决定。',
-  '- 禁止为凑篇幅硬塞无关年龄段；没有写到的阶段不要强行补「后来你老了…」。',
-  '- 时间推进要清楚（季节/年份感/处境变化即可），但不要求每个剧本都横跨几十年。',
-  '',
-  '【输出格式】',
-  '1) 第一行片头 hook：以「今天体验的人生剧本是，」开头，后接 2～4 个短信息点（身份/处境/核心矛盾等；不必每次写年龄），简短有力即可。',
-  '2) 空一行后写正文，段间空一行。',
-  '3) 【叙述人称】默认正文第二人称「你」，语气沉静，像带观众亲历这段人生；须符合上文【语感与真实】。若用户明确要求第一人称「我」、第三人称或其他人称，以用户最新要求为准，全文统一，不得混用。',
-  '4) 本步骤只输出纯文本解说稿，不要输出 ** 或任何 markdown 标记；字幕关键词强调在「旁白分镜」步骤由 Qwen 自动拆句并标注。',
-  '',
-  '【画面与配图】',
-  '- 每句能想象成画面：年代氛围、地点、服装、摊位/工具、人物动作。',
-  '- 写具体物件名（花衬衫、喇叭裤、煤油灯），禁止「各类商品」「很多东西」。',
-  '- 年代用「八十年代市井」「九十年代城镇」等，不要写 1980、1990 等年份数字。',
-  '- 刑案/冲突只写押解、公堂、牢狱等候，不写血腥暴力。',
-  '',
-  '【节奏】',
-  '- 单句 8～22 字为主，便于一句一镜配音。',
-  '- 有 1～2 处命运转折；结尾略有余味，不喊口号。',
-  '',
-  '【禁止】',
-  '- 镜头语言（特写、推镜）、markdown 标题、分点列表、「大家好」「点赞关注」。',
-  '',
-  '用户要求写完整稿时，只输出解说稿正文（第一行即片头 hook）；篇幅以用户指定为准，未指定时满足【篇幅】3000～10000 字。',
-  '',
-  '【多轮改稿】',
-  '- 支持多轮：用户可在后续消息说「改第二段」「补内心戏」「缩短到5000字」等，须结合【当前台本】或对话历史中的上一版完整稿修改。',
-  '- 改稿类请求（含补说话人/改人称/去片尾/扩写/缩写）：先可一句极短确认（≤20字），空一行后**必须输出修改后的完整稿**，不要只解释改了哪段、不要只给 diff。',
-  '- 若【当前台本】已有内容而用户未贴新稿，在其基础上改，勿另起新故事。',
+  '【输出】',
+  '- 只输出完整解说脚本正文（说话人行）；不要镜头语言、不要节拍标签。',
+  '- 本步骤不要输出 **；字幕强调在「分镜脚本」步骤处理。',
+  '- 有【当前解说脚本】则在其基础上改，勿另起新故事。',
   '',
   '闲聊、选题讨论时可正常对话，不必强行输出整稿。',
 ].join('\n')
+
+/** 与前端「改成解说脚本」按钮文案保持一致（兼容旧「改成讲解稿」） */
+export const NARRATION_OPTIMIZE_FROM_SOURCE_USER_HINT =
+  '把「文案输入」改成解说脚本：整篇重写；涵括整章主线；每行「旁白：」或「角色名：」；旁白行数>20%且只解说剧情、不写动作表情；人物对话承担冲突；约两三分钟成片、上限1800字；禁止旧说书腔与照抄原文；只输出完整解说脚本。'
+
+export function isNarrationOptimizeFromSourceIntent(text?: string | null): boolean {
+  const s = String(text || '').trim()
+  if (!s) return false
+  if (s === NARRATION_OPTIMIZE_FROM_SOURCE_USER_HINT) return true
+  return /改成解说脚本|改成讲解稿|原文改讲解|大纲改讲解|素材改讲解|小说解说/.test(s)
+}
 
 function resolveScriptChatSystem(episodeId: number): string {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
@@ -191,6 +194,21 @@ export function parseUserScriptLengthRequest(content: string): ScriptLengthPolic
     }
   }
 
+  // 「约3分钟 / 做成2分钟」→ 按 650 字/分钟换算
+  const minutes = text.match(/(?:约|大约|大概|做成|做成约|写|目标)?\s*(\d{1,2}(?:\.\d)?)\s*分钟/)
+  if (minutes && /分钟|时长|成片/.test(text)) {
+    const m = Number(minutes[1])
+    if (Number.isFinite(m) && m > 0 && m <= 30) {
+      const target = clampTarget(Math.round(m * 650))
+      return {
+        minChars: clampTarget(target * 0.85),
+        maxChars: clampTarget(target * 1.15),
+        targetChars: target,
+        userSpecified: true,
+      }
+    }
+  }
+
   return null
 }
 
@@ -207,17 +225,51 @@ function resolveDefaultScriptMinChars(episodeId: number): number {
   const mode = resolveEpisodeProductionMode(episodeId)
   if (isLocalComicMode(mode)) return LOCAL_COMIC_SCRIPT_MIN_CHARS
   if (isDialoguePortraitMode(mode)) return DIALOGUE_PORTRAIT_SCRIPT_MIN_CHARS
-  if (isNovelComicMode(mode)) return NOVEL_COMIC_CHAPTER_SCRIPT_MIN_CHARS
+  // 小说漫画讲解：默认不卡最低字数（跟故事走）；用户说「写1200字」时仍走 parseUserScriptLengthRequest
+  if (isNovelComicMode(mode)) return 80
   return NARRATION_SCRIPT_MIN_CHARS
+}
+
+/** 「改成解说脚本/讲解稿」篇幅策略 */
+function resolveExplainScriptOptimizeLengthPolicy(episodeId: number): ScriptLengthPolicy {
+  const mode = resolveEpisodeProductionMode(episodeId)
+  // 小说漫画：跟故事走，仅防空稿
+  if (isNovelComicMode(mode)) {
+    return {
+      minChars: 80,
+      maxChars: NOVEL_COMIC_CHAPTER_SCRIPT_MAX_CHARS,
+      targetChars: 80,
+      userSpecified: false,
+    }
+  }
+  // 解说视频：约 2～3 分钟；3 分钟上限 1800 字，目标约 1500
+  const target = 1_500
+  return {
+    minChars: 1_200,
+    maxChars: 1_800,
+    targetChars: target,
+    userSpecified: true,
+  }
 }
 
 function resolveScriptLengthPolicy(
   episodeId: number,
   messages: NarrationScriptChatTurn[],
 ): ScriptLengthPolicy {
+  const mode = resolveEpisodeProductionMode(episodeId)
+  const lastUser = [...(messages || [])].reverse().find(m => m.role === 'user')
+  // 「改成解说脚本/讲解稿」：固定策略，勿从按钮文案二次解析成用户指定篇幅
+  if (
+    usesExplainScriptFlow(mode)
+    && (
+      isNarrationOptimizeFromSourceIntent(lastUser?.content)
+      || isNovelComicOptimizeNarrationIntent(lastUser?.content)
+    )
+  ) {
+    return resolveExplainScriptOptimizeLengthPolicy(episodeId)
+  }
   const userPolicy = findUserScriptLengthPolicy(messages)
   if (userPolicy) return userPolicy
-  const mode = resolveEpisodeProductionMode(episodeId)
   const minChars = resolveDefaultScriptMinChars(episodeId)
   const maxChars = isDialoguePortraitMode(mode)
     ? DIALOGUE_PORTRAIT_SCRIPT_MAX_CHARS
@@ -299,7 +351,31 @@ function buildEpisodeContext(episodeId: number): string {
     `集序号：第 ${ep.episodeNumber} 集`,
   ].filter(Boolean)
 
-  return lines.length ? `【当前项目】\n${lines.join('\n')}` : ''
+  const base = lines.length ? `【当前项目】\n${lines.join('\n')}` : ''
+  const bibleBlock = formatNovelBibleForLlm(drama?.metadata)
+  return [base, bibleBlock].filter(Boolean).join('\n\n')
+}
+
+/** 读取上集原文，压成短摘录（定妆/上下文参考；小说漫画已不再生成讲解稿） */
+export function loadNovelComicPreviousEpisodeSummary(episodeId: number): {
+  previousEpisodeNumber: number
+  summary: string
+} | null {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep || ep.episodeNumber < 2) return null
+  const prevNum = ep.episodeNumber - 1
+  const [prev] = db.select().from(schema.episodes)
+    .where(and(
+      eq(schema.episodes.dramaId, ep.dramaId),
+      eq(schema.episodes.episodeNumber, prevNum),
+      isNull(schema.episodes.deletedAt),
+    )).all()
+  if (!prev) return null
+  // 优先原文；旧项目若仍有讲解稿再回落
+  const raw = String(prev.content || '').trim() || String(prev.scriptContent || '').trim()
+  const summary = compressNovelComicPreviousScript(raw)
+  if (!summary) return null
+  return { previousEpisodeNumber: prevNum, summary }
 }
 
 /** 剧本聊天上下文：带入「直接输入」/已保存文案，支持多轮改稿 */
@@ -309,9 +385,66 @@ export function buildScriptChatContextBlock(episodeId: number, scriptOverride?: 
 
   const mode = resolveEpisodeProductionMode(episodeId)
   const motionComic = isMotionComicMode(mode)
+  const novelComic = isNovelComicMode(mode)
   const dialoguePortrait = isDialoguePortraitMode(mode)
   const script = String(scriptOverride || ep.scriptContent || ep.content || '').trim()
   const parts = [buildEpisodeContext(episodeId)]
+
+  if (novelComic) {
+    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+    const chapter = resolveNovelComicChapterForEpisode(drama?.metadata, ep.episodeNumber)
+    const panelBeats = resolveNovelComicPanelBeatsForEpisode(drama?.metadata, ep.episodeNumber)
+    const epRaw = String(ep.content || '').trim()
+    const epScript = String(scriptOverride || ep.scriptContent || '').trim()
+    const prev = loadNovelComicPreviousEpisodeSummary(episodeId)
+    if (chapter) {
+      parts.push(
+        '',
+        `【本章大纲】第${chapter.number}章「${chapter.title}」`,
+        chapter.summary ? `摘要：${chapter.summary}` : '',
+        chapter.key_beats?.length ? `情节点：${chapter.key_beats.join('；')}` : '',
+      )
+    }
+    if (panelBeats.length) {
+      parts.push(
+        '',
+        '【场面提示】尽量覆盖，以故事完整为准：',
+        ...panelBeats.map((b, i) => `${i + 1}. ${b}`),
+      )
+    }
+    if (prev) {
+      parts.push('', formatNovelComicPreviousEpisodeBlock(prev.summary, prev.previousEpisodeNumber))
+    }
+    if (epRaw) {
+      parts.push('', '【文案输入·本章小说原文】改讲解稿时以此为主：', epRaw.slice(0, 20_000))
+    } else {
+      const novel = String(parseNovelComicMeta(drama?.metadata).source_novel || '').trim()
+      if (novel) parts.push('', '【剧集小说原文·摘录】', novel.slice(0, 12_000))
+    }
+    if (epScript) {
+      parts.push('', '【当前讲解稿】在其基础上改，勿另起新故事：', epScript.slice(0, 12_000))
+    } else {
+      parts.push('', '【当前讲解稿】尚未保存。请根据文案输入改成白话讲解稿。')
+    }
+    return parts.filter(Boolean).join('\n')
+  }
+
+  // 解说视频：文案输入(content) 与讲解稿(script_content) 分离
+  if (isNarrationVideoMode(mode)) {
+    const epRaw = String(ep.content || '').trim()
+    const epScript = String(scriptOverride || ep.scriptContent || '').trim()
+    if (epRaw) {
+      parts.push('', '【文案输入·原文/大纲/素材】改讲解稿时以此为主：', epRaw.slice(0, 20_000))
+    } else {
+      parts.push('', '【文案输入】尚未保存。用户可先粘贴原文/大纲，或在对话里直接写完整讲解稿。')
+    }
+    if (epScript) {
+      parts.push('', '【当前讲解稿】在其基础上改，勿另起新故事：', epScript.slice(0, 12_000))
+    } else {
+      parts.push('', '【当前讲解稿】尚未保存。请根据文案输入改成小说解说讲解稿（精简概括、狠砍感官堆砌、节奏快慢有序；重复写角色名，禁止任何「他」「她」）。')
+    }
+    return parts.filter(Boolean).join('\n')
+  }
 
   if (!script) {
     parts.push('', `【当前台本】尚未保存。用户可在「直接输入」粘贴后切回 AI 对话，或在对话里直接贴全文。`)
@@ -377,7 +510,7 @@ function scriptCharCount(text: string): number {
   return String(text || '').replace(/\s/g, '').length
 }
 
-const SCRIPT_AUTO_EXPAND_MAX_ROUNDS = 2
+const SCRIPT_AUTO_EXPAND_MAX_ROUNDS = 3
 
 function buildScriptChatResultMeta(
   reply: string,
@@ -387,9 +520,12 @@ function buildScriptChatResultMeta(
   extra?: {
     auto_expanded?: boolean
     expand_rounds?: number
+    auto_compressed?: boolean
+    compress_rounds?: number
     dialogue_ratio_repaired?: boolean
     narration_ratio?: number
     dialogue_ratio?: number
+    beat_outline?: string
   },
 ) {
   const charCount = scriptCharCount(reply)
@@ -409,15 +545,20 @@ function buildScriptChatResultMeta(
     dialogue_ratio: extra?.dialogue_ratio ?? (ratio.body ? Number(ratio.dialogueRatio.toFixed(3)) : null),
     auto_expanded: extra?.auto_expanded ?? false,
     expand_rounds: extra?.expand_rounds ?? 0,
+    auto_compressed: extra?.auto_compressed ?? false,
+    compress_rounds: extra?.compress_rounds ?? 0,
     dialogue_ratio_repaired: extra?.dialogue_ratio_repaired ?? false,
     below_min: charCount > 0 && charCount < policy.minChars,
+    above_max: charCount > policy.maxChars,
+    beat_outline: extra?.beat_outline || undefined,
   }
 }
 
-/** 用户是否在要完整稿（含「写剧本」「写1000字」等） */
+/** 用户是否在要完整稿（含「写剧本」「写1000字」「改成解说脚本」等） */
 function userWantsFullScriptDraft(content: string): boolean {
   const u = String(content || '').trim()
   if (!u) return false
+  if (isNarrationOptimizeFromSourceIntent(u) || isNovelComicOptimizeNarrationIntent(u)) return true
   return /完整稿|整稿|全文|3000|8000|10000|扩写|写一[篇个部]|出稿|写稿|写.{0,8}剧本|帮我写|生成.{0,4}稿|直接写|\d{3,5}\s*字/.test(u)
 }
 
@@ -469,13 +610,39 @@ function dedupeAdjacentChatTurns(turns: NarrationScriptChatTurn[]): NarrationScr
   return out
 }
 
+function userAskedScriptExpand(text?: string | null): boolean {
+  return /扩写|补全缺失|写长|加长|不够长|字数不够|再写长|继续补全|继续扩/.test(String(text || ''))
+}
+
 function shouldAutoExpandScript(turns: NarrationScriptChatTurn[], reply: string, policy: ScriptLengthPolicy): boolean {
   const chars = scriptCharCount(reply)
   if (chars >= policy.minChars) return false
-  // 用户指定篇幅时：已达目标 70% 以上视为可用稿，不再自动二轮扩写（本地 thinking 极慢）
-  if (policy.userSpecified && chars >= Math.round(policy.targetChars * 0.7)) return false
+  // 「改成解说脚本」默认整篇重写：未说扩写则不自动扩写
+  const lastUser = lastUserMessage(turns)
+  if (isNarrationOptimizeFromSourceIntent(lastUser) && !userAskedScriptExpand(lastUser)) {
+    return false
+  }
+  // 用户指定篇幅：至少先过 minChars；达 max(min, 目标70%) 才停
+  if (policy.userSpecified && chars >= Math.max(policy.minChars, Math.round(policy.targetChars * 0.7))) {
+    return false
+  }
   if (!looksLikeScriptChatDraftReply(reply)) return false
-  return userWantsFullScriptDraft(lastUserMessage(turns))
+  return userWantsFullScriptDraft(lastUser)
+}
+
+function shouldAutoCompressScript(reply: string, policy: ScriptLengthPolicy): boolean {
+  const chars = scriptCharCount(reply)
+  if (chars <= policy.maxChars) return false
+  return looksLikeScriptChatDraftReply(reply)
+}
+
+function buildScriptCompressUserMessage(currentChars: number, policy: ScriptLengthPolicy): string {
+  return [
+    `当前稿约 ${currentChars} 字，已超过上限 ${policy.maxChars} 字（目标约 ${policy.targetChars} 字，3 分钟上限 ${policy.maxChars} 字）。`,
+    `请精简到 ${policy.minChars}～${policy.maxChars} 字，尽量贴近 ${policy.targetChars} 字。`,
+    '硬性：删掉旁白里的动作/表情/感官/心理细描与原文照抄；保留整章主线与关键对白；每行仍是「旁白：」或「角色名：」。',
+    '直接输出精简后的完整解说脚本全文，不要解释、不要 diff。',
+  ].join('')
 }
 
 function buildScriptExpandUserMessage(
@@ -500,16 +667,17 @@ function buildScriptExpandUserMessage(
   }
   if (policy.userSpecified) {
     return [
-      `当前稿约 ${currentChars} 字，未达到用户要求的约 ${policy.targetChars} 字。`,
-      `请在保持故事主线、人称与说话人格式不变的前提下扩写至约 ${policy.targetChars} 汉字`,
-      `（允许范围 ${policy.minChars}～${policy.maxChars} 字），不要扩成默认长稿。`,
-      '直接输出完整稿全文，不要只解释、不要只给 diff 或片段。',
+      `当前稿约 ${currentChars} 字，未达到约 ${policy.targetChars} 字（约 2～3 分钟成片）要求。`,
+      `请对照【文案输入】整章补齐遗漏情节（开端/冲突升级/高燃/余波钩子），`,
+      `扩写至约 ${policy.targetChars} 汉字（允许 ${policy.minChars}～${policy.maxChars} 字）。`,
+      '保持每行「旁白：」或「角色名：」；旁白只讲剧情不写动作表情；禁止注水重复。',
+      '直接输出完整解说脚本全文，不要只解释、不要只给 diff 或片段。',
     ].join('')
   }
   return [
     `当前稿约 ${currentChars} 字，不足 ${policy.minChars} 字硬性要求。`,
     `请在保持故事主线、人称与说话人格式不变的前提下扩写至至少 ${policy.minChars} 汉字，`,
-    '补内心戏、环境细节与情节转折；直接输出扩写后的完整稿全文，不要只解释、不要只给 diff 或片段。',
+    '对照原文补齐遗漏情节，不要注水。直接输出完整稿全文。',
   ].join('')
 }
 
@@ -613,6 +781,8 @@ function buildNarrationScriptChatMessages(params: {
 type ScriptChatStreamHooks = {
   onThinkingDelta?: (delta: string, full: string) => void
   onStatus?: (message: string) => void
+  /** 两轮生成：第1轮节拍完成后回调，前端可另开气泡展示 */
+  onPhase?: (info: { phase: string; content: string }) => void
 }
 
 async function ensureScriptMinLength(params: {
@@ -645,11 +815,13 @@ async function ensureScriptMinLength(params: {
   const expandMaxTokens = Math.min(params.maxTokens, policy.userSpecified
     ? Math.max(4096, Math.ceil(policy.targetChars * 4))
     : params.maxTokens)
+  // 免费模型扩写易排队卡住：单轮限时 3 分钟，失败则保留当前稿
+  const expandTimeoutMs = /:free\b/i.test(String(params.textModel || '')) ? 180_000 : 420_000
 
   for (let round = 0; round < SCRIPT_AUTO_EXPAND_MAX_ROUNDS; round++) {
     const chars = scriptCharCount(reply)
     if (chars >= policy.minChars) break
-    if (policy.userSpecified && chars >= Math.round(policy.targetChars * 0.7)) break
+    if (policy.userSpecified && chars >= Math.max(policy.minChars, Math.round(policy.targetChars * 0.7))) break
 
     expandRounds += 1
     logTaskProgress('NarrationScriptChat', 'auto-expand', {
@@ -676,34 +848,142 @@ async function ensureScriptMinLength(params: {
       }) },
     ]
 
-    if (params.stream) {
-      reply = await streamTextChatMessages(
-        expandMessages,
-        params.stream.onDelta,
-        params.textModel,
-        expandThinking,
-        900_000,
-        0.65,
-        params.signal,
-        expandMaxTokens,
-        { onThinkingDelta: params.stream.hooks?.onThinkingDelta },
-        SCRIPT_CHAT_OLLAMA_NUM_CTX,
+    try {
+      if (params.stream) {
+        reply = await streamTextChatMessages(
+          expandMessages,
+          params.stream.onDelta,
+          params.textModel,
+          expandThinking,
+          expandTimeoutMs,
+          0.65,
+          params.signal,
+          expandMaxTokens,
+          { onThinkingDelta: params.stream.hooks?.onThinkingDelta },
+          SCRIPT_CHAT_OLLAMA_NUM_CTX,
+        )
+      } else {
+        reply = (await callTextChatMessages(
+          expandMessages,
+          params.textModel,
+          expandThinking,
+          expandTimeoutMs,
+          0.65,
+          expandMaxTokens,
+          SCRIPT_CHAT_OLLAMA_NUM_CTX,
+        )).trim()
+      }
+      reply = finalizeMotionComicScriptReply(reply, params.episodeId)
+    } catch (err: unknown) {
+      const msg = String((err as Error)?.message || err || 'unknown')
+      logTaskWarn('NarrationScriptChat', 'auto-expand-failed', {
+        episodeId: params.episodeId,
+        round: expandRounds,
+        chars,
+        error: msg,
+      })
+      params.stream?.hooks?.onStatus?.(
+        `自动扩写未完成（${msg.slice(0, 80)}），先保留当前约 ${chars} 字稿…`,
       )
-    } else {
-      reply = (await callTextChatMessages(
-        expandMessages,
-        params.textModel,
-        expandThinking,
-        900_000,
-        0.65,
-        expandMaxTokens,
-        SCRIPT_CHAT_OLLAMA_NUM_CTX,
-      )).trim()
+      break
     }
-    reply = finalizeMotionComicScriptReply(reply, params.episodeId)
   }
 
   return { reply, expandRounds }
+}
+
+const SCRIPT_AUTO_COMPRESS_MAX_ROUNDS = 2
+
+async function ensureScriptMaxLength(params: {
+  episodeId: number
+  apiMessages: TextChatMessage[]
+  textModel: string
+  maxTokens: number
+  lengthPolicy: ScriptLengthPolicy
+  initialReply: string
+  signal?: AbortSignal
+  stream?: {
+    onDelta: (delta: string, full: string) => void
+    hooks?: ScriptChatStreamHooks
+  }
+}): Promise<{ reply: string; compressRounds: number }> {
+  let reply = params.initialReply.trim()
+  let compressRounds = 0
+  const policy = params.lengthPolicy
+
+  if (!shouldAutoCompressScript(reply, policy)) {
+    return { reply, compressRounds }
+  }
+
+  let compressMessages = params.apiMessages
+  const compressTimeoutMs = /:free\b/i.test(String(params.textModel || '')) ? 180_000 : 420_000
+  const compressMaxTokens = Math.min(params.maxTokens, Math.max(4096, Math.ceil(policy.maxChars * 3)))
+
+  for (let round = 0; round < SCRIPT_AUTO_COMPRESS_MAX_ROUNDS; round++) {
+    const chars = scriptCharCount(reply)
+    if (chars <= policy.maxChars) break
+
+    compressRounds += 1
+    logTaskProgress('NarrationScriptChat', 'auto-compress', {
+      episodeId: params.episodeId,
+      round: compressRounds,
+      chars,
+      max: policy.maxChars,
+      target: policy.targetChars,
+      model: params.textModel,
+    })
+    params.stream?.hooks?.onStatus?.(
+      `篇幅约 ${chars} 字，超出上限 ${policy.maxChars}，正在精简（第 ${compressRounds} 轮）…`,
+    )
+
+    compressMessages = [
+      ...compressMessages,
+      { role: 'assistant' as const, content: reply },
+      { role: 'user' as const, content: buildScriptCompressUserMessage(chars, policy) },
+    ]
+
+    try {
+      if (params.stream) {
+        reply = await streamTextChatMessages(
+          compressMessages,
+          params.stream.onDelta,
+          params.textModel,
+          false,
+          compressTimeoutMs,
+          0.35,
+          params.signal,
+          compressMaxTokens,
+          { onThinkingDelta: params.stream.hooks?.onThinkingDelta },
+          SCRIPT_CHAT_OLLAMA_NUM_CTX,
+        )
+      } else {
+        reply = (await callTextChatMessages(
+          compressMessages,
+          params.textModel,
+          false,
+          compressTimeoutMs,
+          0.35,
+          compressMaxTokens,
+          SCRIPT_CHAT_OLLAMA_NUM_CTX,
+        )).trim()
+      }
+      reply = finalizeMotionComicScriptReply(reply, params.episodeId)
+    } catch (err: unknown) {
+      const msg = String((err as Error)?.message || err || 'unknown')
+      logTaskWarn('NarrationScriptChat', 'auto-compress-failed', {
+        episodeId: params.episodeId,
+        round: compressRounds,
+        chars,
+        error: msg,
+      })
+      params.stream?.hooks?.onStatus?.(
+        `自动精简未完成（${msg.slice(0, 80)}），先保留当前约 ${chars} 字稿…`,
+      )
+      break
+    }
+  }
+
+  return { reply, compressRounds }
 }
 
 function episodeIsMotionComic(episodeId: number): boolean {
@@ -883,6 +1163,415 @@ async function ensureMotionComicDialogueRatio(params: {
   return { reply: best, repaired, ratio: bestRatio }
 }
 
+/** 两轮·第1轮：节拍大纲（解说视频 / 小说漫画共用骨架） */
+const EXPLAIN_SCRIPT_BEAT_OUTLINE_SYSTEM = [
+  '你是短视频讲解「节拍编剧」：根据小说原文/大纲，只输出本章情节节拍大纲，不要写旁白/对白正文。',
+  '',
+  '【输出格式】每行一条，严格如下：',
+  '序号. 节奏·慢|中|快｜地点｜角色名 + 冲突/结果',
+  '例：3. 节奏·快｜教室讲台｜叶沉交卷触王志刚掌心，桌沿烧穿，全班炸锅',
+  '',
+  '【硬性】',
+  '- 6～14 条，覆盖主线、冲突升级与高燃点；可加减承上启下拍点。',
+  '- 必须写角色全名，禁止「他」「她」「他的」「她的」。',
+  '- 每条一行短句；禁止散文、禁止感官堆砌、禁止心理独白、禁止完整对白台本。',
+  '- 节奏标签必填：铺垫/对峙用慢，爆发/冲突用快，余波/钩子用慢。',
+  '- 只输出节拍列表，不要前言后语、不要 markdown。',
+].join('\n')
+
+/** 解说视频两轮·第1轮：节拍须铺满整章，支撑 2～3 分钟成片 */
+const NARRATION_VIDEO_BEAT_OUTLINE_SYSTEM = [
+  '你是小说解说短视频「节拍编剧」：根据【文案输入】整章，只输出情节节拍大纲，不要写旁白/对白正文。',
+  '',
+  '【输出格式】每行一条，严格如下：',
+  '序号. 节奏·慢|中|快｜地点｜角色名 + 冲突/结果',
+  '例：3. 节奏·快｜教室讲台｜叶沉交卷失控，桌沿烧穿，王志刚质问，全班炸锅',
+  '',
+  '【硬性·整章覆盖】',
+  '- 10～18 条，必须按时间顺序铺满整章：开端铺垫→冲突升级→高燃爆发→余波/下集钩子。',
+  '- 不得只写高潮切片；原文后半段的关键角色、关键转折、收束钩子一律入拍。',
+  '- 必须写角色全名，禁止「他」「她」「他的」「她的」。',
+  '- 每条一行短句；禁止散文、禁止感官堆砌、禁止心理独白、禁止完整对白台本。',
+  '- 节奏标签必填：铺垫/对峙用慢，爆发/冲突用快，余波/钩子用慢。',
+  '- 只输出节拍列表，不要前言后语、不要 markdown。',
+].join('\n')
+
+/** 小说漫画两轮·第2轮：按节拍写白话旁白讲解稿（保持纯旁白） */
+const NOVEL_COMIC_EXPLAIN_FROM_BEATS_SYSTEM = [
+  NOVEL_COMIC_SCRIPT_CHAT_SYSTEM,
+  '',
+  '【本轮硬性·按节拍写】',
+  '- 严格按【节拍大纲】写成白话旁白讲解稿；一拍对应一段或数句，顺序不得乱跳。',
+  '- 标注「快」的拍：短句连击；标注「慢」的拍：可略多半句交代处境。',
+  '- 只输出旁白朗读正文；不要重复节拍列表；不要「节奏·慢/快」标签。',
+  '- 篇幅跟故事走；狠砍感官堆砌；指代人物写角色全名，禁止「他」「她」。',
+].join('\n')
+
+/** 解说视频两轮·第2轮：按节拍写旁白+对白解说脚本 */
+const NARRATION_VIDEO_EXPLAIN_FROM_BEATS_SYSTEM = [
+  NARRATION_SCRIPT_CHAT_SYSTEM,
+  '',
+  '【本轮硬性·按节拍写解说脚本】',
+  '- 严格按【节拍大纲】写成解说脚本；每条节拍都要落到正文，不得跳拍、不得只写前半章。',
+  '- 每行「旁白：」或「角色名：」；旁白只解说剧情，禁止动作/表情/感官描写；冲突与高燃优先角色开口。',
+  '- 禁止照抄【文案输入】长句；禁止散文细描（汗水、青筋、气味、体温、骨缝等一律删）。',
+  '- 旁白行数须 >20%；不要重复节拍列表；不要把「节奏·慢/快」写进正文。',
+  '- 篇幅硬性：约 2～3 分钟成片，目标约 1500 字，不得超过 1800 字（3 分钟上限）；对照原文核对是否漏掉后半章。',
+  '- 本次为整篇重写：只根据节拍与【文案输入】重新成稿，禁止承接或扩写旧解说脚本。',
+].join('\n')
+
+function isExplainScriptOptimizeIntent(text?: string | null): boolean {
+  return isNarrationOptimizeFromSourceIntent(text) || isNovelComicOptimizeNarrationIntent(text)
+}
+
+function stripBeatOutlineNoise(text: string): string {
+  return String(text || '')
+    .replace(/^```(?:\w+)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .replace(/^【?第?\s*1\s*轮[·・]?节拍大纲】?\s*/m, '')
+    .trim()
+}
+
+function formatBeatOutlineForDisplay(beats: string): string {
+  const body = stripBeatOutlineNoise(beats)
+  return `【第1轮·节拍大纲】\n${body}`
+}
+
+async function tryExplainScriptBeatTwoPass(params: {
+  episodeId: number
+  messages: NarrationScriptChatTurn[]
+  textModel: string
+  textThinking: boolean
+  script?: string
+  lengthPolicy: ScriptLengthPolicy
+  stream?: {
+    onDelta: (delta: string, full: string) => void
+    hooks?: ScriptChatStreamHooks
+  }
+  signal?: AbortSignal
+}): Promise<ReturnType<typeof buildScriptChatResultMeta> | null> {
+  const mode = resolveEpisodeProductionMode(params.episodeId)
+  if (!usesExplainScriptFlow(mode)) return null
+
+  const lastUser = [...(params.messages || [])].reverse().find(m => m.role === 'user')
+  if (!isExplainScriptOptimizeIntent(lastUser?.content)) return null
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, params.episodeId)).all()
+  if (!ep) return null
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+
+  const materialParts: string[] = [buildEpisodeContext(params.episodeId)]
+  if (isNovelComicMode(mode)) {
+    const chapter = resolveNovelComicChapterForEpisode(drama?.metadata, ep.episodeNumber)
+    const panelBeats = resolveNovelComicPanelBeatsForEpisode(drama?.metadata, ep.episodeNumber)
+    const prev = loadNovelComicPreviousEpisodeSummary(params.episodeId)
+    if (chapter) {
+      materialParts.push(
+        `【本章大纲】第${chapter.number}章「${chapter.title}」`,
+        chapter.summary ? `摘要：${chapter.summary}` : '',
+      )
+    }
+    if (panelBeats.length) {
+      materialParts.push('【场面提示】', ...panelBeats.map((b, i) => `${i + 1}. ${b}`))
+    }
+    if (prev) {
+      materialParts.push(formatNovelComicPreviousEpisodeBlock(prev.summary, prev.previousEpisodeNumber))
+    }
+  }
+
+  const source = String(ep.content || '').trim()
+    || (isNovelComicMode(mode) ? String(parseNovelComicMeta(drama?.metadata).source_novel || '').trim() : '')
+  const currentScript = String(params.script || ep.scriptContent || '').trim()
+  const wantExpand = userAskedScriptExpand(lastUser?.content)
+  // 「改成解说脚本」默认整篇重写：有文案输入时绝不喂旧解说脚本（避免模型扩写续写）
+  if (source) {
+    materialParts.push('【文案输入】', source.slice(0, 20_000))
+  } else if (currentScript) {
+    materialParts.push(
+      isNarrationVideoMode(mode)
+        ? '【当前解说脚本·请整篇重写为旁白+对白标准，禁止扩写注水】'
+        : '【当前讲解稿·请改写成白话讲解】',
+      currentScript.slice(0, 12_000),
+    )
+  }
+  if (!source && !currentScript) {
+    throw new Error(
+      isNarrationVideoMode(mode)
+        ? '请先在「文案输入」粘贴本章小说/大纲，再点「改成解说脚本」'
+        : '请先在「文案输入」粘贴本章小说/大纲，再点「改成讲解稿」',
+    )
+  }
+
+  const material = materialParts.filter(Boolean).join('\n\n')
+  const maxTokens = resolveScriptChatMaxTokens(params.textModel, params.textThinking)
+  const policy = params.lengthPolicy.userSpecified
+    ? params.lengthPolicy
+    : resolveExplainScriptOptimizeLengthPolicy(params.episodeId)
+  // 免费模型开 thinking 极易排队超时；两轮改稿默认关思考
+  const twoPassThinking = /:free\b/i.test(String(params.textModel || ''))
+    ? false
+    : params.textThinking
+
+  logTaskProgress('NarrationScriptChat', 'explain-beat-two-pass-start', {
+    episodeId: params.episodeId,
+    mode,
+    model: params.textModel,
+    hasSource: !!source,
+    hasScript: !!currentScript,
+    rewriteFromSource: !!source,
+    wantExpand,
+    userSpecifiedLength: policy.userSpecified,
+    minChars: policy.minChars,
+    maxChars: policy.maxChars,
+    thinking: twoPassThinking,
+  })
+
+  // —— 第1轮：节拍大纲 ——
+  const narrationVideo = isNarrationVideoMode(mode)
+  params.stream?.hooks?.onStatus?.(
+    narrationVideo
+      ? (wantExpand ? '第1轮：正在生成节拍大纲（扩写）…' : '第1轮：整篇重写 · 正在生成节拍大纲…')
+      : '第1轮：正在生成节拍大纲…',
+  )
+  params.stream?.onDelta?.('', '')
+  const beatSystem = narrationVideo
+    ? NARRATION_VIDEO_BEAT_OUTLINE_SYSTEM
+    : EXPLAIN_SCRIPT_BEAT_OUTLINE_SYSTEM
+  const beatMessages: TextChatMessage[] = [
+    { role: 'system', content: beatSystem },
+    {
+      role: 'user',
+      content: [
+        narrationVideo
+          ? '请根据下列材料输出整章节拍大纲（10～18 条，铺满开端到余波；只出列表，不要旁白）。'
+          : '请根据下列材料输出本章节拍大纲（只出列表，不要旁白）。',
+        '',
+        material,
+      ].join('\n'),
+    },
+  ]
+
+  let beatsRaw = ''
+  if (params.stream?.onDelta) {
+    beatsRaw = await streamTextChatMessages(
+      beatMessages,
+      (_delta, full) => {
+        const display = formatBeatOutlineForDisplay(full)
+        params.stream?.onDelta?.(display, display)
+      },
+      params.textModel,
+      twoPassThinking,
+      420_000,
+      0.4,
+      params.signal,
+      Math.min(4096, maxTokens),
+      { onThinkingDelta: params.stream?.hooks?.onThinkingDelta },
+      SCRIPT_CHAT_OLLAMA_NUM_CTX,
+    )
+  } else {
+    beatsRaw = await callTextChatMessages(
+      beatMessages,
+      params.textModel,
+      twoPassThinking,
+      420_000,
+      0.4,
+      Math.min(4096, maxTokens),
+      SCRIPT_CHAT_OLLAMA_NUM_CTX,
+    )
+  }
+
+  const beats = stripBeatOutlineNoise(beatsRaw)
+  if (scriptCharCount(beats) < 40) {
+    throw new Error('节拍大纲过短，请重试')
+  }
+  const beatsDisplay = formatBeatOutlineForDisplay(beats)
+  params.stream?.onDelta?.(beatsDisplay, beatsDisplay)
+  params.stream?.hooks?.onPhase?.({ phase: 'beats_done', content: beatsDisplay })
+
+  // —— 第2轮：按节拍写稿（解说视频=旁白+对白；小说漫画=白话旁白）——
+  const fromBeatsSystem = narrationVideo
+    ? NARRATION_VIDEO_EXPLAIN_FROM_BEATS_SYSTEM
+    : NOVEL_COMIC_EXPLAIN_FROM_BEATS_SYSTEM
+  params.stream?.hooks?.onStatus?.(
+    policy.userSpecified
+      ? (narrationVideo
+        ? `第2轮：${wantExpand ? '扩写' : '整篇重写'}解说脚本（目标约 ${policy.targetChars} 字，上限 ${policy.maxChars}）…`
+        : `第2轮：正在按节拍写旁白（目标约 ${policy.targetChars} 字）…`)
+      : (narrationVideo ? '第2轮：整篇重写解说脚本…' : '第2轮：正在按节拍写旁白…'),
+  )
+  params.stream?.onDelta?.('', '')
+  const lengthHint = narrationVideo
+    ? [
+        `【篇幅硬性】约 2～3 分钟成片；目标约 ${policy.targetChars} 汉字，必须落在 ${policy.minChars}～${policy.maxChars} 字；3 分钟上限 ${policy.maxChars} 字，禁止超过。`,
+        '必须涵括整章主线（开端→冲突→高燃→余波钩子），不得只写高潮切片。',
+        wantExpand
+          ? '本次可在现有篇幅上补齐遗漏情节并扩写到目标字数。'
+          : '本次为整篇重写：只根据节拍与【文案输入】重新成稿，禁止扩写旧解说脚本、禁止照抄原文长句。',
+        '旁白只解说剧情，禁止动作表情感官细描。',
+      ].join('\n')
+    : (policy.userSpecified
+      ? [
+          `【篇幅硬性】目标约 ${policy.targetChars} 汉字，允许 ${policy.minChars}～${policy.maxChars} 字。`,
+          '须压缩感官堆砌与重复铺垫；禁止写成精修小说。',
+        ].join('\n')
+      : [
+          '【篇幅】跟故事走，不按原文百分比卡字数。',
+          '精简概括、狠砍感官堆砌；禁止写成精修小说，也禁止压成空洞短摘要。',
+        ].join('\n'))
+  const narrateMessages: TextChatMessage[] = [
+    { role: 'system', content: fromBeatsSystem },
+    {
+      role: 'user',
+      content: [
+        narrationVideo
+          ? (wantExpand
+            ? '请严格按【节拍大纲】写成完整解说脚本；每条节拍都要落到正文；每行「旁白：」或「角色名：」；只输出说话人行正文；字数不得超过上限。'
+            : '请严格按【节拍大纲】整篇重写完整解说脚本（不要扩写旧稿）；每条节拍都要落到正文；每行「旁白：」或「角色名：」；只输出说话人行正文；字数不得超过上限。')
+          : '请严格按【节拍大纲】写成旁白讲解稿；只输出旁白正文。',
+        '',
+        lengthHint,
+        '',
+        '【节拍大纲】',
+        beats,
+        '',
+        '【材料摘录·核对情节用人名，禁止复述原文长描写；解说须覆盖整章】',
+        material.slice(0, 16_000),
+      ].join('\n'),
+    },
+  ]
+
+  let narration = ''
+  const narrateTimeoutMs = /:free\b/i.test(String(params.textModel || '')) ? 420_000 : 900_000
+  if (params.stream?.onDelta) {
+    narration = await streamTextChatMessages(
+      narrateMessages,
+      params.stream.onDelta,
+      params.textModel,
+      twoPassThinking,
+      narrateTimeoutMs,
+      0.55,
+      params.signal,
+      maxTokens,
+      { onThinkingDelta: params.stream?.hooks?.onThinkingDelta },
+      SCRIPT_CHAT_OLLAMA_NUM_CTX,
+    )
+  } else {
+    narration = await callTextChatMessages(
+      narrateMessages,
+      params.textModel,
+      twoPassThinking,
+      narrateTimeoutMs,
+      0.55,
+      maxTokens,
+      SCRIPT_CHAT_OLLAMA_NUM_CTX,
+    )
+  }
+
+  narration = String(narration || '').trim()
+    .replace(/^【?第?\s*2\s*轮[·・]?(?:旁白讲解稿|解说脚本)？】?\s*/m, '')
+    .trim()
+  if (scriptCharCount(narration) < 80) {
+    throw new Error(narrationVideo ? '解说脚本过短，请重试' : '旁白讲解稿过短，请重试')
+  }
+
+  // 解说视频：仅用户明确说「扩写」时才自动补齐字数；默认整篇重写不扩
+  let expandRounds = 0
+  let compressRounds = 0
+  let autoExpanded = false
+  let autoCompressed = false
+  if (narrationVideo && wantExpand && scriptCharCount(narration) < policy.minChars) {
+    const expandTurns: NarrationScriptChatTurn[] = [
+      ...(params.messages || []),
+      { role: 'user', content: NARRATION_OPTIMIZE_FROM_SOURCE_USER_HINT },
+    ]
+    try {
+      const expanded = await ensureScriptMinLength({
+        episodeId: params.episodeId,
+        turns: expandTurns,
+        apiMessages: narrateMessages,
+        textModel: params.textModel,
+        textThinking: false,
+        maxTokens,
+        lengthPolicy: policy,
+        initialReply: narration,
+        signal: params.signal,
+        stream: params.stream,
+      })
+      narration = expanded.reply
+      expandRounds = expanded.expandRounds
+      autoExpanded = expandRounds > 0
+    } catch (err: unknown) {
+      logTaskWarn('NarrationScriptChat', 'explain-expand-skipped', {
+        episodeId: params.episodeId,
+        chars: scriptCharCount(narration),
+        error: String((err as Error)?.message || err || 'unknown'),
+      })
+    }
+  }
+
+  // 超上限：自动精简到 ≤1800（顺带砍感官/照抄）
+  if (narrationVideo && scriptCharCount(narration) > policy.maxChars) {
+    try {
+      const compressed = await ensureScriptMaxLength({
+        episodeId: params.episodeId,
+        apiMessages: narrateMessages,
+        textModel: params.textModel,
+        maxTokens,
+        lengthPolicy: policy,
+        initialReply: narration,
+        signal: params.signal,
+        stream: params.stream,
+      })
+      narration = compressed.reply
+      compressRounds = compressed.compressRounds
+      autoCompressed = compressRounds > 0
+    } catch (err: unknown) {
+      logTaskWarn('NarrationScriptChat', 'explain-compress-skipped', {
+        episodeId: params.episodeId,
+        chars: scriptCharCount(narration),
+        error: String((err as Error)?.message || err || 'unknown'),
+      })
+    }
+  }
+
+  const chars = scriptCharCount(narration)
+  if (narrationVideo && chars < policy.minChars) {
+    logTaskWarn('NarrationScriptChat', 'explain-script-still-below-min', {
+      episodeId: params.episodeId,
+      chars,
+      min: policy.minChars,
+      target: policy.targetChars,
+      expandRounds,
+    })
+  }
+  if (narrationVideo && chars > policy.maxChars) {
+    logTaskWarn('NarrationScriptChat', 'explain-script-still-above-max', {
+      episodeId: params.episodeId,
+      chars,
+      max: policy.maxChars,
+      target: policy.targetChars,
+      compressRounds,
+    })
+  }
+
+  logTaskProgress('NarrationScriptChat', 'explain-beat-two-pass-done', {
+    episodeId: params.episodeId,
+    beatChars: scriptCharCount(beats),
+    narrChars: chars,
+    userSpecifiedLength: policy.userSpecified,
+    expandRounds,
+    compressRounds,
+  })
+
+  return buildScriptChatResultMeta(narration, params.textModel, params.textThinking, policy, {
+    auto_expanded: autoExpanded,
+    expand_rounds: expandRounds,
+    auto_compressed: autoCompressed,
+    compress_rounds: compressRounds,
+    beat_outline: beats,
+  })
+}
+
 export async function streamChatNarrationScript(
   params: {
     episodeId: number
@@ -904,6 +1593,20 @@ export async function streamChatNarrationScript(
     maxTokens,
     turnCount: turns.length,
   })
+
+  hooks?.onStatus?.(`正在连接模型：${textModel}…`)
+
+  const optimized = await tryExplainScriptBeatTwoPass({
+    episodeId: params.episodeId,
+    messages: params.messages,
+    textModel,
+    textThinking,
+    script: params.script,
+    lengthPolicy,
+    stream: { onDelta, hooks },
+    signal,
+  })
+  if (optimized) return optimized
 
   let reply = await streamTextChatMessages(
     apiMessages,
@@ -979,6 +1682,16 @@ export async function chatNarrationScript(params: {
     maxTokens,
     turnCount: turns.length,
   })
+
+  const optimized = await tryExplainScriptBeatTwoPass({
+    episodeId: params.episodeId,
+    messages: params.messages,
+    textModel,
+    textThinking,
+    script: params.script,
+    lengthPolicy,
+  })
+  if (optimized) return optimized
 
   const reply = (await callTextChatMessages(
     apiMessages,

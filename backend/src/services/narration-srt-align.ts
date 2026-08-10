@@ -488,7 +488,7 @@ function pickBestAlignment(
   const candidates = [
     { ...timeline, mode: 'timeline' as const },
     { ...srt, mode: 'srt' as const },
-    { ...weightedSnapped, alignScore: weighted.alignScore * 0.85, mode: 'weighted' as const },
+    { ...weighted, ranges: weightedSnapped, alignScore: weighted.alignScore * 0.85, mode: 'weighted' as const },
   ].sort((a, b) => b.alignScore - a.alignScore)
 
   const best = candidates[0]
@@ -497,7 +497,7 @@ function pickBestAlignment(
   if (cues.length < scripts.length * 0.6) {
     return timeline.alignScore >= weighted.alignScore
       ? { ...timeline, mode: 'timeline' as const }
-      : { ...weightedSnapped, mode: 'weighted' as const }
+      : { ...weighted, ranges: weightedSnapped, mode: 'weighted' as const }
   }
   return best.alignScore > 0 ? best : { ...timeline, mode: 'timeline' as const }
 }

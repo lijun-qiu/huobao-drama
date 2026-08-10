@@ -11,7 +11,7 @@ import { LOCAL_PRESET_SERVICES, LOCAL_COMIC_ENV } from '../constants/local-comic
 const app = new Hono()
 
 const HUOBAO_PRESET_SERVICES = [
-  { serviceType: 'text', label: '文本', provider: 'openrouter', baseUrl: 'https://openrouter.ai/api', model: 'nvidia/nemotron-3-ultra-550b-a55b:free,openrouter/deepseek-v4-flash,openrouter/deepseek-v4-pro', priority: 110 },
+  { serviceType: 'text', label: '文本', provider: 'openrouter', baseUrl: 'https://openrouter.ai/api', model: 'poolside/laguna-s-2.1:free,nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free,openrouter/deepseek-v4-flash,openrouter/deepseek-v4-pro', priority: 110 },
   { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'vidu', baseUrl: 'https://api.4022543.xyz', model: 'viduq3-turbo', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.4022543.xyz/minimax', model: 'speech-2.8-hd', priority: 97 },
@@ -26,7 +26,7 @@ const HUOBAO_AGENT_DEFAULTS = [
   { agentType: 'grid_prompt_generator', name: '图片提示词生成' },
 ] as const
 
-const HUOBAO_AGENT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+const HUOBAO_AGENT_MODEL = 'deepseek-v4-flash'
 
 function bearerHeaders(apiKey?: string, withJson = false) {
   const headers: Record<string, string> = {}
@@ -116,7 +116,7 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
       url: joinProviderUrl(baseUrl, '', '/images/generations'),
       headers: bearerHeaders(apiKey, true),
       body: {
-        model: m || 'agnes-image-2.0-flash',
+        model: m || 'agnes-image-2.1-flash',
         prompt: 'probe character portrait anime',
         size: '1024x1024',
         extra_body: { response_format: 'url' },
@@ -353,16 +353,20 @@ app.post('/local-preset', async (c) => {
 
     const isZhipu = String(preset.provider).toLowerCase() === 'zhipu'
     const isAgnes = String(preset.provider).toLowerCase() === 'agnes'
+    // env 有 key 用 env；否则保留库里已有 key，禁止 local-preset 把有效令牌写成空串
+    const envKey = isZhipu
+      ? (LOCAL_COMIC_ENV.zhipuApiKey || '')
+      : isAgnes
+        ? (LOCAL_COMIC_ENV.agnesApiKey || '')
+        : ''
+    const existingKey = String(existing?.apiKey || '').trim()
+    const apiKey = envKey || existingKey
     const values = {
       serviceType: preset.serviceType,
       provider: preset.provider,
       name: `本地短剧${preset.label}服务`,
       baseUrl: preset.baseUrl,
-      apiKey: isZhipu
-        ? (LOCAL_COMIC_ENV.zhipuApiKey || '')
-        : isAgnes
-          ? (LOCAL_COMIC_ENV.agnesApiKey || '')
-          : '',
+      apiKey,
       model: JSON.stringify(
         preset.serviceType === 'text'
           ? [LOCAL_COMIC_ENV.zhipuTextModel, 'glm-4.7-flash', 'glm-4-flash-250414']

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { eq, inArray, and, isNull } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, notFound, badRequest, now } from '../utils/response.js'
+import { createSseJsonResponse } from '../utils/sse-response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
 import { breakdownNarrationStoryboards } from '../services/narration-breakdown.js'
 import { breakdownNarrationImages, detectNarrationImageAnchors, generateNarrationImagePromptsOnly, retryMissingNarrationImagePrompts } from '../services/narration-image-breakdown.js'
@@ -23,17 +24,32 @@ import {
   clearEpisodeNarrationTts,
   clearEpisodeStoryboards,
 } from '../services/episode-asset-clear.js'
-import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters, syncMotionComicCharactersFromSpeakers } from '../services/narration-characters.js'
+import { extractNarrationCharacters, linkAllNarrationStoryboardCharacters, syncMotionComicCharactersFromSpeakers, linkDramaCastToEpisode } from '../services/narration-characters.js'
+import {
+  extractNarrationEnvAssets,
+  listEpisodeNarrationProps,
+  listEpisodeNarrationScenes,
+} from '../services/narration-scene-assets.js'
 import { extractDramaEpisodeAssets } from '../services/drama-extract.js'
 import { breakdownDramaEpisodeStoryboards } from '../services/drama-storyboard-breakdown.js'
 import { DEFAULT_IMAGE_MODEL, DEFAULT_LOCAL_IMAGE_MODEL, resolveEpisodeImageModel } from '../constants/image-models.js'
 import { DEFAULT_TEXT_MODEL, DEFAULT_LOCAL_TEXT_MODEL, resolveEpisodeTextModel, resolveEpisodeTextThinking, resolveNarrationScriptChatTextModel } from '../constants/text-models.js'
-import { parseProductionMode, isMotionComicMode, usesMotionComicStoryboardRules, resolveEpisodeProductionMode, usesLocalModelPipeline } from '../constants/production-mode.js'
+import { parseProductionMode, isMotionComicMode, isNovelComicMode, usesMotionComicStoryboardRules, resolveEpisodeProductionMode, usesLocalModelPipeline } from '../constants/production-mode.js'
+import { NOVEL_COMIC_MAX_EPISODES } from '../constants/novel-comic.js'
 import { DEFAULT_CLONED_TTS_VOICE, DEFAULT_LOCAL_TTS_ENGINE } from '../constants/local-comic.js'
 import { resolveEpisodeVisualStyle, resolveNarrationImageStyle } from '../constants/art-styles.js'
-import { isOpeningVideoProcessing, resolveOpeningSubtitleText, startOpeningVideoGeneration, parseOpeningPickedImages, buildOpeningPickedImagesZip, pickAndSaveOpeningImages } from '../services/ffmpeg-opening.js'
+import { autoMarkNarrationHighlightsForEpisode } from '../services/narration-highlight.js'
+import { regenerateEpisodeVideoPrompts } from '../services/narration-video-prompt.js'
 import fs from 'fs'
 import { isTitleVideoProcessing, startTitleSegmentVideoGeneration } from '../services/ffmpeg-title-segment.js'
+import {
+  isOpeningVideoProcessing,
+  startOpeningVideoGeneration,
+  resolveOpeningSubtitleText,
+  parseOpeningPickedImages,
+  buildOpeningPickedImagesZip,
+  pickAndSaveOpeningImages,
+} from '../services/ffmpeg-opening.js'
 import { resolveEdgeVoice } from '../services/edge-tts-local.js'
 import { resolveVoiceboxProfileId } from '../services/voicebox-tts.js'
 import { generateTTS } from '../services/tts-generation.js'
@@ -68,6 +84,9 @@ app.post('/', async (c) => {
 
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, body.drama_id)).all()
   const productionMode = parseProductionMode(drama?.metadata)
+  if (isNovelComicMode(productionMode) && existing.length >= NOVEL_COMIC_MAX_EPISODES) {
+    return badRequest(c, `小说漫画最多 ${NOVEL_COMIC_MAX_EPISODES} 集`)
+  }
 
   const res = db.insert(schema.episodes).values({
     dramaId: body.drama_id,
@@ -85,6 +104,9 @@ app.post('/', async (c) => {
 
   const [ep] = db.select().from(schema.episodes)
     .where(eq(schema.episodes.id, Number(res.lastInsertRowid))).all()
+  if (isNovelComicMode(productionMode) && ep) {
+    linkDramaCastToEpisode(ep.id, body.drama_id)
+  }
   return success(c, {
     id: ep.id,
     episode_number: ep.episodeNumber,
@@ -108,6 +130,12 @@ app.put('/:id', async (c) => {
     if (key in body) updates[key] = body[key]
   }
   if (Object.keys(updates).length === 0) return badRequest(c, 'no valid fields')
+
+  // 小说漫画讲解：只用原文 content；保存原文时顺带清空旧讲解稿
+  const productionModeOnUpdate = resolveEpisodeProductionMode(id)
+  if (isNovelComicMode(productionModeOnUpdate) && 'content' in updates && !('script_content' in updates)) {
+    updates.script_content = ''
+  }
 
   // Map snake_case to camelCase for drizzle
   const drizzleUpdates: Record<string, any> = { updatedAt: now() }
@@ -163,6 +191,60 @@ app.get('/:id/scenes', async (c) => {
     .where(and(inArray(schema.scenes.id, sceneIds), isNull(schema.scenes.deletedAt)))
     .all()
   return success(c, toSnakeCaseArray(result))
+})
+
+// GET /episodes/:id/props — 本集解说道具定妆
+app.get('/:id/props', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  return success(c, toSnakeCaseArray(listEpisodeNarrationProps(episodeId)))
+})
+
+// POST /episodes/:id/extract-narration-env — 提取场景+道具定妆并绑定分镜 scene_id
+app.post('/:id/extract-narration-env', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  try {
+    const result = await extractNarrationEnvAssets(episodeId, ep.dramaId, {
+      textModel: body.text_model ?? body.textModel,
+      textThinking: body.text_thinking === true || body.textThinking === true,
+    })
+    return success(c, {
+      scenes: toSnakeCaseArray(result.scenes),
+      props: toSnakeCaseArray(result.props),
+      bound_storyboards: result.bound_storyboards,
+      prompts_synced: result.prompts_synced,
+      generated_at: result.generated_at,
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /episodes/:id/extract-narration-scenes — 同 extract-narration-env（兼容）
+app.post('/:id/extract-narration-scenes', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  try {
+    const result = await extractNarrationEnvAssets(episodeId, ep.dramaId, {
+      textModel: body.text_model ?? body.textModel,
+      textThinking: body.text_thinking === true || body.textThinking === true,
+    })
+    return success(c, {
+      scenes: toSnakeCaseArray(result.scenes),
+      props: toSnakeCaseArray(result.props),
+      bound_storyboards: result.bound_storyboards,
+      prompts_synced: result.prompts_synced,
+      generated_at: result.generated_at,
+    })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
 })
 
 // GET /episodes/:episode_id/storyboards
@@ -263,9 +345,15 @@ app.post('/:id/extract-narration-characters', async (c) => {
       || resolveEpisodeVisualStyle(episodeId, { dramaStyle: drama?.style }),
   )
 
-  const script = String(body.script || ep.scriptContent || ep.content || '').trim()
+  const productionModeForScript = resolveEpisodeProductionMode(episodeId)
+  const script = isNovelComicMode(productionModeForScript)
+    ? String(body.script || ep.content || '').trim()
+    : String(body.script || ep.scriptContent || ep.content || '').trim()
   if (!script) {
-    const motionComic = isMotionComicMode(resolveEpisodeProductionMode(episodeId))
+    if (isNovelComicMode(productionModeForScript)) {
+      return badRequest(c, '请先在「文案输入」粘贴本章小说原文')
+    }
+    const motionComic = isMotionComicMode(productionModeForScript)
     return badRequest(c, motionComic ? '请先填写漫剧旁白稿' : '请先填写解说文案')
   }
 
@@ -456,6 +544,10 @@ app.post('/:id/narration-script-chat', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c)
 
+  if (isNovelComicMode(resolveEpisodeProductionMode(episodeId))) {
+    return badRequest(c, '小说漫画讲解直接使用原文，无需讲解稿；请在「文案输入」粘贴原文后进入旁白分镜')
+  }
+
   const rawMessages = Array.isArray(body.messages) ? body.messages : []
   const messages = rawMessages
     .map((m: { role?: string; content?: string }) => ({
@@ -484,58 +576,37 @@ app.post('/:id/narration-script-chat', async (c) => {
     }
   }
 
-  const encoder = new TextEncoder()
-  const stream = new ReadableStream({
-    async start(controller) {
-      const send = (payload: Record<string, unknown>) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
-      }
-
-      try {
-        const result = await streamChatNarrationScript(
-          chatParams,
-          (_delta, full) => send({ type: 'delta', content: full }),
-          c.req.raw.signal,
-          {
-            onThinkingDelta: (_delta, full) => send({ type: 'thinking', content: full }),
-            onStatus: message => send({ type: 'status', message }),
-          },
-        )
-        send({
-          type: 'done',
-          generated_at: now(),
-          reply: result.reply,
-          model: result.model,
-          text_thinking: result.text_thinking,
-          char_count: result.char_count,
-          min_chars: result.min_chars,
-          max_chars: result.max_chars,
-          target_chars: result.target_chars,
-          user_length_specified: result.user_length_specified,
-          below_min: result.below_min,
-          auto_expanded: result.auto_expanded,
-          expand_rounds: result.expand_rounds,
-          narration_lines: result.narration_lines,
-          dialogue_lines: result.dialogue_lines,
-          narration_ratio: result.narration_ratio,
-          dialogue_ratio: result.dialogue_ratio,
-          dialogue_ratio_repaired: result.dialogue_ratio_repaired,
-        })
-        controller.close()
-      } catch (err: any) {
-        send({ type: 'error', message: String(err?.message || err || '生成失败') })
-        controller.close()
-      }
-    },
-  })
-
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    },
+  return createSseJsonResponse(async (send) => {
+    const result = await streamChatNarrationScript(
+      chatParams,
+      (_delta, full) => send({ type: 'delta', content: full }),
+      c.req.raw.signal,
+      {
+        onThinkingDelta: (_delta, full) => send({ type: 'thinking', content: full }),
+        onStatus: message => send({ type: 'status', message }),
+        onPhase: info => send({ type: 'phase', phase: info.phase, content: info.content }),
+      },
+    )
+    return {
+      generated_at: now(),
+      reply: result.reply,
+      model: result.model,
+      text_thinking: result.text_thinking,
+      char_count: result.char_count,
+      min_chars: result.min_chars,
+      max_chars: result.max_chars,
+      target_chars: result.target_chars,
+      user_length_specified: result.user_length_specified,
+      below_min: result.below_min,
+      auto_expanded: result.auto_expanded,
+      expand_rounds: result.expand_rounds,
+      narration_lines: result.narration_lines,
+      dialogue_lines: result.dialogue_lines,
+      narration_ratio: result.narration_ratio,
+      dialogue_ratio: result.dialogue_ratio,
+      dialogue_ratio_repaired: result.dialogue_ratio_repaired,
+      beat_outline: result.beat_outline,
+    }
   })
 })
 
@@ -745,11 +816,18 @@ app.post('/:id/narration-image-prompts', async (c) => {
     const testBatchIndex = typeof body.test_batch_index === 'number'
       ? body.test_batch_index
       : undefined
+    const panelTextModeRaw = body.panel_text_mode ?? body.panelTextMode
+    const panelTextMode = panelTextModeRaw === 'full' || panelTextModeRaw === 'long'
+      ? 'full' as const
+      : panelTextModeRaw === 'short'
+        ? 'short' as const
+        : undefined
     const promptOptions = {
       ...(promptBatchSize != null ? { batchSize: promptBatchSize } : {}),
       ...(testBatchIndex != null ? { testBatchIndex } : {}),
       textModel: body.text_model ?? body.textModel,
       textThinking: body.text_thinking ?? body.textThinking,
+      ...(panelTextMode ? { panelTextMode } : {}),
     }
 
     if (!acquireNarrationImageBreakdownJob(episodeId)) {
@@ -782,28 +860,9 @@ function parseImageChatMessages(body: Record<string, unknown>) {
 }
 
 function imageChatSseResponse(handler: (send: (payload: Record<string, unknown>) => void) => Promise<Record<string, unknown>>) {
-  const encoder = new TextEncoder()
-  const stream = new ReadableStream({
-    async start(controller) {
-      const send = (payload: Record<string, unknown>) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
-      }
-      try {
-        const result = await handler(send)
-        send({ type: 'done', generated_at: now(), ...result })
-        controller.close()
-      } catch (err: any) {
-        send({ type: 'error', message: String(err?.message || err || '生成失败') })
-        controller.close()
-      }
-    },
-  })
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    },
+  return createSseJsonResponse(async (send) => {
+    const result = await handler(send)
+    return { generated_at: now(), ...result }
   })
 }
 
@@ -846,6 +905,13 @@ app.post('/:id/narration-image-prompt-chat', async (c) => {
       ? 'run' as const
       : null
 
+  const panelTextModeRaw = body.panel_text_mode ?? body.panelTextMode
+  const panelTextMode = panelTextModeRaw === 'full' || panelTextModeRaw === 'long'
+    ? 'full' as const
+    : panelTextModeRaw === 'short'
+      ? 'short' as const
+      : undefined
+
   const chatParams = {
     episodeId,
     messages,
@@ -854,6 +920,7 @@ app.post('/:id/narration-image-prompt-chat', async (c) => {
     action,
     style: body.style,
     promptBatchSize: typeof body.prompt_batch_size === 'number' ? body.prompt_batch_size : undefined,
+    panelTextMode,
   }
 
   return imageChatSseResponse(send =>
@@ -1408,6 +1475,37 @@ app.post('/:id/opening-picked-images/export', async (c) => {
     if (tempDir) {
       try { fs.rmSync(tempDir, { recursive: true, force: true }) } catch {}
     }
+  }
+})
+
+// POST /episodes/:id/auto-mark-narration-highlights — 按关键词自动标记高燃镜（仅合成单元锚点）
+app.post('/:id/auto-mark-narration-highlights', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  const result = autoMarkNarrationHighlightsForEpisode(episodeId)
+  return success(c, result)
+})
+
+// POST /episodes/:id/generate-video-prompts — 一键 LLM 生成本集全部视频运动描述
+app.post('/:id/generate-video-prompts', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c)
+  const body = await c.req.json().catch(() => ({}))
+  const force = !!body.force
+  const onlyMissing = body.only_missing !== false && !force
+  try {
+    const result = await regenerateEpisodeVideoPrompts(episodeId, {
+      force,
+      onlyMissing,
+      textModel: body.text_model ?? body.textModel,
+      textThinking: body.text_thinking ?? body.textThinking,
+      allowRuleFallback: body.allow_rule_fallback !== false && body.allowRuleFallback !== false,
+    })
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err.message || '批量生成视频描述失败')
   }
 })
 

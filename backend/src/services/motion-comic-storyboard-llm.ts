@@ -11,7 +11,7 @@ import { compactMotionComicStoryboardShots } from './motion-comic-shot-merge.js'
 import { assertTextConfigHasCredentials, getTextConfig } from './ai.js'
 import { callTextChat } from './text-chat.js'
 
-const STORYBOARD_LLM_TIMEOUT_MS = 300_000
+const STORYBOARD_LLM_TIMEOUT_MS = 600_000
 const STORYBOARD_LLM_RETRIES = 2
 
 function sleep(ms: number) {

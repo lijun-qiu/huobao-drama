@@ -33,17 +33,18 @@ export function resolveLocalTtsEngine(
   fallbackEngine: LocalTtsEngine = 'edge',
 ): LocalTtsEngine {
   const provider = String(voiceProvider || '').trim().toLowerCase()
-  if (provider === 'edge') return 'edge'
-  if (provider === 'voicebox') return 'voicebox'
-  if (provider === 'gptsovits') return 'gptsovits'
-  if (provider === 'indextts') return 'indextts'
   const raw = String(voiceStyle || '').trim()
-  if (isEdgeVoiceId(raw)) return 'edge'
+  if (provider === 'edge' || isEdgeVoiceId(raw)) return 'edge'
+  // gsv: 参考音由 GPT-SoVITS / IndexTTS2 共用；优先跟当前请求引擎，避免库里残留 gptsovits 把 IndexTTS 请求打到已挂掉的 9880
   if (isClonedRefVoiceId(raw)) {
-    if (fallbackEngine === 'indextts') return 'indextts'
+    if (fallbackEngine === 'indextts' || fallbackEngine === 'gptsovits') return fallbackEngine
+    if (provider === 'indextts') return 'indextts'
+    if (provider === 'gptsovits') return 'gptsovits'
     return 'gptsovits'
   }
-  if (isVoiceboxVoiceId(raw)) return 'voicebox'
+  if (provider === 'voicebox' || isVoiceboxVoiceId(raw)) return 'voicebox'
+  if (provider === 'gptsovits') return 'gptsovits'
+  if (provider === 'indextts') return 'indextts'
   return fallbackEngine
 }
 
@@ -150,13 +151,25 @@ export function resolveStoryboardLocalTtsInput(
     return false
   }
 
+  const remapCloneEngineIfNeeded = (engine: LocalTtsEngine, voice: string): LocalTtsEngine => {
+    if (!isClonedRefVoiceId(voice)) return engine
+    if (engine === 'gptsovits' && options.allowGptsovits === false && options.allowIndextts !== false) {
+      return 'indextts'
+    }
+    if (engine === 'indextts' && options.allowIndextts === false && options.allowGptsovits !== false) {
+      return 'gptsovits'
+    }
+    return engine
+  }
+
   if (characterVoice && characterVoice !== 'alloy') {
     const resolved = resolveLocalTtsVoiceInput(
       characterVoice,
       charMeta?.voiceProvider,
       { engine: preferredEngine, voice: fallbackVoice || characterVoice || DEFAULT_EDGE_VOICE },
     )
-    if (shouldForceEdge(resolved.engine)) {
+    const engine = remapCloneEngineIfNeeded(resolved.engine, resolved.voice)
+    if (shouldForceEdge(engine)) {
       return {
         engine: 'edge',
         voiceInput: mapLocalVoiceToEdge(charMeta, fallbackVoice),
@@ -165,7 +178,7 @@ export function resolveStoryboardLocalTtsInput(
       }
     }
     return {
-      engine: resolved.engine,
+      engine,
       voiceInput: resolved.voice,
       speakerName,
       usedCharacterVoice: true,
@@ -177,7 +190,8 @@ export function resolveStoryboardLocalTtsInput(
     undefined,
     { engine: preferredEngine, voice: fallbackVoice || DEFAULT_EDGE_VOICE },
   )
-  if (shouldForceEdge(resolved.engine)) {
+  const engine = remapCloneEngineIfNeeded(resolved.engine, resolved.voice)
+  if (shouldForceEdge(engine)) {
     return {
       engine: 'edge',
       voiceInput: mapLocalVoiceToEdge(null, fallbackVoice),
@@ -186,7 +200,7 @@ export function resolveStoryboardLocalTtsInput(
     }
   }
   return {
-    engine: resolved.engine,
+    engine,
     voiceInput: resolved.voice,
     speakerName,
     usedCharacterVoice: false,

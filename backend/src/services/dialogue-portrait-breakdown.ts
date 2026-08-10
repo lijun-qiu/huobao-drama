@@ -4,6 +4,7 @@
 import { eq } from 'drizzle-orm'
 import {
   DIALOGUE_PORTRAIT_MAX_CHARS,
+  buildDialoguePortraitScenePrompt,
   inferExpressionFromDialogue,
 } from '../constants/dialogue-portrait.js'
 import { isDialoguePortraitMode, parseProductionMode } from '../constants/production-mode.js'
@@ -91,7 +92,8 @@ function ensureDefaultSceneId(episodeId: number, dramaId: number, locationHint?:
     episodeId,
     location,
     time: '',
-    prompt: location,
+    // 无人空镜约束写入描述字段；生图只按 prompt 原文
+    prompt: buildDialoguePortraitScenePrompt(location),
     createdAt: ts,
     updatedAt: ts,
   }).run()

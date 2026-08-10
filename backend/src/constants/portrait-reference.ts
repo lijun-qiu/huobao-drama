@@ -23,9 +23,9 @@ export const THREE_VIEW_EMPTY_HANDS_CN = PORTRAIT_FULL_BODY_STANDING_CN
 export const THREE_VIEW_EMPTY_HANDS_EN =
   'neutral upper-body pose, chest-up framing, arms at sides, empty hands, NO handheld objects, NO props in hands'
 
-/** 解说 · 动漫风格默认剧情维 */
+/** 解说 · 日系2D漫画默认剧情维 */
 export const THREE_VIEW_PORTRAIT_PLOT_ANIME_CN =
-  '具体脸型五官与发型按角色外貌描述，正常头身比，正面半身站姿，上半身服装与标志配饰（非手持物）清晰可见，双手自然垂于身侧不拿道具'
+  '具体脸型五官与发型按角色外貌描述，日系2D动漫插画脸型，正常头身比，正面半身站姿，上半身服装与标志配饰（非手持物）清晰可见，双手自然垂于身侧不拿道具'
 
 /** 漫画解说默认剧情维 */
 export const THREE_VIEW_PORTRAIT_PLOT_MOTION_COMIC_CN =
@@ -36,7 +36,7 @@ export const THREE_VIEW_PORTRAIT_PLOT_MINIMAL_CN =
   '白色素体小人，正常卡通脸圆眼带高光，正面半身站姿，简化年代服装简笔轮廓，上半身体型清晰可见，双手自然垂于身侧不拿道具'
 
 export const THREE_VIEW_PORTRAIT_FRAMING =
-  'vertical portrait single front upper-body character reference on pure white background, chest-up framing, one character only, facing camera, neutral pose, arms at sides empty hands, follow appearance face hair and upper outfit exactly, distinct face and silhouette, natural dark iris white sclera catchlights, subject fills most of frame with only narrow side margins, NOT landscape with large empty side margins, NOT tiny centered vertical strip, NOT full-body tiny figure, NOT turnaround sheet, NOT multiple views, NOT side view, NOT back view, NOT character lineup'
+  'vertical portrait single front upper-body character reference on pure white background, Japanese 2D anime illustration, cinematic high-contrast modeling, chest-up framing, one character only, facing camera, neutral pose, arms at sides empty hands, follow appearance face hair and upper outfit exactly, distinct face and silhouette, natural dark iris white sclera catchlights, subject fills most of frame with only narrow side margins, NOT landscape with large empty side margins, NOT tiny centered vertical strip, NOT full-body tiny figure, NOT turnaround sheet, NOT multiple views, NOT side view, NOT back view, NOT character lineup, NOT 3D CGI, NOT photorealistic'
 
 export const THREE_VIEW_PORTRAIT_FRAMING_MINIMAL =
   'vertical portrait single front upper-body stick figure reference on pure white background, chest-up framing, one character only, facing camera, white stick figure with normal cartoon face round eyes with highlights, simplified upper clothing outline visible, arms at sides empty hands, subject fills most of frame with only narrow side margins, NOT landscape with large empty side margins, NOT tiny centered vertical strip, NOT full-body tiny figure, NOT turnaround sheet, NOT multiple views, NOT gray background, NOT detailed anime face, NOT realistic portrait, NOT holding objects'
@@ -145,7 +145,7 @@ export function isIncompletePortraitEnglishTags(cnBody: string, enTags: string):
 
 /** 配图文案：characters 须对照定妆参考（脸型/发型以定妆图锁定，文案不重写） */
 export const NARRATION_PORTRAIT_REFERENCE_LLM_RULE =
-  '【定妆对照·硬性】characters 含 portrait_label、gender、has_portrait、portrait_default_outfit（定妆默认服装，仅无剧情换装时 fallback）；appearance_identity_spec_cn 仅供查阅、禁止写入文案；has_portrait=true 时【画面主体】结构固定为：对照定妆「portrait_label」（只写本镜细化表情，禁止写脸型/发型/发色/眉形/身形等固定外貌）位于{位置}以{姿态}（身穿#hex本镜服装）；**每镜仅 1 个对照定妆**，画面只允许这一名人物入镜；禁止第二人脸/身/手/臂/背影/侧影或画外伸手；互动只写焦点本人肢体与手持物（勿用对方接物的手反转施受）；「对照定妆」标签必须与本镜焦点角色一致（段落含 required_portrait_labels 时必须采用该项；禁止用主人公/第一人称标签顶替本段点名的其他角色）；禁止串用他人标签或写「对照定妆标签「xxx」」；脸型与发型固定参照定妆图不变；表情写在【画面主体】，肢体动作写在【核心细节动作】，物件写在【年代场景】，镜头朝向须使姿态+动作+关键物件同帧可见；本镜服装+#hex只写在位于…以…之后的（身穿…）内；场所/职业/时段变化时须换装（办公室正装、居家便装、外出外套等），勿每镜都照抄同一套定妆毛衣；仅当旁白完全未暗示换装且场所连续时才可用 portrait_default_outfit；无定妆时须写性别；手持物只写在【核心细节动作】'
+  '【定妆对照·硬性】characters 含 portrait_label、gender、has_portrait、portrait_default_outfit（定妆默认服装，仅无剧情换装时 fallback）；appearance_identity_spec_cn 仅供查阅、禁止写入文案；has_portrait=true 时【画面主体】结构固定为：对照定妆「portrait_label」（只写本镜细化且可夸张的表情，禁止写脸型/发型/发色/眉形/身形等固定外貌）位于{位置}以{姿态}（身穿#hex本镜服装）；**同框最多 2 个对照定妆**（按旁白：单人戏写 1 个；同场互动且点名两名有定妆角色时可写 2 个）；禁止第三人脸/同脸克隆；路人用剪影；「对照定妆」标签必须与本镜在场角色一致（段落含 required_portrait_labels 时须采用列表项；禁止用主人公/第一人称标签顶替本段点名的其他角色）；禁止串用他人标签或写「对照定妆标签「xxx」」；脸型与发型固定参照定妆图不变；表情写在【画面主体】（可漫画式夸张：瞪眼/汗珠/咬牙等），肢体动作与手持物写在【核心细节动作】（须写清谁、哪只手、握持/递接/掉落）；场所功能陈设与无人手持的静置物件写在【年代场景】；禁止把旁白「手里攥着/握着」的道具写成「前景讲桌与香烟」等无人归属陈设；视线按剧情落在对方/物件/门口/屏幕等戏内目标，禁止全片统一直视镜头；镜头朝向须使姿态+动作+关键物件同帧可见；本镜服装+#hex只写在位于…以…之后的（身穿…）内；场所/职业/时段变化时须换装（办公室正装、居家便装、外出外套等），勿每镜都照抄同一套定妆毛衣；仅当旁白完全未暗示换装且场所连续时才可用 portrait_default_outfit；无定妆时须写性别；对照道具「label」只锁外观，不代替写清持有人'
 
 /** 分镜配图：定妆锁脸 + 服装可变（写入 output_format） */
 export const PORTRAIT_STORYBOARD_OUTFIT_LLM_RULE =
@@ -220,16 +220,157 @@ export const QWEN_PORTRAIT_QUALITY_NEGATIVE_CN = [
  * 用于提取/单人生成 appearance。
  */
 export const PORTRAIT_CHARACTER_DISTINCTIVENESS_RULE = [
-  '【角色辨识·硬性】同集每个角色必须一眼可区分，禁止复用或微调同一套万能男模：棱角分明/俊朗棱角 + 方正下颌 + 细长深褐或丹凤眼 + 黑色中分/侧分短发或中长发/碎发 + 深蓝/深灰西装或夹克 + 银色耳钉。',
-  '须在脸型（棱角/鹅蛋/国字/长脸/圆脸）、眉形（剑眉/浓眉/细眉/一字眉）、眼型（细长/圆大/下垂/丹凤）、发型（短寸/碎发/中分/侧分/中长发/光头/卷烫）、发色、标志配饰（眼镜/疤痕/痣/耳钉/胡茬）、年龄段（青年/中年/老年）中至少换 3 项；服装主色 #hex 也须不同（禁止两人同用深蓝夹克 #1e40af/#2563eb 或同用深灰 #6a7c8f/#382f2e 系）。',
-  '同性别多名角色（尤其两名青年男性）必须拉开：一方鹅蛋碎发圆眼 ↔ 另一方国字寸头浓眉，或一方中年皱纹花白 ↔ 另一方青年黑发；禁止全员黑碎发+蓝夹克青年脸。',
+  '【角色辨识·硬性】同集每个角色必须一眼可区分，禁止复用或微调同一套万能模板：棱角分明/俊朗棱角 + 方正下颌 + 细长深褐或丹凤眼 + 黑色中分/侧分短发或中长发/碎发 + 深蓝/深灰西装或夹克 + 银色耳钉。',
+  '须在脸型（棱角/鹅蛋/国字/长脸/圆脸）、眉形（剑眉/浓眉/细眉/一字眉）、眼型（细长/圆大/下垂/丹凤）、发型（短寸/碎发/中分/侧分/中长发/长发/光头/卷烫）、发色、标志配饰（眼镜/疤痕/痣/耳钉/胡茬）、年龄段（青年/中年/老年）中至少换 3 项；服装主色 #hex 也须不同（禁止两人同用深蓝夹克 #1e40af/#2563eb 或同用深灰 #6a7c8f/#382f2e 系）。',
+  '同性别多名角色必须拉开：两名青年男性可用鹅蛋碎发圆眼 ↔ 国字寸头浓眉；两名青年女性可用长发鹅蛋细眉 ↔ 齐肩圆脸一字眉；禁止全员黑碎发+蓝夹克青年脸；女性禁止被写成寸头胡茬国字男模。',
   '若提供了「同集其他角色」外貌，本角色必须刻意写成视觉对立，禁止在旧描述上小改几个字交差。',
   'English tags 须写出具体 face shape / eyebrows / eyes / hair / age / outfit color，禁止只写 handsome anime face / attractive face / angular jawline / messy black hair / blue jacket 万能词凑数。',
 ].join('')
 
-/** 定妆视觉槽位：批量/撞脸重写时按角色分配，避免全员同一模板 */
+/** 定妆年龄推断：LLM 硬性规则（小说彩漫 / 漫画解说共用） */
+export const PORTRAIT_AGE_INFERENCE_LLM_RULE = [
+  '【年龄·硬性】必须写具体岁数（如「18岁」），按优先级推断，禁止无依据把学生/考生主角写成30+或工装中年：',
+  '1) 旁白/对白对本人的明确「N岁」最优先；',
+  '2) 学籍线索：高三/高考→约18岁；高中/高一高二/考生/同学/校服/班级→约17–18岁；初中→约14岁；大学/大一→约19–20岁；大学生泛称→约20–22岁；',
+  '3) 称谓与 role：名/role 含伯/爷/爷爷/外公→约60–75岁（花白发、皱纹，禁止黑发青年脸）；婶/阿姨/中年妇→约40–55岁；父亲/母亲→约40–50岁；老师/主任/教授/监察官/警官→约28–40岁；班长若同为考生仍按学籍岁数；',
+  '4) 无上述线索的青年主角/配角→约18–25岁；禁止把「青年主角」默认写成30–35岁；',
+  '5) 服装须贴合年龄与身份（高中生/考生写校服或便装，勿写中年工装制服）。',
+  '若输入含「年龄推断建议」，必须采用该岁数（允许±1岁）。',
+].join('')
+
+export type PortraitAgeHint = {
+  ageYears: number
+  ageText: string
+  reason: string
+}
+
+function escapeRegExpLite(text: string): string {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * 从角色名 / role / 讲解稿确定性推断定妆年龄建议。
+ * 供 generateCharacterAppearance 写入 user 提示；无把握时返回 null，交由 LLM 按规则推断。
+ */
+export function inferPortraitAgeHint(params: {
+  name?: string | null
+  role?: string | null
+  personality?: string | null
+  script?: string | null
+  variantLabel?: string | null
+}): PortraitAgeHint | null {
+  const name = String(params.name || '').trim()
+  const role = String(params.role || '').trim()
+  const personality = String(params.personality || '').trim()
+  const variant = String(params.variantLabel || '').trim()
+  const script = String(params.script || '').trim()
+  const charBag = `${name} ${role} ${personality} ${variant}`
+  const bag = `${charBag} ${script}`
+
+  // 1) 文中明确「姓名…N岁」或「N岁…姓名」
+  if (name && script) {
+    const esc = escapeRegExpLite(name)
+    const near = script.match(new RegExp(`${esc}[^。！？\\n]{0,36}(\\d{1,2})\\s*岁`))
+      || script.match(new RegExp(`(\\d{1,2})\\s*岁[^。！？\\n]{0,36}${esc}`))
+    if (near?.[1]) {
+      const n = Number(near[1])
+      if (n >= 3 && n <= 90) {
+        return { ageYears: n, ageText: `${n}岁`, reason: `旁白点名「${n}岁」` }
+      }
+    }
+  }
+
+  // 2) 称谓 / 职业（优先于全稿学籍词，避免「高三」把监察官/伯婶一并打成 18）
+  if (/[伯爷]|爷爷|外公|姥爷/.test(name) || /爷爷|外公|老年|暮年/.test(role)) {
+    return { ageYears: 68, ageText: '68岁', reason: '伯/爷/老年称谓' }
+  }
+  if (/[婶]|阿姨/.test(name) || /婶|阿姨|中年妇/.test(role)) {
+    return { ageYears: 48, ageText: '48岁', reason: '婶/阿姨称谓' }
+  }
+  if (/(父亲|母亲|爸爸|妈妈)/.test(role) && !/少年|青年|男主|女主|主角/.test(role)) {
+    return { ageYears: 45, ageText: '45岁', reason: '父母定位' }
+  }
+  if (/老师|主任|教授|监察|警官|警察|局长|教官|军官/.test(charBag)) {
+    return { ageYears: 34, ageText: '34岁', reason: '师长/公职定位' }
+  }
+
+  // 3) variant 人生阶段
+  if (/童年|幼年|孩童/.test(variant)) {
+    return { ageYears: 8, ageText: '8岁', reason: '定妆时期·童年' }
+  }
+  if (/少年/.test(variant)) {
+    return { ageYears: 16, ageText: '16岁', reason: '定妆时期·少年' }
+  }
+  if (/老年|晚年/.test(variant)) {
+    return { ageYears: 68, ageText: '68岁', reason: '定妆时期·老年' }
+  }
+  if (/中年/.test(variant)) {
+    return { ageYears: 45, ageText: '45岁', reason: '定妆时期·中年' }
+  }
+
+  // 4) 学籍：仅当本角色是学生身份，或主角处于校园稿
+  const namedAsExaminee = !!(name && script && new RegExp(`考生\\s*${escapeRegExpLite(name)}`).test(script))
+  const isStudentish = namedAsExaminee
+    || /考生|学生|同学|校服|班长|高中生|少年|学员/.test(charBag)
+    || (/男主|女主|主角|主人公/.test(role) && /高三|高考|高中|考生|校服|班级/.test(script))
+
+  if (isStudentish) {
+    if (/高三|高考/.test(bag) || namedAsExaminee) {
+      return { ageYears: 18, ageText: '18岁', reason: namedAsExaminee ? '旁白称考生' : '高三/高考线索' }
+    }
+    if (/高二/.test(bag)) {
+      return { ageYears: 17, ageText: '17岁', reason: '高二线索' }
+    }
+    if (/高一/.test(bag)) {
+      return { ageYears: 16, ageText: '16岁', reason: '高一线索' }
+    }
+    if (/初[一二三]|初中/.test(bag)) {
+      return { ageYears: 14, ageText: '14岁', reason: '初中线索' }
+    }
+    if (/大一|大学新生/.test(bag)) {
+      return { ageYears: 19, ageText: '19岁', reason: '大一线索' }
+    }
+    if (/大学|本科生|大学生/.test(bag)) {
+      return { ageYears: 20, ageText: '20岁', reason: '大学线索' }
+    }
+    if (/考生|学生|同学|校服|班长/.test(charBag) || namedAsExaminee) {
+      return { ageYears: 18, ageText: '18岁', reason: '考生/学生身份' }
+    }
+  }
+
+  // 5) 青年主角无强线索：偏年轻，勿默认 30+
+  if (/男主|女主|主角|主人公|青年/.test(role) || /男主|女主|主角/.test(personality)) {
+    return { ageYears: 20, ageText: '20岁', reason: '青年主角默认（无学籍/称谓线索）' }
+  }
+
+  return null
+}
+
+export function formatPortraitAgeHintForLlm(hint: PortraitAgeHint): string {
+  return `年龄推断建议：${hint.ageText}（依据：${hint.reason}）。定妆中文须写此年龄，服装须贴合该年龄与身份。`
+}
+
+/** 定妆视觉槽位：批量/撞脸重写时按角色分配，避免全员同一模板（默认偏中性/可复用） */
 export const PORTRAIT_SILHOUETTE_SLOTS = [
   '清秀鹅蛋脸 + 细眉 + 圆大深褐眼 + 黑色碎发刘海微遮额 + 非深蓝夹克主色（如#8B4513棕/#64748b灰蓝针织）+ 禁止耳钉',
+  '国字方正脸 + 浓眉 + 细长眼 + 黑色短寸头无刘海 + 深色制服或工装（可#1e40af）+ 可有胡茬或眼镜 + 中年感优先',
+  '瘦长冷脸 + 剑眉 + 细长眼 + 黑色中长发侧分或束发 + 长外套/风衣 + 可有细疤',
+  '圆润脸 + 一字眉 + 下垂眼 + 微卷中分短发 + 浅色休闲装 + 可有痣',
+  '宽颌厚实脸 + 浓眉 + 略圆眼 + 极短平头或光头 + 工装/制服色 + 禁止耳钉 + 偏中老年',
+]
+
+/** 女性定妆槽位：禁止寸头/胡茬/国字男模等易出男性图的提示 */
+export const PORTRAIT_SILHOUETTE_SLOTS_FEMALE = [
+  '清秀鹅蛋脸 + 细眉 + 圆大深褐眼 + 黑色长发刘海微遮额 + 非深蓝夹克主色（如#8B4513棕针织/#be185d酒红开衫）+ 可有细耳钉',
+  '圆润脸 + 一字眉 + 下垂眼 + 黑色齐肩微波浪发 + 浅色连衣裙或针织衫 + 可有痣',
+  '瘦长冷脸 + 细眉 + 细长眼 + 黑色中长发侧分或低束发 + 长外套/风衣女装剪裁 + 可有细疤',
+  '瓜子脸 + 弯眉 + 大而清晰深褐眼 + 黑色短发及耳或空气刘海 + 衬衫/风衣 + 禁止男性寸头胡茬国字脸',
+  '柔和方颐脸 + 细长眉 + 略圆眼 + 黑色盘发或中长卷发 + 制服/工装女装剪裁 + 禁止耳钉可选',
+]
+
+/** 男性定妆槽位 */
+export const PORTRAIT_SILHOUETTE_SLOTS_MALE = [
+  '清秀鹅蛋脸偏棱角 + 细眉 + 圆大深褐眼 + 黑色碎发刘海微遮额 + 非深蓝夹克主色（如#8B4513棕/#64748b灰蓝针织）+ 禁止耳钉',
   '国字方正脸 + 浓眉 + 细长眼 + 黑色短寸头无刘海 + 深色制服或工装（可#1e40af）+ 可有胡茬或眼镜 + 中年感优先',
   '瘦长冷脸 + 剑眉 + 细长眼 + 黑色中长发侧分或束发 + 长外套/风衣 + 可有细疤',
   '圆润脸 + 一字眉 + 下垂眼 + 微卷中分短发 + 浅色休闲装 + 可有痣',
@@ -293,45 +434,106 @@ export function appearanceCollidesWithPeers(appearance: string, peerTexts: strin
 /**
  * 从定妆 appearance 抽出短辨识差（供配图文案写入对照定妆括号，防同框撞脸）。
  * 不含表情；约 12–32 字。
+ * genderOverride：身份已锁定时强制写入正确性别，避免旧定妆误写「男性」污染生图。
  */
-export function extractPortraitDistinctCueCn(appearance?: string | null, maxLen = 32): string {
-  const raw = String(appearance || '')
+export function extractPortraitDistinctCueCn(
+  appearance?: string | null,
+  maxLen = 32,
+  genderOverride?: '男性' | '女性' | null,
+): string {
+  const raw0 = String(appearance || '')
     .replace(/【画风规格[：:][^】]*】/g, '')
     .replace(/\bEnglish tags:[\s\S]*$/i, '')
     .replace(/\s+/g, '')
+  const raw = genderOverride ? enforceAppearanceGenderCn(raw0, genderOverride).replace(/\s+/g, '') : raw0
   if (!raw) return ''
   const parts: string[] = []
+  // 性别必须靠前：否则「清秀鹅蛋脸·刘海」会被文生图理解成女性；有 override 时强制正确性别
+  const gender = genderOverride || raw.match(/女性|男性/)?.[0]
+  if (gender) parts.push(gender)
   const age = raw.match(/(约?\d{1,2}岁|青年男性|青年女性|中年男性|中年女性|老年男性|老年女性|少年)/)?.[0]
-  if (age) parts.push(age)
-  const face = raw.match(/(清秀鹅蛋脸|鹅蛋脸|国字方正脸|方正下颌|棱角分明[^，。]{0,6}脸|瘦长冷脸|圆润脸|宽颌厚实脸|长脸|圆脸|方脸|俊朗棱角脸)/)?.[0]
+  if (age && age !== gender) parts.push(age)
+  const face = raw.match(/(清秀鹅蛋脸|鹅蛋脸|国字方正脸|柔和方颐脸|方正下颌|棱角分明[^，。]{0,6}脸|瘦长冷脸|圆润脸|宽颌厚实脸|瓜子脸|长脸|圆脸|方脸|俊朗棱角脸)/)?.[0]
   if (face) parts.push(face)
   const browEye = [
-    raw.match(/(剑眉|浓眉|细眉|一字眉)/)?.[0],
+    raw.match(/(剑眉|浓眉|细眉|一字眉|弯眉)/)?.[0],
     raw.match(/(圆大深褐眼|细长眼|下垂眼|丹凤眼|大而清晰[^，。]{0,8}眼|细长深褐眼)/)?.[0],
   ].filter(Boolean).join('')
   if (browEye) parts.push(browEye)
-  const hair = raw.match(/(黑色短寸头无刘海|黑色碎发刘海微遮额|黑色中长发侧分|黑色长发束冠|极短平头|光头|微卷中分短发|花白[^，。]{0,8}发|黑色[^，。]{0,14}(?:碎发|短发|长发|寸头|平头|中分|侧分|束发))/)?.[0]
+  const hair = raw.match(/(黑色短寸头无刘海|黑色碎发刘海微遮额|黑色中长发侧分|黑色长发束冠|黑色长发刘海微遮额|黑色齐肩微波浪发|极短平头|光头|微卷中分短发|花白[^，。]{0,8}发|黑色[^，。]{0,14}(?:碎发|短发|长发|寸头|平头|中分|侧分|束发|盘发|卷发))/)?.[0]
   if (hair) parts.push(hair.slice(0, 16))
   let cue = [...new Set(parts)].join('·')
   if (!cue) {
-    // 兜底：截取外貌前若干汉字（去掉画风）
     cue = raw.replace(/短剧解说|高清国漫|锋利细线|赛璐璐|冷蓝|戏剧光/g, '').slice(0, maxLen)
   }
   if (cue.length > maxLen) cue = cue.slice(0, maxLen)
   return cue
 }
 
-/** 按角色名稳定分配视觉槽位，拉开同集差异 */
+/** 按角色名稳定分配视觉槽位，拉开同集差异；gender 为 female/male 时用对应槽，避免女角色抽到寸头胡茬男模 */
 export function resolvePortraitSilhouetteSlot(
   characterName: string,
   peerNames: string[] = [],
+  gender?: 'male' | 'female' | 'unknown' | null,
 ): { index: number; hint: string } {
+  const pool = gender === 'female'
+    ? PORTRAIT_SILHOUETTE_SLOTS_FEMALE
+    : gender === 'male'
+      ? PORTRAIT_SILHOUETTE_SLOTS_MALE
+      : PORTRAIT_SILHOUETTE_SLOTS
   const names = [...new Set([characterName, ...peerNames].map(n => String(n || '').trim()).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'zh-CN'))
   let index = Math.max(0, names.indexOf(String(characterName || '').trim()))
   if (index < 0) index = 0
-  index = index % PORTRAIT_SILHOUETTE_SLOTS.length
-  return { index, hint: PORTRAIT_SILHOUETTE_SLOTS[index] }
+  index = index % pool.length
+  return { index, hint: pool[index] }
+}
+
+/**
+ * 定妆成稿性别纠偏：身份已锁定时，把错写的异性前缀改掉，并尽量去掉强异性体征词。
+ */
+export function enforceAppearanceGenderCn(
+  appearance: string,
+  genderLabel: '男性' | '女性' | null | undefined,
+): string {
+  const label = genderLabel === '男性' || genderLabel === '女性' ? genderLabel : null
+  let t = String(appearance || '').trim()
+  if (!label || !t) return t
+
+  if (label === '女性') {
+    t = t
+      .replace(/青年男性/g, '青年女性')
+      .replace(/中年男性/g, '中年女性')
+      .replace(/老年男性/g, '老年女性')
+      .replace(/少年男性/g, '少年女性')
+      .replace(/(\d{1,2}\s*岁)男性/g, '$1女性')
+      .replace(/俊朗棱角男模|万能男模|男模/g, '')
+      .replace(/胡茬|络腮胡|寸头无刘海|极短平头或光头|宽颌厚实脸/g, '')
+      .replace(/国字方正脸/g, '柔和方颐脸')
+    // 剩余裸「男性」→「女性」（已处理「N岁男性/青年男性」）
+    t = t.replace(/男性(?!化)/g, '女性')
+  } else {
+    t = t
+      .replace(/青年女性/g, '青年男性')
+      .replace(/中年女性/g, '中年男性')
+      .replace(/老年女性/g, '老年男性')
+      .replace(/少年女性/g, '少年男性')
+      .replace(/(\d{1,2}\s*岁)女性/g, '$1男性')
+    t = t.replace(/女性(?!化)/g, '男性')
+  }
+
+  // 文首 40 字内须出现性别；若无则在画风括号后或文首补上
+  const head = t.slice(0, 48)
+  if (!/女性|男性/.test(head)) {
+    const age = t.match(/(\d{1,2}\s*岁)/)?.[1]
+    const prefix = age ? `${age}${label}` : label
+    if (/^【[^】]+】/.test(t)) {
+      t = t.replace(/^(【[^】]+】)\s*/, `$1${prefix}，`)
+    } else {
+      t = `${prefix}，${t}`
+    }
+  }
+  return t.replace(/，{2,}/g, '，').replace(/\s{2,}/g, ' ').trim()
 }
 
 /** 漫画解说定妆构图（深色身份锁脸，禁止白棚） */
@@ -433,9 +635,9 @@ export function sanitizePortraitExpressionText(text: string): string {
 }
 
 export const THREE_VIEW_PORTRAIT_STYLE_GUARD_ANIME = [
-  'CRITICAL ART STYLE: cinematic anime key visual, Makoto Shinkai Kyoto Animation film style, highly detailed anime eyes with catchlights, natural dark iris, white sclera, thin clean lineart, soft painterly cel shading, golden hour soft lighting, delicate atmospheric shading',
-  'CRITICAL LAYOUT: vertical portrait single front upper-body character reference facing camera on pure white background, chest-up framing, subject fills most of frame with only narrow side margins, clear detailed face, neutral face no expression',
-  'FORBIDDEN: pixel art, dithering, chibi, 3D render, turnaround sheet, multiple views, side view, back view, gray background, landscape with large empty side margins, tiny centered vertical strip, tiny full-body figure, vertical poster crop-out, handheld objects, props in hands, flat dull colors, rough sketch, duplicate character, solid red eyes, glowing red eyes, crimson eyes, entirely red iris, demonic red eyes, smiling, angry expression, tired expression, frowning, crying',
+  'CRITICAL ART STYLE: Japanese 2D anime illustration portrait, Anime Style, large expressive anime eyes with catchlights, natural dark iris, white sclera, high-contrast cinematic modeling, polished character key visual, normal young adult body proportions',
+  'CRITICAL LAYOUT: vertical portrait single front upper-body character reference facing camera on pure white background, chest-up framing, subject fills most of frame with only narrow side margins, clear detailed face, even soft studio light on white backdrop, neutral face no expression',
+  'FORBIDDEN: thin clean lineart keywords as style recipe, cel shading keywords as style recipe, pixel art, dithering, chibi, 3D render, CGI photoreal, Makoto Shinkai golden hour soft watercolor, turnaround sheet, multiple views, side view, back view, gray background, landscape with large empty side margins, tiny centered vertical strip, tiny full-body figure, vertical poster crop-out, handheld objects, props in hands, rough sketch, duplicate character, solid red eyes, glowing red eyes, crimson eyes, entirely red iris, demonic red eyes, smiling, angry expression, tired expression, frowning, crying',
 ].join(', ')
 
 export const THREE_VIEW_PORTRAIT_STYLE_GUARD_MOTION_COMIC = [
@@ -452,21 +654,21 @@ export const THREE_VIEW_PORTRAIT_STYLE_GUARD_MINIMAL = [
 
 export function buildNarrationMinimalCharacterExtractSystem(options?: { weightArc?: { theme_labels: string[] } | null }): string {
   return [
-    '你是影视解说项目的角色设定师（简体素人/素体小人画风）。须为「主人公」做 16:9 横屏正面半身定妆参考图（纯白色背景、脸与上半身占满画面、清晰展示正常卡通脸），配角不需要单独定妆。',
+    '你是影视解说项目的角色设定师（简体素人/素体小人画风）。须为角色做 16:9 横屏正面半身定妆参考图（纯白色背景、脸与上半身占满画面、清晰展示正常卡通脸）。',
     '规则：',
-    '1) 只提取主人公（男主/女主/主角），不要提取配角（妻子、店员、朋友、提亲者等）',
-    '2) 不要提取「旁白」「解说员」「作者」',
+    '1) 提取主人公（男主/女主/主角）及主要配角：反复出场、有专名、推动剧情或与主角有重要关系的角色',
+    '2) 不要提取一次性路人/群众/店员等龙套；不要提取「旁白」「解说员」「作者」',
     '3) 输出字段：name、variant_label、role、appearance、personality',
-    '4) role 只填固定身份「男主」或「女主」，禁止填职业/情节标签（个体户、万元户、服装店老板、流水线工人等；那些是文案剧情不是角色定位）',
+    '4) role：主人公写「男主」或「女主」；主要配角写「主要配角·身份」（如主要配角·妻子）；role 必须能看出性别（妻子/母亲/姐姐→女；丈夫/父亲/哥哥→男）；禁止只把职业/情节标签当 role',
     '5) variant_label 表示该条定妆的时期/形态：如 童年、少年、青年、中年、老年；若全篇只有一个时期则留空或填「常态」',
-    '6) 同一主人公若文案出现明显不同人生阶段（回忆、多年后、少年与晚年等），必须拆成多条记录：name 相同，variant_label 不同，appearance 各自独立',
-    '7) 第一人称「我」叙述时，name 用「男主」或「女主」，并按青年/中年/老年等阶段拆分 variant_label',
+    '6) 同一人若文案出现明显不同人生阶段（回忆、多年后等），可拆成多条：name 相同，variant_label 不同，appearance 各自独立',
+    '7) 第一人称「我」叙述时，主人公 name 用「男主」或「女主」；配角仍用专名',
     `8) appearance：按定妆规格格式输出（性别+阶段+脸型+眉眼+发型+身形+#hex简笔服装+${PORTRAIT_FULL_BODY_STANDING_CN}）；身形须写躯干宽高或标准体型档位；禁止手持/道具；禁止全身小全身竖条/三视图描述；禁止任何表情/神情`,
     options?.weightArc
       ? `8b) 剧本含${options.weightArc.theme_labels.join('/')}主题：appearance 须写体重档位与具象躯干宽高（如 obese 青年期躯干1.0份高×1.30份宽），禁止只写标准三头身`
       : '',
     '9) 示例 appearance：28岁男性，正常卡通圆脸带高光，圆点眼，青年期躯干1.0份高×1.0份宽标准体型，简化#2563eb蓝色工装简笔轮廓，正面半身标准站姿头到胸口完整入镜双手自然下垂',
-    '10) 合并同一人物同一时期的称呼，不要重复',
+    '10) 合并同一人物同一时期的称呼，不要重复；禁止只输出主人公一人（有主要配角时必须一并列出）',
     '只输出 JSON，不要解释。',
   ].filter(Boolean).join('\n')
 }
@@ -490,34 +692,34 @@ export function buildNarrationMinimalCharacterAppearanceSystem(options?: {
 
 export function buildNarrationAnimeCharacterAppearanceSystem(): string {
   return [
-    '你是影视解说项目的角色定妆造型设计助手（动漫风格）。',
-    `画风：现代高质量 2D 动漫，正常头身比，${PORTRAIT_REFERENCE_IMAGE_LAYOUT_CN}；大而清晰的动漫眼睛带高光与自然虹膜色、干净眼白；禁止 Q 版、3D、真人写实、全身小全身竖条、三视图；手持物/槟榔/道具留到分镜配图文案，定妆不写。`,
+    '你是影视解说项目的角色定妆造型设计助手（日系2D漫画）。',
+    `画风与配图一致：日系2D动漫插画（Anime Style），高对比电影感体积塑形，正常头身比，${PORTRAIT_REFERENCE_IMAGE_LAYOUT_CN}；大而传神的动漫眼睛带高光与自然虹膜色；禁止写「细线稿」「赛璐璐」；禁止 Q 版、3D/CGI写实、真人写实、全身小全身竖条、三视图；手持物/槟榔/道具留到分镜配图文案，定妆不写。`,
     '须根据解说稿中该角色的出场情节、对白、行为推断外貌，与故事时代、题材一致。',
-    '不写过程性描述（如牙齿由白变黑）；身形须写具体（头身比+肩宽/腰线/四肢比例），禁止只写「标准」或省略；禁止素体份数、三头身、圆头直径等计量词（素体画风除外）。',
+    '不写过程性描述（如牙齿由白变黑）；身形须写具体（头身比+肩宽/腰线/四肢比例），禁止只写「标准」或省略；禁止素体份数、三头身、圆头直径等计量词。',
     '若提供了 variant_label，外貌须严格对应该阶段，不得写成其他年龄。',
+    '【性别·硬性】必须按角色定位与旁白她/他线索写对性别：女主/妻子/母亲/姐姐等必须写「女性」；男主/丈夫等写「男性」。禁止把女性写成男性或男模；禁止默认输出「28岁男性」。',
     PORTRAIT_CHARACTER_DISTINCTIVENESS_RULE,
     PORTRAIT_NEUTRAL_EXPRESSION_LLM_RULE,
     PORTRAIT_EYE_COLOR_LLM_RULE,
-    PORTRAIT_APPEARANCE_SPEC_FORMAT_RULE,
-    '只输出描述正文，不要标题、markdown、JSON。',
+    '【定妆规格·纯中文】写满：性别+年龄/阶段、脸型、眉眼（自然虹膜色+瞳孔高光）、发型、身形、#hex服装、非手持配饰、正面半身站姿双手下垂、面无表情中性冷静；约 120–220 字。',
+    '示例（女）：26岁女性，清秀鹅蛋脸，细眉，大而清晰深褐眼带瞳孔高光，黑色长发刘海微遮额，正常头身比肩窄腰软四肢匀称，#be185d酒红针织开衫，正面半身站姿头到胸口双手自然下垂，面无表情中性冷静',
+    '示例（男）：28岁男性，棱角下颌，剑眉，细长深褐眼带瞳孔高光，黑色碎发侧分，正常头身比肩宽适中，#1e40af深蓝夹克，正面半身站姿头到胸口双手自然下垂，面无表情中性冷静',
+    '【输出·硬性】只输出一段中文正文；禁止 English tags、禁止英文段落、禁止 JSON/markdown；#hex 色值可保留。',
+    '只输出描述正文，不要标题。',
   ].join('\n')
 }
 
 export function buildNarrationAnimeCharacterExtractSystem(): string {
   return [
-    '你是影视解说项目的角色设定师（动漫风格）。须为「主人公」做 16:9 横屏正面半身定妆参考图（纯白色背景、脸与上半身占满画面、清晰脸型），配角不需要单独定妆。',
+    '你是影视解说项目的角色设定师（日系2D漫画）。本步只输出角色名单 JSON，禁止写任何外貌/定妆/画风/服装/配图描述。',
     '规则：',
-    '1) 只提取主人公（男主/女主/主角），不要提取配角',
-    '2) 不要提取「旁白」「解说员」「作者」',
-    '3) 输出字段：name、variant_label、role、appearance、personality',
-    '4) role 只填「男主」或「女主」，禁止填职业/情节标签（个体户、万元户、老板、工人等）',
-    '5) variant_label：人生阶段（童年/青年/老年等）；全篇单形态可留空或「常态」；多阶段须拆多条',
-    `5) appearance：按定妆规格格式（性别+年龄/阶段+脸型+眉眼+发型+身形+#hex服装+标志特征 + English tags）；须写清动漫脸型与眉眼；身形须写头身比+肩宽/四肢比例；末尾须含「${PORTRAIT_FULL_BODY_STANDING_CN}」；禁止全身小全身竖条/三视图；禁止表情/神情；禁止只写「短发」「标准」等笼统词`,
-    `5b) ${PORTRAIT_NEUTRAL_EXPRESSION_LLM_RULE}`,
-    `5c) ${PORTRAIT_EYE_COLOR_LLM_RULE}`,
-    '6) 禁止画风词：retro style, chibi, 3D, 真人, 厚涂, Q版, pixel',
-    '7) 示例 appearance：28岁男性，俊朗棱角动漫脸型，剑眉，细长深褐眼带瞳孔高光，黑色略凌乱碎发刘海微遮额，正常头身比肩宽适中四肢修长匀称，穿#2563eb蓝色工厂工装，左耳简约耳钉，面无表情，中性冷静。\nEnglish tags: handsome sharp jawline anime face, thick straight eyebrows, narrow dark-brown eyes with catchlights and white sclera, messy black short hair with bangs, normal anime body proportions balanced shoulders slim athletic build, blue factory uniform, small ear stud, neutral face, no expression',
-    '8) 合并同一人物同一时期称呼，不要重复',
-    '只输出 JSON，不要解释。',
+    '1) 提取主人公（男主/女主/主角）及主要配角：反复出场、有专名、推动剧情或与主角有重要关系的角色',
+    '2) 不要提取一次性路人/群众/店员等龙套；不要提取「旁白」「解说员」「作者」',
+    '3) 每个角色只输出：name、variant_label、role、personality（可短句或 ""）',
+    '4) role：主人公写「男主」或「女主」；主要配角写「主要配角·身份」（如主要配角·妻子）；role 必须能看出性别（妻子/母亲/姐姐→女；丈夫/父亲/哥哥→男）；禁止只把职业/情节标签当 role',
+    '5) variant_label：人生阶段（童年/青年/老年等）；全篇单形态可留空或「常态」；多阶段可拆多条',
+    '6) 禁止输出 appearance 字段；禁止脸型/发型/#hex/English tags/配图文案/七维描述',
+    '7) 合并同一人物同一时期称呼，不要重复；禁止只输出主人公一人（有主要配角时必须一并列出）',
+    '只输出 JSON：{"characters":[{"name":"…","variant_label":"…","role":"…","personality":""}]}',
   ].join('\n')
 }

@@ -26,18 +26,18 @@ export function parseNarrationFluxSections(raw: string): Record<string, string> 
 }
 
 /** LLM 写中文配图文案：【画风规格】短锚（勿写导演名/头身比/浅景深/无文字等套话） */
-export const NARRATION_FLUX_COMPACT_ART_STYLE_CN = '16:9电影感日系动漫'
+export const NARRATION_FLUX_COMPACT_ART_STYLE_CN = '16:9日系2D动漫'
 
-export const NARRATION_FLUX_COMPACT_TEXTURE_CN = '干净线稿，电影感光影'
+export const NARRATION_FLUX_COMPACT_TEXTURE_CN = '高对比电影光影，动漫插画质感'
 
 export const NARRATION_FLUX_COMPACT_LLM_RULE = [
   '【Flux压缩·硬性】七维标签仍必填且信息不得丢失，但每维只用短句（每维建议20–45字，全篇中文≤380字）：',
-  `【画风规格】只写一行固定短锚：「${NARRATION_FLUX_COMPACT_ART_STYLE_CN}」，禁止写新海诚/京阿尼/正常头身比/浅景深/无文字无水印，禁止照抄长段画风规格全文；`,
+  `【画风规格】只写一行固定短锚：「${NARRATION_FLUX_COMPACT_ART_STYLE_CN}」，禁止写3D/CGI/国漫建模/正常头身比/浅景深/无文字无水印，禁止照抄长段画风规格全文；`,
   '【镜头视角】叙事可见性优先：有肢体/道具/坐站姿态→默认中近景（头高约22–30%），朝向主人公上半身与动作点/物件；纯神情无动作才近景（头高≤35%）；禁止「面部情绪→近景大头」与「面部特写」；',
   '【年代场景】地点+前/中/后景+至少3个具体物件（颜色/材质/状态）；禁止写面部特写；',
   '【核心细节动作】肢体+视线+道具/配角接触（含屏幕UI）；禁止只写盯脸/氛围词；',
   '【画面主体】对照定妆「name·阶段」（只写本镜细化表情，禁止写脸型/发型/发色，禁止写服装）+位于+姿态+（身穿#hex本镜服装）；表情在主体、动作在核心维、物件在场景、镜头须同帧装下；',
-  '【光影色调】时段+冷暖+主光源2项；禁「聚焦面部局部」替代构图；',
+  '【光影色调】时段+冷暖+主光源；高对比戏剧光，色温贴合本段情节（紧张悬疑可用冷蓝紫+锐利高光，日常勿硬套末日）；禁「聚焦面部局部」替代构图；',
   `【质感要求】只写「${NARRATION_FLUX_COMPACT_TEXTURE_CN}」；`,
   '禁止同义重复（如画风/质感/后缀各写一遍16:9）；禁止空泛词（高质量、精美、氛围感）替代具体物件/动作/机位。',
 ].join('')
@@ -64,9 +64,10 @@ export const FLUX_COMPACT_CN_SECTION_ORDER = [
 ] as const
 
 export const FLUX_COMPACT_ART_STYLE_EN =
-  '16:9 cinematic anime, clean lineart, soft cel shading'
+  '16:9 Japanese 2D anime illustration, cinematic contrast'
 
-export const FLUX_COMPACT_RENDER_EN = 'clean lineart, cinematic soft light, no text, no watermark'
+export const FLUX_COMPACT_RENDER_EN =
+  'high-contrast cinematic lighting, anime illustration look, no text, no watermark'
 
 export const FLUX_EN_PROMPT_MAX_CHARS = 1000
 
@@ -177,7 +178,7 @@ function compressChineseSection(key: string, raw: string): string {
   if (!s) return s
 
   if (key === '画风规格') {
-    if (/电影感.*动漫|日系动漫/.test(s)) return NARRATION_FLUX_COMPACT_ART_STYLE_CN
+    if (/日系2D|2D动漫|三维国漫|3D国漫|电影感.*动漫|日系动漫/.test(s)) return NARRATION_FLUX_COMPACT_ART_STYLE_CN
     return s
       .replace(/16:9横屏[，,]?/g, '16:9，')
       .replace(/（非Q版非三头身）|\(非Q版[^）)]*\)/g, '')
@@ -191,7 +192,7 @@ function compressChineseSection(key: string, raw: string): string {
   }
 
   if (key === '质感要求') {
-    if (/干净线稿|电影感/.test(s)) return NARRATION_FLUX_COMPACT_TEXTURE_CN
+    if (/高对比电影|动漫插画质感|细线稿|赛璐璐|光滑CGI|强轮廓|浅景深|干净线稿|电影感/.test(s)) return NARRATION_FLUX_COMPACT_TEXTURE_CN
     return s
       .replace(/无文字无水印[，,]?/g, '')
       .slice(0, 80)
@@ -243,7 +244,9 @@ function compressEnglishSection(label: string, raw: string): string {
   if (!s) return s
 
   if (label === 'Art style spec') {
-    if (/Makoto Shinkai|Kyoto Animation|KyoAni|cinematic anime/i.test(s)) return FLUX_COMPACT_ART_STYLE_EN
+    if (/Japanese 2D anime|cinematic contrast|cel shading|3D donghua|Chinese 3D|toon-shaded|Makoto Shinkai|Kyoto Animation|KyoAni|cinematic anime/i.test(s)) {
+      return FLUX_COMPACT_ART_STYLE_EN
+    }
     return s.slice(0, 140)
   }
   if (label === 'Render quality') return FLUX_COMPACT_RENDER_EN

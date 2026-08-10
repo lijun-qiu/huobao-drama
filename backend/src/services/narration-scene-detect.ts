@@ -1,3 +1,5 @@
+import { and, eq, isNull } from 'drizzle-orm'
+import { db, schema } from '../db/index.js'
 import { assertTextConfigHasCredentials, getTextConfig, textConfigHasCredentials } from './ai.js'
 import { callTextChat, resolveOllamaNumCtx } from './text-chat.js'
 import { resolveCharacterGenderLabelCn } from './comfyui-client.js'
@@ -5,6 +7,9 @@ import {
   buildPortraitAppearanceSpecFromCharacter,
   formatCharacterPortraitLabel,
   injectPortraitSpecIntoImagePromptCn,
+  ensurePortraitGenderInImagePromptCn,
+  ensureMissingPortraitLabelsInImagePromptCn,
+  ensureSceneLabelInImagePromptCn,
   resolveExpectedPortraitNamesForPrompt,
   resolveMotionComicOnScreenPortraitNames,
   validateImagePromptPortraitLabels,
@@ -24,37 +29,55 @@ import {
   formatNarrationBodyWeightSpec,
   inferParagraphBodyWeightTier,
   usesNarrationNaturalBodyLock,
+  usesComicIllustrationPipeline,
+  isNovelComicSketchStyle,
   isNarrationAnimeStyle,
   resolveLLMImagePrompt,
   repairNarrationFaceCloseupVsActionPrompt,
   repairNarrationStandingFullBodyPrompt,
   isNarrationDateOnlySentence,
   isNarrationMinimalStyle,
+  NARRATION_USE_RAW_LLM_PROMPTS,
   NARRATION_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
   NARRATION_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
   NARRATION_IMAGE_DETECT_BATCH_THRESHOLD_DEFAULT,
   NARRATION_IMAGE_DETECT_BATCH_SIZE_DEFAULT,
+  NARRATION_IMAGE_DETECT_BATCH_CONCURRENCY_DEFAULT,
   NARRATION_IMAGE_PROMPT_BATCH_SIZE_DEFAULT,
   NARRATION_IMAGE_PROMPT_BATCH_SIZE_MIN,
   NARRATION_IMAGE_PROMPT_BATCH_SIZE_MAX,
   NARRATION_IMAGE_PROMPT_BATCH_CONCURRENCY_DEFAULT,
   NARRATION_IMAGE_SEGMENT_MIN_SHOTS,
   NARRATION_IMAGE_SEGMENT_MAX_SHOTS,
+  inferNarrationPlaceBucket,
+  validateImagePromptOutfitDiversity,
 } from '../constants/art-styles.js'
+import { TOONFLOW_PARAGRAPH_PROMPT_OUTPUT_HINT } from '../constants/toonflow-llm.js'
 import {
-  isMotionComicStyle,
   MOTION_COMIC_IMAGE_DETECT_MIN_STORYBOARD_RATIO,
   MOTION_COMIC_IMAGE_DETECT_MAX_STORYBOARD_RATIO,
   MOTION_COMIC_IMAGE_DETECT_TARGET_STORYBOARD_RATIO,
   MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS,
   MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS,
   MOTION_COMIC_IMAGE_PROMPT_MIN_LEN,
+  MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS,
   MOTION_COMIC_PORTRAIT_OUTFIT_LLM_RULE,
+  MOTION_COMIC_FOCUS_REACTION_BEAT_RE,
+  isMotionComicDualPortraitBeat,
   repairMotionComicContinuousImagePrompt,
   buildMotionComicShotCard,
   isMotionComicStandPoseShellPrompt,
   isMotionComicEmotionWithoutCloseupPrompt,
+  PROP_HOLDER_PLACEMENT_LLM_RULE,
 } from '../constants/motion-comic.js'
+import {
+  NOVEL_COMIC_PAGE_DETECT_MIN_STORYBOARD_RATIO,
+  NOVEL_COMIC_PAGE_DETECT_MAX_STORYBOARD_RATIO,
+  NOVEL_COMIC_PAGE_SEGMENT_MIN_SHOTS,
+  NOVEL_COMIC_PAGE_SEGMENT_MAX_SHOTS,
+  NOVEL_COMIC_PAGE_SEGMENT_HARD_MAX_SHOTS,
+} from '../constants/novel-comic.js'
+import { parseDialogueForTTS } from './narration-tts.js'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 import {
   calcPromptBatchPercent,
@@ -64,6 +87,15 @@ import {
 } from './narration-image-breakdown-progress.js'
 import { buildPriorNarrationLines } from './episode-continuity.js'
 import { buildNarrationSceneEnrichment } from './narration-scene-enrichment.js'
+import {
+  buildNarrationEnvPromptPayload,
+  matchPropsForNarrationLines,
+} from './narration-scene-assets.js'
+import {
+  beatCardForLlmPayload,
+  extractNarrationBeatCard,
+  validateImagePromptBeatFidelity,
+} from './narration-beat-fidelity.js'
 import { ensureLocalModelStage, unloadOllamaModel } from './local-model-manager.js'
 
 /** 场景段配图 prompt（单次调用）超时 */
@@ -127,7 +159,8 @@ function resolveParagraphPromptLLMTimeoutMs(batchParagraphCount: number, attempt
 }
 
 function isLLMTimeoutError(message: string): boolean {
-  return /timeout|aborted due to timeout/i.test(message)
+  // callTextChat 会把 Abort timeout 收成中文「模型未响应（超时 Ns）」——必须匹配，否则批内/外层重试全跳过
+  return /timeout|aborted due to timeout|AbortError|模型未响应|超时\s*\d*\s*s?/i.test(message)
 }
 
 /** 智谱等云端瞬态限流 / 网关错误，可退避重试 */
@@ -137,22 +170,34 @@ function isLLMTransientProviderError(message: string): boolean {
   )
 }
 
+function isLLMInvalidRequestBodyError(message: string): boolean {
+  return /INVALID_REQUEST_BODY|Text API error 400/i.test(message)
+}
+
 function isLLMRetryableError(message: string): boolean {
   return isLLMTimeoutError(message) || isLLMTransientProviderError(message)
 }
 
-/** 换镜检测 LLM 超时下限（毫秒） */
-const IMAGE_DETECT_LLM_TIMEOUT_MIN_MS = 240_000
+function isOpenRouterFreeTextModel(model?: string | null): boolean {
+  return /:free\b/i.test(String(model || ''))
+}
+
+/** 换镜检测 LLM 超时下限（毫秒）——对齐配图文案；免费云模型排队常 >4min */
+const IMAGE_DETECT_LLM_TIMEOUT_MIN_MS = 600_000
 
 /** 换镜检测 LLM 超时上限（毫秒） */
-const IMAGE_DETECT_LLM_TIMEOUT_MAX_MS = 900_000
+const IMAGE_DETECT_LLM_TIMEOUT_MAX_MS = 1_800_000
 
 /** 每个检测单元估算耗时（毫秒），用于按镜头数缩放超时 */
-const IMAGE_DETECT_LLM_TIMEOUT_PER_UNIT_MS = 4_500
+const IMAGE_DETECT_LLM_TIMEOUT_PER_UNIT_MS = 12_000
 
 const IMAGE_DETECT_LLM_BATCH_RETRIES = 2
-/** 检测分批之间留空，降低智谱免费配额 429 */
+/** 检测整次失败后再整轮重试（仍失败才规则兜底） */
+const IMAGE_DETECT_OUTER_RETRIES = 2
+/** 检测分批之间留空，降低智谱免费配额 429（串行模式）；并发仅作启动错峰 */
 const IMAGE_DETECT_LLM_BATCH_GAP_MS = 900
+/** 云端检测批并发；本地 Ollama 强制 1 */
+const IMAGE_DETECT_LLM_BATCH_CONCURRENCY = NARRATION_IMAGE_DETECT_BATCH_CONCURRENCY_DEFAULT
 
 function resolveDetectLLMTimeoutMs(detectUnitCount: number, attempt = 1): number {
   const scaled = Math.max(
@@ -161,6 +206,14 @@ function resolveDetectLLMTimeoutMs(detectUnitCount: number, attempt = 1): number
   )
   const withRetry = attempt > 1 ? Math.round(scaled * 1.25) : scaled
   return Math.min(IMAGE_DETECT_LLM_TIMEOUT_MAX_MS, withRetry)
+}
+
+function isDetectInvalidAnalysisError(message: string): boolean {
+  return /缺少 analysis|返回无效|analysis|期望 .+ 项|请重试检测|低于最低|超过最高|未标出任何|无结果|JSON|parse/i.test(message)
+}
+
+function isDetectRetryableError(message: string): boolean {
+  return isLLMRetryableError(message) || isDetectInvalidAnalysisError(message)
 }
 
 /** 片头标题图 prompt LLM 超时（毫秒） */
@@ -206,6 +259,8 @@ export type DetectImageNeedsOptions = {
   /** 每批覆盖的镜头数；默认 40 */
   batchSize?: number
   onProgress?: NarrationImageBreakdownProgressCallback
+  /** 小说漫画：本章 panel_beats，注入检测 LLM 以对齐换镜 */
+  panelBeats?: string[]
 }
 
 export type NarrationSceneSegment = {
@@ -223,10 +278,22 @@ type ImageSegmentBounds = {
   maxRatio: number
   /** 后处理优先拉到的目标密度；缺省则只保证 min～max */
   targetRatio?: number
+  /** 小说漫画：按内容切页，不做比例硬拉/硬砍 */
+  contentDriven?: boolean
 }
 
 function resolveImageSegmentBounds(style?: string | null): ImageSegmentBounds {
-  if (isMotionComicStyle(style)) {
+  // 小说漫画：竖屏二/三列按剧情切页；不强制锚点占比
+  if (isNovelComicSketchStyle(style)) {
+    return {
+      minShots: 1,
+      maxShots: NOVEL_COMIC_PAGE_SEGMENT_HARD_MAX_SHOTS,
+      minRatio: NOVEL_COMIC_PAGE_DETECT_MIN_STORYBOARD_RATIO,
+      maxRatio: NOVEL_COMIC_PAGE_DETECT_MAX_STORYBOARD_RATIO,
+      contentDriven: true,
+    }
+  }
+  if (usesComicIllustrationPipeline(style)) {
     return {
       minShots: MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS,
       maxShots: MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS,
@@ -592,7 +659,21 @@ export function detectImageNeedsConservative(items: NarrationSentenceItem[]): bo
   return allocateImageNeedsByRatio(items, undefined, 'conservative')
 }
 
-/** 漫画解说规则兜底：按场景/动作换图，不因换人说话强制切图；约 2～4 镜一图 */
+/** 漫画解说：从对白/旁白抽出焦点键（说话人优先；旁白无键） */
+const MOTION_COMIC_FOCUS_IGNORE_SPEAKERS = new Set([
+  '旁白', '剧中', 'OS', '画外音', '画外', '解说', '解说员',
+])
+
+function extractMotionComicFocusKey(item: NarrationSentenceItem): string {
+  const raw = String(item.dialogue || item.sentence || '').trim()
+  if (!raw) return ''
+  const { speaker } = parseDialogueForTTS(raw)
+  const spk = String(speaker || '').trim()
+  if (spk && !MOTION_COMIC_FOCUS_IGNORE_SPEAKERS.has(spk)) return `spk:${spk}`
+  return ''
+}
+
+/** 漫画解说规则兜底：换人/换焦点必切；多人互动拆多镜单人；约 1～2 镜一图 */
 export function detectImageNeedsMotionComic(items: NarrationSentenceItem[]): boolean[] {
   if (!items.length) return []
 
@@ -606,7 +687,19 @@ export function detectImageNeedsMotionComic(items: NarrationSentenceItem[]): boo
 
     const prev = items[index - 1]
     const sentence = item.sentence
-    // 换人说话不强制换图：同场景对白来回可共用
+    const prevText = prev.sentence
+    const focus = extractMotionComicFocusKey(item)
+    const prevFocus = extractMotionComicFocusKey(prev)
+
+    // 换人说话 / 换定妆焦点 → 必换图
+    if (focus && prevFocus && focus !== prevFocus) return true
+    if (focus && !prevFocus) return true
+    if (!focus && prevFocus) return true
+
+    // 多人互动拍点 / 互动后反应 → 拆成单人镜
+    if (isMotionComicDualPortraitBeat(sentence) && !isMotionComicDualPortraitBeat(prevText)) return true
+    if (isMotionComicDualPortraitBeat(prevText) && MOTION_COMIC_FOCUS_REACTION_BEAT_RE.test(sentence)) return true
+
     if (item.paragraphIndex !== prev.paragraphIndex) return true
     if (STRONG_SCENE_SHIFT_RE.test(sentence)) return true
     if (SCENE_SHIFT_RE.test(sentence)) return true
@@ -761,8 +854,9 @@ function normalizeParagraphPromptRow(row: unknown): {
     return null
   }
 
-  const subtitleLines = Array.isArray(r.subtitle_lines ?? r.subtitleLines)
-    ? (r.subtitle_lines ?? r.subtitleLines as unknown[]).map(s => String(s ?? ''))
+  const rawSubs = r.subtitle_lines ?? r.subtitleLines
+  const subtitleLines = Array.isArray(rawSubs)
+    ? (rawSubs as unknown[]).map(s => String(s ?? ''))
     : undefined
   return {
     start_index: startIndex,
@@ -1189,8 +1283,9 @@ function trimImageAnchorCountToMaximum(
 function resolveTargetDetectTrueCount(storyboardCount: number, bounds: ImageSegmentBounds): number {
   const minCount = resolveMinimumDetectTrueCount(storyboardCount, bounds)
   const maxCount = resolveMaximumDetectTrueCount(storyboardCount, bounds)
-  if (!(bounds.targetRatio > 0)) return minCount
-  const target = Math.max(1, Math.round(storyboardCount * bounds.targetRatio))
+  const targetRatio = bounds.targetRatio
+  if (!targetRatio || !(targetRatio > 0)) return minCount
+  const target = Math.max(1, Math.round(storyboardCount * targetRatio))
   return Math.min(maxCount, Math.max(minCount, target))
 }
 
@@ -1200,6 +1295,16 @@ function applyImageAnchorConstraints(
   maximumTrueCount: number,
   bounds: ImageSegmentBounds,
 ): boolean[] {
+  // 内容驱动：保留 LLM 切页结果；仅保证至少 1 页，并拆开极端超长页
+  if (bounds.contentDriven) {
+    let result = [...needs]
+    if (result.length && !result.some(Boolean)) result[0] = true
+    if (bounds.maxShots >= 2) {
+      result = enforceImageSegmentShotBounds(result, 1, bounds.maxShots)
+    }
+    return result
+  }
+
   let result = enforceImageSegmentShotBounds(needs, bounds.minShots, bounds.maxShots)
   // 先拉到目标密度（漫画解说偏密），再保证不低于 min、不超过 max
   const targetCount = resolveTargetDetectTrueCount(needs.length, bounds)
@@ -1380,6 +1485,7 @@ type DetectLLMCallContext = {
   ratioRange: string
   segmentBounds: ImageSegmentBounds
   previousEpisodeNarration?: string[]
+  panelBeats?: string[]
   textModel?: string | null
   textThinking: boolean
 }
@@ -1396,17 +1502,27 @@ function buildDetectUserPayload(
     ctx.minimumTrueCount,
     ctx.maximumTrueCount,
   )
+  const contentDriven = !!ctx.segmentBounds.contentDriven
   return JSON.stringify({
     ...(ctx.previousEpisodeNarration?.length ? { previous_episode_narration: ctx.previousEpisodeNarration } : {}),
+    ...(ctx.panelBeats?.length ? { panel_beats: ctx.panelBeats } : {}),
     full_narration: ctx.fullNarration,
     storyboard_count: ctx.storyboardCount,
     detect_unit_count: batchUnits.length,
-    minimum_true_count: batchMeta ? batchMin : ctx.minimumTrueCount,
-    maximum_true_count: batchMeta ? batchMax : ctx.maximumTrueCount,
-    minimum_true_ratio: ctx.segmentBounds.minRatio,
-    maximum_true_ratio: ctx.segmentBounds.maxRatio,
-    min_shots_per_image: ctx.segmentBounds.minShots,
-    max_shots_per_image: ctx.segmentBounds.maxShots,
+    ...(contentDriven
+      ? {
+        content_driven: true,
+        suggested_shots_per_page: `${NOVEL_COMIC_PAGE_SEGMENT_MIN_SHOTS}～${NOVEL_COMIC_PAGE_SEGMENT_MAX_SHOTS}`,
+        note: '按剧情内容切 9:16 竖屏二/三列页；suggested 仅软参考，勿为凑比例硬切/硬并。',
+      }
+      : {
+        minimum_true_count: batchMeta ? batchMin : ctx.minimumTrueCount,
+        maximum_true_count: batchMeta ? batchMax : ctx.maximumTrueCount,
+        minimum_true_ratio: ctx.segmentBounds.minRatio,
+        maximum_true_ratio: ctx.segmentBounds.maxRatio,
+        min_shots_per_image: ctx.segmentBounds.minShots,
+        max_shots_per_image: ctx.segmentBounds.maxShots,
+      }),
     ...(batchMeta ? {
       batch_index: batchMeta.batchIndex,
       batch_count: batchMeta.batchCount,
@@ -1454,15 +1570,19 @@ async function finalizeDetectNeedsFromAnalysis(
   }
 
   const needCount = needs.filter(Boolean).length
-  if (needCount < minimumTrueCount) {
-    throw new Error(
-      `配图检测仅 ${needCount} 张，低于最低 ${minimumTrueCount} 张（镜头数 ${items.length} 的 ${ratioRange} 下限），请重试检测`,
-    )
-  }
-  if (needCount > maximumTrueCount) {
-    throw new Error(
-      `配图检测 ${needCount} 张，超过最高 ${maximumTrueCount} 张（镜头数 ${items.length} 的 ${ratioRange} 上限），请重试检测`,
-    )
+  if (!bounds.contentDriven) {
+    if (needCount < minimumTrueCount) {
+      throw new Error(
+        `配图检测仅 ${needCount} 张，低于最低 ${minimumTrueCount} 张（镜头数 ${items.length} 的 ${ratioRange} 下限），请重试检测`,
+      )
+    }
+    if (needCount > maximumTrueCount) {
+      throw new Error(
+        `配图检测 ${needCount} 张，超过最高 ${maximumTrueCount} 张（镜头数 ${items.length} 的 ${ratioRange} 上限），请重试检测`,
+      )
+    }
+  } else if (needCount < 1) {
+    throw new Error('配图检测未标出任何四格页，请重试检测')
   }
 
   return {
@@ -1492,7 +1612,7 @@ async function callDetectImageNeedsLLM(
 
 async function callDetectImageNeedsLLMWithRetry(
   system: string,
-  user: string,
+  buildUser: (retryHint?: string) => string,
   detectUnitCount: number,
   textModel?: string | null,
   batchMeta?: { batchIndex: number; batchCount: number },
@@ -1502,27 +1622,43 @@ async function callDetectImageNeedsLLMWithRetry(
 }> {
   let lastError = ''
   for (let attempt = 1; attempt <= IMAGE_DETECT_LLM_BATCH_RETRIES + 1; attempt++) {
+    const retryHint = attempt > 1
+      ? [
+        `上次返回无效：${lastError.slice(0, 160)}。`,
+        `本批必须输出恰好 ${detectUnitCount} 项 analysis，index 与输入 sentences 一一对应；needs_image 为 boolean。`,
+        '只输出合法 JSON，不要 markdown/解释。',
+      ].join('')
+      : undefined
     try {
-      return await callDetectImageNeedsLLM(
+      const result = await callDetectImageNeedsLLM(
         system,
-        user,
+        buildUser(retryHint),
         textModel,
         false,
         resolveDetectLLMTimeoutMs(detectUnitCount, attempt),
       )
+      if (result.analysis.length !== detectUnitCount) {
+        throw new Error(
+          `配图换镜 AI 返回无效（期望 ${detectUnitCount} 项 analysis，实际 ${result.analysis.length}）`,
+        )
+      }
+      return result
     } catch (err: unknown) {
       lastError = String((err as Error)?.message || err || 'unknown error')
-      const retryable = isLLMRetryableError(lastError)
+      const retryable = isDetectRetryableError(lastError)
       if (!retryable || attempt > IMAGE_DETECT_LLM_BATCH_RETRIES) throw err
       const waitMs = isLLMTransientProviderError(lastError)
         ? 3_000 * attempt
-        : 2_000 * attempt
+        : isLLMTimeoutError(lastError)
+          ? 2_000 * attempt
+          : 1_200 * attempt
       logTaskWarn('NarrationScene', 'llm-detect-batch-retry', {
         ...(batchMeta || {}),
         attempt,
+        maxAttempts: IMAGE_DETECT_LLM_BATCH_RETRIES + 1,
         detectUnitCount,
         waitMs,
-        error: lastError.slice(0, 200),
+        error: lastError.slice(0, 240),
       })
       await sleep(waitMs)
     }
@@ -1584,6 +1720,7 @@ export async function detectImageNeedsWithLLM(
     ratioRange,
     segmentBounds,
     previousEpisodeNarration,
+    panelBeats: options?.panelBeats?.length ? options.panelBeats : undefined,
     textModel,
     textThinking: false,
   }
@@ -1591,42 +1728,98 @@ export async function detectImageNeedsWithLLM(
   try {
     if (useBatch) {
       const batches = chunkDetectUnitsByStoryboardSize(units, batchSize)
+      const ollamaLlm = config.provider.toLowerCase() === 'ollama'
+      const batchConcurrency = ollamaLlm
+        ? 1
+        : Math.max(1, Math.min(IMAGE_DETECT_LLM_BATCH_CONCURRENCY, batches.length || 1))
       logTaskProgress('NarrationScene', 'llm-detect-batched', {
         batchCount: batches.length,
         batchSize,
+        concurrency: batchConcurrency,
         storyboardCount: items.length,
       })
 
-      const mergedAnalysis: Array<Record<string, unknown>> = []
-      let lastImagePrompts: unknown
+      const batchResults: Array<{
+        analysis: Array<Record<string, unknown>>
+        image_prompts: unknown
+      } | null> = Array.from({ length: batches.length }, () => null)
+      let completedBatches = 0
+      let activeBatches = 0
+      let launchSeq = 0
+      let rateLimitUntil = 0
 
-      for (let bi = 0; bi < batches.length; bi++) {
-        if (bi > 0) await sleep(IMAGE_DETECT_LLM_BATCH_GAP_MS)
-        const batchUnits = batches[bi]
-        const batchShots = batchUnits.reduce((sum, unit) => sum + unit.storyboardIndices.length, 0)
+      const emitDetectProgress = (extra?: { message?: string; percent?: number }) => {
+        const done = completedBatches
+        const total = batches.length
         onProgress?.({
           phase: 'detecting',
-          batch: bi + 1,
-          batch_count: batches.length,
-          message: `正在检测换镜（第 ${bi + 1}/${batches.length} 批，约 ${batchShots} 镜）…`,
-          percent: calcDetectBatchPercent(bi, batches.length),
+          batch: done,
+          batch_count: total,
+          batches_done: done,
+          batches_active: activeBatches,
+          concurrency: batchConcurrency,
+          message: extra?.message ?? (
+            batchConcurrency > 1
+              ? `换镜检测：已完成 ${done}/${total} 批，进行中 ${activeBatches} 路（并发 ${batchConcurrency}）…`
+              : `正在检测换镜（${done}/${total} 批）…`
+          ),
+          percent: extra?.percent ?? calcDetectBatchPercent(done, total),
         })
+      }
 
-        const llmResult = await callDetectImageNeedsLLMWithRetry(
-          callCtx.system,
-          buildDetectUserPayload(callCtx, batchUnits, { batchIndex: bi + 1, batchCount: batches.length }),
-          batchUnits.length,
-          callCtx.textModel,
-          { batchIndex: bi + 1, batchCount: batches.length },
-        )
-        if (llmResult.analysis.length !== batchUnits.length) {
-          logTaskWarn('NarrationScene', 'llm-detect-batch-invalid', {
-            batch: bi + 1,
-            batchCount: batches.length,
-            expected: batchUnits.length,
-            got: llmResult.analysis.length,
-          })
-          throw new Error(`配图换镜 AI 第 ${bi + 1}/${batches.length} 批返回无效（期望 ${batchUnits.length} 项 analysis）`)
+      const runOneBatch = async (bi: number) => {
+        const batchUnits = batches[bi]
+        const batchShots = batchUnits.reduce((sum, unit) => sum + unit.storyboardIndices.length, 0)
+        const myLaunch = launchSeq++
+        if (batchConcurrency > 1 && myLaunch < batchConcurrency) {
+          await sleep(80 * myLaunch)
+        } else if (batchConcurrency <= 1 && bi > 0) {
+          await sleep(IMAGE_DETECT_LLM_BATCH_GAP_MS)
+        }
+        const rateWait = Math.max(0, rateLimitUntil - Date.now())
+        if (rateWait > 0) await sleep(Math.min(rateWait, 3_000))
+
+        activeBatches++
+        emitDetectProgress({
+          message: batchConcurrency > 1
+            ? `换镜检测：第 ${bi + 1}/${batches.length} 批启动（约 ${batchShots} 镜），进行中 ${activeBatches} 路…`
+            : `正在检测换镜（第 ${bi + 1}/${batches.length} 批，约 ${batchShots} 镜）…`,
+        })
+        try {
+          const llmResult = await callDetectImageNeedsLLMWithRetry(
+            callCtx.system,
+            (retryHint) => buildDetectUserPayload(
+              callCtx,
+              batchUnits,
+              { batchIndex: bi + 1, batchCount: batches.length },
+              retryHint,
+            ),
+            batchUnits.length,
+            callCtx.textModel,
+            { batchIndex: bi + 1, batchCount: batches.length },
+          )
+          batchResults[bi] = llmResult
+        } catch (err: unknown) {
+          const msg = String((err as Error)?.message || err || '')
+          if (isLLMTransientProviderError(msg)) {
+            rateLimitUntil = Math.max(rateLimitUntil, Date.now() + 3_000)
+          }
+          throw err
+        } finally {
+          activeBatches = Math.max(0, activeBatches - 1)
+          completedBatches++
+          emitDetectProgress()
+        }
+      }
+
+      await mapPool(batches.length, batchConcurrency, runOneBatch)
+
+      const mergedAnalysis: Array<Record<string, unknown>> = []
+      let lastImagePrompts: unknown
+      for (let bi = 0; bi < batches.length; bi++) {
+        const llmResult = batchResults[bi]
+        if (!llmResult) {
+          throw new Error(`配图换镜 AI 第 ${bi + 1}/${batches.length} 批无结果`)
         }
         mergedAnalysis.push(...llmResult.analysis)
         if (llmResult.image_prompts) lastImagePrompts = llmResult.image_prompts
@@ -1662,6 +1855,7 @@ export async function detectImageNeedsWithLLM(
         llmDirect: true,
         batched: true,
         batchCount: batches.length,
+        concurrency: batchConcurrency,
       })
       return result
     }
@@ -1674,14 +1868,10 @@ export async function detectImageNeedsWithLLM(
 
     let llmResult = await callDetectImageNeedsLLMWithRetry(
       callCtx.system,
-      buildDetectUserPayload(callCtx, units),
+      (retryHint) => buildDetectUserPayload(callCtx, units, undefined, retryHint),
       units.length,
       callCtx.textModel,
     )
-    if (llmResult.analysis.length !== units.length) {
-      logTaskWarn('NarrationScene', 'llm-detect-invalid', { expected: units.length, got: llmResult.analysis.length })
-      throw new Error(`配图换镜 AI 返回无效（期望 ${units.length} 项 analysis）`)
-    }
 
     let trueUnitCount = countTrueDetectUnits(llmResult.analysis)
     if (trueUnitCount < minimumTrueCount) {
@@ -1690,23 +1880,25 @@ export async function detectImageNeedsWithLLM(
         minimumTrueCount,
         storyboardCount: items.length,
       })
-      const retryHint = [
+      const belowMinHint = [
         `上次输出仅 ${trueUnitCount} 个 needs_image=true，低于最低要求 ${minimumTrueCount}（镜头数 ${items.length} 的 ${ratioRange} 下限）。`,
         `配图张数目标区间：${minimumTrueCount}～${maximumTrueCount} 张（${ratioRange}）。`,
         `每个配图段须覆盖 ${segmentBounds.minShots}～${segmentBounds.maxShots} 镜（含锚点镜），禁止超过 ${segmentBounds.maxShots} 镜共用一图。`,
-        '请重新通读全文：只有「上一张图可原样复用、无任何可视差异」的单元才标 false；',
-        '凡有场景/时间/动作/表情/物件/互动关系/视觉焦点变化的一律标 true；同场对白若出现新反应瞬间也要 true。',
+        '请重新通读全文：只有「同一焦点角色、上一张图可原样复用」的单元才标 false；',
+        '换人说话/换焦点必须 true；同场双人互动可同框最多 2 定妆（不必强制拆镜）；场景/动作/表情变化也要 true。',
         '输出完整 JSON，analysis 长度仍须与 sentences 相同。',
       ].join('')
       llmResult = await callDetectImageNeedsLLMWithRetry(
         callCtx.system,
-        buildDetectUserPayload(callCtx, units, undefined, retryHint),
+        (retryHint) => buildDetectUserPayload(
+          callCtx,
+          units,
+          undefined,
+          retryHint ? `${belowMinHint}${retryHint}` : belowMinHint,
+        ),
         units.length,
         callCtx.textModel,
       )
-      if (llmResult.analysis.length !== units.length) {
-        throw new Error(`配图换镜 AI 重试返回无效（期望 ${units.length} 项 analysis）`)
-      }
       trueUnitCount = countTrueDetectUnits(llmResult.analysis)
     }
 
@@ -1735,7 +1927,7 @@ export async function detectImageNeedsWithLLM(
     return result
   } catch (err: any) {
     const message = String(err?.message || err || '')
-    const isTimeout = /timeout|aborted due to timeout/i.test(message)
+    const isTimeout = isLLMTimeoutError(message)
     logTaskError('NarrationScene', 'llm-detect-failed', { error: message, batched: useBatch })
     if (isTimeout) {
       const waitMin = Math.round(resolveDetectLLMTimeoutMs(units.length) / 60_000)
@@ -1761,6 +1953,7 @@ export async function resolveImageNeeds(
     style?: string
     fullNarrationLines?: string[]
     previousEpisodeNarration?: string[]
+    panelBeats?: string[]
     batchThreshold?: number
     batchSize?: number
     onProgress?: NarrationImageBreakdownProgressCallback
@@ -1771,54 +1964,88 @@ export async function resolveImageNeeds(
   source: ImageDetectSource
 }> {
   const mode = options?.mode || 'paragraph'
-  try {
-    const { needs, segmentDescriptions } = await detectImageNeedsWithLLM(
-      items,
-      mode,
-      options?.textModel,
-      false,
-      options?.style || 'comic',
-      options?.fullNarrationLines,
-      options?.previousEpisodeNarration,
-      {
-        batchThreshold: options?.batchThreshold,
-        batchSize: options?.batchSize,
-        onProgress: options?.onProgress,
-      },
-    )
-    return { needs, segmentDescriptions, source: 'llm' }
-  } catch (err: unknown) {
-    const message = String((err as Error)?.message || err || '配图换镜 AI 检测失败')
-    logTaskWarn('NarrationScene', 'llm-detect-fallback-rules', {
-      error: message.slice(0, 300),
-      mode,
-      sentenceCount: items.length,
-    })
-    options?.onProgress?.({
-      phase: 'detecting',
-      message: isLLMTransientProviderError(message)
-        ? 'LLM 限流，改用规则兜底分配配图段…'
-        : isLLMTimeoutError(message)
-          ? 'LLM 检测超时，改用规则兜底分配配图段…'
-          : 'LLM 检测失败，改用规则兜底分配配图段…',
-      percent: 90,
-    })
-    const segmentBounds = resolveImageSegmentBounds(options?.style)
-    const minimumTrueCount = resolveMinimumDetectTrueCount(items.length, segmentBounds)
-    const maximumTrueCount = resolveMaximumDetectTrueCount(items.length, segmentBounds)
-    const motionComic = isMotionComicStyle(options?.style)
-    const rawNeeds = motionComic
-      ? detectImageNeedsMotionComic(items)
-      : mode === 'conservative'
-        ? detectImageNeedsConservative(items)
-        : detectImageNeedsBalanced(items)
-    const needs = applyImageAnchorConstraints(rawNeeds, minimumTrueCount, maximumTrueCount, segmentBounds)
-    return {
-      needs,
-      segmentDescriptions: new Map(),
-      source: motionComic ? 'balanced' : (mode === 'conservative' ? 'conservative' : 'balanced'),
+  let lastError = ''
+  for (let attempt = 1; attempt <= IMAGE_DETECT_OUTER_RETRIES + 1; attempt++) {
+    try {
+      const { needs, segmentDescriptions } = await detectImageNeedsWithLLM(
+        items,
+        mode,
+        options?.textModel,
+        false,
+        options?.style || 'comic',
+        options?.fullNarrationLines,
+        options?.previousEpisodeNarration,
+        {
+          batchThreshold: options?.batchThreshold,
+          batchSize: options?.batchSize,
+          onProgress: options?.onProgress,
+          panelBeats: options?.panelBeats,
+        },
+      )
+      return { needs, segmentDescriptions, source: 'llm' }
+    } catch (err: unknown) {
+      lastError = String((err as Error)?.message || err || '配图换镜 AI 检测失败')
+      const canRetry = attempt <= IMAGE_DETECT_OUTER_RETRIES && isDetectRetryableError(lastError)
+      if (canRetry) {
+        const waitMs = isLLMTransientProviderError(lastError)
+          ? 4_000 * attempt
+          : isLLMTimeoutError(lastError)
+            ? 3_000 * attempt
+            : 1_500 * attempt
+        logTaskWarn('NarrationScene', 'llm-detect-outer-retry', {
+          attempt,
+          maxAttempts: IMAGE_DETECT_OUTER_RETRIES + 1,
+          waitMs,
+          mode,
+          sentenceCount: items.length,
+          error: lastError.slice(0, 300),
+        })
+        options?.onProgress?.({
+          phase: 'detecting',
+          message: `换镜检测失败，整轮重试 ${attempt}/${IMAGE_DETECT_OUTER_RETRIES}…`,
+          percent: Math.min(88, 70 + attempt * 5),
+        })
+        await sleep(waitMs)
+        continue
+      }
+
+      logTaskWarn('NarrationScene', 'llm-detect-fallback-rules', {
+        error: lastError.slice(0, 300),
+        mode,
+        sentenceCount: items.length,
+        attempts: attempt,
+      })
+      options?.onProgress?.({
+        phase: 'detecting',
+        message: isLLMTransientProviderError(lastError)
+          ? 'LLM 限流，改用规则兜底分配配图段…'
+          : isLLMTimeoutError(lastError)
+            ? 'LLM 检测超时，改用规则兜底分配配图段…'
+            : 'LLM 检测失败，改用规则兜底分配配图段…',
+        percent: 90,
+      })
+      const segmentBounds = resolveImageSegmentBounds(options?.style)
+      const minimumTrueCount = resolveMinimumDetectTrueCount(items.length, segmentBounds)
+      const maximumTrueCount = resolveMaximumDetectTrueCount(items.length, segmentBounds)
+      const sketchPage = isNovelComicSketchStyle(options?.style)
+      const comicPipeline = usesComicIllustrationPipeline(options?.style)
+      // 小说漫画页密度疏于漫画解说，勿复用 1～2 镜一图的 motion 规则
+      const rawNeeds = sketchPage
+        ? detectImageNeedsBalanced(items)
+        : comicPipeline
+          ? detectImageNeedsMotionComic(items)
+          : mode === 'conservative'
+            ? detectImageNeedsConservative(items)
+            : detectImageNeedsBalanced(items)
+      const needs = applyImageAnchorConstraints(rawNeeds, minimumTrueCount, maximumTrueCount, segmentBounds)
+      return {
+        needs,
+        segmentDescriptions: new Map(),
+        source: sketchPage || comicPipeline ? 'balanced' : (mode === 'conservative' ? 'conservative' : 'balanced'),
+      }
     }
   }
+  throw new Error(lastError || '配图换镜 AI 检测失败')
 }
 
 export type ParagraphPromptInput = {
@@ -1827,7 +2054,7 @@ export type ParagraphPromptInput = {
   sentences: string[]
   /** 分镜 TTS 粒度原句（与 narration_lines 一一对应，用于 subtitle_lines） */
   ttsSentences?: string[]
-  layout: 'single' | 'diptych'
+  layout: 'single' | 'diptych' | 'quad'
   sceneDescription?: string
 }
 
@@ -1905,11 +2132,13 @@ export async function generateTitleImagePromptWithLLM(options: {
       return null
     }
 
-    const normalized = resolveLLMImagePrompt(prompt, style, {
-      titleHook: titleHook || undefined,
-      titleFull,
-      titleBodySentences: options.bodySentences,
-    })
+    const normalized = NARRATION_USE_RAW_LLM_PROMPTS
+      ? prompt
+      : resolveLLMImagePrompt(prompt, style, {
+        titleHook: titleHook || undefined,
+        titleFull,
+        titleBodySentences: options.bodySentences,
+      })
     if (!normalized) return null
 
     logTaskSuccess('NarrationScene', 'llm-title-prompt-done', {})
@@ -1932,8 +2161,12 @@ export async function generateParagraphImagePromptsWithLLM(
     characters?: CharacterPromptHint[]
     fullNarrationLines?: string[]
     previousEpisodeNarration?: string[]
+    /** 小说漫画：本章 panel_beats，对齐配图场面 */
+    panelBeats?: string[]
+    /** 小说漫画格字：short（默认）| full */
+    panelTextMode?: 'short' | 'full' | null
     onProgress?: NarrationImageBreakdownProgressCallback
-    /** 为 true 时原样保存 LLM 输出，不做 resolveLLMImagePrompt 清洗 */
+    /** 为 true 时原样落库 LLM 输出：不做 resolveLLMImagePrompt / 定妆注入 / 站姿视线 repair */
     pureLlm?: boolean
     /** 每批段落数；默认见 NARRATION_IMAGE_PROMPT_BATCH_SIZE_DEFAULT */
     batchSize?: number
@@ -1956,9 +2189,12 @@ export async function generateParagraphImagePromptsWithLLM(
   subtitleLinesByStartIndex: Map<number, string[]>
 } | null> {
   const style = options?.style || 'comic'
+  const panelBeats = options?.panelBeats?.length ? options.panelBeats : undefined
   const textModel = options?.textModel || null
   // 配图文案默认关思考（结构化 JSON）；显式传入 true 才开
   const textThinking = options?.textThinking ?? false
+  // 默认跟全局开关：规则约束模型 → 原样落库；显式 false 才走旧清洗链
+  const pureLlm = options?.pureLlm ?? NARRATION_USE_RAW_LLM_PROMPTS
   const titleHook = options?.titleHook?.trim() || null
   const titleFull = options?.titleFull?.trim() || null
   void titleHook
@@ -1967,7 +2203,10 @@ export async function generateParagraphImagePromptsWithLLM(
   const promptBatchSize = resolveParagraphPromptBatchSize(options?.batchSize)
   // 配图文案只出中文；英文（若需要）由用户后期点翻译，不在此同轮共写
   const inlineFluxEnglish = false
-  const motionComic = isMotionComicStyle(style)
+  const sketchPage = isNovelComicSketchStyle(style)
+  const motionComic = usesComicIllustrationPipeline(style)
+  /** 解说视频 / 漫画解说：陈设只跟本段；小说四格页仍可略用全文理解 */
+  const segmentLocalScene = motionComic || isNarrationAnimeStyle(style) || isNarrationMinimalStyle(style)
   const batchGapMs = promptBatchSize <= 1 ? 400 : PARAGRAPH_PROMPT_LLM_BATCH_GAP_MS
 
   if (!paragraphs.length) {
@@ -2002,6 +2241,7 @@ export async function generateParagraphImagePromptsWithLLM(
     }
 
     const episodeHasDiptych = paragraphs.some(p => p.layout === 'diptych')
+    const episodeHasQuad = sketchPage || paragraphs.some(p => p.layout === 'quad')
     const fullBodyLines = options?.fullNarrationLines || []
     const previousEpisodeNarration = options?.previousEpisodeNarration || []
     const fullNarrationForArc = fullBodyLines.length
@@ -2016,6 +2256,7 @@ export async function generateParagraphImagePromptsWithLLM(
       hasCharacters: characters.length > 0,
       hasDiptych: episodeHasDiptych,
       weightArc,
+      panelTextMode: options?.panelTextMode,
     })
     const protagonistHints = characters.map(ch => ({
       name: ch.name,
@@ -2050,7 +2291,11 @@ export async function generateParagraphImagePromptsWithLLM(
           gender: formatCharacterGenderForLLM(ch.name, role, ch.appearance),
           life_stage: variantLabel,
           portrait_default_outfit: spec.outfit,
-          distinct_identity_cue: extractPortraitDistinctCueCn(coerced || ch.appearance),
+          distinct_identity_cue: extractPortraitDistinctCueCn(
+            coerced || ch.appearance,
+            32,
+            resolveCharacterGenderLabelCn(ch.name, role, coerced || ch.appearance),
+          ),
         }
       })
       : characters.map(ch => {
@@ -2067,19 +2312,38 @@ export async function generateParagraphImagePromptsWithLLM(
           has_portrait: !!(ch as { imageUrl?: string | null }).imageUrl?.trim(),
           gender: formatCharacterGenderForLLM(ch.name, role, ch.appearance),
           portrait_default_outfit: spec.outfit,
-          distinct_identity_cue: extractPortraitDistinctCueCn(ch.appearance),
+          distinct_identity_cue: extractPortraitDistinctCueCn(
+            ch.appearance,
+            32,
+            resolveCharacterGenderLabelCn(ch.name, role, ch.appearance),
+          ),
         }
       })
 
-    const paragraphOutputHint = motionComic
-      ? (episodeHasDiptych
-        ? '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；layout=single 写一整段连贯中文（禁止【】六维标签，须覆盖画风/主体/场景/动作/光影/镜头/质感）；layout=diptych 用「左格：…；右格：…」各写一整段；有定妆须含对照定妆「label」与（身穿#hex…）'
-        : '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；每条一整段连贯中文 image_prompt（禁止【画风规格】等六维标签，但仍须写全画风/主体/场景/动作/光影/镜头/质感）；有定妆须含对照定妆「label」与（身穿#hex…）')
-      : inlineFluxEnglish
-        ? '必须同时返回中文+英文两个字段：[{ "start_index":number, "image_prompt":"中文七维【画风规格】…【质感要求】", "flux_prompt_en":"English seven sections" }]。image_prompt 严禁英文；flux_prompt_en 严禁中文。英文顺序：Action and interaction / Environment and era / Camera and composition / Subjects in frame / Lighting and color / Art style spec / Render quality'
-        : episodeHasDiptych
-          ? '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；layout=single 按七维输出；layout=diptych 按【左格】【右格】各写完整七维'
-          : '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；每条一条七维中文 image_prompt'
+    const envPayload = options?.episodeId != null
+      ? buildNarrationEnvPromptPayload(options.episodeId)
+      : { scenes: [] as ReturnType<typeof buildNarrationEnvPromptPayload>['scenes'], props: [] as ReturnType<typeof buildNarrationEnvPromptPayload>['props'] }
+    const storyboardsForEnv = options?.episodeId != null
+      ? db.select().from(schema.storyboards)
+        .where(and(eq(schema.storyboards.episodeId, options.episodeId), isNull(schema.storyboards.deletedAt)))
+        .all()
+        .sort((a, b) => Number(a.storyboardNumber || 0) - Number(b.storyboardNumber || 0))
+      : []
+    const sceneById = new Map(envPayload.scenes.map(s => [s.id, s]))
+
+    const paragraphOutputHint = sketchPage || episodeHasQuad
+      ? '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；默认 layout=quad：一整段纯中文描述 9:16 竖屏二列或三列分格（上格/中格/下格），每格旁白框「…」写完整讲解；禁止六维标签；禁止 English tags/英文段落；有定妆必须含对照定妆「label」（禁止只写姓名）；有 required_scene_label 须含对照场景「label」；身穿#hex 按场所换装'
+      : motionComic
+        ? (episodeHasDiptych
+          ? '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；layout=single 写一整段纯中文（禁止【】六维标签与英文）；layout=diptych 用「左格：…；右格：…」；有定妆须含对照定妆「label」与（身穿#hex…）'
+          : '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；每条一整段纯中文 image_prompt（禁止六维标签与 English tags/英文段落）；有定妆须含对照定妆「label」与（身穿#hex…）')
+        : (isNarrationAnimeStyle(style) || isNarrationMinimalStyle(style))
+          ? TOONFLOW_PARAGRAPH_PROMPT_OUTPUT_HINT
+          : inlineFluxEnglish
+            ? '必须同时返回中文+英文两个字段：[{ "start_index":number, "image_prompt":"中文七维【画风规格】…【质感要求】", "flux_prompt_en":"English seven sections" }]。image_prompt 严禁英文；flux_prompt_en 严禁中文。英文顺序：Action and interaction / Environment and era / Camera and composition / Subjects in frame / Lighting and color / Art style spec / Render quality'
+            : episodeHasDiptych
+              ? '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；layout=single 按七维输出；layout=diptych 按【左格】【右格】各写完整七维'
+              : '[{ start_index: number, image_prompt: string }]，长度与本批 paragraphs 相同；每条一条七维中文 image_prompt'
 
     const fullNarrationSummary = compressFullNarrationLines(fullNarration)
       || (Array.isArray(fullNarration) ? fullNarration.slice(0, 6).join('→') : String(fullNarration || '').slice(0, 200))
@@ -2098,9 +2362,12 @@ export async function generateParagraphImagePromptsWithLLM(
     /** 全局限流：失败后推迟「新开批」时间，但不阻塞已完成 worker 立刻领下一批的逻辑之外的额外长睡 */
     let rateLimitUntil = 0
     const withSharedLock = createAsyncMutex()
-    const batchConcurrency = ollamaLlm
+    const freeOpenRouter = isOpenRouterFreeTextModel(config.model)
+    // 免费模型 20 次/分钟：强制串行，避免批并发 + 单段重试打满配额
+    const batchConcurrency = ollamaLlm || freeOpenRouter
       ? 1
       : Math.max(1, Math.min(PARAGRAPH_PROMPT_LLM_BATCH_CONCURRENCY, batches.length || 1))
+    const freeBatchGapMs = freeOpenRouter ? 2_500 : batchGapMs
 
     const emitPromptProgress = (extra?: {
       message?: string
@@ -2151,11 +2418,11 @@ export async function generateParagraphImagePromptsWithLLM(
       if (batchConcurrency > 1 && myLaunch < batchConcurrency) {
         await sleep(80 * myLaunch)
       } else if (batchConcurrency <= 1 && batchIndex > 0) {
-        await sleep(batchGapMs)
+        await sleep(freeOpenRouter ? freeBatchGapMs : batchGapMs)
       }
       // 失败退避：只在开新批前短等，避免占着并发槽长睡
       const rateWait = Math.max(0, rateLimitUntil - Date.now())
-      if (rateWait > 0) await sleep(Math.min(rateWait, 3_000))
+      if (rateWait > 0) await sleep(Math.min(rateWait, freeOpenRouter ? 70_000 : 3_000))
 
       activeBatches++
       emitPromptProgress({
@@ -2172,13 +2439,15 @@ export async function generateParagraphImagePromptsWithLLM(
           hasCharacters: characters.length > 0,
           hasDiptych: batchHasDiptych,
           weightArc,
+          panelTextMode: options?.panelTextMode,
         })
 
       // （原 reportProgress 启动文案已由 emitPromptProgress 覆盖）
 
-      // 每段只带：全文摘要 + 本段旁白 + enrichment；不再塞长 prior_narration 原文数组
+      // 每段只带：本段旁白 + enrichment；segmentLocal 时不塞全文摘要，避免后文物件提前入画
       const user = JSON.stringify({
         ...(previousEpisodeSummary ? { previous_episode_summary: previousEpisodeSummary } : {}),
+        ...(panelBeats?.length ? { panel_beats: panelBeats } : {}),
         ...(naturalBodyLock
           ? { protagonist_body_policy: '标准比例动漫身材匀称，禁止写胖瘦体型词' }
           : {}),
@@ -2190,8 +2459,19 @@ export async function generateParagraphImagePromptsWithLLM(
             },
           }
           : {}),
-        full_narration_summary: fullNarrationSummary,
+        ...(segmentLocalScene ? {} : { full_narration_summary: fullNarrationSummary }),
         characters: characterPayload,
+        ...(envPayload.scenes.length || envPayload.props.length
+          ? {
+            env_assets: {
+              scenes: envPayload.scenes,
+              props: envPayload.props,
+            },
+            env_asset_rule:
+              '有场景定妆时须写对照场景「scene_label」，【年代场景】外壳复用该场 scene_bible；本镜旁白出现的关键道具写对照道具「prop_label」；禁止把未在本镜旁白出现的道具提前入画；场景/道具定妆只锁外观。'
+              + PROP_HOLDER_PLACEMENT_LLM_RULE,
+          }
+          : {}),
         paragraphs: batch.map(p => {
           const priorNarration = buildPriorNarrationLines(previousEpisodeNarration, fullBodyLines, p.startIndex)
           const priorTimelineSnip = compressTimelineNarrationLines(priorNarration) || undefined
@@ -2199,16 +2479,43 @@ export async function generateParagraphImagePromptsWithLLM(
             narrationLines: p.sentences,
             priorLines: priorNarration,
             detectSceneDescription: p.sceneDescription,
+            segmentLocal: segmentLocalScene,
           })
+          const sb = storyboardsForEnv[p.index] || null
+          const boundScene = sb?.sceneId ? sceneById.get(sb.sceneId) : null
+          const hitProps = matchPropsForNarrationLines(p.sentences, envPayload.props)
           const base = {
             paragraph_index: p.index,
             start_index: p.startIndex,
             layout: p.layout,
             narration_lines: p.sentences,
-            ...(motionComic
+            ...(boundScene
+              ? {
+                required_scene_label: boundScene.scene_label,
+                required_scene_bible: boundScene.scene_bible,
+                has_scene_ref: boundScene.has_scene_ref,
+              }
+              : {}),
+            ...(hitProps.length
+              ? {
+                required_prop_labels: hitProps.map(x => x.prop_label),
+                required_props: hitProps.map(x => ({
+                  prop_label: x.prop_label,
+                  has_prop_ref: x.has_prop_ref,
+                  description: x.description,
+                })),
+              }
+              : {}),
+            ...beatCardForLlmPayload(extractNarrationBeatCard(p.sentences)),
+            ...(motionComic && !sketchPage
               ? {
                 shot_card: buildMotionComicShotCard(p.sentences, { paragraphIndex: p.index }),
                 shot_card_rule: '必须按 shot_card 写景别/姿态/光影；禁止无视 card 复读万能全身平视站立句',
+              }
+              : {}),
+            ...(sketchPage
+              ? {
+                page_card_rule: '必须写成整页 9:16 竖屏二列或三列分格（上格/中格/下格）；每格旁白框「」写出讲解且格内中文清晰可读；禁止 2×2 四宫格、禁止无框单图与横屏 16:9',
               }
               : {}),
             ...(priorTimelineSnip ? { prior_timeline_snip: priorTimelineSnip } : {}),
@@ -2226,25 +2533,22 @@ export async function generateParagraphImagePromptsWithLLM(
                   characters,
                   dialogue: p.sentences?.[0] || null,
                   narrationLines: p.sentences,
-                }).slice(0, 1))
+                }).slice(0, MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS))
               if (!expected.length) return {}
+              const labels = expected.map(name => {
+                const ch = characters.find(c => String(c.name || '').trim() === name)
+                return formatCharacterPortraitLabel(
+                  name,
+                  (ch as { variantLabel?: string | null })?.variantLabel,
+                )
+              })
+              const labelList = labels.map(l => `「${l}」`).join('、')
+              const n = labels.length
               return {
-                required_portrait_labels: expected.map(name => {
-                  const ch = characters.find(c => String(c.name || '').trim() === name)
-                  return formatCharacterPortraitLabel(
-                    name,
-                    (ch as { variantLabel?: string | null })?.variantLabel,
-                  )
-                }),
-                ...(motionComic && expected.length >= 2
-                  ? {
-                    presence_rule: '本段 narration_lines 已点名/对白多人：必须同框写出 required_portrait_labels 全部对照定妆，禁止写无配角，禁止只画其中一人；同一配图严禁撞脸/双胞胎克隆/同脸复制',
-                  }
-                  : motionComic
-                    ? {
-                      presence_rule: '本段仅一名焦点角色：只画 required_portrait_labels 首项，可写无配角；禁止硬塞未点名角色',
-                    }
-                    : {}),
+                required_portrait_labels: labels,
+                presence_rule: n >= 2
+                  ? `本段对照定妆 ${labelList}（${n} 人同框）：必须写对照定妆「label」标签（禁止只写姓名）；按剧情写左右/前后站位；未点名路人用剪影`
+                  : `本段必须写对照定妆「${labels[0] || ''}」（括号含男性或女性）；禁止只写「姓名（男性）」而无对照定妆标签；未点名路人用剪影`,
               }
             })(),
           }
@@ -2263,27 +2567,46 @@ export async function generateParagraphImagePromptsWithLLM(
         }),
         output_format: {
           paragraph_prompts: paragraphOutputHint,
-          writing_rule: motionComic
-            ? '只根据本段 narration_lines + shot_card 写一整段连贯中文（禁止【】六维标签）：必须遵守 shot_card 景别/姿态/光影；表情与动作必须符合该段旁白，禁止面无表情站桩、禁止搬用别段动作、禁止复读万能全身平视句；画风用短标记；full_narration_summary/prior/scene_enrichment 只补场景；有定妆须含对照定妆「label」与（身穿#hex…）；严格 JSON'
+          writing_rule: sketchPage
+            ? '只根据本段 narration_lines 写一整段素笔彩画竖页中文（禁止【】六维标签，【格字模式】【画风规格】除外）：必须二/三列分格+旁白框；有定妆必须写对照定妆「label」（括号含男性或女性），禁止只写「姓名（男性）」；身穿#hex 按场所换装禁止全片同一套；有 required_scene_label 须写对照场景「label」；成稿即终稿；严格 JSON'
+            : motionComic
+            ? (segmentLocalScene
+              ? '只根据本段 narration_lines + shot_card 写一整段连贯中文（禁止【】六维标签）：必须遵守 shot_card；表情与动作须符合本段旁白且可漫画式夸张；按内容 1～2 个对照定妆；视线按剧情落在戏内目标；陈设以本段 scene_enrichment/旁白为准，可略扩展同场氛围；禁止把 full_narration_summary/prior 全书物件塞进本镜；有定妆须含对照定妆「label」（括号内须含男性或女性）与（身穿#hex…）；双人同框须写入 characters.distinct_identity_cue 防撞脸；成稿即终稿——生图不再追加画风/景别/性别/英文 REFERENCE；严格 JSON'
+              : '只根据本段 narration_lines + shot_card 写一整段连贯中文（禁止【】六维标签）：必须遵守 shot_card 景别/姿态/光影；表情与动作必须符合该段旁白且可夸张（汗珠/瞪眼/重心等），禁止面无表情站桩、禁止搬用别段动作、禁止复读万能全身平视句；同框对照定妆最多 2 人；视线按剧情写戏内目标禁止全片直视镜头；开篇写画风短标记（高对比国漫/锋利细线/硬边赛璐璐等）；有定妆须含对照定妆「label」（括号内须含男性或女性）与（身穿#hex…）；双人同框须写 distinct_identity_cue；成稿即终稿——生图不再追加画风/景别/性别/英文壳；full_narration_summary/prior/scene_enrichment 只补场景；严格 JSON')
             : inlineFluxEnglish
               ? 'image_prompt 必须是中文七维（含【画风规格】【画面主体】等全角括号），禁止把英文写进 image_prompt；flux_prompt_en 为短英文七维，Subjects 用 portrait_label；两项都要有；严格 JSON'
-              : '只根据本段 narration_lines 写七维中文：【画面主体】表情与【核心细节动作】必须符合该段旁白正在发生的事与情绪，禁止面无表情站桩、禁止搬用别段动作；full_narration_summary/prior 只补场景；勿复述长旁白原文；输出严格 JSON',
+              : (segmentLocalScene
+                ? '只根据本段 narration_lines 写七维：表情与动作须符合本段旁白且可夸张；【年代场景】以本段为准可略扩展同场氛围；禁止把 full_narration_summary/prior 全书陈设塞进本镜；【画面主体】对照定妆括号内须含男性或女性；成稿即终稿——生图不再叠壳；勿复述长旁白原文；严格 JSON'
+                : '只根据本段 narration_lines 写七维中文：【画面主体】表情与【核心细节动作】必须符合该段旁白正在发生的事与情绪（可夸张），禁止面无表情站桩、禁止搬用别段动作；按内容 1～2 个对照定妆（括号内须含男性或女性）；视线按剧情落在戏内目标；成稿即终稿——生图不再追加画风/景别/性别；full_narration_summary/prior 只补场景；勿复述长旁白原文；输出严格 JSON'),
+          generation_finality_rule:
+            '硬性：image_prompt 落库后即最终生图文案；系统不会再追加画风规格、景别英文前缀、REFERENCE USAGE、性别词或外貌注入。须在本条一次写全画风短标记、景别/姿态/光影、对照定妆性别、身穿#hex、对照场景/道具标签。',
           paragraph_beat_match: motionComic
-            ? '硬性：先从 narration_lines 提取动作动词与情绪词，再写入人物表情与可见动作；冲跑刺拦须写位移重心，禁止只写三分之四侧站立比划；塞钱就画递钱、僵住就画僵住、质问就画张嘴/指向；禁止与本段无关的通用姿势'
-            : '硬性：先从 narration_lines 提取动作动词与情绪词，再写入【核心细节动作】与【画面主体】表情；塞钱就画递钱、僵住就画僵住、质问就画张嘴/指向；禁止与本段无关的通用姿势',
+            ? '硬性：先从 narration_lines / beat_card / must_cover 提取动作动词与情绪词，再写入夸张表情与可见动作；必须覆盖 beat_card.verbs 与 must_cover（允许同义）；hands_lr 不得写反；held_props 挂手上禁止桌面陈设；禁止 invent_forbidden；冲跑刺拦须写位移重心，禁止只写三分之四侧站立比划；视线按剧情看向对方/物件/门口等；同框定妆最多 2 人'
+            : '硬性：先从 narration_lines / beat_card / must_cover 提取动作动词与情绪词，再写入【核心细节动作】与【画面主体】可夸张表情；必须覆盖 beat_card.verbs 与 must_cover（允许同义）；hands_lr 不得写反；held_props 写入动作禁止桌面陈设；禁止 invent_forbidden；视线按剧情写戏内目标，禁止全片望向前方/直视镜头',
+          beat_fidelity_rule:
+            '硬性：必须遵守本段 beat_card 与 must_cover；左右手、持物归属、核心动词以旁白为准；scene_description 仅场景参考；禁止把下一段动作提前画进本镜。',
+          shot_fidelity_rule:
+            '硬性：本镜画面只服务 narration_lines 正在发生的事；detect_scene_description 仅可补充景别/地点构图，若与旁白冲突以旁白为准；禁止把 prior/full_narration_summary 里尚未发生的情节或物件写入本镜；比喻勿实物化。',
+          env_lock_rule:
+            '若含 required_scene_label：必须写对照场景「该 label」，【年代场景】以 required_scene_bible 为固定外壳再叠本镜可见物件；若含 required_prop_labels：仅对本镜旁白出现的项写对照道具「label」。'
+            + PROP_HOLDER_PLACEMENT_LLM_RULE,
           scene_enrichment_rule: motionComic
-            ? '若含 scene_enrichment：场景陈设写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入动作描述；执行 must_use'
-            : '若含 scene_enrichment：【年代场景】写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入【核心细节动作】；执行 must_use',
+            ? (segmentLocalScene
+              ? '若含 scene_enrichment：只使用本段 place/carriers/props/actions；可略扩展同场氛围；禁止把 prior_props/全文物件清单塞进本镜'
+              : '若含 scene_enrichment：场景陈设写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入动作描述；执行 must_use')
+            : (segmentLocalScene
+              ? '若含 scene_enrichment：【年代场景】只写本段 place/carriers/props；可略扩展同场氛围；禁止把 prior_props/全文物件清单塞进本镜；actions 仅本段'
+              : '若含 scene_enrichment：【年代场景】写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入【核心细节动作】；执行 must_use'),
           paragraph_outfit_continuity:
-            '同一 start_index 内（身穿#hex）须一致；跨段按旁白+场所换装，禁止全片抄同一套定妆服/同一毛衣；#hex紧挨款式词；禁止中文色词',
+            '同一 start_index 内（身穿#hex）须一致；跨段按旁白+场所换装，禁止全片抄同一套定妆服/同一毛衣/同一 portrait_default_outfit；婚礼/就寝/职场/外出须换对应款式；#hex紧挨款式词；禁止中文色词',
           ...(characters.length
             ? {
               paragraph_portrait_spec: motionComic
                 ? MOTION_COMIC_PORTRAIT_OUTFIT_LLM_RULE
                 : PORTRAIT_STORYBOARD_OUTFIT_LLM_RULE,
-              portrait_label_rule: motionComic
-                ? '必须遵守本段 required_portrait_labels：列表有几人就写几个对照定妆（不封顶）；本段点名/对白多人时禁止无配角、禁止漏人；禁止用主人公/第一人称标签顶替本段点名或说话人'
-                : '若段落含 required_portrait_labels：【画面主体】只写这 1 个对照定妆；画面仅此一人入镜，禁止第二人手/背影/侧影；禁止用主人公/第一人称标签顶替本段点名或说话人',
+              portrait_label_rule: sketchPage || motionComic
+                ? '必须遵守本段 required_portrait_labels：必须写对照定妆「label」标签（禁止只写姓名）；按内容 1～2 个；同场互动可双人；禁止第三人脸/同脸克隆；禁止用主人公/第一人称标签顶替本段点名或说话人'
+                : '若段落含 required_portrait_labels：【画面主体】按内容写列表中 1～2 个对照定妆；同场互动可双人；禁止同脸克隆与未点名路人抢焦点；禁止用主人公/第一人称标签顶替本段点名或说话人；视线按剧情落在戏内目标',
             }
             : {}),
           ...(naturalBodyLock
@@ -2309,7 +2632,9 @@ export async function generateParagraphImagePromptsWithLLM(
       const batchAttempts = PARAGRAPH_PROMPT_LLM_BATCH_RETRIES + 1
       for (let attempt = 0; attempt < batchAttempts; attempt++) {
         if (attempt > 0) {
-          const waitMs = isLLMTransientProviderError(lastError) ? 3_000 * attempt : 2_000 * attempt
+          const waitMs = isLLMTransientProviderError(lastError)
+            ? (freeOpenRouter ? 20_000 * attempt : 3_000 * attempt)
+            : 2_000 * attempt
           logTaskWarn('NarrationScene', 'llm-paragraph-prompt-batch-retry', {
             batch: batchIndex + 1,
             attempt,
@@ -2339,13 +2664,14 @@ export async function generateParagraphImagePromptsWithLLM(
         })
 
         try {
+          // 禁止 json_object：ling-3.0-flash:free 等会 INVALID_REQUEST_BODY
           const text = await callTextChat(
             batchSystem,
             user,
             textModel,
             textThinking,
             resolveParagraphPromptLLMTimeoutMs(batch.length, attempt + 1),
-            true,
+            false,
             maxTokens,
             'narration_image_prompt',
           )
@@ -2357,6 +2683,8 @@ export async function generateParagraphImagePromptsWithLLM(
           continue
         } catch (err: any) {
           lastError = String(err?.message || err || 'unknown error')
+          // 400 请求体非法：同参重试无意义
+          if (isLLMInvalidRequestBodyError(lastError)) break
           if (isLLMRetryableError(lastError) && attempt < batchAttempts - 1) {
             continue
           }
@@ -2372,7 +2700,7 @@ export async function generateParagraphImagePromptsWithLLM(
         return {
           dialogue: lines[0] || null,
           narrationLines: lines,
-          allowDualPortrait: motionComic,
+          allowDualPortrait: MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS >= 2,
         }
       }
 
@@ -2388,28 +2716,54 @@ export async function generateParagraphImagePromptsWithLLM(
             characters,
             dialogue: lines?.[0] || null,
             narrationLines: lines,
-          }).slice(0, 1))
+          }).slice(0, MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS))
         if (!expected.length) return {}
         const labels = expected.map(name => {
           const ch = characters.find(c => String(c.name || '').trim() === name)
           return formatCharacterPortraitLabel(name, (ch as { variantLabel?: string | null })?.variantLabel)
         })
+        const labelList = labels.map(l => `「${l}」`).join('、')
+        const n = labels.length
         return {
           required_portrait_labels: labels,
-          ...(motionComic && labels.length >= 2
-            ? { presence_rule: '本段 narration_lines 已点名/对白多人：必须同框写出全部 required_portrait_labels，禁止无配角' }
-            : {}),
-          retry_hint: motionComic
-            ? (labels.length >= 2
-              ? `【在场角色·重写】上一条在场角色不对。本段必须同框对照定妆「${labels[0]}」与「${labels[1]}」，分句写清各自位置姿态表情与（身穿…）；禁止无配角；禁止漏画或顶替。`
-              : `【在场角色·重写】上一条定妆标签错误。本段只画对照定妆「${labels[0]}」；旁白未点名其他人时不要硬塞第二人；表情与动作须符合本段 narration_lines。`)
-            : `【定妆标签·重写】上一条【画面主体】定妆标签错误或出现多人同框。本段只允许 1 个对照定妆「${labels[0]}」` +
-              `；禁止第二人任何可视部分（含手/背影/侧影/画外伸手）；互动只写该焦点角色本人肢体与手持物；表情与动作须符合本段 narration_lines（禁止面无表情站桩、禁止与旁白无关动作）。`,
+          presence_rule: n >= 2
+            ? `本段对照定妆 ${labelList}（${n} 人同框）：必须写对照定妆「label」标签（禁止只写姓名）；按剧情写左右/前后站位；未点名路人用剪影`
+            : `本段必须写对照定妆「${labels[0] || ''}」（括号含男性或女性）；禁止只写「姓名（男性）」而无对照定妆标签；未点名路人用剪影`,
+          retry_hint: n >= 2
+            ? `【定妆标签·重写】上一条定妆错误。本段须含对照 ${labelList}（最多 ${MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS} 人）；禁止只写姓名；禁止同脸克隆；表情与动作须符合本段 narration_lines。`
+            : `【定妆标签·重写】上一条定妆错误。本段必须写对照定妆「${labels[0] || ''}」；禁止只写「姓名（男性）」；表情与动作须符合本段 narration_lines。`,
         }
       }
 
       /** 本批拒收原因：用于进度文案（勿把「近重复」误报成定妆不符） */
-      const rejectReasonByStart = new Map<number, 'format' | 'portrait' | 'duplicate'>()
+      const rejectReasonByStart = new Map<number, 'format' | 'portrait' | 'duplicate' | 'beat' | 'outfit' | 'scene'>()
+      const beatRetryHintByStart = new Map<number, string>()
+      const outfitRetryHintByStart = new Map<number, string>()
+      const placeByStart = new Map(
+        paragraphs.map(p => [p.startIndex, inferNarrationPlaceBucket(p.sentences)] as const),
+      )
+
+      const resolveBoundSceneLabel = (batchItem?: ParagraphPromptInput) => {
+        if (!batchItem) return ''
+        const sb = storyboardsForEnv[batchItem.index] || null
+        const bound = sb?.sceneId ? sceneById.get(sb.sceneId) : null
+        return String(bound?.scene_label || '').trim()
+      }
+
+      const alignPromptAssets = (
+        rawPrompt: string,
+        batchItem?: ParagraphPromptInput,
+        portraitCtx?: ReturnType<typeof buildPortraitCtx>,
+      ) => {
+        let next = String(rawPrompt || '').trim()
+        if (!next) return next
+        if (characters.length) {
+          next = ensureMissingPortraitLabelsInImagePromptCn(next, characters, portraitCtx)
+        }
+        const sceneLabel = resolveBoundSceneLabel(batchItem)
+        if (sceneLabel) next = ensureSceneLabelInImagePromptCn(next, sceneLabel)
+        return next
+      }
 
       const commitRow = (
         row: { start_index?: number; image_prompt?: string; flux_prompt_en?: string },
@@ -2418,14 +2772,16 @@ export async function generateParagraphImagePromptsWithLLM(
       ) => {
         const batchItem = batch.find(p => p.startIndex === Number(row?.start_index)) ?? fallbackItem
         const startIndex = Number(row?.start_index ?? batchItem?.startIndex)
-        const prompt = String(row?.image_prompt || '').trim()
-        if (!Number.isFinite(startIndex) || !prompt) return false
+        if (!Number.isFinite(startIndex)) return false
+        const portraitCtx = buildPortraitCtx(batchItem)
+        const forceAccept = !!opts?.forceAfterAlign
+        let prompt = alignPromptAssets(String(row?.image_prompt || '').trim(), batchItem, portraitCtx)
+        if (!prompt) return false
         // 硬性：须含汉字且达最低信息量；不再强制【】六维标签
         const hasCn = /[\u4e00-\u9fff]/.test(prompt)
         const hasPortraitTag = /对照定妆「/.test(prompt)
         const minLen = motionComic ? MOTION_COMIC_IMAGE_PROMPT_MIN_LEN : 24
         const narrLines = batchItem?.sentences || []
-        const forceAccept = !!opts?.forceAfterAlign
         const tooThin = motionComic && !forceAccept && prompt.length < minLen
         const standShell = motionComic && !forceAccept && isMotionComicStandPoseShellPrompt(prompt, narrLines)
         const emotionFar = motionComic && !forceAccept && isMotionComicEmotionWithoutCloseupPrompt(prompt, narrLines)
@@ -2455,9 +2811,32 @@ export async function generateParagraphImagePromptsWithLLM(
           return false
         }
 
-        const portraitCtx = buildPortraitCtx(batchItem)
+        if (!forceAccept) {
+          const beat = extractNarrationBeatCard(narrLines)
+          const beatCheck = validateImagePromptBeatFidelity(prompt, beat, narrLines, {
+            description: batchItem?.sceneDescription,
+          })
+          if (beatCheck.soft_reasons?.length) {
+            logTaskWarn('NarrationScene', 'llm-paragraph-prompt-beat-soft', {
+              startIndex,
+              soft_reasons: beatCheck.soft_reasons,
+              preview: prompt.slice(0, 120),
+            })
+          }
+          if (!beatCheck.ok) {
+            rejectReasonByStart.set(startIndex, 'beat')
+            beatRetryHintByStart.set(startIndex, beatCheck.retry_hint)
+            logTaskWarn('NarrationScene', 'llm-paragraph-prompt-beat-mismatch', {
+              startIndex,
+              reasons: beatCheck.reasons,
+              preview: prompt.slice(0, 120),
+            })
+            return false
+          }
+        }
+
         const enforcePortrait = opts?.enforcePortrait !== false && characters.length > 0
-        if (enforcePortrait && !opts?.forceAfterAlign) {
+        if (enforcePortrait && !forceAccept) {
           const check = validateImagePromptPortraitLabels(prompt, characters, portraitCtx)
           if (!check.ok) {
             rejectReasonByStart.set(startIndex, 'portrait')
@@ -2472,13 +2851,47 @@ export async function generateParagraphImagePromptsWithLLM(
           }
         }
 
+        const requiredSceneLabel = resolveBoundSceneLabel(batchItem)
+        if (requiredSceneLabel && !forceAccept) {
+          const hasScene = prompt.includes(`对照场景「${requiredSceneLabel}」`) || /对照场景「/.test(prompt)
+          if (!hasScene) {
+            rejectReasonByStart.set(startIndex, 'scene')
+            logTaskWarn('NarrationScene', 'llm-paragraph-prompt-scene-mismatch', {
+              startIndex,
+              expected: requiredSceneLabel,
+              preview: prompt.slice(0, 120),
+            })
+            return false
+          }
+        }
+
+        if (!forceAccept) {
+          const peerOutfit = [...promptsByStartIndex.entries()]
+            .filter(([idx]) => idx !== startIndex)
+            .map(([idx, p]) => ({
+              prompt: p,
+              placeBucket: placeByStart.get(idx),
+            }))
+          const outfitCheck = validateImagePromptOutfitDiversity(prompt, narrLines, peerOutfit)
+          if (!outfitCheck.ok) {
+            rejectReasonByStart.set(startIndex, 'outfit')
+            if (outfitCheck.retry_hint) outfitRetryHintByStart.set(startIndex, outfitCheck.retry_hint)
+            logTaskWarn('NarrationScene', 'llm-paragraph-prompt-outfit-mismatch', {
+              startIndex,
+              reason: outfitCheck.reason,
+              preview: prompt.slice(0, 120),
+            })
+            return false
+          }
+        }
+
         // 拦截模型复读：与本轮已落库文案动作指纹过近则拒收，走单段重写
         // forceAfterAlign / allowDuplicate：单段兜底末次允许落库，避免整批空过
         const peerPrompts = [...promptsByStartIndex.entries()]
           .filter(([idx]) => idx !== startIndex)
           .map(([, p]) => p)
         const dup = isNearDuplicateImagePrompt(prompt, peerPrompts)
-        if (dup && !opts?.forceAfterAlign && !opts?.allowDuplicate) {
+        if (dup && !forceAccept && !opts?.allowDuplicate) {
           rejectReasonByStart.set(startIndex, 'duplicate')
           logTaskWarn('NarrationScene', 'llm-paragraph-prompt-duplicate', {
             startIndex,
@@ -2486,7 +2899,7 @@ export async function generateParagraphImagePromptsWithLLM(
           })
           return false
         }
-        if (dup && (opts?.forceAfterAlign || opts?.allowDuplicate)) {
+        if (dup && (forceAccept || opts?.allowDuplicate)) {
           logTaskWarn('NarrationScene', 'llm-paragraph-prompt-duplicate-forced', {
             startIndex,
             preview: prompt.slice(0, 120),
@@ -2494,9 +2907,16 @@ export async function generateParagraphImagePromptsWithLLM(
         }
 
         rejectReasonByStart.delete(startIndex)
-        const injected = options?.pureLlm
-          ? injectPortraitSpecIntoImagePromptCn(prompt, characters, style, portraitCtx)
-          : injectPortraitSpecIntoImagePromptCn(
+        beatRetryHintByStart.delete(startIndex)
+        outfitRetryHintByStart.delete(startIndex)
+        // pureLlm：信任模型成稿；落库前已补对照定妆/场景标签
+        if (pureLlm) {
+          promptsByStartIndex.set(
+            startIndex,
+            characters.length ? ensurePortraitGenderInImagePromptCn(prompt, characters) : prompt,
+          )
+        } else {
+          const injected = injectPortraitSpecIntoImagePromptCn(
             resolveLLMImagePrompt(prompt, style, {
               narrationLines: batchItem?.sentences,
               fullNarrationLines: options?.fullNarrationLines,
@@ -2507,13 +2927,14 @@ export async function generateParagraphImagePromptsWithLLM(
             style,
             portraitCtx,
           )
-        const repaired = repairNarrationStandingFullBodyPrompt(
-          repairNarrationFaceCloseupVsActionPrompt(injected),
-        )
-        promptsByStartIndex.set(
-          startIndex,
-          motionComic ? repairMotionComicContinuousImagePrompt(repaired) : repaired,
-        )
+          const repaired = repairNarrationStandingFullBodyPrompt(
+            repairNarrationFaceCloseupVsActionPrompt(injected),
+          )
+          promptsByStartIndex.set(
+            startIndex,
+            motionComic ? repairMotionComicContinuousImagePrompt(repaired) : repaired,
+          )
+        }
         const fluxEn = String(row?.flux_prompt_en || '').trim()
         if (fluxEn) englishByStartIndex.set(startIndex, fluxEn)
         return true
@@ -2539,15 +2960,29 @@ export async function generateParagraphImagePromptsWithLLM(
         const item = missing[mi]
         const rejectReason = rejectReasonByStart.get(item.startIndex)
         const portraitFields = buildRequiredPortraitFields(item)
+        const beatPayload = beatCardForLlmPayload(extractNarrationBeatCard(item.sentences))
+        const beatRetryHint = beatRetryHintByStart.get(item.startIndex) || ''
         // 仅真实定妆校验失败才提示「定妆标签不符」；有 required_portrait_labels 不等于标签不符
         const isPortraitRetry = rejectReason === 'portrait'
         const isDuplicateRetry = rejectReason === 'duplicate'
         const isFormatRetry = rejectReason === 'format'
-        const retryHintExtra = isDuplicateRetry
+        const isBeatRetry = rejectReason === 'beat'
+        const isOutfitRetry = rejectReason === 'outfit'
+        const isSceneRetry = rejectReason === 'scene'
+        const retryHintExtra = isBeatRetry
+          ? (beatRetryHint || '【拍点保真·重写】必须严格按 beat_card 写动作，禁止发明下一段动作，左右手与持物归属以旁白为准。')
+          : isOutfitRetry
+          ? (outfitRetryHintByStart.get(item.startIndex)
+            || '【换装·重写】禁止全片抄同一套定妆服；本段须按旁白+场所写新的（身穿#hex…）。')
+          : isSceneRetry
+          ? '【场景标签·重写】本段含 required_scene_label，必须写对照场景「该 label」。'
+          : isDuplicateRetry
           ? '【动作去重·硬性】禁止照抄填空示例或其它段的同一套动作（如推开红包/堂屋账本）；必须严格按本段 narration_lines 写全新表情与动作，场景与镜头也须贴合本段。'
           : isFormatRetry
             ? '【信息量/景别·硬性】文案须≥180字；须含前中后景陈设+定妆+身穿#hex+景别俯仰头高%；旁白有冲跑刺拦等动词时禁止只写站立比划；纯惊吓/哭愣须近景或中近景，禁止全身远站或滥用过肩。'
-            : ''
+            : isPortraitRetry
+              ? '【定妆标签·硬性】必须写对照定妆「label」（括号含男性或女性）；禁止只写「姓名（男性）」而无对照定妆标签。'
+              : ''
         const mergedPortraitFields = retryHintExtra
           ? {
             ...portraitFields,
@@ -2557,7 +2992,13 @@ export async function generateParagraphImagePromptsWithLLM(
           }
           : portraitFields
         emitPromptProgress({
-          message: isDuplicateRetry
+          message: isBeatRetry
+            ? `第 ${batchIndex + 1} 批拍点不符重写 ${mi + 1}/${missing.length}；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`
+            : isOutfitRetry
+            ? `第 ${batchIndex + 1} 批换装不符重写 ${mi + 1}/${missing.length}；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`
+            : isSceneRetry
+            ? `第 ${batchIndex + 1} 批场景标签重写 ${mi + 1}/${missing.length}；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`
+            : isDuplicateRetry
             ? `第 ${batchIndex + 1} 批近重复重写 ${mi + 1}/${missing.length}；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`
             : isPortraitRetry
               ? `第 ${batchIndex + 1} 批定妆不符重写 ${mi + 1}/${missing.length}；已完成 ${completedBatches}/${batches.length}，进行中 ${activeBatches} 路…`
@@ -2567,25 +3008,29 @@ export async function generateParagraphImagePromptsWithLLM(
         })
         const singleUser = JSON.stringify({
           ...(previousEpisodeSummary ? { previous_episode_summary: previousEpisodeSummary } : {}),
-          full_narration_summary: fullNarrationSummary,
+          ...(panelBeats?.length ? { panel_beats: panelBeats } : {}),
+          ...(segmentLocalScene ? {} : { full_narration_summary: fullNarrationSummary }),
           characters: characterPayload,
           paragraphs: (() => {
             const priorNarration = buildPriorNarrationLines(previousEpisodeNarration, fullBodyLines, item.startIndex)
             const priorTimelineSnip = compressTimelineNarrationLines(priorNarration) || undefined
+            const lines = item.ttsSentences?.length ? item.ttsSentences : item.sentences
             const sceneEnrichment = buildNarrationSceneEnrichment({
               narrationLines: item.sentences,
               priorLines: priorNarration,
               detectSceneDescription: item.sceneDescription,
+              segmentLocal: segmentLocalScene,
             })
             return [{
               paragraph_index: item.index,
               start_index: item.startIndex,
               layout: item.layout,
-              narration_lines: (item.ttsSentences?.length ? item.ttsSentences : item.sentences),
+              narration_lines: lines,
+              ...beatPayload,
               ...(motionComic
                 ? {
                   shot_card: buildMotionComicShotCard(
-                    item.ttsSentences?.length ? item.ttsSentences : item.sentences,
+                    lines,
                     { paragraphIndex: item.index },
                   ),
                   shot_card_rule: '必须按 shot_card 写景别/姿态/光影；禁止无视 card 复读万能全身平视站立句',
@@ -2599,26 +3044,40 @@ export async function generateParagraphImagePromptsWithLLM(
           })(),
           output_format: {
             paragraph_prompts: motionComic
-              ? '[{ start_index: number, image_prompt: string }]，仅 1 条；一整段连贯中文（禁止【】六维标签，须覆盖画风/主体/场景/动作/光影/镜头/质感）；有定妆须含对照定妆「label」'
+              ? '[{ start_index: number, image_prompt: string }]，仅 1 条；一整段连贯中文（禁止【】六维标签，须覆盖画风/主体/场景/动作/光影/镜头/质感）；有定妆须含对照定妆「label」（括号内须含男性或女性）'
               : inlineFluxEnglish
                 ? '[{ start_index, image_prompt, flux_prompt_en }]，仅 1 条；中文七维 + 短英文七维'
                 : '[{ start_index: number, image_prompt: string }]，仅 1 条；按七维中文输出完整 image_prompt',
             writing_rule: motionComic
-              ? '只根据本段 narration_lines + shot_card 写一整段连贯中文；必须遵守 shot_card 景别/姿态/光影；表情与动作必须符合该段旁白，禁止面无表情站桩、禁止搬用别段动作、禁止照抄填空示例、禁止【】六维标签；full_narration_summary/prior 只补场景；严格 JSON'
+              ? (segmentLocalScene
+                ? '只根据本段 narration_lines + shot_card + beat_card 写一整段连贯中文；陈设以本段为准可略扩展同场氛围；禁止全书物件清单；禁止照抄填空示例、禁止【】六维标签；对照定妆括号须含男性或女性；成稿即终稿；严格 JSON'
+                : '只根据本段 narration_lines + shot_card + beat_card 写一整段连贯中文；必须遵守 shot_card 景别/姿态/光影；表情与动作必须符合该段旁白与 beat_card，禁止面无表情站桩、禁止搬用别段动作、禁止照抄填空示例、禁止【】六维标签；开篇写画风短标记；对照定妆括号须含男性或女性；成稿即终稿；full_narration_summary/prior 只补场景；严格 JSON')
               : inlineFluxEnglish
                 ? '写中文七维并同步短英文 flux_prompt_en；严格 JSON'
-                : '只根据本段 narration_lines 写七维；表情与【核心细节动作】必须符合该段旁白正在发生的事，禁止面无表情站桩、禁止搬用别段动作、禁止照抄填空示例；full_narration_summary/prior 只补场景；严格 JSON',
+                : (segmentLocalScene
+                  ? '只根据本段 narration_lines + beat_card 写七维；【年代场景】以本段为准可略扩展；禁止全书陈设清单；对照定妆括号须含男性或女性；成稿即终稿；禁止照抄填空示例；严格 JSON'
+                  : '只根据本段 narration_lines + beat_card 写七维；表情与【核心细节动作】必须符合该段旁白与 beat_card，禁止面无表情站桩、禁止搬用别段动作、禁止照抄填空示例；对照定妆括号须含男性或女性；成稿即终稿；full_narration_summary/prior 只补场景；严格 JSON'),
+            generation_finality_rule:
+              '硬性：image_prompt 落库后即最终生图文案；系统不会再追加画风规格、景别英文前缀、REFERENCE USAGE、性别词或外貌注入。',
             paragraph_beat_match: motionComic
-              ? '硬性：从 narration_lines 提取动作与情绪再写入人物表情与可见动作；有冲跑刺拦时禁止只写站立比划；禁止与本段无关的通用姿势；禁止复用其它段或示例里的推红包/站桩动作'
-              : '硬性：从 narration_lines 提取动作与情绪再写入【核心细节动作】与表情；禁止与本段无关的通用姿势；禁止复用其它段或示例里的推红包/站桩动作',
+              ? '硬性：从 narration_lines / beat_card / must_cover 提取动作与情绪再写入人物表情与可见动作；覆盖 verbs 与 must_cover（允许同义）；hands_lr 不得写反；禁止 invent_forbidden；有冲跑刺拦时禁止只写站立比划'
+              : '硬性：从 narration_lines / beat_card / must_cover 提取动作与情绪再写入【核心细节动作】与表情；覆盖 verbs 与 must_cover（允许同义）；hands_lr 不得写反；禁止 invent_forbidden',
+            beat_fidelity_rule:
+              '硬性：必须遵守本段 beat_card 与 must_cover；左右手、持物归属、核心动词以旁白为准；禁止把下一段动作提前画进本镜。',
+            shot_fidelity_rule:
+              '硬性：本镜画面只服务 narration_lines 正在发生的事；detect_scene_description 仅可补充景别/地点构图，若与旁白冲突以旁白为准；禁止把 prior/full_narration_summary 里尚未发生的情节或物件写入本镜；比喻勿实物化。',
             scene_enrichment_rule: motionComic
-              ? '若含 scene_enrichment：场景陈设写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入动作描述'
-              : '若含 scene_enrichment：【年代场景】写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入【核心细节动作】',
+              ? (segmentLocalScene
+                ? '若含 scene_enrichment：只使用本段 place/carriers/props/actions；可略扩展同场氛围；禁止 prior_props/全文物件清单'
+                : '若含 scene_enrichment：场景陈设写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入动作描述')
+              : (segmentLocalScene
+                ? '若含 scene_enrichment：【年代场景】只写本段 place/carriers/props；可略扩展同场氛围；禁止 prior_props/全文物件清单；actions 仅本段'
+                : '若含 scene_enrichment：【年代场景】写入 place/carriers/props；actions 仅当与本段 narration_lines 一致时写入【核心细节动作】'),
             ...(Object.keys(mergedPortraitFields).length > 0
               ? {
                 portrait_label_rule: motionComic
-                  ? '必须遵守本段 required_portrait_labels：按列表人数写定妆标签；≥2 人必须同框写齐；禁止擅自改成单人；禁止用主人公/第一人称标签顶替'
-                  : '必须遵守本段 required_portrait_labels：【画面主体】只写列表中那 1 个对照定妆；画面仅此一人，禁止第二人手/背影；禁止用主人公/第一人称标签顶替',
+                  ? '必须遵守本段 required_portrait_labels：按内容写 1～2 个对照定妆；同场可双人；禁止第三人脸/同脸克隆；禁止用主人公/第一人称标签顶替；视线按剧情写戏内目标'
+                  : '必须遵守本段 required_portrait_labels：【画面主体】按内容写列表中 1～2 个对照定妆；同场可双人；禁止同脸克隆；禁止用主人公/第一人称标签顶替；视线按剧情写戏内目标',
               }
               : {}),
           },
@@ -2634,16 +3093,20 @@ export async function generateParagraphImagePromptsWithLLM(
                 batch: batchIndex + 1,
                 rejectReason: rejectReasonByStart.get(item.startIndex) || rejectReason || null,
               })
-              await sleep(1_500 * sa)
+              const singleWait = isLLMTransientProviderError(lastError)
+                ? (freeOpenRouter ? 20_000 * sa : 3_000 * sa)
+                : 1_500 * sa
+              await sleep(singleWait)
             }
             try {
+              // 禁止 json_object：与批调用一致，避免 free 模型 INVALID_REQUEST_BODY
               const text = await callTextChat(
                 batchSystem,
                 singleUser,
                 textModel,
                 textThinking,
                 resolveParagraphPromptLLMTimeoutMs(1, sa + 1),
-                true,
+                false,
                 resolveParagraphPromptMaxTokens(1),
                 'narration_image_prompt',
               )
@@ -2653,23 +3116,69 @@ export async function generateParagraphImagePromptsWithLLM(
                 || null
               if (rowToCommit) {
                 const committed = await withSharedLock(() => commitRow(rowToCommit, item))
-                if (!committed && !(await withSharedLock(() => promptsByStartIndex.has(item.startIndex))) && sa === singleAttempts - 1) {
-                  // 末次兜底：强制写入（跳过定妆校验 + 近重复拦截）
+                const stillMissing = !committed
+                  && !(await withSharedLock(() => promptsByStartIndex.has(item.startIndex)))
+                const lastTry = sa === singleAttempts - 1
+                const failReason = rejectReasonByStart.get(item.startIndex) || rejectReason || null
+                if (stillMissing && lastTry && failReason === 'beat') {
+                  // 硬拍点仍失败：不 force-accept，留给「补全缺失」
+                  logTaskWarn('NarrationScene', 'llm-paragraph-prompt-force-skip-hard-beat', {
+                    startIndex: item.startIndex,
+                    required: (mergedPortraitFields as { required_portrait_labels?: string[] }).required_portrait_labels,
+                    rejectReason: failReason,
+                  })
+                } else if (stillMissing && lastTry && (failReason === 'outfit' || failReason === 'scene')) {
+                  // 换装/场景：末次仍对齐标签后强制落库（至少带定妆/场景标签），换装靠重写提示已尽量纠正
+                  const aligned = {
+                    ...rowToCommit,
+                    image_prompt: alignPromptAssets(
+                      String(rowToCommit.image_prompt || ''),
+                      item,
+                      buildPortraitCtx(item),
+                    ),
+                  }
+                  logTaskWarn('NarrationScene', 'llm-paragraph-prompt-force-accept-outfit-scene', {
+                    startIndex: item.startIndex,
+                    rejectReason: failReason,
+                  })
+                  await withSharedLock(() => {
+                    commitRow(aligned, item, { forceAfterAlign: true, allowDuplicate: true })
+                  })
+                } else if (stillMissing && lastTry) {
+                  // 格式/近重复等末次兜底：先补定妆/场景标签再强制写入
+                  const aligned = {
+                    ...rowToCommit,
+                    image_prompt: alignPromptAssets(
+                      String(rowToCommit.image_prompt || ''),
+                      item,
+                      buildPortraitCtx(item),
+                    ),
+                  }
                   logTaskWarn('NarrationScene', 'llm-paragraph-prompt-force-accept', {
                     startIndex: item.startIndex,
                     required: (mergedPortraitFields as { required_portrait_labels?: string[] }).required_portrait_labels,
-                    rejectReason: rejectReasonByStart.get(item.startIndex) || rejectReason || null,
+                    rejectReason: failReason,
                   })
                   await withSharedLock(() => {
-                    commitRow(rowToCommit, item, { forceAfterAlign: true, allowDuplicate: true })
+                    commitRow(aligned, item, { forceAfterAlign: true, allowDuplicate: true })
                   })
-                } else if (!committed && !(await withSharedLock(() => promptsByStartIndex.has(item.startIndex))) && rejectReasonByStart.get(item.startIndex) === 'portrait') {
+                } else if (stillMissing && failReason === 'portrait') {
+                  // 定妆失败：补标签后再校验落库；仍失败才 force（保证至少有对照定妆）
+                  const aligned = {
+                    ...rowToCommit,
+                    image_prompt: alignPromptAssets(
+                      String(rowToCommit.image_prompt || ''),
+                      item,
+                      buildPortraitCtx(item),
+                    ),
+                  }
                   logTaskWarn('NarrationScene', 'llm-paragraph-prompt-portrait-force-align', {
                     startIndex: item.startIndex,
                     required: (mergedPortraitFields as { required_portrait_labels?: string[] }).required_portrait_labels,
                   })
                   await withSharedLock(() => {
-                    commitRow(rowToCommit, item, { forceAfterAlign: true })
+                    const ok = commitRow(aligned, item)
+                    if (!ok) commitRow(aligned, item, { forceAfterAlign: true })
                   })
                 }
                 if (await withSharedLock(() => promptsByStartIndex.has(item.startIndex))) singleOk = true
@@ -2679,7 +3188,8 @@ export async function generateParagraphImagePromptsWithLLM(
             } catch (err: any) {
               const msg = String(err?.message || err)
               lastError = msg
-              if (!isLLMRetryableError(msg) && sa >= 1) break
+              // 400 同参重试无意义；非限流错误也不再空烧配额
+              if (isLLMInvalidRequestBodyError(msg) || !isLLMRetryableError(msg)) break
               logTaskWarn('NarrationScene', 'llm-paragraph-prompt-single-failed', {
                 startIndex: item.startIndex,
                 attempt: sa + 1,
@@ -2693,7 +3203,7 @@ export async function generateParagraphImagePromptsWithLLM(
             error: String(err?.message || err).slice(0, 200),
           })
         }
-        await sleep(800)
+        await sleep(freeOpenRouter ? 2_000 : 800)
       }
 
       missing = await withSharedLock(() => batch.filter(p => !promptsByStartIndex.has(p.startIndex)))
@@ -2734,7 +3244,9 @@ export async function generateParagraphImagePromptsWithLLM(
           lastError: lastError.slice(0, 200),
         })
         // 整批失败：不中断后续；限流写入 shared window，本 worker 立刻可领下一批
-        const coolMs = Math.min(8_000, 1_500 * Math.max(1, consecutiveBatchFails))
+        const coolMs = isLLMTransientProviderError(lastError)
+          ? (freeOpenRouter ? 65_000 : 15_000)
+          : Math.min(8_000, 1_500 * Math.max(1, consecutiveBatchFails))
         rateLimitUntil = Math.max(rateLimitUntil, Date.now() + coolMs)
         emitPromptProgress({
           message: `第 ${batchIndex + 1} 批失败已跳过；已完成 ${completedBatches}/${batches.length}，进行中 ${Math.max(0, activeBatches - 1)} 路…`,

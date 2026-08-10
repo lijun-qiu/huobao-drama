@@ -6,6 +6,10 @@ import {
   getEpisodeVisualCharacters,
   getVariantAgeGroup,
 } from './narration-characters.js'
+import {
+  formatNovelBibleCharacterBriefForLlm,
+  formatNovelBibleForLlm,
+} from '../constants/novel-bible.js'
 
 function splitScriptLines(text: string): string[] {
   return String(text || '')
@@ -153,6 +157,8 @@ export function buildCharacterAppearanceContext(params: {
         appearance: String(youthSibling.appearance).trim().slice(0, 360),
       }
       : null,
+    novelBibleBlock: formatNovelBibleForLlm(drama?.metadata, { forAppearance: true }),
+    novelBibleCharacterBrief: formatNovelBibleCharacterBriefForLlm(drama?.metadata, characterName),
     hasScript: !!episodeScript.trim(),
   }
 }

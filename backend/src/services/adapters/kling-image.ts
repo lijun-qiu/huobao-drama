@@ -199,10 +199,15 @@ export class KlingImageAdapter implements ImageProviderAdapter {
 
   extractImageUrl(result: any): string | null {
     const data = unwrapData(result)
-    const fromTask = data?.task_result?.images?.[0]?.url
+    // task_result.images[i].url / task_result.image 等（Record<string,unknown> → 逐层取值）
+    const taskResultAny = (data?.task_result ?? {}) as Record<string, unknown>
+    const taskImagesAny = Array.isArray(taskResultAny?.images)
+      ? (taskResultAny.images as Record<string, unknown>[])
+      : []
+    const fromTask = typeof taskImagesAny[0]?.url === 'string' ? String(taskImagesAny[0].url) : null
     if (fromTask) return fromTask
-    if (data?.url) return data.url
-    if (result?.url) return result.url
+    if (typeof data?.url === 'string') return String(data.url)
+    if (typeof result?.url === 'string') return String(result.url)
     return null
   }
 

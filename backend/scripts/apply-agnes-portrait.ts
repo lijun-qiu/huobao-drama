@@ -5,7 +5,7 @@ import { loadEnvLocal } from '../src/utils/load-env-local.js'
 import { applyEnvHttpProxy } from '../src/utils/apply-env-http-proxy.js'
 
 loadEnvLocal()
-applyEnvHttpProxy()
+await applyEnvHttpProxy()
 
 const { eq } = await import('drizzle-orm')
 const { db, schema } = await import('../src/db/index.js')
@@ -21,7 +21,7 @@ if (!apiKey) {
 }
 
 const ts = new Date().toISOString()
-const model = LOCAL_COMIC_ENV.agnesPortraitModel || 'agnes-image-2.0-flash'
+const model = LOCAL_COMIC_ENV.agnesPortraitModel || 'agnes-image-2.1-flash'
 
 const existing = db.select().from(schema.aiServiceConfigs).all()
   .find(r => r.serviceType === 'image' && String(r.provider).toLowerCase() === 'agnes')
@@ -32,7 +32,7 @@ const values = {
   name: '定妆 Agnes Image 服务',
   baseUrl: LOCAL_COMIC_ENV.agnesBaseUrl,
   apiKey,
-  model: JSON.stringify([model, 'agnes-image-2.0-flash', 'agnes-image-2.0']),
+  model: JSON.stringify([model, 'agnes-image-2.1-flash', 'agnes-image-2.0-flash', 'agnes-image-2.0']),
   priority: 125,
   isActive: true,
   updatedAt: ts,

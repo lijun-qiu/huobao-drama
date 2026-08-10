@@ -870,6 +870,17 @@
 
 /* Production content — see .prod-shell / .prod-content below script-chat rules */
 .prod-section-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.prod-section-bar > .prod-section-actions,
+.prod-section-bar > .ml-auto.flex {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  min-width: 0;
+  flex: 1 1 100%;
+  justify-content: flex-start;
+}
 .prod-image-model-bar {
   display: flex;
   align-items: center;
@@ -1299,9 +1310,11 @@
 }
 .shot-folder-tool-hint {
   font-size: 11px;
-  max-width: 220px;
-  line-height: 1.3;
-  text-align: right;
+  max-width: min(260px, 100%);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .btn-retry-missing-prompts {
   background: linear-gradient(135deg, #2548a6 0%, #1e3a8a 100%);
@@ -2089,8 +2102,40 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
+}
+.narration-shot-prompt-title {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.narration-shot-portrait-row {
+  margin-top: 4px;
+  min-width: 0;
+}
+.narration-shot-portrait-count {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.45;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  color: #1d4ed8;
+  background: #dbeafe;
+  border: 1px solid #93c5fd;
+}
+.narration-shot-portrait-row.is-empty .narration-shot-portrait-count {
+  font-weight: 500;
+  color: #64748b;
+  background: #f1f5f9;
+  border-color: #cbd5e1;
 }
 .narration-shot-prompt-copy {
+  margin-left: auto;
   padding: 2px 8px;
   font-size: 10px;
   min-height: 0;
@@ -2108,11 +2153,39 @@
   flex: 1 1 72px;
   justify-content: center;
 }
-.narration-shot-prompt-textarea {
+.narration-shot-prompt-textarea,
+.narration-shot-prompt-rich {
   font-size: 11px;
   line-height: 1.5;
   min-height: 72px;
+  max-height: 88px;
   resize: vertical;
+}
+.video-prompt-field {
+  margin-top: 6px;
+  display: block;
+}
+.video-prompt-textarea {
+  width: 100%;
+  min-height: 120px;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.narration-shot-prompt-rich {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  cursor: text;
+  resize: none;
+  overflow: auto;
+  max-height: 88px;
+}
+.narration-shot-prompt-rich.is-empty {
+  color: var(--text-3, #94a3b8);
 }
 .narration-shot-prompt-duo {
   display: grid;
@@ -2202,6 +2275,23 @@
 .asset-name { font-size: 13px; font-weight: 600; }
 .asset-meta { font-size: 11px; }
 .asset-foot { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-top: 1px solid var(--border); }
+.asset-foot--stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.asset-foot-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.asset-foot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
 .sr-only-file-input {
   position: absolute;
   width: 1px;
@@ -3174,4 +3264,110 @@
   .latest-grid-strip-actions {
     justify-content: flex-start;
   }
+}
+
+/* ===== Novel bible (剧级小说设定) ===== */
+.novel-bible-panel {
+  flex-shrink: 0;
+  margin: 0 0 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(27, 41, 64, 0.1);
+  background: rgba(252, 253, 255, 0.92);
+  box-shadow: 0 6px 18px rgba(20, 32, 54, 0.05);
+  overflow: hidden;
+}
+.novel-bible-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.novel-bible-head-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.novel-bible-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-0);
+}
+.novel-bible-hint { font-size: 12px; }
+.novel-bible-summary {
+  font-size: 11px;
+  color: var(--accent, #3b6fd9);
+  background: rgba(59, 111, 217, 0.08);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.novel-bible-chevron {
+  color: var(--text-3);
+  transition: transform 0.15s;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.novel-bible-chevron.collapsed { transform: rotate(-90deg); }
+.novel-bible-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 12px 12px;
+  border-top: 1px solid rgba(27, 41, 64, 0.06);
+  padding-top: 10px;
+  max-height: 42vh;
+  overflow: auto;
+}
+.novel-bible-field { display: flex; flex-direction: column; gap: 4px; }
+.novel-bible-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.novel-bible-textarea,
+.novel-bible-input {
+  width: 100%;
+  border: 1px solid rgba(27, 41, 64, 0.12);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--text-0);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  resize: vertical;
+}
+.novel-bible-input { resize: none; }
+.novel-bible-cast { display: flex; flex-direction: column; gap: 8px; }
+.novel-bible-cast-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.novel-bible-empty { font-size: 12px; }
+.novel-bible-cast-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.9fr) minmax(90px, 1fr) minmax(140px, 2fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+.novel-bible-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+@media (max-width: 900px) {
+  .novel-bible-cast-row {
+    grid-template-columns: 1fr 1fr auto;
+  }
+  .novel-bible-input-brief { grid-column: 1 / -1; }
 }

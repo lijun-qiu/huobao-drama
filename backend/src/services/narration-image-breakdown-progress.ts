@@ -21,7 +21,7 @@ export type NarrationImageBreakdownProgress = {
   flux_en_saved?: number
   /** 递增序号，前端用来判断是否该刷新镜头列表 */
   prompts_saved_seq?: number
-  image_detect_source?: 'llm' | 'balanced' | 'conservative'
+  image_detect_source?: 'llm' | 'balanced' | 'conservative' | 'rules' | 'one_to_one'
   generated_at?: string
   /** 本次配图文案任务同步写出的 Flux 英文条数 */
   flux_prompt_en_translated?: number

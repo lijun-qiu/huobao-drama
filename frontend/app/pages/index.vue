@@ -109,7 +109,7 @@
           <div class="field-row">
             <label class="field">
               <span class="field-label">计划集数</span>
-              <input v-model.number="form.total_episodes" class="input" type="number" min="1" max="100" />
+              <input v-model.number="form.total_episodes" class="input" type="number" min="1" max="1000" />
             </label>
             <label class="field">
               <span class="field-label">制作模式</span>
@@ -140,7 +140,7 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, dramaAPI } from '~/composables/useApi'
-import { NARRATION_ANIME_STYLE, NARRATION_MINIMAL_STYLE, MOTION_COMIC_DEFAULT_STYLE, artStyleLabel, artStyleSelectOptions } from '~/composables/useArtStyles'
+import { NARRATION_ANIME_STYLE, NARRATION_MINIMAL_STYLE, MOTION_COMIC_DEFAULT_STYLE, NOVEL_COMIC_DEFAULT_STYLE, artStyleLabel, artStyleSelectOptions } from '~/composables/useArtStyles'
 import { buildDramaMetadata, productionModeLabel as motionComicModeLabel } from '~/composables/useMotionComic'
 import BaseSelect from '~/components/BaseSelect.vue'
 
@@ -150,9 +150,9 @@ const showCreate = ref(false)
 const form = ref({ title: '', total_episodes: 1, style: NARRATION_ANIME_STYLE, production_mode: 'narration' })
 const styleSelectOptions = artStyleSelectOptions
 const modeSelectOptions = [
-  { label: '解说视频（配图+旁白）', value: 'narration' },
+  { label: '解说视频（文案→讲解稿→配图旁白）', value: 'narration' },
   { label: '漫画解说（电影感日系·本地模型）', value: 'motion_comic' },
-  { label: '小说漫画讲解（贴小说·分章·旁白漫画）', value: 'novel_comic' },
+  { label: '小说漫画讲解（贴原文直接拆镜·素笔彩画竖页+翻页BGM）', value: 'novel_comic' },
   { label: '对话立绘（视觉小说·静底+立绘对话）', value: 'dialogue_portrait' },
   { label: '本地短剧（完整流程·全本地模型）', value: 'local_comic' },
   { label: '漫剧短剧（完整流程）', value: 'drama' },
@@ -160,7 +160,8 @@ const modeSelectOptions = [
 
 watch(() => form.value.production_mode, (mode) => {
   if (mode === 'narration') form.value.style = NARRATION_ANIME_STYLE
-  if (mode === 'motion_comic' || mode === 'novel_comic') form.value.style = MOTION_COMIC_DEFAULT_STYLE
+  if (mode === 'motion_comic') form.value.style = MOTION_COMIC_DEFAULT_STYLE
+  if (mode === 'novel_comic') form.value.style = NOVEL_COMIC_DEFAULT_STYLE
   if (mode === 'dialogue_portrait') form.value.style = NARRATION_ANIME_STYLE
 })
 

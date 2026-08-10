@@ -3,7 +3,7 @@
  */
 import { asc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { usesMotionComicStoryboardRules, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import { isNovelComicMode, usesMotionComicStoryboardRules, resolveEpisodeProductionMode } from '../constants/production-mode.js'
 import { resolveStoryboardNarrationText } from '../constants/motion-comic.js'
 import { parseNarrationScript } from './narration-breakdown.js'
 import { parseNarrationImageMeta } from './narration-image.js'
@@ -34,7 +34,11 @@ export function buildStoryboardChatContextBlock(episodeId: number, scriptOverrid
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error('集不存在')
 
-  const script = String(scriptOverride || ep.scriptContent || ep.content || '').trim()
+  const mode = resolveEpisodeProductionMode(episodeId)
+  const novelComic = isNovelComicMode(mode)
+  const script = novelComic
+    ? String(scriptOverride || ep.content || '').trim()
+    : String(scriptOverride || ep.scriptContent || ep.content || '').trim()
   const orderedStoryboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
     .orderBy(asc(schema.storyboards.storyboardNumber))
@@ -45,19 +49,25 @@ export function buildStoryboardChatContextBlock(episodeId: number, scriptOverrid
     `集序号：第 ${ep.episodeNumber} 集`,
   ].filter(Boolean)
 
-  const motionComic = usesMotionComicStoryboardRules(resolveEpisodeProductionMode(episodeId))
+  const motionComic = usesMotionComicStoryboardRules(mode)
+  const scriptLabel = novelComic ? '小说原文' : (motionComic ? '漫剧旁白稿' : '解说稿')
 
   if (script) {
     const { title, body } = parseNarrationScript(script)
     const charCount = script.replace(/\s/g, '').length
-    lines.push('', `【${motionComic ? '漫剧旁白稿' : '解说稿'}】约 ${charCount} 字`)
+    lines.push('', `【${scriptLabel}】约 ${charCount} 字`)
     if (title) lines.push(`片头：${title.slice(0, 120)}${title.length > 120 ? '…' : ''}`)
     const bodyPreview = body.trim().slice(0, 400)
     if (bodyPreview) {
       lines.push(`正文节选：${bodyPreview}${body.length > 400 ? '…' : ''}`)
     }
   } else {
-    lines.push('', `【${motionComic ? '漫剧旁白稿' : '解说稿'}】尚未填写，执行分镜前需先有完整${motionComic ? '旁白稿' : '解说稿'}。`)
+    lines.push(
+      '',
+      novelComic
+        ? '【小说原文】尚未填写，请先在「文案输入」粘贴本章原文再拆镜。'
+        : `【${scriptLabel}】尚未填写，执行分镜前需先有完整${motionComic ? '旁白稿' : '解说稿'}。`,
+    )
   }
 
   if (orderedStoryboards.length) {

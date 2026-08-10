@@ -1,6 +1,6 @@
 <template>
   <div v-if="!drama" class="studio-loading">加载中…</div>
-  <div v-else class="studio">
+  <div v-else class="studio" @paste.window="onStudioImagePaste">
     <EpisodeStudioTopbar />
 
     <div class="studio-body">
@@ -40,7 +40,7 @@ definePageMeta({ layout: 'studio' })
 const studio = useEpisodeStudio()
 provide(EPISODE_STUDIO_KEY, studio)
 
-const { drama, panel } = studio
+const { drama, panel, onStudioImagePaste } = studio
 </script>
 
 <style>

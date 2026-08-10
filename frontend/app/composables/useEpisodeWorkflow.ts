@@ -32,6 +32,19 @@ export function isNovelComicMode(mode?: ProductionMode | string | null): boolean
   return mode === 'novel_comic'
 }
 
+/** 纯解说视频（不含漫画解说 / 小说漫画 / 对话立绘） */
+export function isNarrationVideoMode(mode?: ProductionMode | string | null): boolean {
+  return mode === 'narration'
+}
+
+/**
+ * 文案输入 → 解说脚本 → 分镜：仅解说视频。
+ * 小说漫画讲解直接用原文，不再经讲解稿。
+ */
+export function usesExplainScriptFlow(mode?: ProductionMode | string | null): boolean {
+  return mode === 'narration'
+}
+
 export function isDramaLikeMode(mode?: ProductionMode | string | null): boolean {
   return mode === 'drama' || mode === 'local_comic'
 }
@@ -57,9 +70,9 @@ export function usesMotionComicVisuals(mode?: ProductionMode | string | null): b
   return mode === 'motion_comic' || mode === 'novel_comic'
 }
 
-/** 多角色「说话人：台词」分镜 / 配音（漫画解说、对话立绘） */
+/** 多角色「说话人：台词」分镜 / 配音（解说视频、漫画解说、对话立绘） */
 export function usesDialogueSpeakers(mode?: ProductionMode | string | null): boolean {
-  return mode === 'motion_comic' || mode === 'dialogue_portrait'
+  return mode === 'narration' || mode === 'motion_comic' || mode === 'dialogue_portrait'
 }
 
 export function parseCharacterReferenceImages(char: any): Record<string, any> {
@@ -128,7 +141,7 @@ export function dramaStoryboardStepForMode(mode?: ProductionMode | string | null
   return isLocalDramaMode(mode) ? LOCAL_DRAMA_STORYBOARD_STEP : dramaStoryboardStep()
 }
 
-export const DEFAULT_LOCAL_TEXT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+export const DEFAULT_LOCAL_TEXT_MODEL = 'deepseek-v4-flash'
 /** 本地短剧：剧本生成对话默认模型 */
 export const DEFAULT_LOCAL_SCRIPT_TEXT_MODEL = DEFAULT_LOCAL_TEXT_MODEL
 
@@ -140,6 +153,8 @@ export const LOCAL_TEXT_MODEL_OPTIONS = [
 ] as const
 
 export const CLOUD_TEXT_MODELS = new Set([
+  'poolside/laguna-s-2.1:free',
+  'nvidia/nemotron-3-super-120b-a12b:free',
   'nvidia/nemotron-3-ultra-550b-a55b:free',
   'openrouter/deepseek-v4-flash:free',
   'openrouter/deepseek-v4-flash',
@@ -158,10 +173,21 @@ export const CLOUD_TEXT_MODELS = new Set([
 export function normalizeTextModelId(model?: string | null): string {
   const m = String(model || '').trim()
   if (!m) return m
+  // Ling 已下架（OpenRouter 404 unavailable for free）→ 妙飞 DeepSeek
+  if (
+    m === 'inclusionai/ling-3.0-flash:free'
+    || m === 'inclusionai/ling-3.0-flash'
+  ) {
+    return 'deepseek-v4-flash'
+  }
   if (
     m === 'deepseek-v4-flash:free'
     || m === 'openrouter/deepseek-v4-flash:free'
-    || m === 'nvidia/nemotron-3-ultra:free'
+  ) {
+    return 'poolside/laguna-s-2.1:free'
+  }
+  if (
+    m === 'nvidia/nemotron-3-ultra:free'
     || m === 'nvidia/nemotron-3-ultra-550b:free'
   ) {
     return 'nvidia/nemotron-3-ultra-550b-a55b:free'
@@ -189,9 +215,13 @@ const LEGACY_OLLAMA_TEXT_MODEL_TAGS = new Set([
   'deepseek-r1:14b-64k',
 ])
 
-export const DEFAULT_LOCAL_IMAGE_MODEL = 'agnes-image-2.0-flash'
+export const DEFAULT_LOCAL_IMAGE_MODEL = 'agnes-image-2.1-flash'
 
+/** 非解说管线默认视频；解说默认见 DEFAULT_NARRATION_HIGHLIGHT_VIDEO_MODEL */
 export const DEFAULT_LOCAL_VIDEO_MODEL = 'cogvideox-flash'
+
+/** 解说每镜图生视频默认：Agnes Video V2.0 */
+export const DEFAULT_NARRATION_HIGHLIGHT_VIDEO_MODEL = 'agnes-video-v2.0'
 
 export const FLUX_PROMPT_EN_VERSION = 20
 
@@ -370,7 +400,8 @@ export function isFluxEnglishPromptInaccurate(en: string, chinese?: string | nul
 }
 
 export const LOCAL_IMAGE_MODEL_OPTIONS = [
-  { value: 'agnes-image-2.0-flash', label: 'Agnes · Image 2.0（定妆/参考图，默认）' },
+  { value: 'agnes-image-2.1-flash', label: 'Agnes · Image 2.1（复杂构图/定妆，默认）' },
+  { value: 'agnes-image-2.0-flash', label: 'Agnes · Image 2.0（定妆/多图合成）' },
   { value: 'cogview-3-flash', label: '智谱 · CogView-3-Flash（免费文生图，无定妆参考）' },
   { value: 'qwen_image_edit_q3', label: 'ComfyUI Qwen-Edit · Q3_K_M（中文+定妆）' },
   { value: 'qwen_image_edit_q4', label: 'ComfyUI Qwen-Edit · Q4_K_M（中文+定妆）' },
@@ -378,7 +409,8 @@ export const LOCAL_IMAGE_MODEL_OPTIONS = [
 ] as const
 
 export const LOCAL_VIDEO_MODEL_OPTIONS = [
-  { value: 'cogvideox-flash', label: '智谱 · CogVideoX-Flash（免费视频，推荐）' },
+  { value: 'agnes-video-v2.0', label: 'Agnes · Video V2.0（首尾帧镜间连贯·推荐）' },
+  { value: 'cogvideox-flash', label: '智谱 · CogVideoX-Flash（免费视频）' },
   { value: 'wan_i2v_fusionx', label: 'Wan FusionX 快速 · 6 步图生视频' },
   { value: 'wan_i2v', label: 'Wan I2V 本地 · AI 图生视频（14B 高质量）' },
   { value: 'wan_flf2v', label: 'Wan FLF2V 本地 · 首尾帧' },
@@ -388,20 +420,24 @@ export const LOCAL_VIDEO_MODEL_OPTIONS = [
 
 export const DEFAULT_IMAGE_MODEL = 'gpt-image-2'
 
-export const DEFAULT_TEXT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+export const DEFAULT_TEXT_MODEL = 'deepseek-v4-flash'
 
 export const DEFAULT_TEXT_THINKING = true
 /** 剧本生成对话默认模型 */
 export const DEFAULT_NARRATION_SCRIPT_CHAT_MODEL = DEFAULT_TEXT_MODEL
 /** 解说模式：配图等文本 LLM 默认模型 */
 export const DEFAULT_NARRATION_TEXT_MODEL = DEFAULT_NARRATION_SCRIPT_CHAT_MODEL
+/** 配图文案专用（与后端一致：妙飞 DeepSeek） */
+export const DEFAULT_NARRATION_IMAGE_TEXT_MODEL = 'deepseek-v4-flash'
 
 export const TEXT_MODEL_OPTIONS = [
-  { value: 'nvidia/nemotron-3-ultra-550b-a55b:free', label: 'Nemotron 3 Ultra · OpenRouter 免费' },
+  { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash · 妙飞（默认）' },
   { value: 'openrouter/deepseek-v4-flash', label: 'DeepSeek V4 Flash · OpenRouter 付费' },
-  { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash · 官网' },
   { value: 'openrouter/deepseek-v4-pro', label: 'DeepSeek V4 Pro · OpenRouter 付费' },
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 官网' },
+  { value: 'poolside/laguna-s-2.1:free', label: 'Laguna S 2.1 · OpenRouter 免费' },
+  { value: 'nvidia/nemotron-3-ultra-550b-a55b:free', label: 'Nemotron 3 Ultra · OpenRouter 免费（备选）' },
+  { value: 'nvidia/nemotron-3-super-120b-a12b:free', label: 'Nemotron 3 Super · OpenRouter 免费（备选）' },
   { value: 'qwen3.5-plus', label: 'Qwen 3.5 Plus · 4022' },
   { value: 'gpt-4o', label: 'GPT-4o · OpenAI 兼容' },
   ...LOCAL_TEXT_MODEL_OPTIONS,
@@ -422,6 +458,10 @@ export function resolveNarrationEpisodeTextModel(
     'google/gemini-3-flash-preview',
     'gpt-4.1-mini',
     'deepseek-v4-flash:free',
+    'inclusionai/ling-3.0-flash:free',
+    'nvidia/nemotron-3-ultra-550b-a55b:free',
+    'nvidia/nemotron-3-ultra:free',
+    'nvidia/nemotron-3-ultra-550b:free',
     'glm-4.7-flash',
     'glm-4-flash-250414',
   ])
@@ -430,17 +470,23 @@ export function resolveNarrationEpisodeTextModel(
 }
 
 export function resolveNarrationImageTextModel(
-  ep?: { text_model?: string | null; textModel?: string | null } | null,
-  bodyModel?: string | null,
+  _ep?: { text_model?: string | null; textModel?: string | null } | null,
+  _bodyModel?: string | null,
 ) {
-  const picked = String(bodyModel || '').trim()
-  if (picked) return picked
-  return resolveNarrationEpisodeTextModel(ep)
+  // 配图文案批写 paragraph_prompts JSON（统一妙飞 DeepSeek）
+  return DEFAULT_NARRATION_IMAGE_TEXT_MODEL
 }
 
 export function textModelSupportsThinking(model?: string | null): boolean {
   const m = String(model || '').trim().toLowerCase()
-  return m.includes('deepseek') || m.includes('qwen3.5') || m.includes('qwen-3.5')
+  if (!m) return false
+  if (m.includes('deepseek')) return true
+  if (m.includes('qwen3.5') || m.includes('qwen-3.5') || m.includes('qwen3_5')) return true
+  if (m.startsWith('glm-') || m.includes('glm4') || m.includes('glm-4')) return true
+  // OpenRouter Ling / Ring hybrid reasoning
+  if (m.includes('inclusionai/ling') || m.includes('inclusionai/ring')) return true
+  if (/(^|\/)ling-[\d.]/.test(m) || /(^|\/)ring-[\d.]/.test(m)) return true
+  return false
 }
 
 export function textModelSupportsVision(model?: string | null): boolean {
@@ -577,7 +623,7 @@ export function resolveLocalScriptChatTextModel(
 export function isLocalOllamaTextModel(model?: string | null): boolean {
   const m = normalizeTextModelId(model)
   if (!m || CLOUD_TEXT_MODELS.has(m)) return false
-  if (m.startsWith('glm-') || m.startsWith('openrouter/')) return false
+  if (m.startsWith('glm-') || m.startsWith('openrouter/') || m.startsWith('nvidia/') || m.startsWith('inclusionai/') || m.startsWith('poolside/')) return false
   if (LEGACY_OLLAMA_TEXT_MODEL_TAGS.has(m)) return true
   if (LOCAL_TEXT_MODEL_OPTIONS.some(item => item.value === m)) return false
   return /^[\w.-]+:[\w.-]+$/i.test(m)
@@ -632,6 +678,8 @@ export function isLocalAgentToolModel(model?: string | null): boolean {
 export function resolveLocalExtractModel(episodeModel?: string | null): string {
   const picked = resolveActiveLocalLlmModel(episodeModel)
   if (isLocalAgentToolModel(picked)) return picked
+  // 已选 DeepSeek 等云端模型时勿再回落旧默认（曾误用已下架的 ling）
+  if (CLOUD_TEXT_MODELS.has(picked)) return picked
   return DEFAULT_LOCAL_AGENT_MODEL
 }
 
@@ -643,7 +691,9 @@ export function resolveLocalEpisodeImageModel(
   if (stored && LOCAL_IMAGE_MODEL_OPTIONS.some(item => item.value === stored)) return stored
   if (stored && stored.startsWith('cogview')) return stored
   if (stored && stored.startsWith('agnes-image')) {
-    return stored === 'agnes-image-2.0' ? 'agnes-image-2.0-flash' : stored
+    if (stored === 'agnes-image-2.0') return 'agnes-image-2.0-flash'
+    if (stored === 'agnes-image-2.1') return 'agnes-image-2.1-flash'
+    return stored
   }
   if (stored && (stored.startsWith('sdxl_') || stored.startsWith('wan_') || stored.startsWith('flux') || stored === 'kolors' || stored.startsWith('qwen_image'))) return stored
   if (stored && !isCloudImageModel(stored)) return stored
@@ -756,8 +806,7 @@ export function extractNarrationSentence(sb: any): string {
   const dialogue = String(sb?.dialogue || '').trim()
   if (dialogue) {
     const pure = dialogue
-      .replace(/^旁白[:：]\s*/, '')
-      .replace(/^剧中[:：]\s*/, '')
+      .replace(/^[^：:]{1,20}[:：]\s*/, '')
       .trim()
     if (pure) return pure
   }
@@ -779,7 +828,7 @@ export interface NarrationImageMeta {
   narration_lines?: string[]
   image_narration_lines?: string[]
   paragraph_index?: number
-  paragraph_layout?: 'single' | 'diptych'
+  paragraph_layout?: 'single' | 'diptych' | 'quad'
   script_paragraph_index?: number
   body_sentence_index?: number
   image_prompt_source?: 'llm_raw' | 'optimized' | 'upload' | 'manual'
@@ -793,6 +842,9 @@ export interface NarrationImageMeta {
   image_validate_summary?: string
   image_validate_issues?: string[]
   image_validate_suggestions?: string[]
+  /** 可选：强化运动提示词（不决定是否出视频；解说默认每镜图生视频） */
+  highlight_motion?: boolean
+  highlight_reason?: string
 }
 
 export function isNarrationStoryboard(sb: any) {
@@ -827,7 +879,13 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
         ? raw.image_narration_lines.map((s: unknown) => String(s || '').trim()).filter(Boolean)
         : undefined,
       paragraph_index: typeof raw.paragraph_index === 'number' ? raw.paragraph_index : undefined,
-      paragraph_layout: raw.paragraph_layout === 'diptych' ? 'diptych' : raw.paragraph_layout === 'single' ? 'single' : undefined,
+      paragraph_layout: raw.paragraph_layout === 'quad'
+        ? 'quad'
+        : raw.paragraph_layout === 'diptych'
+          ? 'diptych'
+          : raw.paragraph_layout === 'single'
+            ? 'single'
+            : undefined,
       script_paragraph_index: typeof raw.script_paragraph_index === 'number' ? raw.script_paragraph_index : undefined,
       body_sentence_index: typeof raw.body_sentence_index === 'number' ? raw.body_sentence_index : undefined,
       image_prompt_source: raw.image_prompt_source === 'llm_raw'
@@ -863,6 +921,10 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
       image_validate_suggestions: Array.isArray(raw.image_validate_suggestions)
         ? raw.image_validate_suggestions.map((s: unknown) => String(s || '').trim()).filter(Boolean)
         : undefined,
+      highlight_motion: typeof raw.highlight_motion === 'boolean' ? raw.highlight_motion : undefined,
+      highlight_reason: typeof raw.highlight_reason === 'string' && raw.highlight_reason.trim()
+        ? raw.highlight_reason.trim()
+        : undefined,
     }
   }
   try {
@@ -885,7 +947,13 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
         ? parsed.image_narration_lines.map((s: unknown) => String(s || '').trim()).filter(Boolean)
         : undefined,
       paragraph_index: typeof parsed?.paragraph_index === 'number' ? parsed.paragraph_index : undefined,
-      paragraph_layout: parsed?.paragraph_layout === 'diptych' ? 'diptych' : parsed?.paragraph_layout === 'single' ? 'single' : undefined,
+      paragraph_layout: parsed?.paragraph_layout === 'quad'
+        ? 'quad'
+        : parsed?.paragraph_layout === 'diptych'
+          ? 'diptych'
+          : parsed?.paragraph_layout === 'single'
+            ? 'single'
+            : undefined,
       script_paragraph_index: typeof parsed?.script_paragraph_index === 'number' ? parsed.script_paragraph_index : undefined,
       body_sentence_index: typeof parsed?.body_sentence_index === 'number' ? parsed.body_sentence_index : undefined,
       image_prompt_source: parsed?.image_prompt_source === 'llm_raw'
@@ -920,6 +988,10 @@ export function parseNarrationImageMeta(sb: any): NarrationImageMeta {
         : undefined,
       image_validate_suggestions: Array.isArray(parsed?.image_validate_suggestions)
         ? parsed.image_validate_suggestions.map((s: unknown) => String(s || '').trim()).filter(Boolean)
+        : undefined,
+      highlight_motion: typeof parsed?.highlight_motion === 'boolean' ? parsed.highlight_motion : undefined,
+      highlight_reason: typeof parsed?.highlight_reason === 'string' && parsed.highlight_reason.trim()
+        ? parsed.highlight_reason.trim()
         : undefined,
     }
   } catch {}
@@ -1120,8 +1192,9 @@ export function estimateStoryboardDurationSec(sb: any): number {
   if (Number.isFinite(stored) && stored > 0) return stored
   const text = resolveStoryboardSubtitleNarration(sb)
   const chars = text.replace(/\s/g, '').length
-  if (isNarrationTitleShot(sb)) return Math.max(6, Math.min(12, Math.ceil(chars / 3.5)))
-  return Math.max(3, Math.min(12, Math.ceil(chars / 4.5)))
+  if (isNarrationTitleShot(sb)) return Math.max(6, Math.min(12, Math.round(chars / 3.5) || 6))
+  // 解说脚本节奏：约 650 字/分钟 → 10s≈108 字
+  return Math.max(7, Math.min(13, Math.round(chars / (650 / 60)) || 7))
 }
 
 export type ComposeUnitSubtitleLine = {
@@ -1218,27 +1291,77 @@ export function cleanVideoPromptText(raw: string): string {
   return String(raw || '')
     .replace(/\*\*/g, '')
     .replace(/旁白\s*[:：]\s*/g, '')
+    .replace(/@图\d+/g, '')
+    .replace(/对照定妆「[^」]+」/g, '')
+    .replace(/对照场景「[^」]+」/g, '')
+    .replace(/对照道具「[^」]+」/g, '')
+    .replace(/【定妆参考顺序：[^\]]*】/g, '')
+    .replace(/【场景参考：[^\]]*】/g, '')
+    .replace(/【道具参考顺序：[^\]]*】/g, '')
     .replace(/\s+/g, ' ')
     .trim()
 }
 
+/** 从 Toonflow 配图文案抽【画面】，供视频运动描述（禁止截前 110 字标签壳） */
+export function extractImageSceneForVideoPrompt(imagePrompt?: string | null): string {
+  const raw = String(imagePrompt || '').trim()
+  if (!raw) return ''
+  const huamian = raw.match(/【画面】([\s\S]*?)(?=\n*【(?:风格|画风|定妆|场景|道具)|$)/)
+  if (huamian?.[1]) {
+    return cleanVideoPromptText(huamian[1]).slice(0, 160)
+  }
+  const stripped = raw
+    .split(/\n+/)
+    .filter((line) => {
+      const t = line.trim()
+      if (!t) return false
+      if (/^@图\d+/.test(t)) return false
+      if (/^对照(定妆|场景|道具)/.test(t)) return false
+      if (/^【定妆参考|^【场景参考|^【道具参考/.test(t)) return false
+      if (/^【风格】|^保持 @图/.test(t)) return false
+      return true
+    })
+    .join(' ')
+    .replace(/【画面】/g, '')
+  return cleanVideoPromptText(stripped).slice(0, 160)
+}
+
 /**
- * 由「配图场景描述 + 段落旁白」生成 Wan 提示词。
- * 配图锚定画面，段落锚定动作/情绪。
+ * 由「配图文案 + 段落旁白」生成专用视频运动描述（非配图全文截断）。
+ * imageScene 可传整段 image_prompt（会抽【画面】）或已抽好的画面句。
  */
-export function buildVideoPromptFromParagraphAndImage(imageScene: string, paragraph: string): string {
-  const scene = cleanVideoPromptText(imageScene).slice(0, 110)
-  const para = cleanVideoPromptText(paragraph).slice(0, 90)
-  if (scene && para) {
-    return `${scene}。旁白情境：${para}。画面与配图一致，角色轻微自然动作，镜头稳定，动漫风格`
+export function buildVideoPromptFromParagraphAndImage(
+  imageScene: string,
+  paragraph: string,
+  opts?: { highlight?: boolean; highlightReason?: string | null },
+): string {
+  const hasHuamianMarker = /【画面】/.test(String(imageScene || ''))
+    || /^@图\d+/.test(String(imageScene || '').trim())
+    || /对照定妆「/.test(String(imageScene || ''))
+  const scene = hasHuamianMarker
+    ? extractImageSceneForVideoPrompt(imageScene)
+    : cleanVideoPromptText(imageScene).slice(0, 160)
+  const para = cleanVideoPromptText(paragraph).slice(0, 100)
+
+  if (opts?.highlight) {
+    const motionHint = opts.highlightReason
+      ? `关键动作：${String(opts.highlightReason).trim()}，动作幅度明显、节奏紧凑`
+      : '关键动作有冲击力，角色表情与肢体有明显变化'
+    const parts = [
+      scene ? `画面：${scene}` : '',
+      para ? `旁白情境：${para}` : '',
+      motionHint,
+      '单镜头连续运动，运镜跟动作，动漫风格，禁止切镜换装，禁止字幕水印',
+    ].filter(Boolean)
+    return parts.join('。') || '画面与配图一致，角色做出有冲击力的短动作，镜头跟进，动漫风格'
   }
-  if (para) {
-    return `旁白情境：${para}。画面与配图一致，角色轻微自然动作，镜头稳定，动漫风格`
-  }
-  if (scene) {
-    return `${scene}。画面轻微自然运动，镜头稳定，动漫风格`
-  }
-  return '画面与配图一致，角色轻微自然动作，镜头稳定，动漫风格'
+
+  const lock = '保持与参考图人物服装发型一致，单镜头连续运动，禁止切镜换装，日系2D动漫'
+  const parts: string[] = []
+  if (scene) parts.push(scene.replace(/[。．.]+$/g, ''))
+  if (para) parts.push(`旁白要点：${para.replace(/[。．.]+$/g, '')}`)
+  parts.push(lock)
+  return parts.filter(Boolean).join('。') || `画面与配图一致，角色轻微自然动作，镜头稳定。${lock}`
 }
 
 /** 配音列表：片头 + 正文每句一镜（按句配音，合成时再拼段落） */
@@ -1482,8 +1605,9 @@ export function narrationShotNeedsOwnImage(sb: any) {
   return false
 }
 
-export function resolveNarrationParagraphLayout(sb: any): 'single' | 'diptych' {
+export function resolveNarrationParagraphLayout(sb: any): 'single' | 'diptych' | 'quad' {
   const meta = parseNarrationImageMeta(sb)
+  if (meta.paragraph_layout === 'quad') return 'quad'
   return meta.paragraph_layout === 'diptych' ? 'diptych' : 'single'
 }
 
@@ -1553,24 +1677,54 @@ export function resolveSceneContentForShot(storyboards: any[], sb: any): string 
   return `${first}。${sentences.slice(1, -1).join('，')}。${last}`
 }
 
-/** 配图模块展示用：优先 scene_content / narration_lines，完整旁白不截断 */
-
-/** 配图模块展示用：优先 scene_content / narration_lines，完整旁白不截断 */
+/** 配图模块展示用：该镜完整旁白+对话（保留说话人前缀），不截断 */
 export function getNarrationShotDisplayText(sb: any, storyboards?: any[]): string {
+  // 优先分镜 dialogue：含「旁白：」「角色：」；锚点镜带上沿用镜台词
+  if (storyboards?.length) {
+    const meta = parseNarrationImageMeta(sb)
+    if (meta.narration_image_mode === 'new' || narrationShotNeedsOwnImage(sb)) {
+      const group = collectShotGroupDialogueLines(storyboards, sb)
+      if (group.length) return group.join('\n')
+    }
+  }
+  const dialogue = String(sb?.dialogue || '').trim()
+  if (dialogue) return dialogue
   const meta = parseNarrationImageMeta(sb)
-  const scene = String(meta.scene_content || '').trim()
-  if (scene) return scene
   const lines = meta.image_narration_lines?.length
     ? meta.image_narration_lines
     : meta.narration_lines?.length
       ? meta.narration_lines
       : null
   if (lines?.length) return lines.join('\n')
+  const scene = String(meta.scene_content || '').trim()
+  if (scene) return scene
   if (storyboards?.length && meta.narration_image_mode === 'new') {
     const resolved = resolveSceneContentForShot(storyboards, sb).trim()
     if (resolved) return resolved
   }
   return extractNarrationSentence(sb)
+}
+
+/** 配图锚点及其沿用镜的完整台词（旁白+对话） */
+function collectShotGroupDialogueLines(storyboards: any[], sb: any): string[] {
+  const ordered = sortStoryboards(storyboards)
+  const idx = ordered.findIndex(item => item.id === sb.id)
+  if (idx < 0) {
+    const d = String(sb?.dialogue || '').trim()
+    return d ? [d] : []
+  }
+  const out: string[] = []
+  const push = (item: any) => {
+    const d = String(item?.dialogue || '').trim()
+    if (d) out.push(d)
+  }
+  push(ordered[idx])
+  for (let i = idx + 1; i < ordered.length; i++) {
+    const meta = parseNarrationImageMeta(ordered[i])
+    if (meta.narration_image_mode === 'new') break
+    push(ordered[i])
+  }
+  return out
 }
 
 export function collectBodyNarrationLines(storyboards: any[]): string[] {
@@ -1830,6 +1984,12 @@ export function buildNarrationImageGeneratePayload(
   model?: string | null,
   characterIds?: number[],
   allSbs?: any[],
+  options?: {
+    usePortraitReference?: boolean
+    useSceneReference?: boolean
+    usePropReference?: boolean
+    panelTextMode?: 'short' | 'full'
+  },
 ) {
   const resolvedIds = characterIds?.length
     ? characterIds
@@ -1838,14 +1998,36 @@ export function buildNarrationImageGeneratePayload(
   const prompt = enrichNarrationPromptWithCharacters(basePrompt, chars, resolvedIds, style)
   const minimal = isNarrationMinimalStyle(style)
   const maxRefs = imageModelMaxReferenceImages(model)
-  const referenceImages = !minimal && imageModelSupportsReferenceImages(model)
+  const usePortraitReference = options?.usePortraitReference !== false
+    && extra.use_portrait_reference !== false
+    && extra.usePortraitReference !== false
+  const useSceneReference = options?.useSceneReference !== false
+    && extra.use_scene_reference !== false
+    && extra.useSceneReference !== false
+  const usePropReference = options?.usePropReference !== false
+    && extra.use_prop_reference !== false
+    && extra.usePropReference !== false
+  const referenceImages = usePortraitReference
+    && !minimal
+    && imageModelSupportsReferenceImages(model)
     ? collectNarrationCharacterReferenceImages(chars, resolvedIds, maxRefs, prompt)
     : []
+  const panelTextMode = options?.panelTextMode === 'full'
+    ? 'full'
+    : options?.panelTextMode === 'short'
+      ? 'short'
+      : (extra.panel_text_mode === 'full' || extra.panelTextMode === 'full' ? 'full' : undefined)
   return {
     ...extra,
     prompt,
     image_style: style,
-    reference_images: referenceImages.length ? referenceImages : undefined,
+    use_portrait_reference: usePortraitReference,
+    use_scene_reference: useSceneReference,
+    use_prop_reference: usePropReference,
+    reference_images: usePortraitReference
+      ? (referenceImages.length ? referenceImages : undefined)
+      : (useSceneReference || usePropReference ? undefined : []),
+    ...(panelTextMode ? { panel_text_mode: panelTextMode } : {}),
   }
 }
 
@@ -2037,6 +2219,7 @@ export function narrationTtsReady(storyboards: any[]) {
 }
 
 export function workflowStepTotal(mode: ProductionMode) {
+  if (usesExplainScriptFlow(mode)) return 11
   return isNarrationLikeMode(mode) ? 10 : 12
 }
 
@@ -2059,6 +2242,8 @@ export interface WorkflowState {
   openingVideoUrl?: boolean
   titleVideoUrl?: boolean
   bgmAppliedCount?: number
+  /** 剪辑台：已有保存的时间线工程 */
+  timelineReady?: boolean
   /** 对话立绘：场景背景就绪 */
   scenesCount?: number
   sceneImgCount?: number
@@ -2085,6 +2270,7 @@ export function workflowProgress(mode: ProductionMode, s: WorkflowState) {
   if (isNarrationLikeMode(mode)) {
     let p = 0
     if (s.rawContent) p++
+    if (usesExplainScriptFlow(mode) && s.scriptContent) p++
     if (s.charsCount > 0) p++
     if (s.sbsCount) p++
     if (s.narratorReady) p++
@@ -2143,6 +2329,7 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
           { key: 'export:opening', label: '开幕视频', desc: '翻页片头', done: !!s.openingVideoUrl },
           { key: 'export:title', label: '片头视频', desc: '剧中红字', done: !!s.titleVideoUrl },
           { key: 'export:merge', label: '拼接导出', desc: '完整 MP4', done: s.mergeUrl },
+          { key: 'export:timeline', label: '剪辑台', desc: '时间轴精剪', done: !!s.timelineReady },
         ],
       },
     ]
@@ -2150,29 +2337,69 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
   if (mode === 'narration' || mode === 'motion_comic' || mode === 'novel_comic') {
     const scriptLabel = mode === 'novel_comic'
       ? '小说漫画讲解'
-      : (mode === 'motion_comic' ? '漫画解说' : '解说')
-    const storyboardLabel = '旁白分镜'
+      : (mode === 'motion_comic' ? '漫画解说' : '解说视频')
+    const storyboardLabel = mode === 'narration' ? '分镜脚本' : '旁白分镜'
     const composeDesc = usesMotionComicVisuals(mode) ? '漫画图+旁白+上下运镜' : '配图+旁白'
+    const voiceLabel = usesDialogueSpeakers(mode) ? '角色音色' : '旁白音色'
+    const voiceDesc = usesDialogueSpeakers(mode) ? '旁白+角色配音' : '选择配音'
+    const scriptItems = mode === 'novel_comic'
+      ? [
+        {
+          key: 'script:raw',
+          label: '文案输入',
+          desc: '粘贴本章小说原文（直接拆镜）',
+          done: s.rawContent,
+        },
+        {
+          key: 'script:storyboard',
+          label: storyboardLabel,
+          desc: '按原文拆镜',
+          done: s.sbsCount > 0,
+        },
+      ]
+      : usesExplainScriptFlow(mode)
+        ? [
+          {
+            key: 'script:raw',
+            label: '文案输入',
+            desc: '粘贴小说/大纲/素材原文',
+            done: s.rawContent,
+          },
+          {
+            key: 'script:chat',
+            label: '解说脚本',
+            desc: '旁白>20%+人物对白',
+            done: s.scriptContent,
+          },
+          {
+            key: 'script:storyboard',
+            label: storyboardLabel,
+            desc: 'LLM约10s≈108字一镜',
+            done: s.sbsCount > 0,
+          },
+        ]
+        : [
+          { key: 'script:chat', label: '剧本生成', desc: mode === 'motion_comic' ? 'AI 写短剧稿' : 'AI 写解说稿或直接输入', done: s.rawContent },
+          { key: 'script:raw', label: '文案输入', desc: '粘贴文稿', done: s.rawContent },
+          { key: 'script:storyboard', label: storyboardLabel, desc: '拆成镜头', done: s.sbsCount > 0 },
+        ]
     return [
       {
         id: 'script',
         label: scriptLabel,
-        items: [
-          { key: 'script:chat', label: mode === 'novel_comic' ? '本章朗读稿' : '剧本生成', desc: mode === 'novel_comic' ? '改本章旁白朗读稿' : (mode === 'motion_comic' ? 'AI 写短剧稿' : 'AI 写解说稿或直接输入'), done: s.rawContent },
-          { key: 'script:raw', label: '文案输入', desc: mode === 'novel_comic' ? '粘贴/编辑本章朗读稿' : '粘贴文稿', done: s.rawContent },
-          { key: 'script:storyboard', label: storyboardLabel, desc: '拆成镜头', done: s.sbsCount > 0 },
-        ],
+        items: scriptItems,
       },
       {
         id: 'production',
-        label: '制作',
+        label: mode === 'narration' ? '出图·配音·剪辑' : '制作',
         items: [
-          { key: 'prod:voice', label: '旁白音色', desc: '选择配音', done: s.narratorReady },
+          { key: 'prod:voice', label: voiceLabel, desc: voiceDesc, done: s.narratorReady },
           { key: 'prod:chars', label: '定妆参考', desc: '角色参考图', done: s.charsCount > 0 },
-          { key: 'prod:shots', label: '生成配图', desc: usesMotionComicVisuals(mode) ? '漫画插画+换镜' : '换场景配图', done: s.sbsCount > 0 && (s.narrationImagesReady ?? s.shotImgCount === s.sbsCount) },
-          { key: 'prod:dubbing', label: '生成配音', desc: 'TTS 旁白', done: s.sbsCount > 0 && (s.narrationTtsReady ?? (!s.ttsEligibleCount || s.ttsGeneratedCount === s.ttsEligibleCount)) },
+          { key: 'prod:scenes', label: '场景/道具', desc: '场所与关键物件定妆', done: (s.scenesCount ?? 0) > 0 && !!(s.scenesReady) },
+          { key: 'prod:dubbing', label: '生成配音', desc: usesDialogueSpeakers(mode) ? '按说话人 TTS' : 'TTS 旁白', done: s.sbsCount > 0 && (s.narrationTtsReady ?? (!s.ttsEligibleCount || s.ttsGeneratedCount === s.ttsEligibleCount)) },
+          { key: 'prod:shots', label: '生成配图', desc: usesMotionComicVisuals(mode) ? '漫画插画+换镜' : (mode === 'narration' ? '按分镜一镜一图' : '换场景配图'), done: s.sbsCount > 0 && (s.narrationImagesReady ?? s.shotImgCount === s.sbsCount) },
+          { key: 'prod:videos', label: '镜头视频', desc: mode === 'narration' ? '每镜图生视频 · 同妆同服才串尾帧' : '可选图生视频 · 同妆同服才串尾帧', done: s.sbsCount > 0 && (s.shotVidCount ?? 0) > 0 },
           { key: 'prod:bgm', label: 'BGM 配乐', desc: 'Suno / PixVerse', done: s.sbsCount > 0 && (s.bgmAppliedCount ?? 0) > 0 },
-          { key: 'prod:videos', label: '本地视频', desc: 'Wan / 动图漫（可选）', done: s.sbsCount > 0 && (s.shotVidCount ?? 0) > 0 },
           { key: 'prod:compose', label: '镜头合成', desc: composeDesc, done: s.sbsCount > 0 && s.composedCount === s.sbsCount },
         ],
       },
@@ -2183,6 +2410,7 @@ export function buildSidebarSections(mode: ProductionMode, s: WorkflowState) {
           { key: 'export:opening', label: '开幕视频', desc: '翻页片头', done: !!s.openingVideoUrl },
           { key: 'export:title', label: '片头视频', desc: '剧中红字', done: !!s.titleVideoUrl },
           { key: 'export:merge', label: '拼接导出', desc: '完整 MP4', done: s.mergeUrl },
+          { key: 'export:timeline', label: '剪辑台', desc: '时间轴精剪', done: !!s.timelineReady },
         ],
       },
     ]
@@ -2214,15 +2442,23 @@ export function localModelStageLabel(stage: LocalModelStage | string): string {
   return '待机'
 }
 
-export function narrationScriptChatStep() {
-  return 0
+/**
+ * 小说漫画：文案输入(0) → 旁白分镜(1)
+ * 解说视频：文案输入(0) → 解说脚本(1) → 分镜(2)
+ * 其它旁白类：剧本生成(0) → 文案(1) → 分镜(2)
+ */
+export function narrationScriptChatStep(mode?: ProductionMode | string | null) {
+  if (mode === 'novel_comic') return -1
+  return usesExplainScriptFlow(mode) ? 1 : 0
 }
 
-export function narrationRawContentStep() {
-  return 1
+export function narrationRawContentStep(mode?: ProductionMode | string | null) {
+  if (mode === 'novel_comic') return 0
+  return usesExplainScriptFlow(mode) ? 0 : 1
 }
 
-export function narrationStoryboardStep() {
+export function narrationStoryboardStep(mode?: ProductionMode | string | null) {
+  if (mode === 'novel_comic') return 1
   return 2
 }
 
@@ -2232,10 +2468,16 @@ export function dramaStoryboardStep() {
 
 export function resolveScriptStep(mode: ProductionMode, key: string) {
   if (isNarrationLikeMode(mode)) {
-    if (key === 'script:chat') return narrationScriptChatStep()
-    if (key === 'script:raw') return narrationRawContentStep()
-    if (key === 'script:storyboard') return narrationStoryboardStep()
-    return narrationScriptChatStep()
+    if (key === 'script:chat') {
+      const chat = narrationScriptChatStep(mode)
+      return chat >= 0 ? chat : narrationRawContentStep(mode)
+    }
+    if (key === 'script:raw') return narrationRawContentStep(mode)
+    if (key === 'script:storyboard') return narrationStoryboardStep(mode)
+    if (mode === 'novel_comic') return narrationRawContentStep(mode)
+    return usesExplainScriptFlow(mode)
+      ? narrationRawContentStep(mode)
+      : narrationScriptChatStep(mode)
   }
   const stepMap: Record<string, number> = {
     'script:raw': 0,
@@ -2257,13 +2499,15 @@ export function resolveActiveSubStepKey(
   if (panel === 'export') {
     if (exportTab === 'opening') return 'export:opening'
     if (exportTab === 'title') return 'export:title'
+    if (exportTab === 'timeline') return 'export:timeline'
     return 'export:merge'
   }
   if (panel === 'production') return `prod:${prodTab}`
   if (isNarrationLikeMode(mode)) {
-    if (scriptStep === narrationStoryboardStep()) return 'script:storyboard'
-    if (scriptStep === narrationRawContentStep()) return 'script:raw'
-    return 'script:chat'
+    if (scriptStep === narrationStoryboardStep(mode)) return 'script:storyboard'
+    if (scriptStep === narrationRawContentStep(mode)) return 'script:raw'
+    if (scriptStep === narrationScriptChatStep(mode)) return 'script:chat'
+    return usesExplainScriptFlow(mode) ? 'script:raw' : 'script:chat'
   }
   if (scriptStep === 0) return 'script:raw'
   if (scriptStep === 1) return 'script:rewrite'
@@ -2272,8 +2516,23 @@ export function resolveActiveSubStepKey(
   return 'script:storyboard'
 }
 
-export function inferNarrationScriptStep(_ep: any, sbsCount: number, _charsCount: number) {
-  if (sbsCount > 0) return narrationStoryboardStep()
+export function inferNarrationScriptStep(
+  ep: any,
+  sbsCount: number,
+  _charsCount: number,
+  mode?: ProductionMode | string | null,
+) {
+  if (sbsCount > 0) return narrationStoryboardStep(mode)
+  if (mode === 'novel_comic') {
+    return narrationRawContentStep(mode)
+  }
+  if (usesExplainScriptFlow(mode)) {
+    const hasScript = !!(ep?.script_content || ep?.scriptContent || '').toString().trim()
+    const hasRaw = !!(ep?.content || '').toString().trim()
+    if (hasScript) return narrationScriptChatStep(mode)
+    if (hasRaw) return narrationScriptChatStep(mode)
+    return narrationRawContentStep(mode)
+  }
   // 已有文案也默认进入「剧本生成」对话，便于多轮修改；文案编辑走侧栏「文案输入」
-  return narrationScriptChatStep()
+  return narrationScriptChatStep(mode)
 }

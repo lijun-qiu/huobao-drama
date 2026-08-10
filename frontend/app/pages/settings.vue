@@ -441,13 +441,13 @@ const providerPresets = {
   text: {
     chatfire: { label: '4022 文本（DeepSeek）', baseUrl: 'https://api.4022543.xyz', models: ['deepseek-v4-flash', 'deepseek-v4-pro', 'qwen3.5-plus', 'gpt-4o'] },
     zhipu: { label: '智谱免费 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4.7-flash', 'glm-4-flash-250414'] },
-    openrouter: { label: 'OpenRouter（Nemotron / DeepSeek）', baseUrl: 'https://openrouter.ai/api', models: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'openrouter/deepseek-v4-flash', 'openrouter/deepseek-v4-pro'] },
+    openrouter: { label: 'OpenRouter（Laguna / Ultra / Super / DeepSeek）', baseUrl: 'https://openrouter.ai/api', models: ['poolside/laguna-s-2.1:free', 'nvidia/nemotron-3-ultra-550b-a55b:free', 'nvidia/nemotron-3-super-120b-a12b:free', 'openrouter/deepseek-v4-flash', 'openrouter/deepseek-v4-pro'] },
     openai: { label: 'DeepSeek 官网 / OpenAI', baseUrl: 'https://api.deepseek.com', models: ['deepseek-v4-flash', 'deepseek-v4-pro', 'gpt-4.1-mini'] },
     ollama: { label: 'Ollama 本地 LLM（可选）', baseUrl: 'http://127.0.0.1:11434/v1', models: ['qwen3.5:9b', 'qwen3.5:27b'] },
   },
   image: {
     zhipu: { label: '智谱免费 CogView（推荐）', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['cogview-3-flash'] },
-    agnes: { label: 'Agnes Image 定妆（推荐）', baseUrl: 'https://apihub.agnes-ai.com/v1', models: ['agnes-image-2.0-flash', 'agnes-image-2.0'] },
+    agnes: { label: 'Agnes Image 定妆（推荐）', baseUrl: 'https://apihub.agnes-ai.com/v1', models: ['agnes-image-2.1-flash', 'agnes-image-2.0-flash', 'agnes-image-2.0'] },
     kling: {
       label: '4022 可灵 Kling',
       baseUrl: 'https://api.4022543.xyz',
@@ -505,7 +505,7 @@ const providerPresets = {
   },
 }
 const huobaoPresetCards = [
-  { serviceType: 'text', label: '文本', provider: 'openrouter', baseUrl: 'https://openrouter.ai/api', model: 'nvidia/nemotron-3-ultra-550b-a55b:free', priority: 110 },
+  { serviceType: 'text', label: '文本', provider: 'openrouter', baseUrl: 'https://openrouter.ai/api', model: 'poolside/laguna-s-2.1:free,nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free,openrouter/deepseek-v4-flash,openrouter/deepseek-v4-pro', priority: 110 },
   { serviceType: 'image', label: '图片', provider: 'chatfire', baseUrl: 'https://api.4022543.xyz', model: 'gpt-image-2', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'vidu', baseUrl: 'https://api.4022543.xyz', model: 'viduq3-turbo', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.4022543.xyz/minimax', model: 'speech-2.8-hd', priority: 97 },

@@ -13,6 +13,7 @@ import { db, schema } from '../../db/index.js'
 import { eq, and } from 'drizzle-orm'
 import { now } from '../../utils/response.js'
 import { sanitizeCharacterAppearance } from '../../constants/art-styles.js'
+import { isNovelComicMode, resolveEpisodeProductionMode } from '../../constants/production-mode.js'
 import { logTaskProgress, logTaskSuccess } from '../../utils/task-logger.js'
 
 // ─── 关联辅助 ────────────────────────────────────────────────
@@ -40,6 +41,10 @@ export function readEpisodeScriptContent(episodeId: number): string {
   const [ep] = db.select().from(schema.episodes)
     .where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return ''
+  // 小说漫画讲解：直接读原文 content，不走讲解稿 script_content
+  if (isNovelComicMode(resolveEpisodeProductionMode(episodeId))) {
+    return String(ep.content || '').trim()
+  }
   return String(ep.scriptContent || ep.content || '').trim()
 }
 

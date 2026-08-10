@@ -15,7 +15,7 @@ import {
   hasNarrationUniversalPrefixIssue,
   isNarrationMinimalStyle,
   isNarrationStructuredStyle,
-  isMotionComicStyle,
+  usesComicIllustrationPipeline,
   NARRATION_UNIVERSAL_SCENE_SUFFIX,
   VIOLENCE_IMAGE_DETECT_RE,
   sanitizeSceneImagePrompt,
@@ -73,7 +73,7 @@ export function auditNarrationImagePromptText(
 
   const minimal = isNarrationMinimalStyle(style)
   const structured = isNarrationStructuredStyle(style)
-  const motionComic = isMotionComicStyle(style)
+  const motionComic = usesComicIllustrationPipeline(style)
   const issues: NarrationPromptAuditIssue[] = []
 
   if (VIOLENCE_IMAGE_DETECT_RE.test(text)) {
@@ -85,7 +85,7 @@ export function auditNarrationImagePromptText(
     })
   }
 
-  // 漫画解说改为整段文案：不再审计【】六维标签结构
+  // 漫画解说 / 小说彩漫四格改为整段文案：不再审计【】六维标签结构
   if (structured && !motionComic) {
     if (!hasNarrationSixDimStructure(text)) {
       issues.push({
@@ -302,7 +302,7 @@ export function optimizeEpisodeNarrationImagePrompts(
     const meta = parseNarrationImageMeta(sb.referenceImages)
     const { narration_image_mode, ...restMeta } = meta
     const llmRawBackup = meta.image_prompt_llm_raw || before
-    const derived = isMotionComicStyle(style)
+    const derived = usesComicIllustrationPipeline(style)
       ? deriveMotionComicShotMetaFromImagePrompt(after)
       : null
     db.update(schema.storyboards)

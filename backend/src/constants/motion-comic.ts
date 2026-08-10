@@ -4,6 +4,7 @@
  */
 import type { ProductionMode } from './production-mode.js'
 import { isMotionComicMode } from './production-mode.js'
+import { PORTRAIT_AGE_INFERENCE_LLM_RULE } from './portrait-reference.js'
 
 export const MOTION_COMIC_STYLE = 'motion-comic'
 
@@ -25,15 +26,15 @@ export const MOTION_COMIC_IMAGE_STYLE_OPTIONS = [
   { value: MOTION_COMIC_STYLE, label: '高对比国漫' },
 ] as const
 
-/** 漫画解说：每张配图覆盖 2～3 镜（更密，避免同图拖太久） */
-export const MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS = 2
-export const MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS = 3
+/** 漫画解说：每张配图覆盖 1～2 镜（更密；换焦点可单镜成段） */
+export const MOTION_COMIC_IMAGE_SEGMENT_MIN_SHOTS = 1
+export const MOTION_COMIC_IMAGE_SEGMENT_MAX_SHOTS = 2
 
-/** 漫画解说：配图锚点约占镜头数 40%～58%（约每 2 镜一张，观感更密） */
-export const MOTION_COMIC_IMAGE_DETECT_MIN_STORYBOARD_RATIO = 0.4
-export const MOTION_COMIC_IMAGE_DETECT_MAX_STORYBOARD_RATIO = 0.58
+/** 漫画解说：配图锚点约占镜头数 50%～72%（约每 1.5～2 镜一张） */
+export const MOTION_COMIC_IMAGE_DETECT_MIN_STORYBOARD_RATIO = 0.5
+export const MOTION_COMIC_IMAGE_DETECT_MAX_STORYBOARD_RATIO = 0.72
 /** 后处理优先拉到的目标密度（落在 min～max 偏上） */
-export const MOTION_COMIC_IMAGE_DETECT_TARGET_STORYBOARD_RATIO = 0.5
+export const MOTION_COMIC_IMAGE_DETECT_TARGET_STORYBOARD_RATIO = 0.6
 
 /** 项目级动效预设（写入 dramas.metadata） */
 export interface MotionComicPreset {
@@ -130,7 +131,6 @@ export function ensureMotionComicPortraitStyleInAppearance(appearance: string): 
   if (!raw) return raw
   const tagsMatch = raw.match(/\bEnglish tags:\s*([\s\S]+)$/im)
   let body = tagsMatch && tagsMatch.index != null ? raw.slice(0, tagsMatch.index).trim() : raw
-  const tags = tagsMatch?.[1]?.trim() || ''
   body = stripMotionComicPortraitStyleBracket(body)
   // 去掉旧白底均匀光残留，避免与统一戏剧光冲突
   body = body
@@ -142,22 +142,18 @@ export function ensureMotionComicPortraitStyleInAppearance(appearance: string): 
     .replace(/白底均匀柔光/g, '冷蓝戏剧侧光')
     .replace(/^[，,\s]+/, '')
     .trim()
-  if (!body) {
-    const bracketOnly = formatMotionComicPortraitStyleSpecBracket()
-    return tags ? `${bracketOnly}\nEnglish tags: ${tags}` : bracketOnly
-  }
-  const withStyle = `${formatMotionComicPortraitStyleSpecBracket()}，${body}`
-  return tags ? `${withStyle}\nEnglish tags: ${tags}` : withStyle
+  if (!body) return formatMotionComicPortraitStyleSpecBracket()
+  return `${formatMotionComicPortraitStyleSpecBracket()}，${body}`
 }
 
 /** 提取/补全定妆 appearance：画风与配图一致 */
 export const MOTION_COMIC_PORTRAIT_APPEARANCE_LLM_RULE = [
   `【定妆文案·画风规格·硬性】appearance 开头必须原样写入：${formatMotionComicPortraitStyleSpecBracket()}；须与配图同一套短剧解说高清国漫戏剧光，禁止改成白底均匀柔光/新海诚/京阿尼/水彩/厚涂/条漫/webtoon；`,
   '其后只写身份外貌（年龄或约略岁数/脸型/眉眼/发型/身形/#hex服装/标志特征/正面半身站姿）；五官与发型须国漫可辨：轮廓清晰、眉眼锋利、发块干净分明，禁止柔糊水彩五官、禁止万能男模棱角模板脸；',
-    '【年龄·硬性】必须按角色名与定位写年龄段：名含伯/爷/爷爷或 role 含爷爷/老年 → 写约60–75岁老年男性（花白或稀疏白发、皱纹），禁止写成青年小伙/黑色碎发少年感；名含婶/阿姨或中年妇人 → 写约40–55岁；role 含父亲/母亲且非青年主角 → 优先中年脸（方正/成熟）与青年主角拉开；青年主角才写20–35岁；',
-    '【同集异脸·硬性】与同集其他角色必须至少换脸型+发型+服装主色三档；禁止两名男性同用黑碎发+蓝夹克青年脸；',
-    '定妆须面无表情中性冷静（表情留给配图）；画风光影按【画风规格】戏剧光，勿改成白棚平光。',
-  ].join('')
+  PORTRAIT_AGE_INFERENCE_LLM_RULE,
+  '【同集异脸·硬性】与同集其他角色必须至少换脸型+发型+服装主色三档；禁止两名男性同用黑碎发+蓝夹克青年脸；',
+  '定妆须面无表情中性冷静（表情留给配图）；画风光影按【画风规格】戏剧光，勿改成白棚平光。',
+].join('')
 
 export const MOTION_COMIC_STYLE_FORBIDDEN =
   '禁止3D渲染、真人照片、新海诚暖金柔光、水彩糊边、粗劣平涂、像素风、Q版三头身、粗条漫黑线、速度线放射线、画面内字幕水印文字'
@@ -184,17 +180,35 @@ export const MOTION_COMIC_NEGATIVE_PROMPT =
   '3D建模、真人照片、新海诚暖金柔光、水彩糊边、粗劣平涂、像素风、Q版三头身、速度线、放射线、水印、文字、字幕、血腥、gore、blood、斩首、尸体'
 
 /**
- * 漫画解说定妆对照：按文案点名/对白人数写对照定妆（不封顶）。
- * 不复用解说动漫的「每镜仅 1 个」硬规则。
+ * 漫画解说同框对照定妆上限：按剧情最多 2 人同框（各挂一张定妆参考）。
+ * 单人戏仍只挂 1 张；换焦点/轮流说话可拆镜。
+ */
+export const MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS = 2
+
+/**
+ * 持物归属：旁白里「手里攥着」的烟不能写成「前景讲桌与香烟」。
+ * 对照道具只锁外观，持有人/左右手必须写进动作。
+ */
+export const PROP_HOLDER_PLACEMENT_LLM_RULE = [
+  '【持物归属·硬性】旁白出现手里/手中/握着/攥着/夹着/捏着/拿着/递/接/塞/掉/扔等与人物绑定的道具时：',
+  '①必须写入人物动作/【核心细节动作】（谁、哪只手、握持/递接/掉落姿态），例：「王志刚右手攥着没点着的香烟」；',
+  '②禁止只写成无人归属的桌面/前景陈设（如「前景讲桌与香烟」「桌上摆着烟」「前景掉落的香烟与桌面」却不写持有人或掉落动作）；',
+  '③对照道具「label」只锁外观，不代替写清持有人与左右手；',
+  '④仅当旁白明确静置在桌/地/架上且无人手持时，才可写入场景陈设；手持中的道具禁止再作为独立桌面静物重复摆放。',
+].join('')
+
+/**
+ * 漫画解说定妆对照：按内容 1～2 个对照定妆（说话人/焦点优先）。
  */
 export const MOTION_COMIC_PORTRAIT_REFERENCE_LLM_RULE = [
   '【定妆对照·硬性】characters 含 portrait_label、gender、has_portrait、portrait_default_outfit、distinct_identity_cue；',
-  'has_portrait=true 时正文须含：对照定妆「portrait_label」（distinct_identity_cue短辨识差 + 本镜细化表情）+ 位于{位置}以{姿态} +（身穿#hex本镜服装）；',
-  '【辨识差·硬性】distinct_identity_cue 必须原样写入该角色括号靠前位置（如国字浓眉短寸·中年），禁止省略、禁止两名角色写相同辨识差、禁止自编与 cue 冲突的脸型发型；单人镜可只写表情，多人同框必须人人写出不同 cue；',
-  '【同一配图禁撞脸】多人同框时每人必须不同脸不同发型，禁止双胞胎/克隆/同脸复制；服装同色也不能画成同一人；',
-  '【在场人数】严格按本段 narration_lines / required_portrait_labels：点名或对白几人就画几人（不限人数）；≥2 人时禁止写无配角；1 人时可写无配角；禁止把未点名角色硬塞进画面；',
-  '主标签须为列表首项（说话人优先，其次旁白点名）；禁止用主人公/第一人称标签顶替本段点名的其他角色；',
-  '表情写在人物描述里，肢体动作写清可见动作，物件写入场景陈设；多人时动作须写清施受关系与左右手分工，禁止第三只手/悬空手；',
+  'has_portrait=true 时正文须含：对照定妆「portrait_label」（distinct_identity_cue短辨识差 + 本镜细化且可夸张的表情）+ 位于{位置}以{姿态} +（身穿#hex本镜服装）；',
+  '【服装·硬性】（身穿…）只写服装款式+#hex，发色/瞳色勿写入身穿；每个 #hex 紧贴对应服装词，禁止无归属裸色号链；输出即终稿，系统不做二次清洗/注入。',
+  '【辨识差·硬性】distinct_identity_cue 必须原样写入该角色括号靠前位置（如国字浓眉短寸·中年），禁止省略、禁止自编与 cue 冲突的脸型发型；',
+  '【定妆人数·硬性】required_portrait_labels 按本段内容取 1～2 个（说话人/主焦点优先；同场互动且旁白点名两名有定妆角色时可同框 2 人）；每条 image_prompt 对照定妆不超过 2 个；禁止第三人脸/同脸克隆；第三人用剪影；',
+  '主标签须为列表首项（说话人优先）；禁止用主人公/第一人称标签顶替本段点名的其他角色；',
+  '表情写在人物描述里（可漫画式夸张：瞪眼、汗珠、咬牙、重心夸张等），肢体动作写清可见动作；禁止第三只手/悬空手；',
+  PROP_HOLDER_PLACEMENT_LLM_RULE,
   '场所变化须换装；同一配图段内同一人物（身穿…）须一致；无定妆时须写性别。',
 ].join('')
 
@@ -206,15 +220,15 @@ export const MOTION_COMIC_CAMERA_GAZE_SCENE_LLM_RULE = [
   '【景别·按 beat】优先遵守本段 shot_card；无 card 时按旁白选镜，禁止全片同一句「中远景略侧平视+头高12%+全身入镜」：',
   '· 场所/时间跳转、进门出门、远望 → 全景或远景建立（头高约6–10%）；',
   '· 冲/跑/刺/追/逃/扑等位移 → 跟拍或侧向中景/中远景，写清重心与迈步，头高约10–14%；',
-  '· 对峙/拦挡/质问/递接 → 优先双人中景错位，过肩约每 2–3 段用一次（头高约12–18%），可到膝盖或半身；禁止大半段都写过肩；',
-  '· 对话站谈 → 默认中景半身（头高约14–20%），过肩穿插使用，勿强制从头顶到脚；',
+  '· 对峙/拦挡/质问/递接 → 中景或中近景；若双方同场且均有定妆，可同框最多 2 人（左右/前后站位拉开）；仅单焦点时对空位/物件/门缝暗示对方；',
+  '· 对话站谈 → 默认中景半身（头高约14–20%）；同场双人可左右/前后并排，禁止过肩双人构图；',
   '· 坐/蹲/跪持物 → 中近景（头高约18–24%）；',
-  '· 纯神情（吓/哭/愣/惊恐且无肢体大位移）→ 必须近景或中近景（头高约22–30%），突出眉眼嘴型；禁止仍写全身/过肩远站；',
-  '相邻段须交替景别与俯仰（略俯/平视/略仰），禁止连续多段同一机位口吻；过肩占比宜 ≤ 约 1/4。',
+  '· 纯神情（吓/哭/愣/惊恐且无肢体大位移）→ 必须近景或中近景（头高约22–30%），突出眉眼嘴型，表情可夸张；禁止仍写全身/过肩远站；',
+  '相邻段须交替景别与俯仰（略俯/平视/略仰），禁止连续多段同一机位口吻。',
   '【姿态·硬性】有冲跑刺拦跪推等动词时，禁止只写「三分之四侧站立」比划；须写位移/重心偏移/手脚连续动作。三分之四侧仅为站谈默认倾向，不是全片唯一姿态；禁止无动作的正面摆拍站桩。',
-  '【信息量·硬性】每条须含：短画风标记 + 景别俯仰头高% + 前中后景陈设 + 定妆标签与身穿#hex + 表情动作；总长建议 ≥180 字，禁止只有一句站立概述。',
-  '【视线·硬性】必须写「视线落在{戏内目标}而非镜头」；禁止直视镜头、望向镜头、无目标目视前方。',
-  '【多人构图·硬性】≥2 人须左右或前后拉开站位；≥3 人优先中景层次或偶发过肩；须写「单帧剧情场景」，禁止白底定妆拼贴/角色设定表/多头拼贴。',
+  '【信息量·硬性】每条须含：短画风标记 + 景别俯仰头高% + 前中后景陈设 + 定妆标签与身穿#hex + 夸张表情动作；总长建议 ≥180 字，禁止只有一句站立概述。',
+  '【视线·硬性】按剧情写「视线落在{戏内目标}」：对话看向对方、递接看向物件/手、进门看向室内、惊恐看向声源/门口、写字看向试卷、发呆可低垂或望向窗外；禁止全片统一直视镜头/望向镜头/无目标目视前方；仅当旁白明确「看向镜头/第四面墙」时才写看向镜头。',
+  '【在场构图·硬性】可见有名定妆角色 1～2 人（按本段内容）；禁止同脸克隆/设定表/右侧头像墙；未点名群众用剪影。须写「单帧剧情场景」。',
   '【场景布置·硬性】年代场景至少写出 5 个具体陈设点（含材质/颜色/状态），前中后景都要有可指认物件；按场所补功能陈设。禁止空泛「昏暗墙壁与模糊窗框」。',
 ].join('\n')
 
@@ -234,6 +248,19 @@ export function repairMotionComicContinuousImagePrompt(prompt?: string | null): 
   if (!/对照定妆「/.test(s) && !/短剧解说高清国漫|锋利细线稿/.test(s)) return s
 
   const labelCount = [...s.matchAll(/对照定妆「/g)].length
+  // 硬上限：同框对照定妆不超过上限（按文案可多人）
+  if (labelCount > MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS) {
+    let kept = 0
+    s = s.replace(/对照定妆「[^」]+」/g, (m) => {
+      kept += 1
+      return kept <= MOTION_COMIC_MAX_SAME_FRAME_PORTRAITS ? m : ''
+    })
+      .replace(/，同框对照定妆/g, '')
+      .replace(/，{2,}/g, '，')
+      .replace(/；{2,}/g, '；')
+      .replace(/：，/g, '：')
+  }
+
   const hasDynamicPose = MOTION_COMIC_DYNAMIC_POSE_RE.test(s)
 
   // 仅无动态姿态时，把空洞正面站桩改成三分之四侧；有冲刺/对峙等则保留
@@ -320,9 +347,9 @@ export const MOTION_COMIC_SIX_DIM_LLM_RULE = [
   '【漫画解说整段文案】每条 image_prompt 写成一整段通顺中文（可用逗号/分号衔接），禁止输出【画风规格】【画面主体】【年代场景】【核心细节动作】【光影色调】【镜头视角】【质感要求】等固定【】标签。',
   '信息仍须齐全（顺序建议如下，写成自然叙述即可）：',
   `1) 画风：开头用短标记即可（如「16:9横屏短剧解说高清国漫，锋利细线稿硬边赛璐璐」），勿每条重复整段光影套话；禁止新海诚暖金柔光/水彩糊边/粗条漫黑线/速度线`,
-  '2) 画面主体：位置+姿态+本段表情（贴合 narration_lines 情绪，禁止无故面无表情/中性冷静）；有定妆写对照定妆「portrait_label」（须含 characters.distinct_identity_cue 短辨识差+本镜表情）+（身穿#hex本镜服装）；同框对照定妆人数跟 required_portrait_labels（不封顶）；多人必须异脸异发型禁止同框撞脸/克隆；站谈可用三分之四侧，位移/对峙须写动态姿态，禁止无动作正面摆拍',
-  '3) 年代场景：时代+具体地点+前/中/后景分层；前景≥2、中景≥2、后景≥1 个可辨物件（写清材质/颜色/新旧/污渍/灯光状态）；须写出场所功能陈设（柜台器具、门窗猫眼、路灯招牌、沙发茶几、病床护栏等），禁止只写「昏暗墙壁/模糊窗框/楼宇剪影」等空泛背景',
-  '4) 核心细节动作：本段旁白正在发生的可见动作（塞钱/接物/僵住/后退/打电话/冲刺等），肢体方向与重心清晰；视线须落在物件/对方/门外/手机屏幕等戏内目标，禁止直视镜头；禁止速度线；禁止站桩或上一段残留动作；手持物写在此',
+  `2) 画面主体：位置+姿态+本段表情（贴合 narration_lines 情绪，可漫画式夸张：瞪眼/汗珠/咬牙/重心偏移等；禁止无故面无表情/中性冷静）；按内容写 1～2 个对照定妆「portrait_label」（含 distinct_identity_cue 短辨识差+本镜夸张表情）+（身穿#hex本镜服装）；同场互动且点名两名有定妆角色时可双人同框，禁止第三人脸/同脸克隆；未点名路人用剪影；站谈可用三分之四侧，位移/对峙须写动态姿态，禁止无动作正面摆拍`,
+  '3) 年代场景：时代+具体地点+前/中/后景分层；前景≥2、中景≥2、后景≥1 个可辨物件（写清材质/颜色/新旧/污渍/灯光状态）；须写出场所功能陈设（柜台器具、门窗猫眼、路灯招牌、沙发茶几、病床护栏等），禁止只写「昏暗墙壁/模糊窗框/楼宇剪影」等空泛背景；手持中的关键道具不要塞进前景桌面陈设',
+  '4) 核心细节动作：本段旁白正在发生的可见动作（塞钱/接物/僵住/后退/打电话/冲刺等），肢体方向与重心清晰；视线按剧情落在对方/物件/门外/手机屏幕/窗外等戏内目标，禁止全片统一直视镜头；禁止速度线；禁止站桩或上一段残留动作；手持物必须写在此（谁+哪只手+握持姿态）',
   '5) 光影色调：优先遵守 shot_card.suggested_light；按时段/场所写（夜巷冷蓝侧光、店内暖黄顶灯、白天街道自然光、紧张戏硬侧光）；禁止全片复读「冷蓝强侧光半脸深阴影与发丝冷白轮廓光」；背景可浅景深虚化',
   '6) 镜头视角：优先遵守 shot_card；须写景别+俯仰+身体朝向+镜头朝向（人+物件/动作点）+头高%；相邻段交替景别与俯仰；禁止连续多段「中远景略侧平视+头高12%+全身入镜」万能句',
   '7) 质感：锋利细线稿，硬边赛璐璐高对比，无文字无水印无字幕',
@@ -330,6 +357,7 @@ export const MOTION_COMIC_SIX_DIM_LLM_RULE = [
   '【屏幕朝向】禁止只画手机背面或显示器机箱背面；须正面或略侧可见屏幕内容',
   '【物件年代】同帧禁止CRT与现代超薄键鼠/全面屏手机混搭',
   '【手持解剖】手持物须写清左右手分工与恰好两只手；禁止一手撑墙一手持物贴墙（易出第三只手）；五指正常；指向/伸手须肩→肘→手连续成臂，禁止同侧臂下垂同时前景另出手/悬空手/第三只手',
+  PROP_HOLDER_PLACEMENT_LLM_RULE,
   '【单帧一致】先锁定唯一可画瞬间（位置+姿态+动作+关键物件）；人物、动作、场景、镜头须同一瞬间同帧可见',
   MOTION_COMIC_PORTRAIT_REFERENCE_LLM_RULE,
 ].join('\n')
@@ -339,18 +367,21 @@ export const MOTION_COMIC_NARRATIVE_PROMPT_LLM_RULE = MOTION_COMIC_SIX_DIM_LLM_R
 
 /** 分镜配图：定妆锁脸 + 服装可变 */
 export const MOTION_COMIC_PORTRAIT_OUTFIT_LLM_RULE =
-  '【定妆锁脸·硬性】有定妆时禁止凭空编造与 distinct_identity_cue 冲突的脸型/发型；须写入 characters 提供的短辨识差 + 本镜细化表情；服装款式与 #hex 写在（身穿#hex…）中，须按本段旁白与场所换装，禁止每段照抄 portrait_default_outfit；同一配图段内同一人物（身穿…）须一致；多人同框时各角色辨识差与服装主色须可区分'
+  '【定妆锁脸·硬性】有定妆时禁止凭空编造与 distinct_identity_cue 冲突的脸型/发型；须写入 characters 提供的短辨识差 + 本镜细化表情；服装款式与 #hex 写在（身穿#hex…）中，须按本段旁白与场所换装，禁止每段照抄 portrait_default_outfit；同一配图段内同一人物（身穿…）须一致；同框对照定妆最多 2 人'
 
 /** 配图文案必须贴合本段旁白的动作与表情 */
 export const MOTION_COMIC_PARAGRAPH_BEAT_MATCH_LLM_RULE = [
-  '【段落贴合·硬性】本条 image_prompt 只服务本段 narration_lines（可含 2～4 句），表情与动作必须能对上这段旁白正在发生的事与情绪。',
-  '先从 narration_lines 抽出：谁、在做什么、什么情绪（震惊/愤怒/害怕/尴尬/哀求/冷漠等），再写入表情与动作；禁止套用上一段或通用站桩。',
-  '对照示例：旁白写「塞钱/塞红包」→动作须伸手递钱或掏钱前伸，表情可为殷勤/紧张；旁白写「全身僵住/吓傻」→瞳孔微缩、肩背绷紧、汗珠，禁止笑或闲聊手势；旁白写「问/喊/质问」→张嘴或指向，禁止沉默面无表情；旁白写「冲进/跑向/刺向」→须写迈步重心与身体前倾，禁止只写站立抬手。',
+  '【段落贴合·硬性】本条 image_prompt 只服务本段 narration_lines（约 1～2 句），表情与动作必须能对上这段旁白正在发生的事与情绪；可漫画式夸张当时状态（汗珠、瞪眼、嘴角抽搐、身体后仰、重心夸张等），仍须可读为同一瞬间剧情。',
+  '先从 narration_lines 抽出：谁、在做什么、什么情绪（震惊/愤怒/害怕/尴尬/哀求/冷漠等），再写入夸张表情与动作；禁止套用上一段或通用站桩。',
+  '对照示例：旁白写「塞钱/塞红包」→动作须伸手递钱或掏钱前伸，表情可为殷勤/紧张；旁白写「全身僵住/吓傻」→瞳孔微缩、肩背绷紧、夸张汗珠，禁止笑或闲聊手势；旁白写「问/喊/质问」→张嘴或指向，禁止沉默面无表情；旁白写「冲进/跑向/刺向」→须写迈步重心与身体前倾，禁止只写站立抬手。',
   '若本段含 shot_card：镜头/姿态/光影必须按 card 写，禁止无视 card 改回万能全身平视站立句。',
-  '旁白写指向/伸手/拉袖/攥物：须肩→肘→手连续成臂，手持物挂在该连续臂上；禁止只写前景大手而同侧臂下垂；双人互动时双方肢体均须连续成臂，禁止第三人肢体入镜。',
-  '禁止：写「面无表情、中性冷静」（那是定妆专用）；配图必须有本段情绪表情。',
+  '旁白写指向/伸手/拉袖/攥物：须肩→肘→手连续成臂，手持物挂在该连续臂上；禁止只写前景大手而同侧臂下垂；双人同框时各自肢体须可分清，禁止第三人肢体入镜。',
+  '禁止：写「面无表情、中性冷静」（那是定妆专用）；配图必须有本段情绪表情，鼓励适度夸张。',
   '禁止：动作与旁白施受关系反了（如旁白李伯塞钱给我，却画「我」递钱）。',
-  'full_narration / prior 只用来补场景与连续性，不得把别段的高潮动作表情搬进本段。',
+  '【动作保真·硬性】①左右手以 narration_lines 为准：旁白写「左手夹烟/攥物」则动作须左手，禁止改成右手或双手；未写左右时可合理分配，但不得与旁白左右矛盾。',
+  '②禁止发明本段旁白没有的肢体动作（如旁白只写「夹不稳/掉落」，却写「半拖半拽/指着标签/接过」）；未写到的下一拍高潮动作一律禁止提前画进本镜。',
+  '③prior / full_narration / 相邻段只可补地点与关系，不得把别段或下一段的动词搬进本段【核心细节动作】。',
+  'full_narration / prior 只可用来理解人物关系与地点；场景陈设以本段 narration_lines / scene_enrichment 为准，可略扩展同场氛围；禁止把全书物件清单搬进本镜，也不得把别段高潮动作表情搬进本段。',
 ].join('\n')
 
 export const MOTION_COMIC_ACTION_LLM_RULE =
@@ -364,21 +395,21 @@ export const MOTION_COMIC_BODY_CONSISTENCY_LLM_RULE = [
 ].join(' ')
 
 export const MOTION_COMIC_LLM_ANALYSIS_STEPS_PROMPT = [
-  '1) 通读 full_narration（及 previous_episode_narration 若有），把握主线、人物关系、场景变迁与情绪节奏',
-  '2) 读 prior 与 characters；同一配图段内同一人物服装款式+#hex 须一致',
-  '3) 精读本段 narration_lines：抽出「谁 + 动词 + 情绪 + 视线目标」，按点名/对白判断在场人数（可多人同框），锁定单帧拍点（位置+姿态+动作+表情+看向何处）',
-  '4) 先读本段 shot_card（若有）选定景别/姿态/光影，再写一整段连贯中文 image_prompt（禁止【】六维标签）；画风用短标记，勿复读长光影壳；场景陈设靠 full_narration/prior/scene_enrichment 加厚，禁止把别段高潮动作/表情塞进本段',
+  '1) 可扫一眼 full_narration（及 previous_episode_narration 若有），把握人物关系与地点；勿把全书物件当本镜清单',
+  '2) 读 characters；同一配图段内同一人物服装款式+#hex 须一致',
+  '3) 精读本段 narration_lines：抽出「谁 + 动词 + 情绪 + 视线目标」与本段可见物件；手持/递接/掉落道具必须挂到人物动作（谁+哪只手），勿只塞进场景前景；按内容选 1～2 个对照定妆（单人戏 1 个，同场互动且点名两名有定妆角色时 2 个），锁定单帧拍点（位置+姿态+动作+表情+看向何处）',
+  '4) 先读本段 shot_card（若有）选定景别/姿态/光影，再写一整段连贯中文 image_prompt（禁止【】六维标签）；画风用短标记；场景陈设以本段旁白/scene_enrichment 为准，可略扩展同场氛围；禁止全书物件清单，禁止把别段高潮动作/表情塞进本段；手持道具写进动作而非桌面陈设',
 ].join('\n')
 
 export const MOTION_COMIC_DYNAMIC_IMAGE_LLM_RULE = [
-  '【一段一图】每条 prompt 对应一个配图段（narration_lines 可含 2～4 句），写出该段最具叙事力的单一瞬间；同场景同焦点勿拆成多张无关图。',
+  '【一段一图】每条 prompt 对应一个配图段（narration_lines 约 1～2 句），写出该段最具叙事力的单一瞬间；同场景同焦点勿拆成多张无关图；换人/换焦点须另开段。',
   '【运镜友好构图】画面留前中后景层次（前景道具/中景主体/背景环境），主体姿态与肢体方向明确，便于后续推近/拉远/横移；避免主体贴边、画面过满；环境物件面积宜占画面主要部分，人物不要挤满画面中央。',
   '【动态表现】优先写本段可见动作与对应表情、物体互动；禁止速度线/放射线/气流线；情绪镜写眉眼嘴型与肢体语言。',
-  '【镜头视角多样化】相邻配图段必须交替：全景建立/跟拍中景/过肩对峙/中近景神情/略俯/略仰；姿态在站谈三分之四侧、侧面迈步、前倾冲刺、错位对峙间切换；禁止连续多镜同一「全身平视站立」口吻。',
-  '【手脚与持物】须写清左右手脚落点、握持方式与坐蹲臀膝脚关系；禁止只写「站着/坐着/拿着」。',
+  '【镜头视角多样化】相邻配图段必须交替：全景建立/跟拍中景/单人中近景神情/略俯/略仰；姿态在站谈三分之四侧、侧面迈步、前倾冲刺间切换；禁止连续多镜同一「全身平视站立」口吻；禁止双人过肩构图。',
+  '【手脚与持物】须写清左右手脚落点、握持方式与坐蹲臀膝脚关系；禁止只写「站着/坐着/拿着」；旁白「手里攥着/握着」须写「{角色}{左右手}攥/握{物}」，禁止「前景讲桌与{物}」。',
 ].join('\n')
 
-/** 旁白是否适合双定妆同框（递接/对峙/并肩等） */
+/** 旁白是否含双人互动拍点（可同框双定妆；换焦点/反应镜可另开图） */
 export const MOTION_COMIC_DUAL_PORTRAIT_BEAT_RE =
   /递|接|塞|拉|拽|推|拦|挡|并肩|对视|对峙|面对面|相对|两人|双方|交给|递给|握手|拥抱|质问|对骂|跟在|身旁|身边|拉住|抓住|拽住|塞进|塞给|并排|指着对方|对吼|对喊/
 
@@ -386,23 +417,22 @@ export function isMotionComicDualPortraitBeat(text?: string | null): boolean {
   return MOTION_COMIC_DUAL_PORTRAIT_BEAT_RE.test(String(text || ''))
 }
 
-/** 同一条配图文案 / 同一画面内禁止撞脸（多人同框） */
+/** 互动后的反应镜：应另开单人图 */
+export const MOTION_COMIC_FOCUS_REACTION_BEAT_RE =
+  /愣|僵住|吓傻|吓得|惊|怒|哭|吼|退|推开|接过|躲开|抬头|低头|转身|沉默|不语|瞪大|睁大|咬牙|攥紧/
+
+/** 同一条配图：禁止克隆脸/同脸路人填空（允许多个不同角色） */
 export const MOTION_COMIC_SAME_FRAME_NO_FACE_COLLISION_LLM_RULE = [
-  '【同一配图禁撞脸·硬性】同一条 image_prompt、同一画面内：每个对照定妆必须是可辨识的不同人脸+不同发型轮廓；',
-  '严禁同一张脸左右对称复制、双胞胎并排、分身、克隆人、多张近乎相同的脸；',
-  '严禁用同一男主脸顶替父亲/母亲/配角/「我」等不同角色；男女必须一眼可辨，不可撞成同脸；',
-  '即使夹克/围裙主色接近，也必须靠各自定妆区分五官与发型，不得因服装同色画成同一人；',
-  '同框两名同性别角色禁止只靠同色夹克深浅区分（如#2563eb蓝夹克与#1e40af深蓝夹克）：括号内必须写入互不相同的 distinct_identity_cue；服装主色宜明显对比或款式不同；',
-  '人数必须等于对照定妆标签数，禁止为填构图多画一个同脸路人/分身。',
+  '【禁克隆·硬性】同一条 image_prompt 内每个对照定妆必须是不同人脸与发型；',
+  '严禁同一张脸左右对称复制、双胞胎、分身、克隆人、多张近乎相同的脸；',
+  '严禁为填构图多画同脸路人/分身；未点名的群众用剪影或淡线。',
 ].join('')
 
-/** 漫画解说：按本段旁白决定在场人数（不封顶） */
+/** 漫画解说：按内容 1～2 个对照定妆；同场双人可同框，换焦点可拆镜 */
 export const MOTION_COMIC_PORTRAIT_FRAME_LLM_RULE = [
-  '【在场角色·硬性】先通读本段 narration_lines：对白说话人（「姓名：」）与旁白点名的具名角色 = 本镜应在场角色；required_portrait_labels 已按此列出（几人就几人，不封顶）。',
-  '列表 1 人：只画该对照定妆，可写无配角；禁止硬塞未点名角色。',
-  '列表 ≥2 人：必须同框写齐全部对照定妆，分句写清各自位置（左/右/前/后）、姿态、表情与（身穿…）；禁止写无配角；禁止只画其中一人或部分人；写清施受关系（谁递谁接、谁推谁退），各方肩→肘→手连续成臂；禁止正面并排挤满画面，优先三分之四侧+过肩层次。',
+  '【在场角色·硬性】先通读本段 narration_lines：对白说话人（「姓名：」）与旁白点名；required_portrait_labels 取 1～2 个（说话人/主焦点优先；同场互动且点名两名有定妆角色时写 2 个）。',
+  '每条配图对照定妆最多 2 人；仅一人在场或只写单人反应时写 1 人；换说话人/换焦点可拆镜各 true；禁止同框第三人脸或同脸克隆。',
   MOTION_COMIC_SAME_FRAME_NO_FACE_COLLISION_LLM_RULE,
-  '路人/群众用泛称，不得写成额外对照定妆（不定妆）。',
   '主标签=列表首项（说话人优先）；禁止用主人公/第一人称标签顶替本段点名的其他角色。',
   '硬禁多肢汤：第三只手、悬空手、浮空手、身侧同侧臂下垂同时前景另出手。',
 ].join('\n')
@@ -411,20 +441,33 @@ export const MOTION_COMIC_PORTRAIT_FRAME_LLM_RULE = [
 export const MOTION_COMIC_SINGLE_PORTRAIT_FRAME_LLM_RULE = MOTION_COMIC_PORTRAIT_FRAME_LLM_RULE
 
 export const MOTION_COMIC_MAJOR_SUPPORTING_LLM_RULE = [
-  '【主要配角】已在 characters 表提供 name + appearance 的，当本镜焦点或同框互动对象是该配角时，须对照其定妆，写清位置、服装主色、表情',
-  '【定妆标签·硬性】主对照定妆须对应当镜焦点角色（对白说话人或旁白点名）；本段点名配角时主标签必须是该配角，禁止用主人公/第一人称标签顶替；同框须写齐 required_portrait_labels 全部对照定妆',
+  '【主要配角】已在 characters 表提供 name + appearance 的，当本镜焦点为该配角或双人同框时，须对照其定妆，写清位置、服装主色、夸张表情与本段动作',
+  '【定妆标签·硬性】对照定妆须对应本段在场角色（对白说话人或旁白点名）；同框最多 2 个对照定妆；禁止用主人公/第一人称标签顶替本段点名',
   MOTION_COMIC_PORTRAIT_FRAME_LLM_RULE,
-  '【一次性路人/群众/龙套】不定妆；用「几位路人/店员/弟子」等泛称 + 简化服装色块即可，勿与主要配角混淆，不得写成额外对照定妆',
+  '【一次性路人/群众】不画进对照定妆；焦点留给 required_portrait_labels',
 ].join('\n')
 
 export const MOTION_COMIC_CROWD_LLM_RULE =
-  '【路人/群众】不写具体姓名；简化日系造型、低饱和服装、背景或侧位，不得抢主人公/主要配角焦点'
+  '【路人/群众】不画第三人脸对照定妆；同框最多 2 个定妆角色，其余用剪影或场景陈设'
 
 export function isMajorSupportingCharacter(char: { name?: string | null; role?: string | null }): boolean {
   const role = String(char.role || '').trim()
   if (/主要配角|重要配角|核心配角|次要主角|男二|女二/.test(role)) return true
-  if (/反派|宿敌|师父|师尊|师叔|师兄|师姐|挚友|恋人|闺蜜|未婚|长老|掌门|魔头|boss/i.test(role)) return true
+  // 裸「配角」也保留（小说漫画 LLM 常不写「主要配角」前缀）
+  if (/(^|[·・\-])配角/.test(role) || /^配角/.test(role)) return true
+  if (/反派|宿敌|师父|师尊|师叔|师兄|师姐|师妹|师弟|挚友|恋人|闺蜜|未婚|长老|掌门|魔头|boss/i.test(role)) return true
+  if (/朋友|同学|妹妹|姐姐|哥哥|弟弟|父亲|母亲|妻子|丈夫|女友|男友|同门/.test(role)) return true
   if (/^主要配角/.test(role)) return true
+  return false
+}
+
+/** 一次性路人/龙套：漫画定妆提取应丢弃 */
+export function isComicExtraCharacter(char: { name?: string | null; role?: string | null }): boolean {
+  const name = String(char.name || '').trim()
+  const role = String(char.role || '').trim()
+  if (/^(旁白|解说|解说员|剧中)$/.test(name) || /^(旁白|解说|解说员|剧中)$/.test(role)) return true
+  if (/路人|群众|龙套|路人甲|路人乙|围观|店小二/.test(name)) return true
+  if (/一次性|路人|群众|龙套|围观/.test(role) && !/主要|重要|核心/.test(role)) return true
   return false
 }
 
@@ -435,8 +478,8 @@ export function buildMotionComicCharacterExtractSystem(): string {
     '1) 提取主人公（男主/女主/主角）及主要配角：反复出场、有专名、有对白或推动剧情的角色',
     '2) 不要提取一次性路人/群众/店员等龙套；不要提取「旁白」「解说员」',
     '3) 每个角色只输出：name、variant_label（必须 ""）、role、personality（可短句或 ""）',
-    '4) role：主人公写「主角/男主/女主」；主要配角写「主要配角·身份」',
-    '5) 一人一条；禁止拆童年/青年/老年等多形态',
+    '4) name 只能是纯姓名，禁止把「主角/配角/阶段」写进 name；role：主人公写「主角/男主/女主」；主要配角写「主要配角·身份」',
+    '5) 一人一条；禁止拆童年/青年/老年等多形态；禁止同一人输出两条',
     '6) 禁止输出 appearance 字段；禁止脸型/发型/#hex/English tags/画风规格',
     '7) 合并同一人物不同称呼为一条',
     '只输出 JSON：{"characters":[{"name":"…","variant_label":"","role":"…","personality":""}]}',
@@ -444,25 +487,28 @@ export function buildMotionComicCharacterExtractSystem(): string {
 }
 
 export function buildMotionComicCharacterAppearanceSystem(): string {
+  const bracket = formatMotionComicPortraitStyleSpecBracket()
   return [
     '你是漫画解说项目的角色定妆造型设计助手。',
-    `定妆与配图必须同一画风：短剧解说高清国漫冷色戏剧光。须在 appearance 开头原样写入 ${formatMotionComicPortraitStyleSpecBracket()}；竖幅正面半身、面无表情；禁止白底均匀柔光、禁止 Q 版、3D、真人写实、粗条漫黑线、新海诚暖金柔光；定妆不写手持道具。`,
-    '年龄必须贴合角色名与定位：李伯/爷爷→老年；张婶→中年妇人；禁止把老年配角写成黑发青年。',
+    '根据漫剧旁白稿推断外貌；输出即最终定妆文案，系统不做二次改写，请一次写对。',
+    `开头必须原样写入且只写一次：${bracket}；竖幅正面半身、面无表情；禁止白底均匀柔光、禁止 Q 版、3D、真人写实、粗条漫黑线、新海诚暖金柔光；定妆不写手持道具。`,
+    '年龄必须贴合角色名、定位与讲解稿学籍/称谓线索（见年龄硬性规则）；禁止把高中考生写成30+工装中年。',
+    '【性别·硬性】女主/妻子/母亲/姐姐等必须写「女性」；男主/丈夫等写「男性」；禁止把女性写成男性或寸头胡茬男模；禁止默认「28岁男性」。',
     MOTION_COMIC_PORTRAIT_APPEARANCE_LLM_RULE,
-    '须根据漫剧旁白稿中该角色的出场情节、对白、行为推断外貌，与故事时代、题材一致。',
-    '不写胖瘦体型词；人物统一为正常头身比国漫审美，禁止素体份数、三头身、圆头直径等计量词。',
     PORTRAIT_CHARACTER_DISTINCTIVENESS_RULE,
-    '**一人一图**：只写该角色全片统一定妆形象一条；禁止按童年/青年/老年分阶段写多套；不要写「青年形态」「老年形态」等阶段标题。',
-    MOTION_COMIC_PORTRAIT_APPEARANCE_SPEC_FORMAT_RULE,
-    `【字数】【画风规格】不计入身份字数；其后身份外貌约 120–220 字。输出须以 ${formatMotionComicPortraitStyleSpecBracket()} 开头。`,
-    '只输出描述正文，不要标题、markdown、JSON。',
+    '一人一条统一定妆；禁止拆童年/青年/老年；禁止阶段标题。',
+    '【输出格式·纯中文】',
+    `1) 整段只输出中文：以 ${bracket} 开头（只一次），其后身份外貌约 120–220 字；`,
+    '2) 禁止 English tags、禁止英文段落、禁止 JSON/markdown；#hex 色值可保留；',
+    '3) 每个 #hex 紧贴服装词；禁止裸色号堆叠。',
+    '只输出描述正文。',
   ].join('\n')
 }
 
 /** 多样示例：建立 / 中景对峙 / 动作跟拍 / 情绪近景（禁止模型只学一种壳） */
 export const MOTION_COMIC_SCENE_BODY_EXAMPLES = [
   '国漫赛璐璐，16:9；对照定妆「我」（青年·碎发，神色警惕）刚推开卤肉店铁门迈入（身穿#64748b灰蓝针织立领衫）；夜店街景全景建立：前景油腻门槛与铁门把手，中景卤锅蒸汽与挂腊肉，后景巷口霓虹与路灯；暖黄店内顶灯混室外冷蓝；远景略仰，头高约8%，人物偏画面一侧留环境',
-  '国漫赛璐璐，16:9；单帧剧情；对照定妆「黑衣人」（中年·短寸，眉头紧锁）在走廊左侧三分之四侧对峙抬掌（身穿#1f2937黑西装），对照定妆「我」在右侧错位中景张嘴喝止（身穿#64748b灰蓝针织立领衫）；前景门把手与猫眼，中景剥落墙皮，后景声控灯；冷白楼道灯+硬侧光；双人中景略俯，头高约16%，左右拉开肩线对抗，勿滥用过肩',
+  '国漫赛璐璐，16:9；单帧剧情；对照定妆「黑衣人」（中年·短寸，眉头紧锁）在走廊中景三分之四侧抬掌喝止（身穿#1f2937黑西装），画面仅此人；前景门把手与猫眼，中景剥落墙皮，后景声控灯；冷白楼道灯+硬侧光；单人中景略俯，头高约16%，视线落在对面空位而非镜头',
   '国漫赛璐璐，16:9；对照定妆「我」（青年·碎发，双目圆睁）持桃木剑身体前倾冲刺迈右脚（身穿#64748b灰蓝针织立领衫），无配角；走廊玄关：前景地面反光与散落钥匙，中景防盗门洞开，后景楼梯口暗影；紧张戏硬侧光；侧向跟拍中景，头高约12%，写清迈步重心与剑尖朝向，禁止只写站立抬手',
   '国漫赛璐璐，16:9；对照定妆「刘翠兰」（中年·花白寸发，双眼圆睁泛白、嘴角微张惊骇）双手紧抓围裙边缘（身穿#3d4e1f深橄榄绿工装立领夹克）；卤肉店内：前景热气模糊虚化，中景挂钟与菜单牌虚影；中性顶灯；近景略俯，头高约26%，面部占画面大部，禁止全身站立远站',
 ] as const
@@ -546,14 +592,13 @@ export function buildMotionComicShotCard(
     }
   }
   if (SHOT_CARD_CONFRONT_RE.test(text) || isMotionComicDualPortraitBeat(text)) {
-    const useOts = idx % 3 === 0
     return {
       beat: 'confront',
-      suggested_shot: useOts ? `过肩中景，${tilt}` : `双人中景错位，${tilt}`,
-      suggested_pose: '左右错位对峙/拦挡，肩线对抗，禁止并排正面站桩',
+      suggested_shot: `中景（点名双人可同框），${tilt}`,
+      suggested_pose: '抬掌/拦挡/前倾质问；点名双人可同框并对视/对峙，否则对空位或物件做动作；视线落在对方或戏内目标',
       suggested_light: light,
       head_height_hint: '头高约12–18%',
-      forbid: [...forbidBase, '强制从头顶到脚全身入镜', '连续多段复读过肩'],
+      forbid: [...forbidBase, '第三人脸入镜', '同脸克隆', '强制从头顶到脚全身入镜', '过肩双人构图'],
     }
   }
   if (SHOT_CARD_ESTABLISH_RE.test(text)) {
@@ -567,14 +612,13 @@ export function buildMotionComicShotCard(
     }
   }
   if (/说|问|答|道|：|「|」/.test(text)) {
-    const useOts = idx % 4 === 0
     return {
       beat: 'dialogue',
-      suggested_shot: useOts ? `过肩，${tilt}` : `中景半身，${tilt}`,
-      suggested_pose: '三分之四侧站谈或侧身交谈，视线落在对方/物件',
+      suggested_shot: `中景半身，${tilt}`,
+      suggested_pose: '三分之四侧站谈，视线落在物件/对方/门口；按点名人数构图',
       suggested_light: light,
       head_height_hint: '头高约14–20%',
-      forbid: [...forbidBase, '对话镜强制从头顶到脚', '对话段过半写成过肩'],
+      forbid: [...forbidBase, '第三人脸入镜', '同脸克隆', '对话镜强制从头顶到脚', '过肩双人构图'],
     }
   }
   return {
@@ -970,7 +1014,10 @@ export function isMotionComicCameraMetaDescription(text: string): boolean {
 }
 
 /**
- * 配图检测/文案用的镜头正文：优先对白；description 若是运镜元数据则忽略。
+ * 配图检测/文案用的镜头正文：
+ * - description 为运镜元数据时用对白
+ * - description 为独立画面描述（与台词正文不同）时仍用对白（台词作字幕/检测）
+ * - description 与台词正文一致时用 description（旧解说/小说漫画一句一镜）
  */
 export function resolveStoryboardNarrationText(sb: {
   description?: string | null
@@ -979,8 +1026,33 @@ export function resolveStoryboardNarrationText(sb: {
   const dialogue = String(sb.dialogue || '').trim()
   const desc = String(sb.description || '').trim()
   if (dialogue && (!desc || isMotionComicCameraMetaDescription(desc))) return dialogue
+
+  const stripped = dialogue.replace(/^[^：:]{1,20}[:：]\s*/, '').trim()
+  if (desc && stripped && (desc === stripped || desc.replace(/\*\*/g, '') === stripped.replace(/\*\*/g, ''))) {
+    return desc
+  }
+  // 画面描述与台词不同 → 检测/旁白句用对白行
+  if (dialogue && desc && desc !== stripped) return dialogue
   if (desc) return desc
   return dialogue
+}
+
+/**
+ * 配图用画面描述：description 为独立画面文案时优先返回；
+ * 运镜元数据 / 与台词相同则返回 null（调用方回退到旁白句或 scene_content）。
+ */
+export function resolveStoryboardVisualDescription(sb: {
+  description?: string | null
+  dialogue?: string | null
+}): string | null {
+  const desc = String(sb.description || '').trim()
+  if (!desc || isMotionComicCameraMetaDescription(desc)) return null
+  const dialogue = String(sb.dialogue || '').trim()
+  const stripped = dialogue.replace(/^[^：:]{1,20}[:：]\s*/, '').trim()
+  if (stripped && (desc === stripped || desc.replace(/\*\*/g, '') === stripped.replace(/\*\*/g, ''))) {
+    return null
+  }
+  return desc
 }
 
 export function normalizeMotionComicShotRole(raw?: string | null): MotionComicShotRole | undefined {
@@ -1127,7 +1199,7 @@ export const MOTION_COMIC_STORYBOARD_CHAT_SYSTEM = [
   '- 正文：按句拆镜，句末标点必拆；逗号/顿号仅当相邻合计超过约 16 字才拆。',
   '- 自动为关键词标注 ** 强调（黄字字幕）；用户稿中已有 ** 则保留。',
   '- 每镜一条台词（旁白或角色对白均可），时长按字数估算，便于一句一镜配音。',
-  '- 配图策略：2～4 镜共用一张高对比国漫插画；**按场景/动作/焦点变化换图**，同场景同焦点勿句句切图；换人说话不强制换图；换图处硬切；**同一张图整段只用一种运镜**',
+  '- 配图策略：1～2 镜共用一张高对比国漫插画；**换人说话/换焦点必须换图**；同场互动可同框最多 2 个对照定妆，三人及以上拆镜；同场景同焦点勿句句切图；换图处硬切；**同一张图整段只用一种运镜**',
   '- 单镜运镜：根据台词句/景别/运镜字段推断（特写→推近，全景→拉远，位移→横移，可上下浏览）',
   '',
   '【职责】',
@@ -1146,7 +1218,7 @@ export function buildMotionComicStoryboardLLMSystem(): string {
     '若台本每行已是「说话人：台词」，保留原 speaker，按行拆镜，不要合并不同说话人。',
     '若台本无说话人前缀，叙述句 speaker=旁白，角色直接引语 speaker=角色名，主人公引语 speaker=我。',
     '自动标注 emphasis_word；跳过片尾引流句（故事还没结束、下期继续、记得关注、咱们下期再见等）。',
-    '配图节奏：2～4 镜一图；按场景/动作/焦点变化换图，同场景同焦点可共用；换人说话不强制换图；合成时每张图整段一种运镜。',
+    '配图节奏：1～2 镜一图；换人说话/换焦点必须换图；同场互动可同框最多 2 个对照定妆，三人及以上拆镜；同场景同焦点可共用；合成时每张图整段一种运镜。',
     '只输出 JSON：',
     '{"title_shots":[{"speaker":"剧中","dialogue":"本期故事：…","emphasis_word":""}],"shots":[{"speaker":"旁白","dialogue":"…","emphasis_word":""}]}',
     '无片头时 title_shots=[]。不要 markdown，不要解释。',
@@ -1175,7 +1247,9 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
   hasDiptych?: boolean
 }): string {
   return [
-    '你是漫画解说分镜美术指导。每个配图段含 2～4 句旁白，须为该段写一张短剧解说高清国漫的中文配图文案：一整段连贯叙述，禁止【】六维标签，但画风/主体/场景/动作/光影/镜头/质感信息须齐全。',
+    '你是漫画解说分镜美术指导。每个配图段含 1～2 句旁白，须为该段写一张短剧解说高清国漫的中文配图文案：一整段连贯叙述，禁止【】六维标签，但画风/主体/场景/动作/光影/镜头/质感信息须齐全。按内容 1～2 个对照定妆；视线按剧情写戏内目标，禁止全片直视镜头。',
+    '【成稿即终稿·硬性】image_prompt 落库后生图阶段不再追加画风壳、景别英文前缀、REFERENCE USAGE、性别词或外貌注入；须在本条一次写全。',
+    '【语言·硬性】image_prompt 纯中文；禁止 English tags、禁止英文段落；#hex 色值可保留。',
     '【shot_card·硬性】每段 paragraphs[].shot_card 已按旁白给出建议景别/姿态/光影：必须遵守；禁止无视 card 复读「中远景略侧平视+头高12%+全身入镜+冷蓝半脸深阴影」万能句。',
     '分析流程：',
     MOTION_COMIC_LLM_ANALYSIS_STEPS_PROMPT,
@@ -1186,13 +1260,14 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
     MOTION_COMIC_DYNAMIC_IMAGE_LLM_RULE,
     MOTION_COMIC_PORTRAIT_FRAME_LLM_RULE,
     MOTION_COMIC_PORTRAIT_OUTFIT_LLM_RULE,
-    '分析须结合 full_narration 与 prior 丰富场景陈设，但表情与动作必须以本段 narration_lines 为准。',
+    PROP_HOLDER_PLACEMENT_LLM_RULE,
+    '场景陈设以本段 narration_lines 为准，可略扩展同场氛围；full_narration/prior 只理解关系与地点，禁止全书堆陈设；表情与动作必须以本段旁白为准。',
     'layout=single：单张完整电影感插画，禁止 grid/collage/multi-panel（diptych 除外）。',
     options?.hasDiptych
       ? 'layout=diptych：用「左格：…；右格：…」各写一整段（谁在哪、表情动作、光影景别），禁止【左格】【右格】标签；适合动作前后对比。'
       : '',
     options?.hasCharacters
-      ? `characters 提供 portrait_label、has_portrait 与外貌；正文须写对照定妆「portrait_label」与（身穿#hex…）。${MOTION_COMIC_MAJOR_SUPPORTING_LLM_RULE}`
+      ? `characters 提供 portrait_label、gender、has_portrait 与外貌；正文须写对照定妆「portrait_label」（括号内必须含男性或女性，可写「男性·表情…」）与（身穿#hex…）；双人同框须写入 distinct_identity_cue 防撞脸。${MOTION_COMIC_MAJOR_SUPPORTING_LLM_RULE}`
       : MOTION_COMIC_CROWD_LLM_RULE,
     `整段示例（四种不同景别/姿态/光影，仅格式；禁止照抄情节；每段按本段 narration_lines + shot_card 重写）：\n1) ${MOTION_COMIC_SCENE_BODY_EXAMPLES[0]}\n2) ${MOTION_COMIC_SCENE_BODY_EXAMPLES[1]}\n3) ${MOTION_COMIC_SCENE_BODY_EXAMPLES[2]}\n4) ${MOTION_COMIC_SCENE_BODY_EXAMPLES[3]}`,
     MOTION_COMIC_STYLE_FORBIDDEN,
@@ -1200,39 +1275,41 @@ export function buildMotionComicParagraphImagePromptLLMSystem(options?: {
   ].filter(Boolean).join('\n')
 }
 
-/** 漫画解说：配图换镜检测（2～3 镜一图，偏密节奏） */
+/** 漫画解说：配图换镜检测（1～2 镜一图，换焦点必切，多人互动拆多镜单人） */
 export function buildMotionComicImageDetectLLMSystem(
   mode: 'paragraph' | 'conservative' | 'balanced' = 'paragraph',
 ): string {
   const conservativeExtra = mode === 'conservative'
-    ? '\n\n# 保守模式补充\n可略少换图，但仍须满足密度下限；同场景仅当姿态/动作/表情几乎不变才共用一图。'
+    ? '\n\n# 保守模式补充\n可略少换图，但仍须满足密度下限；同场景同焦点仅当姿态/动作/表情几乎不变才共用一图。'
     : ''
 
   return `# Role
-你是漫画解说视频的分镜导演。你的任务是为旁白脚本规划**配图段**（约 2～3 镜共用一张高对比国漫插画）。
+你是漫画解说视频的分镜导演。你的任务是为旁白脚本规划**配图段**（约 1～2 镜共用一张高对比国漫插画；同框对照定妆最多 2 人，按剧情取 1～2）。
 
 # Goal
 分析每一句旁白，判断是否需要新配图。**本步骤仅输出 needs_image，不写配图文案**。
-节奏偏密：宁可多开几张图把动作/情绪拍清楚，也不要把不同瞬间硬塞进同一张图。
+节奏偏密：换人说话/换焦点要换图；同场双人互动可同框，不必为「两人」强制拆成两张。
 
 # Input
-JSON 含 \`sentences\`、\`min_shots_per_image\` / \`max_shots_per_image\`（约 2～3）、\`minimum_true_count\` / \`maximum_true_count\`。
+JSON 含 \`sentences\`、\`min_shots_per_image\` / \`max_shots_per_image\`（约 1～2）、\`minimum_true_count\` / \`maximum_true_count\`。
 
 # Critical Rules
-1. **按画面变化换图**：地点/场景、主体动作、表情情绪、手持物、互动关系变化 → 新配图段起点标 true。
-2. **同场也常换图**：同地点对白来回时，若下一句是反击/反应/递接/推拒/愣住等新可视瞬间 → 仍标 true；仅当姿态动作表情几乎原样可复用才 false。
-3. **焦点/情绪切须换图**：双人互动→独处反应、A 单人→C 单人、震惊/愤怒/害怕等情绪跳变 → true。
-4. **同段延续标 false**：仅同场景、同核心动作瞬间、画面可原样不动的后续句；空行分段后的新瞬间通常 true。
-5. **配图段长度**：每段约 **min～max 镜**（默认 2～3）；禁止无必要的单镜成段，也禁止 4 镜及以上共用一图。
-6. **配图密度（硬性）**：true 数量须在 minimum～maximum 之间（约 40%～58% 镜头为新配图起点）；**优先靠近区间中上**，宁多勿少；禁止为省图而大段 false。
+1. **按画面变化换图**：地点/场景、主体动作、表情情绪、手持物变化 → 新配图段起点标 true。
+2. **换人说话 / 换焦点角色必须换图**：上一句说话人是 A、本句是 B → 本句 true；旁白焦点从 A 切到 C → true。禁止 A/B 对白来回仍共用一图。
+3. **同场双人**：递接/对峙/质问等双方同在场的拍点，可同框最多 2 个对照定妆（配图阶段处理）；若焦点已切到单人反应/特写 → 拆镜各 true。禁止指望一张图挂 3 个以上定妆。
+4. **同场也常换图**：同地点若出现反击/反应/递接/推拒/愣住等新可视瞬间 → true；仅当同一焦点、姿态动作表情几乎原样可复用才 false。
+5. **情绪跳变须换图**：震惊/愤怒/害怕/哭喊等情绪突变 → true（配图阶段会夸张表情，检测勿把情绪段挤进同一图）。
+6. **同段延续标 false**：仅同场景、同一焦点角色、同核心动作瞬间、画面可原样不动的后续句；空行分段后的新瞬间通常 true。
+7. **配图段长度**：每段约 **min～max 镜**（默认 1～2）；焦点切换允许单镜成段；禁止 3 镜及以上共用一图。
+8. **配图密度（硬性）**：true 数量须在 minimum～maximum 之间；**优先靠近区间中上**，宁多勿少。
 
 # 运镜说明（供理解，非本步输出）
-每张配图段在合成时使用**一种**运镜；同段多句共享，不会句句换运镜。
+每张配图段在合成时使用**一种**运镜；同段多句共享，不会句句换运镜。同框定妆最多 2 人。
 
 # Workflow
-1. 通读 full_narration，标出场景块与情绪/动作节拍。
-2. 逐句判定：有新可视瞬间优先 true；只有画面完全可复用才 false。
-3. 验证：每段 2～3 镜；true 数量落在区间内（偏上更好）。
+1. 通读 full_narration，标出场景块、说话人切换与互动拍点。
+2. 逐句判定：换人/换焦点/新互动瞬间优先 true；只有同人同瞬间可复用才 false。
+3. 验证：每段 1～2 镜；true 数量落在区间内（偏上更好）。
 
 # Output
 \`\`\`json

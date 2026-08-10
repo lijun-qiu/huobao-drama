@@ -33,8 +33,8 @@ export const LOCAL_COMIC_ENV = {
   /** Agnes 定妆生图（支持参考图 / 图生图） @see https://wiki.agnes-ai.com/en/docs/agnes-image-20-flash */
   agnesBaseUrl: (process.env.AGNES_BASE_URL || 'https://apihub.agnes-ai.com/v1').replace(/\/+$/, ''),
   agnesApiKey: process.env.AGNES_API_KEY || '',
-  agnesImageModel: process.env.AGNES_IMAGE_MODEL || process.env.AGNES_PORTRAIT_MODEL || 'agnes-image-2.0-flash',
-  agnesPortraitModel: process.env.AGNES_PORTRAIT_MODEL || process.env.AGNES_IMAGE_MODEL || 'agnes-image-2.0-flash',
+  agnesImageModel: process.env.AGNES_IMAGE_MODEL || process.env.AGNES_PORTRAIT_MODEL || 'agnes-image-2.1-flash',
+  agnesPortraitModel: process.env.AGNES_PORTRAIT_MODEL || process.env.AGNES_IMAGE_MODEL || 'agnes-image-2.1-flash',
   ollamaBaseUrl: (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/+$/, ''),
   /** @deprecated 文本已迁智谱；保留给仍启用 Ollama 的环境 */
   ollamaTextModel: process.env.OLLAMA_TEXT_MODEL || ZHIPU_DEFAULT_TEXT_MODEL,
@@ -237,7 +237,7 @@ export const LOCAL_PRESET_SERVICES = [
     label: '图片',
     provider: 'agnes',
     baseUrl: LOCAL_COMIC_ENV.agnesBaseUrl,
-    model: `${LOCAL_COMIC_ENV.agnesImageModel},agnes-image-2.0-flash,agnes-image-2.0`,
+    model: `${LOCAL_COMIC_ENV.agnesImageModel},agnes-image-2.1-flash,agnes-image-2.0-flash,agnes-image-2.0`,
     priority: 120,
   },
   {

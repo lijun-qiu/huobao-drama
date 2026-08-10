@@ -16,6 +16,9 @@ export default defineNuxtConfig({
     },
   },
   vite: {
+    optimizeDeps: {
+      include: ['@webav/av-canvas', '@webav/av-cliper'],
+    },
     server: {
       proxy: {
         '/api': {
@@ -27,6 +30,9 @@ export default defineNuxtConfig({
         '/static': { target: 'http://localhost:5679', changeOrigin: true },
       },
     },
+  },
+  build: {
+    transpile: ['@webav/av-canvas', '@webav/av-cliper'],
   },
   compatibilityDate: '2025-05-15',
 })

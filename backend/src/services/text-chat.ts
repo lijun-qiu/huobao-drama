@@ -1,7 +1,8 @@
 /**
- * 文本 LLM 对话 — 统一封装 chat/completions，支持 DeepSeek / Qwen 思考模式（4022 代理）
+ * 文本 LLM 对话 — 统一封装 chat/completions，支持 DeepSeek / Qwen / Ling（OpenRouter reasoning）思考模式
  * @see https://api-docs.deepseek.com/guides/thinking_mode
  * @see https://help.aliyun.com/zh/model-studio/deep-thinking
+ * @see https://openrouter.ai/docs （reasoning 参数）
  */
 import { getTextConfig, getTextProviderBaseUrl, textConfigRequiresApiKey } from './ai.js'
 import { joinProviderUrl } from './adapters/url.js'
@@ -12,6 +13,37 @@ import { parseDataUrl } from '../utils/storage.js'
 
 function isOllamaProvider(provider?: string | null): boolean {
   return String(provider || '').toLowerCase() === 'ollama'
+}
+
+/** 把 fetch/超时错误收成可读的「连没连上」提示 */
+export function formatTextModelConnectError(
+  err: unknown,
+  model: string,
+  timeoutMs?: number,
+): Error {
+  const raw = String((err as Error)?.message || err || 'unknown')
+  const shortModel = String(model || '').trim() || '文本模型'
+  if (/timeout|aborted due to timeout|AbortError/i.test(raw)) {
+    const sec = timeoutMs && timeoutMs > 0 ? Math.round(timeoutMs / 1000) : null
+    return new Error(
+      sec
+        ? `模型未响应（超时 ${sec}s）：${shortModel}。多为免费模型排队/限流或响应过慢，不一定是本机网络故障`
+        : `模型未响应（超时）：${shortModel}。多为免费模型排队/限流或响应过慢，不一定是本机网络故障`,
+    )
+  }
+  if (/401|403|Unauthorized|invalid.?api.?key|缺少|未配置.*key/i.test(raw)) {
+    return new Error(`模型鉴权失败：${shortModel}。请检查 API Key / 渠道配置`)
+  }
+  if (/404|model.?not.?found|无可用渠道|No endpoints/i.test(raw)) {
+    return new Error(`模型不可用或未连上：${shortModel}（${raw.slice(0, 160)}）`)
+  }
+  if (/fetch failed|ECONNREFUSED|ENOTFOUND|ECONNRESET|network|socket/i.test(raw)) {
+    return new Error(`模型连不上：${shortModel}（${raw.slice(0, 160)}）`)
+  }
+  if (/Text API error\s*(\d+)/i.test(raw)) {
+    return new Error(`模型接口报错：${shortModel}（${raw.slice(0, 200)}）`)
+  }
+  return err instanceof Error ? err : new Error(raw)
 }
 
 function buildTextApiHeaders(config: { provider?: string; apiKey?: string }): Record<string, string> {
@@ -29,7 +61,12 @@ function isOllamaQwen35Model(model?: string | null): boolean {
   return m.includes('qwen3.5') || m.includes('qwen3_5')
 }
 
-type TextChatMessageLike = { role: string; content: string }
+type TextChatMessageLike = {
+  role: string
+  content: string
+  tool_calls?: Array<{ id?: string | null }> | null
+  reasoning_content?: string | null
+}
 
 const CHINESE_THINKING_USER_HINT = '（启用思考时：内心推理须用简体中文，禁止英文思考链）'
 
@@ -39,9 +76,9 @@ export function augmentMessagesForChineseThinking(
   thinkingEnabled: boolean,
 ): TextChatMessageLike[] {
   if (!thinkingEnabled) {
-    return messages.map(m => ({ role: m.role, content: m.content }))
+    return messages.map(m => ({ ...m }))
   }
-  const mapped = messages.map(m => ({ role: m.role, content: m.content }))
+  const mapped = messages.map(m => ({ ...m }))
   for (let i = mapped.length - 1; i >= 0; i--) {
     if (mapped[i].role === 'user') {
       mapped[i] = {
@@ -240,7 +277,8 @@ async function callOllamaNativeChatMessages(
 }
 
 export type TextThinkingEffort = 'high' | 'max'
-export type TextThinkingFamily = 'deepseek' | 'qwen'
+/** deepseek：thinking.type；qwen：enable_thinking；openrouter：reasoning.effort（Ling 等） */
+export type TextThinkingFamily = 'deepseek' | 'qwen' | 'openrouter'
 
 /** Qwen 3.5 思考预算（token）；未设时由上游默认 */
 export const DEFAULT_QWEN_THINKING_BUDGET = 8192
@@ -252,11 +290,21 @@ export const OLLAMA_QWEN35_9B_NUM_CTX_IMAGE_PROMPT = OLLAMA_QWEN35_9B_NUM_CTX_DE
 /** Ollama qwen3.5:9b 剧本生成（64K；长文+思考需要更大窗口） */
 export const OLLAMA_QWEN35_9B_NUM_CTX_SCRIPT = 65_536
 
-export type OllamaNumCtxProfile = 'default' | 'narration_image_prompt' | 'narration_script'
+export type OllamaNumCtxProfile = 'default' | 'narration_image_prompt' | 'narration_script' | 'narration_env_extract'
 
 function isOllamaQwen35_9bModel(model?: string | null): boolean {
   const m = String(model || '').trim().toLowerCase()
   return m === 'qwen3.5:9b' || /^qwen3[._]5:9b(?:-|$)/i.test(m)
+}
+
+/** OpenRouter / Ant Ling 系：走 reasoning 参数 */
+export function isOpenRouterReasoningModel(model?: string | null): boolean {
+  const m = String(model || '').trim().toLowerCase()
+  if (!m) return false
+  // inclusionai/ling-3.0-flash:free、ling-3.0-flash、ring-2.6 等
+  if (m.includes('inclusionai/ling') || m.includes('inclusionai/ring')) return true
+  if (/(^|\/)ling-[\d.]/.test(m) || /(^|\/)ring-[\d.]/.test(m)) return true
+  return false
 }
 
 /** 按用途为 Ollama 请求解析 num_ctx；非 qwen3.5:9b 返回 undefined（沿用模型 Modelfile 默认） */
@@ -270,18 +318,24 @@ export function resolveOllamaNumCtx(
   return OLLAMA_QWEN35_9B_NUM_CTX_DEFAULT
 }
 
-/** 解析模型思考模式族：DeepSeek/智谱用 thinking，Qwen 3.5 用 enable_thinking */
+/** 解析模型思考模式族：DeepSeek/智谱用 thinking，Qwen 3.5 用 enable_thinking，Ling 用 OpenRouter reasoning */
 export function resolveTextThinkingFamily(model?: string | null): TextThinkingFamily | null {
   const m = String(model || '').trim().toLowerCase()
   if (!m) return null
   if (m.includes('deepseek')) return 'deepseek'
   if (m.startsWith('glm-') || m.includes('glm4') || m.includes('glm-4')) return 'deepseek'
-  if (m.includes('qwen3.5') || m.includes('qwen-3.5')) return 'qwen'
+  if (m.includes('qwen3.5') || m.includes('qwen-3.5') || m.includes('qwen3_5')) return 'qwen'
+  if (isOpenRouterReasoningModel(m)) return 'openrouter'
   return null
 }
 
 export function supportsTextThinkingMode(model?: string | null): boolean {
   return resolveTextThinkingFamily(model) != null
+}
+
+function mapOpenRouterReasoningEffort(effort: TextThinkingEffort): 'high' | 'medium' | 'low' {
+  // OpenRouter effort：minimal | low | medium | high；项目内 max/high → high
+  return 'high'
 }
 
 /** 为 chat/completions 请求体追加思考模式参数 */
@@ -302,17 +356,53 @@ export function appendTextThinkingOptions(
     if (!m.startsWith('glm-') && !m.includes('glm4')) {
       body.reasoning_effort = effort
     }
-  } else {
+  } else if (family === 'qwen') {
     body.enable_thinking = enabled
     if (!enabled) return
     body.thinking_budget = DEFAULT_QWEN_THINKING_BUDGET
+  } else {
+    // OpenRouter Ling / Ring：reasoning.effort
+    if (enabled) {
+      body.reasoning = { effort: mapOpenRouterReasoningEffort(effort) }
+    } else if (!/:free\b/i.test(String(model || ''))) {
+      // 付费模型显式关思考；免费模型不传 reasoning，避免部分上游 INVALID_REQUEST_BODY
+      body.reasoning = { effort: 'none' }
+    }
   }
 
   // 思考模式下 temperature 等参数无效，去掉以免部分网关告警
-  delete body.temperature
-  delete body.top_p
-  delete body.frequency_penalty
-  delete body.presence_penalty
+  if (enabled) {
+    delete body.temperature
+    delete body.top_p
+    delete body.frequency_penalty
+    delete body.presence_penalty
+  }
+}
+
+/** 从 OpenRouter reasoning_details / 字符串字段抽取思考文本 */
+export function extractReasoningText(source: unknown): string {
+  if (source == null) return ''
+  if (typeof source === 'string') return source
+  if (Array.isArray(source)) {
+    const parts: string[] = []
+    for (const item of source) {
+      if (typeof item === 'string') {
+        parts.push(item)
+        continue
+      }
+      if (!item || typeof item !== 'object') continue
+      const row = item as Record<string, unknown>
+      const text = row.text ?? row.content ?? row.summary
+      if (typeof text === 'string' && text) parts.push(text)
+    }
+    return parts.join('')
+  }
+  if (typeof source === 'object') {
+    const row = source as Record<string, unknown>
+    if (typeof row.text === 'string') return row.text
+    if (typeof row.content === 'string') return row.content
+  }
+  return ''
 }
 
 function assistantReasoningKey(msg: {
@@ -388,15 +478,23 @@ export function createTextThinkingFetch(
           const json = await clone.json() as {
             choices?: Array<{ message?: {
               reasoning_content?: string
+              reasoning?: string
+              reasoning_details?: unknown
               tool_calls?: Array<{ id?: string | null }>
               content?: string | null
             } }>
           }
           const message = json.choices?.[0]?.message
-          if (message?.reasoning_content && message.tool_calls?.length) {
+          const reasoningText = String(
+            message?.reasoning_content
+            || message?.reasoning
+            || extractReasoningText(message?.reasoning_details)
+            || '',
+          ).trim()
+          if (reasoningText && message?.tool_calls?.length) {
             reasoningByAssistantKey.set(
               assistantReasoningKey(message),
-              message.reasoning_content,
+              reasoningText,
             )
           }
         }
@@ -410,12 +508,22 @@ export function createTextThinkingFetch(
 }
 
 export function extractChatCompletionText(json: {
-  choices?: Array<{ message?: { content?: string | null; reasoning?: string | null; reasoning_content?: string | null } }>
+  choices?: Array<{ message?: {
+    content?: string | null
+    reasoning?: string | null
+    reasoning_content?: string | null
+    reasoning_details?: unknown
+  } }>
 }): string {
   const message = json.choices?.[0]?.message
   const content = String(message?.content || '').trim()
   if (content) return content
-  const reasoning = String(message?.reasoning_content || message?.reasoning || '').trim()
+  const reasoning = String(
+    message?.reasoning_content
+    || message?.reasoning
+    || extractReasoningText(message?.reasoning_details)
+    || '',
+  ).trim()
   return reasoning
 }
 
@@ -430,12 +538,19 @@ function parseOpenAIStreamChunk(line: string): { content: string; reasoning: str
         content?: string | null
         reasoning_content?: string | null
         reasoning?: string | null
+        reasoning_details?: unknown
       } }>
     }
     const delta = json.choices?.[0]?.delta
+    const reasoning = String(
+      delta?.reasoning_content
+      ?? delta?.reasoning
+      ?? extractReasoningText(delta?.reasoning_details)
+      ?? '',
+    )
     return {
       content: String(delta?.content ?? ''),
-      reasoning: String(delta?.reasoning_content ?? delta?.reasoning ?? ''),
+      reasoning,
     }
   } catch {
     return { content: '', reasoning: '' }
@@ -471,7 +586,7 @@ export async function streamTextChatMessages(
   if (ollamaInUse) beginOllamaUse()
   try {
     if (ollamaInUse) {
-      return streamOllamaNativeChatMessages(
+      return await streamOllamaNativeChatMessages(
         config,
         messages,
         onDelta,
@@ -543,6 +658,9 @@ export async function streamTextChatMessages(
     }
     if (!full.trim()) throw new Error('AI 未返回内容')
     return full.trim()
+  } catch (err: unknown) {
+    if (signal?.aborted) throw err instanceof Error ? err : new Error(String(err))
+    throw formatTextModelConnectError(err, config.model, timeoutMs)
   } finally {
     if (ollamaInUse) endOllamaUse()
   }
@@ -566,7 +684,7 @@ export async function callTextChat(
   if (ollamaInUse) beginOllamaUse()
   try {
     if (ollamaInUse) {
-      return callOllamaNativeChatMessages(
+      return await callOllamaNativeChatMessages(
         config,
         [
           { role: 'system', content: system },
@@ -596,7 +714,10 @@ export async function callTextChat(
       temperature: 0.2,
     }
     if (jsonObject) {
-      body.response_format = { type: 'json_object' }
+      // 部分 OpenRouter :free 模型（如 ling-3.0-flash）拒收 response_format=json_object
+      if (!/:free\b/i.test(String(config.model || ''))) {
+        body.response_format = { type: 'json_object' }
+      }
     }
     if (maxTokens != null) body.max_tokens = maxTokens
     appendTextThinkingOptions(body, config.model, 'high', thinkingEnabled)
@@ -616,6 +737,8 @@ export async function callTextChat(
 
     const json = await resp.json() as { choices?: Array<{ message?: { content?: string | null } }> }
     return extractChatCompletionText(json)
+  } catch (err: unknown) {
+    throw formatTextModelConnectError(err, config.model, timeoutMs)
   } finally {
     if (ollamaInUse) endOllamaUse()
   }
@@ -649,7 +772,7 @@ export async function callTextChatMessages(
   if (ollamaInUse) beginOllamaUse()
   try {
     if (ollamaInUse) {
-      return callOllamaNativeChatMessages(
+      return await callOllamaNativeChatMessages(
         config,
         messages,
         thinkingEnabled,
@@ -685,6 +808,8 @@ export async function callTextChatMessages(
 
     const json = await resp.json() as { choices?: Array<{ message?: { content?: string | null } }> }
     return extractChatCompletionText(json)
+  } catch (err: unknown) {
+    throw formatTextModelConnectError(err, config.model, timeoutMs)
   } finally {
     if (ollamaInUse) endOllamaUse()
   }
@@ -802,7 +927,9 @@ export async function callVisionChat(
     ],
     temperature: 0.2,
   }
-  if (jsonObject) body.response_format = { type: 'json_object' }
+  if (jsonObject && !/:free\b/i.test(String(config.model || ''))) {
+    body.response_format = { type: 'json_object' }
+  }
   appendTextThinkingOptions(body, config.model, 'high', thinkingEnabled)
 
   const resp = await fetch(url, {

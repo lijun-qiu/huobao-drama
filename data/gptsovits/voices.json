@@ -1,3 +1,84 @@
 {
-  "voices": []
+  "voices": [
+    {
+      "voice_id": "001",
+      "voice_name": "晨宝",
+      "ref_audio_path": "1783414734522-9cfd12f0.mp3",
+      "prompt_text": "这是一段配音模板，我是配音员晨宝",
+      "prompt_lang": "zh",
+      "language": "中文",
+      "description": [],
+      "text_split_method": "cut5"
+    },
+    {
+      "voice_id": "002",
+      "voice_name": "吹灯",
+      "ref_audio_path": "1783414787815-79955b8c.mp3",
+      "prompt_text": "这是一段配音模板，我是配音员吹灯",
+      "prompt_lang": "zh",
+      "language": "中文",
+      "description": [],
+      "text_split_method": "cut5"
+    },
+    {
+      "voice_id": "003",
+      "voice_name": "毒少",
+      "ref_audio_path": "1783414804025-d9a34000.mp3",
+      "prompt_text": "这是一段配音模板，我是配音员毒少",
+      "prompt_lang": "zh",
+      "language": "中文",
+      "description": [],
+      "text_split_method": "cut5"
+    },
+    {
+      "voice_id": "004",
+      "voice_name": "宏少",
+      "ref_audio_path": "1783414823617-e06ec0d1.mp3",
+      "prompt_text": "这是一段配音模板，我是配音员宏少",
+      "prompt_lang": "zh",
+      "language": "中文",
+      "description": [],
+      "text_split_method": "cut5"
+    },
+    {
+      "voice_id": "005",
+      "voice_name": "晓晨",
+      "ref_audio_path": "1783415124029-0fffb8d1.mp3",
+      "prompt_text": "这是一段配音模板，我是配音员晓晨",
+      "prompt_lang": "zh",
+      "language": "中文",
+      "description": [],
+      "text_split_method": "cut5"
+    },
+    {
+      "voice_id": "006",
+      "voice_name": "笑笑",
+      "ref_audio_path": "1783414859596-f9465172.mp3",
+      "prompt_text": "这是一段配音模板，我是配音员笑笑",
+      "prompt_lang": "zh",
+      "language": "中文",
+      "description": [],
+      "text_split_method": "cut5"
+    },
+    {
+      "voice_id": "007",
+      "voice_name": "宇少",
+      "ref_audio_path": "1783414873306-f05d60a6.mp3",
+      "prompt_text": "这是一段配音模板，我是配音员宇少",
+      "prompt_lang": "zh",
+      "language": "中文",
+      "description": [],
+      "text_split_method": "cut5"
+    },
+    {
+      "voice_id": "008",
+      "voice_name": "云希",
+      "ref_audio_path": "1783414892783-e30c7a50.mp3",
+      "prompt_text": "这是一段配音模板，我是配音员云希",
+      "prompt_lang": "zh",
+      "language": "中文",
+      "description": [],
+      "text_split_method": "cut5"
+    }
+  ]
 }

@@ -8,11 +8,14 @@ import {
   OFFICIAL_DEEPSEEK_V4_PRO,
   OPENROUTER_DEEPSEEK_V4_FLASH,
   OPENROUTER_DEEPSEEK_V4_PRO,
+  OPENROUTER_LAGUNA_S_FREE,
+  OPENROUTER_LING_FLASH_FREE,
+  OPENROUTER_NEMOTRON_SUPER_FREE,
   OPENROUTER_NEMOTRON_ULTRA_FREE,
 } from '../constants/text-models.js'
 
 const PRESET_SERVICES = [
-  { serviceType: 'text', label: '文本', provider: 'chatfire', model: `${OPENROUTER_NEMOTRON_ULTRA_FREE},${OPENROUTER_DEEPSEEK_V4_FLASH},${OFFICIAL_DEEPSEEK_V4_FLASH},${OPENROUTER_DEEPSEEK_V4_PRO},${OFFICIAL_DEEPSEEK_V4_PRO},qwen3.5-plus,gpt-4o`, priority: 100 },
+  { serviceType: 'text', label: '文本', provider: 'chatfire', model: `${OFFICIAL_DEEPSEEK_V4_FLASH},${OFFICIAL_DEEPSEEK_V4_PRO},${OPENROUTER_LAGUNA_S_FREE},${OPENROUTER_NEMOTRON_ULTRA_FREE},${OPENROUTER_NEMOTRON_SUPER_FREE},${OPENROUTER_DEEPSEEK_V4_FLASH},${OPENROUTER_DEEPSEEK_V4_PRO},qwen3.5-plus,gpt-4o`, priority: 100 },
   { serviceType: 'image', label: '图片', provider: 'chatfire', model: 'gpt-image-2', priority: 99 },
   { serviceType: 'video', label: '视频', provider: 'vidu', model: 'viduq3-turbo', priority: 98 },
   { serviceType: 'audio', label: '音频', provider: 'minimax', basePath: '/minimax', model: 'speech-2.8-hd', priority: 97 },
@@ -20,7 +23,9 @@ const PRESET_SERVICES = [
 ] as const
 
 const OPENROUTER_TEXT_MODELS = [
+  OPENROUTER_LAGUNA_S_FREE,
   OPENROUTER_NEMOTRON_ULTRA_FREE,
+  OPENROUTER_NEMOTRON_SUPER_FREE,
   OPENROUTER_DEEPSEEK_V4_FLASH,
   OPENROUTER_DEEPSEEK_V4_PRO,
 ] as const
@@ -71,6 +76,10 @@ function syncAgentDefaultModels(model: string): void {
       || current === 'deepseek-v4-flash:free'
       || current === 'openrouter/deepseek-v4-flash:free'
       || current === OPENROUTER_DEEPSEEK_V4_FLASH
+      || current === OPENROUTER_LING_FLASH_FREE
+      || current === OPENROUTER_NEMOTRON_ULTRA_FREE
+      || current === 'nvidia/nemotron-3-ultra:free'
+      || current === 'nvidia/nemotron-3-ultra-550b:free'
       || current === 'glm-4.7-flash'
       || current === 'glm-4-flash-250414'
     ) {
@@ -99,7 +108,7 @@ function syncOpenRouterText(ts: string): boolean {
   ]
   upsertTextConfig({
     provider: 'openrouter',
-    name: 'OpenRouter 文本（Nemotron 免费 / DeepSeek 付费）',
+    name: 'OpenRouter 文本（Laguna 免费 / DeepSeek 付费）',
     baseUrl: 'https://openrouter.ai/api',
     apiKey: freeKey || paidKey,
     model: JSON.stringify(models),
@@ -130,9 +139,10 @@ function syncOfficialDeepseekText(ts: string): boolean {
     || 'https://api.deepseek.com'
   ).replace(/\/+$/, '')
 
+  const isMiaofei = /miaofei\.vip/i.test(baseUrl)
   upsertTextConfig({
     provider: 'openai',
-    name: 'DeepSeek 官网文本',
+    name: isMiaofei ? 'DeepSeek 文本（妙飞网关）' : 'DeepSeek 官网文本',
     baseUrl,
     apiKey,
     model: JSON.stringify([...OFFICIAL_TEXT_MODELS]),

@@ -2,7 +2,12 @@
  * 旁白分镜 — 多轮聊天（讨论拆镜策略、流式展示过程、触发整稿拆镜）
  */
 import { eq } from 'drizzle-orm'
-import { parseProductionMode, usesMotionComicStoryboardRules, resolveEpisodeProductionMode } from '../constants/production-mode.js'
+import {
+  isNarrationVideoMode,
+  parseProductionMode,
+  usesMotionComicStoryboardRules,
+  resolveEpisodeProductionMode,
+} from '../constants/production-mode.js'
 import { MOTION_COMIC_STORYBOARD_CHAT_SYSTEM } from '../constants/motion-comic.js'
 import { db, schema } from '../db/index.js'
 import { resolveEpisodeTextThinking, resolveNarrationStoryboardTextModel } from '../constants/text-models.js'
@@ -34,12 +39,35 @@ const STORYBOARD_CHAT_SYSTEM = [
   '回复简洁、可操作。',
 ].join('\n')
 
+/** 解说视频：LLM 按约 10s/108 字打包，不做规则分镜 */
+const NARRATION_VIDEO_STORYBOARD_CHAT_SYSTEM = [
+  '你是火宝解说视频流水线的「分镜脚本」助手，帮助创作者把「解说脚本」拆成可配音、一镜一图、图生视频的镜头。',
+  '',
+  '【拆镜规则】',
+  '- 输入是带「说话人：台词」的解说脚本（旁白+人物对白），不是小说原文。',
+  '- 系统用 LLM 按约 10 秒≈108 字/镜（650 字/分钟）打包；同说话人、不同说话人均可合并。',
+  '- 每镜写入画面描述与秒数；失败不会改用规则分镜，需重试。',
+  '- 后续流程：一镜一图 → 一镜一视频。',
+  '',
+  '【职责】',
+  '- 讨论打包粒度、多说话人同镜、画面描述质量等。',
+  '- 用户说「开始分镜」「重新分镜」「执行拆镜」等时，系统会走 LLM 分镜并写库；你解读结果（行数、镜数、片头）。',
+  '- 重新分镜会覆盖本集全部镜头，提醒用户确认后再执行。',
+  '- 不要输出 JSON 或 markdown 表格；用 #镜号 和自然语言说明。',
+  '',
+  '回复简洁、可操作。',
+].join('\n')
+
 function resolveStoryboardChatSystem(episodeId: number): string {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return STORYBOARD_CHAT_SYSTEM
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
-  if (usesMotionComicStoryboardRules(parseProductionMode(drama?.metadata))) {
+  const mode = parseProductionMode(drama?.metadata)
+  if (usesMotionComicStoryboardRules(mode)) {
     return MOTION_COMIC_STORYBOARD_CHAT_SYSTEM
+  }
+  if (isNarrationVideoMode(mode)) {
+    return NARRATION_VIDEO_STORYBOARD_CHAT_SYSTEM
   }
   return STORYBOARD_CHAT_SYSTEM
 }
@@ -84,22 +112,35 @@ function buildStoryboardChatMessages(params: NarrationStoryboardChatParams) {
 function formatStoryboardResultSummary(result: {
   count?: number
   sentence_count?: number
+  source_line_count?: number
   title_count?: number
   title_hook?: string | null
   emphasis_source?: string
+  pack_source?: string
   total_duration?: number
-}, motionComic = false) {
+  target_shot_sec?: number
+  target_shot_chars?: number
+}, motionComic = false, narrationVideo = false) {
   const shotCount = result.count ?? 0
   const sentenceCount = result.sentence_count ?? 0
+  const sourceLineCount = result.source_line_count ?? sentenceCount
   const titleCount = result.title_count ?? 0
   const titleHook = result.title_hook
   const dur = result.total_duration ?? 0
-  const source = result.emphasis_source === 'llm' ? 'AI 拆镜' : '规则兜底'
+  const source = result.pack_source === 'llm' || result.emphasis_source === 'llm' ? 'LLM 分镜' : '规则兜底'
   const titleHint = titleCount
     ? `，片头 ${titleCount} 镜${titleHook ? `（${titleHook}）` : ''}`
-    : motionComic
+    : narrationVideo
       ? '，未识别片头（首行请写「标题：」或「本期故事：…」）'
-      : '，未识别片头（首行请写「标题：」或「今天体验的人生剧本是…」）'
+      : motionComic
+        ? '，未识别片头（首行请写「标题：」或「本期故事：…」）'
+        : '，未识别片头（首行请写「标题：」或「今天体验的人生剧本是…」）'
+  if (narrationVideo) {
+    const pace = result.target_shot_sec && result.target_shot_chars
+      ? `，约 ${result.target_shot_sec}s/≈${result.target_shot_chars}字`
+      : ''
+    return `分镜脚本完成（${source}）：${sourceLineCount} 行 → ${shotCount} 镜${titleHint}${pace}，合计约 ${dur}s。可在下方编辑，或继续对话后重新分镜。`
+  }
   const label = motionComic ? '句台词' : '句旁白'
   return `${motionComic ? '漫画' : ''}分镜完成（${source}）：${sentenceCount} ${label} → ${shotCount} 镜${titleHint}，约 ${dur}s。可在下方编辑镜头，或继续对话后重新分镜。`
 }
@@ -115,15 +156,26 @@ export async function streamNarrationStoryboardChat(
 
   if (params.action === 'run') {
     const script = String(params.script || '').trim()
-    const motionComic = usesMotionComicStoryboardRules(resolveEpisodeProductionMode(params.episodeId))
-    if (!script) throw new Error(motionComic ? '请先填写漫剧旁白稿' : '请先填写解说文案')
+    const productionMode = resolveEpisodeProductionMode(params.episodeId)
+    const motionComic = usesMotionComicStoryboardRules(productionMode)
+    const narrationVideo = isNarrationVideoMode(productionMode)
+    if (!script) {
+      throw new Error(
+        motionComic ? '请先填写漫剧旁白稿' : (narrationVideo ? '请先填写解说脚本' : '请先填写解说文案'),
+      )
+    }
 
     const reportStatus = createWorkflowChatStatusReporter(send)
     const onProgress: StoryboardChatProgressCallback = patch => {
       reportStatus(patch.message)
     }
 
-    reportStatus(motionComic ? '正在读取旁白稿…' : '正在读取解说稿…')
+    reportStatus(`文本模型：${textModel}`)
+    reportStatus(
+      motionComic
+        ? '正在读取旁白稿…'
+        : (narrationVideo ? '正在读取解说脚本（LLM 分镜）…' : '正在读取解说稿…'),
+    )
 
     breakdownResult = await breakdownNarrationStoryboards(params.episodeId, script, {
       textModel,
@@ -131,15 +183,17 @@ export async function streamNarrationStoryboardChat(
       onProgress,
     })
 
-    breakdownSummary = formatStoryboardResultSummary(breakdownResult, motionComic)
+    breakdownSummary = formatStoryboardResultSummary(breakdownResult, motionComic, narrationVideo)
     send({
       type: 'storyboard_done',
       count: breakdownResult.count,
       sentence_count: breakdownResult.sentence_count,
+      source_line_count: (breakdownResult as { source_line_count?: number }).source_line_count,
       title_count: breakdownResult.title_count,
       title_hook: breakdownResult.title_hook,
       total_duration: breakdownResult.total_duration,
       emphasis_source: breakdownResult.emphasis_source,
+      pack_source: (breakdownResult as { pack_source?: string }).pack_source,
       message: breakdownSummary,
       generated_at: breakdownResult.generated_at,
       storyboard_breakdown_at: breakdownResult.storyboard_breakdown_at,
@@ -158,6 +212,9 @@ export async function streamNarrationStoryboardChat(
       ? { ...m, content: `${m.content}\n\n【刚完成的分镜结果】\n${breakdownSummary}` }
       : m)
     : apiMessages
+
+  const reportStatus = createWorkflowChatStatusReporter(send)
+  reportStatus(`正在连接模型生成说明：${textModel}…`)
 
   let reply = await streamTextChatMessages(
     systemWithResult,
